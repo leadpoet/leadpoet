@@ -38,6 +38,10 @@ CANDIDATE_WATERFALL_RECEIPT_VERSION = (
 CANDIDATE_WATERFALL_METRIC_VERSION = (
     "leadpoet.candidate_waterfall_metric_sidecar:v1"
 )
+EXACT_MODEL_RUNNER_RECEIPT_VERSION = "model-runner-receipt:v1"
+EXACT_MODEL_CANDIDATE_METRIC_VERSION = (
+    "model-runner-candidate-attempt-metric:v1"
+)
 
 _LAB_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MODEL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -77,6 +81,95 @@ def _nonnegative_int(value: Any, field_name: str) -> int:
     if type(value) is not int or value < 0:
         raise RoutingExperimentError(f"candidate_{field_name}_must_be_a_nonnegative_integer")
     return value
+
+
+def adapt_exact_model_candidate_receipt(
+    terminal_result: Mapping[str, Any],
+    *,
+    expected_release_identity_sha256: str,
+    expected_binding_contracts_sha256: str,
+) -> Mapping[str, Any]:
+    """Validate and project PR274's canonical candidate receipt only.
+
+    This function does not receive a runtime, provider binding, route
+    compiler, endpoint, credential, or execution callback. PR274 has already
+    selected and executed the route. Lab only verifies its canonical receipt
+    and exposes candidate metrics for PR93 evaluation.
+    """
+
+    if not isinstance(terminal_result, Mapping) or (
+        terminal_result.get("status") != "completed"
+    ):
+        raise RoutingExperimentError("exact_model_terminal_result_is_invalid")
+    raw_receipt = terminal_result.get("model_receipt")
+    if not isinstance(raw_receipt, Mapping):
+        raise RoutingExperimentError("exact_model_candidate_receipt_is_missing")
+    receipt = dict(raw_receipt)
+    claimed_receipt_hash = _model_hash(
+        receipt.pop("receipt_sha256", None),
+        "runner_receipt_hash",
+    )
+    if (
+        receipt.get("schema_version") != EXACT_MODEL_RUNNER_RECEIPT_VERSION
+        or receipt.get("release_identity_sha256")
+        != _model_hash(
+            expected_release_identity_sha256,
+            "release_identity_sha256",
+        )
+        or receipt.get("tool_binding_manifest_sha256")
+        != _model_hash(
+            expected_binding_contracts_sha256,
+            "binding_contracts_sha256",
+        )
+        or sha256_json(receipt).split(":", 1)[1] != claimed_receipt_hash
+    ):
+        raise RoutingExperimentError("exact_model_candidate_receipt_identity_differs")
+    raw_metrics = receipt.get("candidate_attempt_metrics")
+    if not isinstance(raw_metrics, list):
+        raise RoutingExperimentError("exact_model_candidate_metrics_are_invalid")
+    metrics: list[Mapping[str, Any]] = []
+    for raw_metric in raw_metrics:
+        if not isinstance(raw_metric, Mapping):
+            raise RoutingExperimentError("exact_model_candidate_metric_is_invalid")
+        metric = dict(raw_metric)
+        claimed_metric_hash = _model_hash(
+            metric.pop("metric_sha256", None),
+            "candidate_metric_hash",
+        )
+        counts = tuple(
+            _nonnegative_int(metric.get(name), name)
+            for name in (
+                "provider_returned_count",
+                "normalized_count",
+                "unique_count",
+                "verified_qualified_count",
+            )
+        )
+        if (
+            metric.get("schema_version")
+            != EXACT_MODEL_CANDIDATE_METRIC_VERSION
+            or not _CANDIDATE_TOOL_RE.fullmatch(str(metric.get("tool_id") or ""))
+            or not counts[3] <= counts[2] <= counts[1] <= counts[0]
+            or sha256_json(metric).split(":", 1)[1] != claimed_metric_hash
+        ):
+            raise RoutingExperimentError("exact_model_candidate_metric_differs")
+        metrics.append({**metric, "metric_sha256": claimed_metric_hash})
+    route = receipt.get("candidate_route")
+    if route is not None:
+        if not isinstance(route, Mapping):
+            raise RoutingExperimentError("exact_model_candidate_route_receipt_is_invalid")
+        route_payload = dict(route)
+        claimed_route_hash = _model_hash(
+            route_payload.pop("candidate_route_sha256", None),
+            "candidate_route_hash",
+        )
+        if sha256_json(route_payload).split(":", 1)[1] != claimed_route_hash:
+            raise RoutingExperimentError("exact_model_candidate_route_receipt_differs")
+    return {
+        "model_receipt_sha256": claimed_receipt_hash,
+        "candidate_route": None if route is None else dict(route),
+        "candidate_attempt_metrics": tuple(metrics),
+    }
 
 
 def _candidate_variant(spec: RoutingExperimentV2Spec, variant_id: str) -> Any:
@@ -907,8 +1000,11 @@ def evaluate_candidate_waterfall_metrics(
 __all__ = [
     "CANDIDATE_WATERFALL_METRIC_VERSION",
     "CANDIDATE_WATERFALL_RECEIPT_VERSION",
+    "EXACT_MODEL_CANDIDATE_METRIC_VERSION",
+    "EXACT_MODEL_RUNNER_RECEIPT_VERSION",
     "CandidateWaterfallMetric",
     "CandidateWaterfallReceipt",
+    "adapt_exact_model_candidate_receipt",
     "candidate_waterfall_receipt_from_model",
     "evaluate_candidate_waterfall_metrics",
     "validate_candidate_routing_model_runtime",

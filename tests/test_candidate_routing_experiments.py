@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import copy
+import importlib.util
 import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +15,7 @@ import pytest
 from research_lab.canonical import sha256_json
 from research_lab.candidate_routing_experiments import (
     CandidateWaterfallReceipt,
+    adapt_exact_model_candidate_receipt,
     candidate_waterfall_receipt_from_model,
     evaluate_candidate_waterfall_metrics,
     validate_candidate_routing_model_runtime,
@@ -20,7 +24,6 @@ from research_lab.routing_experiments import (
     ExperimentCreditBudget,
     ProviderBindingIdentity,
     ProviderReceipt,
-    PinnedSourcingModelRoutingAdapter,
     ReceiptExecutionMode,
     RoutingDecisionReceiptV2,
     RoutingEvaluationGates,
@@ -32,7 +35,6 @@ from research_lab.routing_experiments import (
     RoutingExperimentV2Variant,
     RoutingExperimentV2VariantEvaluation,
     SourcingModelArtifactIdentity,
-    model_hash_to_lab,
 )
 
 
@@ -460,137 +462,61 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
 )
 def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
     checkout = Path(os.environ["SOURCING_MODEL_CHECKOUT"]).resolve()
-    adapter = PinnedSourcingModelRoutingAdapter.from_model_root(checkout)
-    runtime = adapter.runtime
-    candidate_profiles = adapter.candidate_profiles
-    tool_id = runtime.TOOL_CANDIDATE_REGISTRY
-    profile = candidate_profiles.CandidateRoutingProfile(
-        profile_id="candidate-exact",
-        version="v1",
-        required_features=(),
-        forbidden_features=(),
-        steps=(candidate_profiles.CandidateRoutingProfileStep(tool_id, 0),),
-        is_default=True,
+    fixture_spec = importlib.util.spec_from_file_location(
+        "exact_pr274_model_runner_fixture",
+        checkout / "tests" / "test_model_runner.py",
     )
-    registry = candidate_profiles.CandidateRoutingProfileRegistry(
-        profiles=(profile,)
-    )
-    features = adapter.features.RoutingFeatureSet(("icp.structured_eligible",))
-    policy = runtime.runtime_policy()
-    plan = runtime.compile_candidate_routing_plan(
-        catalog=runtime.runtime_catalog({tool_id: True}),
-        policy=policy,
-        context=runtime.RouteContext(
-            stage=runtime.STAGE_CANDIDATE_ACQUISITION,
-            features=("runtime.registry_available",),
-            remaining_seconds=300,
-            remaining_calls=4,
-            remaining_results=100,
-            credit_cap=4,
-        ),
-        feature_set=features,
-        registry=registry,
-    )
-    stop = runtime.compile_candidate_stop_policy(
-        plan,
-        target_verified_qualified_count=2,
-        registry=registry,
-        policy=policy,
-    )
-    identity = runtime.candidate_waterfall_execution_contract_identity()
-
-    spec = _spec()
-    observed = adapter.observed_artifact_identity()
-    exact_artifact = replace(
-        _artifact(),
-        **{
-            field_name: value
-            for field_name, value in observed.items()
-            if field_name in _artifact().__dataclass_fields__
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    original_path = list(sys.path)
+    sys.path.insert(0, str(checkout))
+    try:
+        fixture_spec.loader.exec_module(fixture)
+    finally:
+        sys.path[:] = original_path
+    manifest = fixture._capability_manifest()
+    identity = fixture._release_identity(manifest)
+    start = fixture.build_model_start_request(
+        input={
+            "kind": "normalized_icp",
+            "normalized_icp": fixture._normalized_icp(contact=False),
         },
+        execution_mode="full_company",
+        target_count=1,
+        evaluated_on=fixture.EVALUATED_ON,
+        host_capability_manifest=manifest,
+        release_identity=identity,
     )
-    exact_variants = tuple(
-        replace(item, artifact=exact_artifact) for item in spec.variants
-    )
-    spec = replace(spec, variants=exact_variants)
-    model_step = plan.route.steps[0]
-    model_receipt = runtime.CandidateStepAttemptReceipt(
-        plan_sha256=plan.sha256(),
-        stop_policy_sha256=stop.sha256(),
-        step_order=model_step.order,
-        tool_id=model_step.tool_id,
-        attempt=0,
-        disposition="succeeded",
-        raw_candidate_count=8,
-        normalized_candidate_count=6,
-        unique_candidate_count=4,
-        verified_qualified_count=2,
-        verification_receipt_sha256="e" * 64,
-        outcome_code="verified_candidates",
-        latency_seconds=0.25,
-        provider_call_count=1,
-        estimated_cost_usd=0.0,
-    )
-    provider = _provider_receipt()
-    decision = _decision(
-        spec,
-        provider,
-        plan_hash=model_hash_to_lab(plan.sha256(), "plan_sha256"),
-        route_hash=model_hash_to_lab(plan.route.sha256(), "route_sha256"),
-    )
-    receipt = candidate_waterfall_receipt_from_model(
-        spec=spec,
-        variant_id="baseline",
-        decision_receipt=decision,
-        provider_receipt=provider,
-        plan_payload=plan.as_payload(),
-        stop_policy_payload=stop.as_payload(),
-        receipt_payloads=(model_receipt.as_payload(),),
-        model_adapter=adapter,
-        published_count=1,
+    terminal, _transitions = fixture._run(
+        start,
+        identity,
+        fixture._candidate(),
     )
 
-    assert receipt.model_contract_sha256 == identity["contract_sha256"]
-    assert receipt.attempt_receipt_sha256 == model_receipt.sha256()
-    assert receipt.verification_receipt_sha256 == "e" * 64
-
-    malformed_payload = model_receipt.as_payload()
-    malformed_payload["unknown_provider_field"] = "not-admitted"
-    with pytest.raises(RoutingExperimentError, match="attempt_prefix_is_invalid"):
-        candidate_waterfall_receipt_from_model(
-            spec=spec,
-            variant_id="baseline",
-            decision_receipt=decision,
-            provider_receipt=provider,
-            plan_payload=plan.as_payload(),
-            stop_policy_payload=stop.as_payload(),
-            receipt_payloads=(malformed_payload,),
-            model_adapter=adapter,
-        )
-
-    continued_after_target = runtime.CandidateStepAttemptReceipt(
-        plan_sha256=plan.sha256(),
-        stop_policy_sha256=stop.sha256(),
-        step_order=model_step.order,
-        tool_id=model_step.tool_id,
-        attempt=1,
-        disposition="missed",
-        outcome_code="provider_miss",
-        provider_call_count=1,
+    adapted = adapt_exact_model_candidate_receipt(
+        terminal,
+        expected_release_identity_sha256=identity["release_identity_sha256"],
+        expected_binding_contracts_sha256=manifest["binding_contracts_sha256"],
     )
-    with pytest.raises(RoutingExperimentError, match="attempt_prefix_is_invalid"):
-        candidate_waterfall_receipt_from_model(
-            spec=spec,
-            variant_id="baseline",
-            decision_receipt=decision,
-            provider_receipt=provider,
-            plan_payload=plan.as_payload(),
-            stop_policy_payload=stop.as_payload(),
-            receipt_payloads=(
-                model_receipt.as_payload(),
-                continued_after_target.as_payload(),
-            ),
-            model_adapter=adapter,
+    assert adapted["candidate_attempt_metrics"]
+    assert adapted["candidate_attempt_metrics"][0][
+        "verified_qualified_count"
+    ] == 1
+    assert adapted["candidate_route"]["stop_reason"] == "target_reached"
+
+    forged = copy.deepcopy(terminal)
+    forged["model_receipt"]["candidate_attempt_metrics"][0][
+        "verified_qualified_count"
+    ] = 50
+    with pytest.raises(RoutingExperimentError, match="receipt_identity_differs"):
+        adapt_exact_model_candidate_receipt(
+            forged,
+            expected_release_identity_sha256=identity[
+                "release_identity_sha256"
+            ],
+            expected_binding_contracts_sha256=manifest[
+                "binding_contracts_sha256"
+            ],
         )
 
 

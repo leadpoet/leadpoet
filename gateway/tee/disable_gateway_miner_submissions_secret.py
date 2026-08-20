@@ -474,10 +474,19 @@ def _document_commitment(raw: str) -> str:
 
 
 def _n_minus_one_hydrated_environment(raw: str) -> str:
-    """Render the exact installed-0dd gateway environment cache bytes."""
+    """Render the exact installed-0dd gateway environment cache bytes.
+
+    Frozen 0dd reads ``SecretString`` through AWS CLI ``--output text``.  The
+    CLI writes the scalar followed by one transport newline before the frozen
+    renderer reads ``SECRET_TMP``.  Model that byte explicitly so a shell
+    secret which already ends in a delimiter retains the same final blank
+    record as the installed renderer.
+    """
+
+    transported_raw = raw + "\n"
 
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(transported_raw)
     except Exception:
         parsed = None
     if isinstance(parsed, dict):
@@ -493,7 +502,7 @@ def _n_minus_one_hydrated_environment(raw: str) -> str:
         return "\n".join(lines) + "\n"
 
     lines = []
-    for raw_line in raw.replace("\x00", "\n").splitlines():
+    for raw_line in transported_raw.replace("\x00", "\n").splitlines():
         line = raw_line.strip()
         candidate = line[7:].strip() if line.startswith("export ") else line
         try:

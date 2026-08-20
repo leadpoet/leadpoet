@@ -420,6 +420,9 @@ def test_n_minus_one_hydration_commitment_matches_exact_json_rendering():
             },
             separators=(",", ":"),
         ),
+        "ORDER_A=without-terminal-delimiter",
+        "ORDER_A=with-terminal-delimiter\n",
+        "ORDER_A=with-terminal-blank-record\n\n",
         (
             "# preserved\r\n"
             "ORDER_Z='first value'\x00"
@@ -448,7 +451,10 @@ def test_hydration_commitment_exactly_models_frozen_n_minus_one(
     frozen_renderer = source.split(marker, 1)[1].split("\nPY\n", 1)[0]
     secret_path = tmp_path / "secret.txt"
     output_path = tmp_path / "gateway.env"
-    secret_path.write_bytes(raw.encode("utf-8"))
+    # Frozen 0dd obtains SecretString through ``aws --output text``.  The CLI
+    # writes one trailing transport newline before this renderer reads the
+    # temporary file.
+    secret_path.write_bytes((raw + "\n").encode("utf-8"))
 
     subprocess.run(
         [
@@ -499,7 +505,7 @@ def test_frozen_n_minus_one_keeps_legacy_aws_pair_only_in_canonical_cache(
     secret_path = tmp_path / "secret.txt"
     cache_path = tmp_path / "gateway.env"
     runtime_path = tmp_path / "gw_env_secret.sh"
-    secret_path.write_text(raw, encoding="utf-8")
+    secret_path.write_text(raw + "\n", encoding="utf-8")
 
     subprocess.run(
         [
@@ -526,8 +532,8 @@ def test_frozen_n_minus_one_keeps_legacy_aws_pair_only_in_canonical_cache(
         text=True,
     )
 
-    assert cache_path.read_text(encoding="utf-8") == raw
-    assert operation._n_minus_one_hydrated_environment(raw) == raw
+    assert cache_path.read_text(encoding="utf-8") == raw + "\n"
+    assert operation._n_minus_one_hydrated_environment(raw) == raw + "\n"
     runtime = runtime_path.read_text(encoding="utf-8")
     assert "AWS_ACCESS_KEY_ID" not in runtime
     assert "AWS_SECRET_ACCESS_KEY" not in runtime

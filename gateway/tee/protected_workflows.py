@@ -202,6 +202,7 @@ PROTECTED_SYMBOLS = {
     ),
     "research_lab/sourcing_model_contract_check.py": (
         "REVIEWED_CONSUMER_SNAPSHOT_SPECS",
+        "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS",
         "SEMANTIC_COMPATIBILITY_POLICY_V1_PATH",
         "SEMANTIC_COMPATIBILITY_POLICY_SCHEMA_V1",
         "SEMANTIC_COMPATIBILITY_CONSUMER_API_V1",
@@ -211,7 +212,9 @@ PROTECTED_SYMBOLS = {
         "SEMANTIC_COMPATIBILITY_RECEIPT_FIELDS_V1",
         "_SEMANTIC_COMPATIBILITY_CACHE_SIZE",
         "load_wrapper_contract",
+        "_reviewed_consumer_snapshot_from_spec",
         "reviewed_consumer_snapshots",
+        "reviewed_consumer_profiles",
         "_snapshot_sha256",
         "_excluded_compatibility_source_path_v1",
         "compute_compatibility_source_tree_hash_v1",

@@ -18,7 +18,10 @@ from research_lab.eval import (
     validate_private_model_artifact_manifest,
     verify_private_artifact_manifest_signature,
 )
-from research_lab.sourcing_model_contract_check import reviewed_consumer_snapshots
+from research_lab.sourcing_model_contract_check import (
+    reviewed_consumer_profiles,
+    reviewed_consumer_snapshots,
+)
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
@@ -264,6 +267,37 @@ def test_known_contract_with_other_fixtures_requires_semantic_admission() -> Non
     assert result["consumer_contract_binding_mode"] == "semantic_v1_required"
     assert len(s3.calls) == 1
     assert len(kms.calls) == 1
+
+
+def test_current_v55_e55_manifest_pair_is_legacy_exact() -> None:
+    profile = next(
+        item
+        for item in reviewed_consumer_profiles()
+        if item["contract_sha256"]
+        == "sha256:b89eda998cf8cf3d9ee80c4ccd2bd4e10e37d6e4bdd7be80e2dc70492d2c0ffd"
+    )
+    manifest = artifact_mapping()
+    manifest["compatibility_contract"] = {
+        "contract_id": profile["contract"]["contract_id"],
+        "path": profile["contract"]["canonical_path"],
+        "sha256": profile["contract_sha256"],
+    }
+    manifest["consumer_parity_fixtures"] = {
+        "path": profile["contract"]["parity_fixture_path"],
+        "sha256": profile["parity_sha256"],
+    }
+    payload = dict(manifest)
+    payload.pop("manifest_hash")
+    manifest["manifest_hash"] = sha256_json(payload)
+
+    result = verify_private_artifact_manifest_signature(
+        manifest,
+        s3_client=FakeS3(),
+        kms_client=FakeKms(),
+    )
+
+    assert result["verified"] is True
+    assert result["consumer_contract_binding_mode"] == "legacy_exact"
 
 
 def test_local_manifest_builder_derives_semantic_source_pair(

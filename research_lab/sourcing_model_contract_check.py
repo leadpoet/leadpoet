@@ -75,6 +75,12 @@ CONTRACT_V55_PATH = Path(__file__).with_name("sourcing_model_contract_v55.json")
 PARITY_FIXTURE_V55_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v55.json"
 )
+CONTRACT_V55_E55_PATH = Path(__file__).with_name(
+    "sourcing_model_contract_v55_e55.json"
+)
+PARITY_FIXTURE_V55_E55_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v55_e55.json"
+)
 SEMANTIC_COMPATIBILITY_POLICY_V1_PATH = Path(__file__).with_name(
     "sourcing_model_semantic_compatibility_v1.json"
 )
@@ -424,6 +430,53 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
     },
 )
 
+# The model publisher retained the v55 contract id while adding the measured
+# intent-source evidence surface. Keep both byte-exact v55 revisions so the
+# active release and the older rollback releases remain independently bound.
+REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v55",
+        "contract_path": CONTRACT_V55_E55_PATH,
+        "contract_sha256": (
+            "sha256:b89eda998cf8cf3d9ee80c4ccd2bd4e10e37d6e4bdd7be80e2dc70492d2c0ffd"
+        ),
+        "parity_path": PARITY_FIXTURE_V55_E55_PATH,
+        "parity_sha256": (
+            "sha256:b75f79a8b7c3eb72c24b14ceab7c84442e394dd8c738a627dbbb22ed4bf4271a"
+        ),
+        "required_source_constants": {
+            "sourcing_model/runtime_capabilities.py": {
+                "CAPABILITY_CONTRACT_VERSION": (
+                    "sourcing-model-runtime-capabilities:v3"
+                ),
+            },
+        },
+        "release_identities": (
+            {
+                "source_tree_hash": (
+                    "sha256:491d6e76adf629b60d913062005191673f962db3cd5cd77223a68cf6262ac60f"
+                ),
+                "git_commit_sha": "e55e57f2be0ddadcc6b9c92c18b932dc2c354d21",
+                "manifest_hash": (
+                    "sha256:af68f0fbd29c77f9ffe686dcbddbc1e5dd1cab6c8725c7c9669de367bd592928"
+                ),
+                "image_digest": (
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                    "sourcing-model@sha256:f1ae9bc0ba2cd55450e4c1b1bbdb0030514dbf5afd380f29a09d5e95bdb0ade5"
+                ),
+            },
+        ),
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+        },
+    },
+)
+
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     """Load and shape-check the reviewed model-owned contract snapshot."""
@@ -445,100 +498,125 @@ def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     return document
 
 
-def reviewed_consumer_snapshots() -> Dict[str, Dict[str, Any]]:
-    """Return the exact contract/parity pairs accepted by this consumer.
+def _reviewed_consumer_snapshot_from_spec(
+    spec: Mapping[str, Any],
+) -> Dict[str, Any]:
+    contract_path = Path(spec["contract_path"])
+    parity_path = Path(spec["parity_path"])
+    contract_sha256 = _snapshot_sha256(contract_path)
+    parity_sha256 = _snapshot_sha256(parity_path)
+    if contract_sha256 != spec["contract_sha256"]:
+        raise ValueError(
+            f"reviewed sourcing contract hash differs: {contract_path.name}"
+        )
+    if parity_sha256 != spec["parity_sha256"]:
+        raise ValueError(
+            f"reviewed sourcing parity hash differs: {parity_path.name}"
+        )
+    document = load_wrapper_contract(contract_path)
+    contract_id = str(spec["contract_id"])
+    if document["contract_id"] != contract_id:
+        raise ValueError(
+            f"reviewed sourcing contract id differs: {contract_path.name}"
+        )
+    if not parity_path.is_file():
+        raise ValueError(
+            f"reviewed sourcing parity snapshot is missing: {parity_path.name}"
+        )
+    release_identities: list[Dict[str, str]] = []
+    for value in spec.get("release_identities") or ():
+        release = {str(key): str(item) for key, item in dict(value).items()}
+        if set(release) != {
+            "source_tree_hash",
+            "git_commit_sha",
+            "manifest_hash",
+            "image_digest",
+        }:
+            raise ValueError(
+                f"reviewed legacy release identity is malformed: {contract_id}"
+            )
+        if (
+            re.fullmatch(r"sha256:[0-9a-f]{64}", release["source_tree_hash"])
+            is None
+            or re.fullmatch(r"[0-9a-f]{40}", release["git_commit_sha"])
+            is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", release["manifest_hash"])
+            is None
+            or re.fullmatch(
+                r"[^\s]+@sha256:[0-9a-f]{64}", release["image_digest"]
+            )
+            is None
+        ):
+            raise ValueError(
+                f"reviewed legacy release identity is invalid: {contract_id}"
+            )
+        release_identities.append(release)
+    if len({item["source_tree_hash"] for item in release_identities}) != len(
+        release_identities
+    ):
+        raise ValueError(
+            f"duplicate reviewed legacy source identity: {contract_id}"
+        )
+    return {
+        "contract": document,
+        "contract_path": contract_path,
+        "contract_sha256": contract_sha256,
+        "parity_path": parity_path,
+        "parity_sha256": parity_sha256,
+        "release_identities": tuple(release_identities),
+        "positional_exact_signatures": bool(
+            spec.get("positional_exact_signatures", False)
+        ),
+        "variadic_parameters": dict(spec.get("variadic_parameters") or {}),
+        "required_source_constants": {
+            str(relative): {
+                str(name): value
+                for name, value in dict(expected_values).items()
+            }
+            for relative, expected_values in dict(
+                spec.get("required_source_constants") or {}
+            ).items()
+        },
+    }
 
-    Contract ids are selectors only. Acceptance still requires byte equality
-    with both files in the selected pair, so an artifact cannot mix a reviewed
-    contract with unrelated parity projections.
-    """
+
+def reviewed_consumer_snapshots() -> Dict[str, Dict[str, Any]]:
+    """Return the primary exact contract/parity pair for each contract id."""
 
     snapshots: Dict[str, Dict[str, Any]] = {}
     for spec in REVIEWED_CONSUMER_SNAPSHOT_SPECS:
-        contract_path = Path(spec["contract_path"])
-        parity_path = Path(spec["parity_path"])
-        contract_sha256 = _snapshot_sha256(contract_path)
-        parity_sha256 = _snapshot_sha256(parity_path)
-        if contract_sha256 != spec["contract_sha256"]:
-            raise ValueError(
-                f"reviewed sourcing contract hash differs: {contract_path.name}"
-            )
-        if parity_sha256 != spec["parity_sha256"]:
-            raise ValueError(
-                f"reviewed sourcing parity hash differs: {parity_path.name}"
-            )
-        document = load_wrapper_contract(contract_path)
-        contract_id = str(spec["contract_id"])
-        if document["contract_id"] != contract_id:
-            raise ValueError(
-                f"reviewed sourcing contract id differs: {contract_path.name}"
-            )
+        snapshot = _reviewed_consumer_snapshot_from_spec(spec)
+        contract_id = str(snapshot["contract"]["contract_id"])
         if contract_id in snapshots:
             raise ValueError(
                 f"duplicate reviewed sourcing wrapper contract id: {contract_id}"
             )
-        if not parity_path.is_file():
-            raise ValueError(
-                f"reviewed sourcing parity snapshot is missing: {parity_path.name}"
-            )
-        release_identities: list[Dict[str, str]] = []
-        for value in spec.get("release_identities") or ():
-            release = {str(key): str(item) for key, item in dict(value).items()}
-            if set(release) != {
-                "source_tree_hash",
-                "git_commit_sha",
-                "manifest_hash",
-                "image_digest",
-            }:
-                raise ValueError(
-                    f"reviewed legacy release identity is malformed: {contract_id}"
-                )
-            if (
-                re.fullmatch(r"sha256:[0-9a-f]{64}", release["source_tree_hash"])
-                is None
-                or re.fullmatch(r"[0-9a-f]{40}", release["git_commit_sha"])
-                is None
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", release["manifest_hash"])
-                is None
-                or re.fullmatch(
-                    r"[^\s]+@sha256:[0-9a-f]{64}", release["image_digest"]
-                )
-                is None
-            ):
-                raise ValueError(
-                    f"reviewed legacy release identity is invalid: {contract_id}"
-                )
-            release_identities.append(release)
-        if len({item["source_tree_hash"] for item in release_identities}) != len(
-            release_identities
-        ):
-            raise ValueError(
-                f"duplicate reviewed legacy source identity: {contract_id}"
-            )
-        snapshots[contract_id] = {
-            "contract": document,
-            "contract_path": contract_path,
-            "contract_sha256": contract_sha256,
-            "parity_path": parity_path,
-            "parity_sha256": parity_sha256,
-            "release_identities": tuple(release_identities),
-            "positional_exact_signatures": bool(
-                spec.get("positional_exact_signatures", False)
-            ),
-            "variadic_parameters": dict(
-                spec.get("variadic_parameters") or {}
-            ),
-            "required_source_constants": {
-                str(relative): {
-                    str(name): value
-                    for name, value in dict(expected_values).items()
-                }
-                for relative, expected_values in dict(
-                    spec.get("required_source_constants") or {}
-                ).items()
-            },
-        }
+        snapshots[contract_id] = snapshot
     return snapshots
+
+
+def reviewed_consumer_profiles() -> tuple[Dict[str, Any], ...]:
+    """Return every byte-exact reviewed profile, including same-id revisions."""
+
+    primary = reviewed_consumer_snapshots()
+    profiles = list(primary.values())
+    seen_pairs = {
+        (snapshot["contract_sha256"], snapshot["parity_sha256"])
+        for snapshot in profiles
+    }
+    for spec in REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS:
+        snapshot = _reviewed_consumer_snapshot_from_spec(spec)
+        contract_id = str(snapshot["contract"]["contract_id"])
+        if contract_id not in primary:
+            raise ValueError(
+                f"alternate reviewed contract id has no primary: {contract_id}"
+            )
+        pair = (snapshot["contract_sha256"], snapshot["parity_sha256"])
+        if pair in seen_pairs:
+            raise ValueError(f"duplicate reviewed sourcing profile: {contract_id}")
+        seen_pairs.add(pair)
+        profiles.append(snapshot)
+    return tuple(profiles)
 
 
 def _snapshot_sha256(path: Path) -> str:
@@ -606,7 +684,7 @@ def _resolve_reviewed_consumer_contract_pair(
 
     root = Path(root)
     matches: list[Dict[str, Any]] = []
-    for snapshot in reviewed_consumer_snapshots().values():
+    for snapshot in reviewed_consumer_profiles():
         document = snapshot["contract"]
         candidate_contract_path = root / str(document["canonical_path"])
         candidate_parity_path = root / str(document["parity_fixture_path"])
@@ -693,7 +771,7 @@ def validate_reviewed_legacy_release_manifest_identity_v1(
         return
     matching_snapshots = tuple(
         snapshot
-        for snapshot in reviewed_consumer_snapshots().values()
+        for snapshot in reviewed_consumer_profiles()
         if str(snapshot["contract_sha256"]) == str(receipt.get("contract_hash"))
         and str(snapshot["parity_sha256"]) == str(receipt.get("parity_hash"))
     )
@@ -1619,10 +1697,9 @@ def semantic_compatibility_policy_hash_v1() -> str:
     table are both authorization inputs, so receipts and cache keys bind both.
     """
 
-    snapshots = reviewed_consumer_snapshots()
     reviewed_profiles = [
         {
-            "contract_id": contract_id,
+            "contract_id": str(snapshot["contract"]["contract_id"]),
             "contract_sha256": str(snapshot["contract_sha256"]),
             "parity_sha256": str(snapshot["parity_sha256"]),
             "release_identities": sorted(
@@ -1641,7 +1718,14 @@ def semantic_compatibility_policy_hash_v1() -> str:
                 sorted(dict(snapshot["variadic_parameters"]).items())
             ),
         }
-        for contract_id, snapshot in sorted(snapshots.items())
+        for snapshot in sorted(
+            reviewed_consumer_profiles(),
+            key=lambda item: (
+                str(item["contract"]["contract_id"]),
+                str(item["contract_sha256"]),
+                str(item["parity_sha256"]),
+            ),
+        )
     ]
     return _sha256_json(
         {
@@ -1849,7 +1933,7 @@ def validate_source_tree_compatibility_receipt_v1(
                 source_tree_hash=str(normalized.get("source_tree_hash") or ""),
             )
         )
-        for snapshot in reviewed_consumer_snapshots().values()
+        for snapshot in reviewed_consumer_profiles()
     )
     mode_identity_valid = normalized.get("admission_mode") == (
         "legacy_exact" if profiled_legacy_source else "semantic_v1"

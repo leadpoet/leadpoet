@@ -36,6 +36,7 @@ from research_lab.employee_buckets import (
 from research_lab.sourcing_model_contract_check import (
     compute_compatibility_source_tree_hash_v1,
     resolve_reviewed_consumer_snapshot,
+    reviewed_consumer_profiles,
     reviewed_consumer_snapshots,
     semantic_compatibility_policy_v1,
     source_tree_compatibility_admission_v1,
@@ -160,7 +161,7 @@ EXPECTED_CONSUMER_PARITY_FIXTURE_PATH = str(
 _REVIEWED_CONSUMER_MANIFEST_PAIRS = tuple(
     (
         {
-            "contract_id": contract_id,
+            "contract_id": str(snapshot["contract"]["contract_id"]),
             "path": str(snapshot["contract"]["canonical_path"]),
             "sha256": str(snapshot["contract_sha256"]),
         },
@@ -169,7 +170,14 @@ _REVIEWED_CONSUMER_MANIFEST_PAIRS = tuple(
             "sha256": str(snapshot["parity_sha256"]),
         },
     )
-    for contract_id, snapshot in sorted(reviewed_consumer_snapshots().items())
+    for snapshot in sorted(
+        reviewed_consumer_profiles(),
+        key=lambda item: (
+            str(item["contract"]["contract_id"]),
+            str(item["contract_sha256"]),
+            str(item["parity_sha256"]),
+        ),
+    )
 )
 DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"

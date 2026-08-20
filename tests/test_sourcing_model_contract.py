@@ -25,6 +25,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V47_PATH,
     CONTRACT_V52_PATH,
     CONTRACT_V55_PATH,
+    CONTRACT_V55_E55_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
@@ -35,10 +36,12 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V47_PATH,
     PARITY_FIXTURE_V52_PATH,
     PARITY_FIXTURE_V55_PATH,
+    PARITY_FIXTURE_V55_E55_PATH,
     PARITY_FIXTURE_V7_PATH,
     _resolve_reviewed_consumer_contract_pair,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
+    reviewed_consumer_profiles,
     reviewed_consumer_snapshots,
     verify_source_tree_contract,
 )
@@ -739,6 +742,51 @@ def test_exact_v55_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
             ),
         },
     )
+
+
+def test_exact_v55_e55_revision_is_independently_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V55_E55_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V55_E55_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V55_E55_PATH.read_bytes())
+
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v55"
+    )
+    assert resolved["contract_sha256"] == (
+        "sha256:b89eda998cf8cf3d9ee80c4ccd2bd4e10e37d6e4bdd7be80e2dc70492d2c0ffd"
+    )
+    assert resolved["parity_sha256"] == (
+        "sha256:b75f79a8b7c3eb72c24b14ceab7c84442e394dd8c738a627dbbb22ed4bf4271a"
+    )
+    assert resolved["release_identities"] == (
+        {
+            "source_tree_hash": (
+                "sha256:491d6e76adf629b60d913062005191673f962db3cd5cd77223a68cf6262ac60f"
+            ),
+            "git_commit_sha": "e55e57f2be0ddadcc6b9c92c18b932dc2c354d21",
+            "manifest_hash": (
+                "sha256:af68f0fbd29c77f9ffe686dcbddbc1e5dd1cab6c8725c7c9669de367bd592928"
+            ),
+            "image_digest": (
+                "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                "sourcing-model@sha256:f1ae9bc0ba2cd55450e4c1b1bbdb0030514dbf5afd380f29a09d5e95bdb0ade5"
+            ),
+        },
+    )
+    assert len(
+        [
+            profile
+            for profile in reviewed_consumer_profiles()
+            if profile["contract"]["contract_id"]
+            == "leadpoet-sourcing-wrapper-contract-v55"
+        ]
+    ) == 2
 
 
 def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(

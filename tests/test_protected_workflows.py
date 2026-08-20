@@ -53,6 +53,19 @@ def test_miner_maintenance_protected_inventory_is_complete():
         )
 
 
+def test_sourcing_model_profile_authority_is_protected():
+    protected = set(
+        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
+    )
+    assert {
+        "REVIEWED_CONSUMER_SNAPSHOT_SPECS",
+        "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS",
+        "_reviewed_consumer_snapshot_from_spec",
+        "reviewed_consumer_snapshots",
+        "reviewed_consumer_profiles",
+    } <= protected
+
+
 def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)

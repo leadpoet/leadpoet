@@ -2108,6 +2108,41 @@ def test_signed_legacy_profiles_and_manifest_identities_are_exact(
                         )
 
 
+def test_current_v55_e55_signed_release_is_exact_and_hybrid_fails() -> None:
+    profiled = next(
+        profile
+        for profile in compatibility.reviewed_consumer_profiles()
+        if profile["contract_sha256"]
+        == "sha256:b89eda998cf8cf3d9ee80c4ccd2bd4e10e37d6e4bdd7be80e2dc70492d2c0ffd"
+    )
+    release = profiled["release_identities"][0]
+    manifest = {
+        "model_artifact_hash": release["source_tree_hash"],
+        "git_commit_sha": release["git_commit_sha"],
+        "manifest_hash": release["manifest_hash"],
+        "image_digest": release["image_digest"],
+    }
+    receipt = {
+        "admission_mode": "legacy_exact",
+        "contract_id": profiled["contract"]["contract_id"],
+        "source_tree_hash": release["source_tree_hash"],
+        "contract_hash": profiled["contract_sha256"],
+        "parity_hash": profiled["parity_sha256"],
+    }
+
+    compatibility.validate_reviewed_legacy_release_manifest_identity_v1(
+        receipt,
+        manifest,
+    )
+    for field in ("git_commit_sha", "manifest_hash", "image_digest"):
+        hybrid = {**manifest, field: str(manifest[field]) + ":hybrid"}
+        with pytest.raises(ValueError, match="reviewed signed release"):
+            compatibility.validate_reviewed_legacy_release_manifest_identity_v1(
+                receipt,
+                hybrid,
+            )
+
+
 def test_legacy_receipt_identity_rejects_hybrid_or_relabelled_release() -> None:
     snapshot = compatibility.reviewed_consumer_snapshots()[
         "leadpoet-sourcing-wrapper-contract-v7"

@@ -288,6 +288,14 @@ class _ArtifactAuthority:
         return {"verified": True}
 
 
+class _DurableStore:
+    def __init__(self, identity: str):
+        self.identity = identity
+
+    def durable_authority_identity(self):
+        return self.identity
+
+
 class _Lineage(SimpleNamespace):
     def identity_hash(self):
         return sha256_json(

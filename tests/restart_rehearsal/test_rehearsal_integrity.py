@@ -8705,6 +8705,10 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         "Prepared exact-candidate miner maintenance under the canonical restart lock"
         in script
     )
+    assert 'MINER_BOOTSTRAP_READY_EPOCH="$(date -u +%s)"' in script
+    assert '"GATEWAY_RESTART_TIMING stage=controller_reexec"' in script
+    assert "miner-maintenance N-1 handoff lost its cwd or timing ledger" in script
+    assert "gateway restart timing ledger is unavailable" in script
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
     assert 'bash /home/ec2-user/gw_restart.sh\n' in script
     assert "direct miner-maintenance restart performed secret writes" in script

@@ -751,6 +751,10 @@ PY
       /bin/sleep 0.05
     done
     if [ "$MINER_BOOTSTRAP_READY" = "1" ]; then
+      MINER_BOOTSTRAP_READY_EPOCH="$(date -u +%s)"
+      while [ "$(date -u +%s)" = "$MINER_BOOTSTRAP_READY_EPOCH" ]; do
+        /bin/sleep 0.05
+      done
       printf '%s %s\n' "$CANDIDATE_SHA" "$MINER_HANDOFF_NONCE" \
         >"$MINER_HANDOFF_FILE.tmp"
       chmod 0600 "$MINER_HANDOFF_FILE.tmp"
@@ -758,6 +762,19 @@ PY
     fi
     wait "$MINER_BOOTSTRAP_PID"
     RESTART_STATUS=$?
+    if grep -Eq \
+        'shell-init: error retrieving current directory|gateway restart timing ledger is unavailable' \
+        "$MINER_BOOTSTRAP_LOG"; then
+      echo "ERROR: miner-maintenance N-1 handoff lost its cwd or timing ledger" >&2
+      RESTART_STATUS=1
+    fi
+    if [ "$MINER_BOOTSTRAP_READY" = "1" ] \
+        && ! grep -Fq \
+          "GATEWAY_RESTART_TIMING stage=controller_reexec" \
+          "$MINER_BOOTSTRAP_LOG"; then
+      echo "ERROR: miner-maintenance N-1 handoff did not retain the timing ledger" >&2
+      RESTART_STATUS=1
+    fi
     rm -f -- "$MINER_HANDOFF_FILE" "$MINER_HANDOFF_FILE.tmp"
     if [[ "$MINER_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]]; then
       rm -rf -- "$MINER_BOOTSTRAP_ROOT"

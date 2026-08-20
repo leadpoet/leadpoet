@@ -1824,6 +1824,114 @@ GATEWAY_RESTART_TIMING_FILE="$ledger"
         assert "ERROR: gateway restart timing ledger" in rejected.stderr, mode
 
 
+def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
+    tmp_path: Path,
+) -> None:
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    branch = restart.index(
+        '  GATEWAY_DEPLOY_STAGE="miner_maintenance_pre_hydration"'
+    )
+    body = restart[branch : restart.index("\nfi\n", branch)]
+
+    repo_root = tmp_path / "repo"
+    bootstrap_root = tmp_path / "bootstrap"
+    candidate_root = bootstrap_root / "candidate"
+    timing_dir = tmp_path / "timings"
+    result_file = tmp_path / "result"
+    repo_root.mkdir()
+    candidate_root.mkdir(parents=True)
+    timing_dir.mkdir()
+
+    python_stub = tmp_path / "bootstrap-python"
+    python_stub.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'test "$1" = -P\n'
+        'test "$2" = -m\n'
+        'test "$PWD" = /\n'
+        'test "$GATEWAY_RESTART_STARTED_EPOCH" = 1700000000\n'
+        'test "$GATEWAY_RESTART_TIMING_DIR" = "$EXPECTED_TIMING_DIR"\n'
+        'test "$GATEWAY_RESTART_TIMING_FILE" = "$EXPECTED_TIMING_FILE"\n'
+        'test "$GATEWAY_RESTART_TIMING_INITIALIZED" = 1\n'
+        'rm -rf -- "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT"\n'
+        "/bin/sleep 1.1\n"
+        'test "$PWD" = /\n'
+        'test -s "$GATEWAY_RESTART_TIMING_FILE"\n'
+        "printf '%s\\n%s\\n%s\\n' "
+        '"$PWD" "$GATEWAY_RESTART_STARTED_EPOCH" '
+        '"$GATEWAY_RESTART_TIMING_FILE" '
+        '>"$RESULT_FILE"\n'
+    )
+    python_stub.chmod(0o700)
+
+    started_epoch = "1700000000"
+    timing_file = timing_dir / "gateway-1700000000-probe.jsonl"
+    timing_file.write_text(
+        '{"stage":"invoked","status":"reached"}\n', encoding="utf-8"
+    )
+    probe = candidate_root / "gw_restart.sh"
+    probe.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f"GATEWAY_RESTART_STARTED_EPOCH={started_epoch}\n"
+        f"GATEWAY_RESTART_TIMING_DIR={shlex.quote(str(timing_dir))}\n"
+        f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(timing_file))}\n"
+        "GATEWAY_RESTART_TIMING_INITIALIZED=1\n"
+        + body
+        + "\n",
+        encoding="utf-8",
+    )
+    probe.chmod(0o700)
+
+    probe_environment = dict(os.environ)
+    for name in (
+        "GATEWAY_RESTART_STARTED_EPOCH",
+        "GATEWAY_RESTART_TIMING_DIR",
+        "GATEWAY_RESTART_TIMING_FILE",
+        "GATEWAY_RESTART_TIMING_INITIALIZED",
+    ):
+        probe_environment.pop(name, None)
+    probe_environment.update(
+        {
+            "EXPECTED_TIMING_DIR": str(timing_dir),
+            "EXPECTED_TIMING_FILE": str(timing_file),
+            "GATEWAY_HOST_RESTART_SCRIPT": str(tmp_path / "host-restart"),
+            "GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN": str(
+                bootstrap_root / "plan.json"
+            ),
+            "GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT": str(bootstrap_root),
+            "GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE": str(
+                tmp_path / "handoff"
+            ),
+            "GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE": "0" * 64,
+            "GATEWAY_PYTHON_BIN": str(python_stub),
+            "GATEWAY_RESTART_CONTROLLER_CURRENT": str(tmp_path / "current"),
+            "LEADPOET_REPO_ROOT": str(repo_root),
+            "REQUESTED_GATEWAY_DEPLOY_COMMIT": "1" * 40,
+            "RESULT_FILE": str(result_file),
+            "bootstrap_candidate_root": str(candidate_root),
+        }
+    )
+    completed = subprocess.run(
+        ["/bin/bash", str(probe)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=probe_environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "getcwd" not in completed.stderr
+    assert "timing ledger is unavailable" not in completed.stderr
+    assert not bootstrap_root.exists()
+    assert result_file.read_text(encoding="utf-8").splitlines() == [
+        "/",
+        started_epoch,
+        str(timing_file),
+    ]
+
+
 def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = "if ! wait_for_gateway_v2_authority; then"

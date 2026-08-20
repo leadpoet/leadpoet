@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -36,9 +37,16 @@ def _controller_fixture(
     for directory in (controller_parent, controller_root, releases):
         directory.mkdir(exist_ok=True)
         directory.chmod(0o775)
-    (release / "scripts").mkdir(parents=True)
-    (release / "Leadpoet/utils").mkdir(parents=True)
-    (release / "gateway/tee").mkdir(parents=True)
+    nested_directories = (
+        release / "scripts",
+        release / "Leadpoet",
+        release / "Leadpoet/utils",
+        release / "gateway",
+        release / "gateway/tee",
+    )
+    for directory in nested_directories:
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o775)
     release.chmod(0o700)
     payloads = {
         "gw_restart.sh": b"#!/bin/bash\nexit 0\n",
@@ -94,11 +102,29 @@ def _controller_fixture(
     return repository, current, host_restart, release, installed_payloads
 
 
+def _installed_controller_directories(
+    current: Path,
+    release: Path,
+) -> tuple[Path, ...]:
+    controller_root = current.parent
+    return (
+        controller_root.parent,
+        controller_root,
+        controller_root / "releases",
+        release,
+        release / "scripts",
+        release / "Leadpoet",
+        release / "Leadpoet/utils",
+        release / "gateway",
+        release / "gateway/tee",
+    )
+
+
 def test_valid_bundle_allows_exact_partial_cutover_host_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    repository, current, host_restart, _release, _payloads = _controller_fixture(
+    repository, current, host_restart, release, _payloads = _controller_fixture(
         tmp_path,
         monkeypatch,
         controller_commit=CANDIDATE_COMMIT,
@@ -115,6 +141,10 @@ def test_valid_bundle_allows_exact_partial_cutover_host_identity(
     assert result["controller_commit"] == CANDIDATE_COMMIT
     assert result["host_controller_commits"] == [N_MINUS_ONE_COMMIT]
     assert set(result["payloads"]) == set(verifier.CONTROLLER_FILES)
+    assert all(
+        stat.S_IMODE(directory.stat().st_mode) == 0o700
+        for directory in _installed_controller_directories(current, release)
+    )
 
 
 def test_exact_supported_n_minus_one_bundle_does_not_require_candidate_object(
@@ -142,6 +172,144 @@ def test_exact_supported_n_minus_one_bundle_does_not_require_candidate_object(
 
     assert result["controller_commit"] == N_MINUS_ONE_COMMIT
     assert result["host_controller_commits"] == [N_MINUS_ONE_COMMIT]
+
+
+def test_controller_directory_hardening_is_retry_safe_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    fake_git = verifier._git
+    interrupted = False
+
+    def interrupt_after_first_file(_repository, *arguments, binary=False):
+        nonlocal interrupted
+        if arguments[0] == "ls-tree" and not interrupted:
+            interrupted = True
+            raise verifier.InstalledGatewayControllerError("synthetic interruption")
+        return fake_git(_repository, *arguments, binary=binary)
+
+    monkeypatch.setattr(verifier, "_git", interrupt_after_first_file)
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="synthetic interruption",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
+
+    controller_root = current.parent
+    assert all(
+        stat.S_IMODE(directory.stat().st_mode) == 0o700
+        for directory in (
+            controller_root.parent,
+            controller_root,
+            controller_root / "releases",
+        )
+    )
+    assert all(
+        stat.S_IMODE(directory.stat().st_mode) == 0o775
+        for directory in (
+            release / "scripts",
+            release / "Leadpoet",
+            release / "Leadpoet/utils",
+            release / "gateway",
+            release / "gateway/tee",
+        )
+    )
+
+    monkeypatch.setattr(verifier, "_git", fake_git)
+    first_retry = verifier.verify_installed_controller_bundle(
+        repo_root=repository,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=CANDIDATE_COMMIT,
+    )
+    second_retry = verifier.verify_installed_controller_bundle(
+        repo_root=repository,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=CANDIDATE_COMMIT,
+    )
+
+    assert first_retry["controller_commit"] == N_MINUS_ONE_COMMIT
+    assert second_retry["controller_commit"] == N_MINUS_ONE_COMMIT
+    assert all(
+        stat.S_IMODE(directory.stat().st_mode) == 0o700
+        for directory in _installed_controller_directories(current, release)
+    )
+
+
+def test_reviewed_nested_controller_directory_rejects_mode_777(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    (release / "scripts").chmod(0o777)
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="installed controller file ancestry is unsafe",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+        )
+
+
+def test_unreviewed_nested_group_writable_directory_remains_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _repository, current, _host_restart, release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    unreviewed_directory = release / "unreviewed"
+    unreviewed_directory.mkdir()
+    unreviewed_directory.chmod(0o775)
+    unreviewed_file = unreviewed_directory / "helper.py"
+    unreviewed_file.write_bytes(b"UNREVIEWED = True\n")
+    unreviewed_file.chmod(0o600)
+    controller_root = current.parent
+    reviewed_nested_paths = verifier._reviewed_controller_parent_paths(release)
+    assert reviewed_nested_paths == frozenset(
+        {
+            release / "scripts",
+            release / "Leadpoet",
+            release / "Leadpoet/utils",
+            release / "gateway",
+            release / "gateway/tee",
+        }
+    )
+    allowed_paths = frozenset(
+        {
+            controller_root.parent,
+            controller_root,
+            controller_root / "releases",
+        }
+    ) | reviewed_nested_paths
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="installed controller file ancestry is unsafe",
+    ):
+        verifier._read_exact_file(
+            unreviewed_file,
+            expected_mode=0o600,
+            allowed_group_writable_paths=allowed_paths,
+        )
 
 
 def test_tampered_installed_helper_never_reaches_execution(

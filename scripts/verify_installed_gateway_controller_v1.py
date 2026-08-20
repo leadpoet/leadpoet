@@ -189,6 +189,27 @@ def _open_parent_fd(
                 raise InstalledGatewayControllerError(
                     "installed controller file ancestry is unsafe"
                 )
+            if reviewed_live_mode:
+                try:
+                    os.fchmod(descriptor, 0o700)
+                    os.fsync(descriptor)
+                    hardened = os.fstat(descriptor)
+                except OSError:
+                    os.close(descriptor)
+                    raise
+                if (
+                    not stat.S_ISDIR(hardened.st_mode)
+                    or hardened.st_dev != metadata.st_dev
+                    or hardened.st_ino != metadata.st_ino
+                    or hardened.st_uid != os.geteuid()
+                    or hardened.st_gid != os.getegid()
+                    or stat.S_IMODE(hardened.st_mode) != 0o700
+                ):
+                    os.close(descriptor)
+                    raise InstalledGatewayControllerError(
+                        "installed controller file ancestry could not be hardened"
+                    )
+                metadata = hardened
             descriptors.append(
                 (
                     descriptor,
@@ -334,6 +355,16 @@ def _verify_directory(path: Path, *, modes: frozenset[int]) -> tuple[int, int]:
             os.close(descriptor)
 
 
+def _reviewed_controller_parent_paths(release_dir: Path) -> frozenset[Path]:
+    release = Path(release_dir)
+    return frozenset(
+        release / parent
+        for relative_path in CONTROLLER_FILES
+        for parent in Path(relative_path).parents
+        if parent != Path(".")
+    )
+
+
 def verify_installed_controller_bundle(
     *,
     repo_root: Path,
@@ -388,12 +419,15 @@ def verify_installed_controller_bundle(
             )
     release_dir = releases_root / controller_commit
     release_identity = _verify_directory(release_dir, modes=frozenset({0o700}))
+    allowed_group_writable_paths = frozenset(ancestry) | (
+        _reviewed_controller_parent_paths(release_dir)
+    )
     observed: dict[str, bytes] = {}
     for relative_path, (installed_mode, git_mode) in CONTROLLER_FILES.items():
         payload = _read_exact_file(
             release_dir / relative_path,
             expected_mode=installed_mode,
-            allowed_group_writable_paths=frozenset(ancestry),
+            allowed_group_writable_paths=allowed_group_writable_paths,
         )
         tree_row = _git(
             repository,

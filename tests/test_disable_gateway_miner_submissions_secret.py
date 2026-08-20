@@ -470,6 +470,71 @@ def test_hydration_commitment_exactly_models_frozen_n_minus_one(
     )
 
 
+def test_frozen_n_minus_one_keeps_legacy_aws_pair_only_in_canonical_cache(
+    tmp_path: Path,
+):
+    repository = Path(__file__).resolve().parents[1]
+    source = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "show",
+            "0dd3a385a23a3af0fa17210bfe02a39cc4023952:gw_restart.sh",
+        ],
+        text=True,
+    )
+    cache_marker = 'python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE" <<\'PY\'\n'
+    runtime_marker = 'python3 - "$GATEWAY_ENV_FILE" "$ENV_SECRET" <<\'PY\'\n'
+    cache_renderer = source.split(cache_marker, 1)[1].split("\nPY\n", 1)[0]
+    runtime_renderer = source.split(runtime_marker, 1)[1].split("\nPY\n", 1)[0]
+    raw = (
+        "AWS_ACCESS_KEY_ID=legacy-preserved-access\n"
+        "AWS_SECRET_ACCESS_KEY=legacy-preserved-secret\n"
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'\n"
+        "  export RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'  \n"
+        f"{operation.TARGET_ENV_NAME}=false\n"
+        "NORMAL=value\n"
+    )
+    secret_path = tmp_path / "secret.txt"
+    cache_path = tmp_path / "gateway.env"
+    runtime_path = tmp_path / "gw_env_secret.sh"
+    secret_path.write_text(raw, encoding="utf-8")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            cache_renderer,
+            str(secret_path),
+            str(cache_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            runtime_renderer,
+            str(cache_path),
+            str(runtime_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert cache_path.read_text(encoding="utf-8") == raw
+    assert operation._n_minus_one_hydrated_environment(raw) == raw
+    runtime = runtime_path.read_text(encoding="utf-8")
+    assert "AWS_ACCESS_KEY_ID" not in runtime
+    assert "AWS_SECRET_ACCESS_KEY" not in runtime
+    assert runtime.count("export RESEARCH_LAB_WEIGHT_MUTATION_ENABLED=false\n") == 2
+    assert f"export {operation.TARGET_ENV_NAME}=false\n" in runtime
+
+
 @pytest.mark.parametrize(
     ("name", "value", "error"),
     [
@@ -548,6 +613,32 @@ def test_apply_stages_then_cas_promotes_and_preserves_unrelated_shell_bytes():
         "RemoveFromVersionId": INITIAL_VERSION,
     }
     assert client.stage_calls[1]["VersionStage"] == custom_stage
+
+
+def test_apply_preserves_legacy_aws_pair_and_identical_duplicate_raw_bytes():
+    original = (
+        "# preserved byte-for-byte\n"
+        "AWS_ACCESS_KEY_ID=legacy-preserved-access\n"
+        "AWS_SECRET_ACCESS_KEY=legacy-preserved-secret\n"
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'\n"
+        "  export RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'  \n"
+        "UNCHANGED='opaque value'\n"
+    )
+    expected = (
+        original
+        + "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n"
+    )
+    client = FakeSecretsClient(original)
+
+    result = _apply(client)
+
+    assert result["status"] == "updated"
+    assert client.versions[client.current] == expected
+    assert client.versions[INITIAL_VERSION] == original
+    assert "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'\n" in expected
+    assert "  export RESEARCH_LAB_WEIGHT_MUTATION_ENABLED='false'  \n" in expected
+    assert "AWS_ACCESS_KEY_ID=legacy-preserved-access\n" in expected
+    assert "AWS_SECRET_ACCESS_KEY=legacy-preserved-secret\n" in expected
 
 
 def test_success_preserves_preexisting_pending_and_uses_standard_previous_move():
@@ -637,6 +728,11 @@ def test_known_false_alias_is_canonicalized(known_false):
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n",
             "duplicate names",
         ),
+        (
+            '{"RESEARCH_LAB_WEIGHT_MUTATION_ENABLED":"false",'
+            '"RESEARCH_LAB_WEIGHT_MUTATION_ENABLED":"false"}',
+            "duplicate names",
+        ),
         ('{"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED":null}', "must be text"),
         ('{"BROKEN":', "JSON is malformed"),
         ("NOT_AN_ASSIGNMENT\n", "environment is malformed"),
@@ -648,6 +744,120 @@ def test_unknown_or_ambiguous_documents_fail_without_staging(secret, message):
 
     with pytest.raises(operation.GatewayMinerSubmissionsDisableError, match=message):
         _apply(client)
+
+    assert client.put_calls == []
+    assert client.stage_calls == []
+
+
+@pytest.mark.parametrize(
+    "aws_records",
+    [
+        "AWS_ACCESS_KEY_ID=legacy-preserved-access\n",
+        "AWS_SECRET_ACCESS_KEY=legacy-preserved-secret\n",
+        (
+            "AWS_ACCESS_KEY_ID=legacy-preserved-access\n"
+            "AWS_SECRET_ACCESS_KEY=legacy-preserved-secret\n"
+            "AWS_SESSION_TOKEN=legacy-extra-token\n"
+        ),
+    ],
+)
+def test_legacy_preserved_aws_names_must_be_the_exact_pair(
+    aws_records: str,
+    tmp_path: Path,
+):
+    client = FakeSecretsClient(
+        aws_records + "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="restart or AWS authority",
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=tmp_path / "transaction.json",
+        )
+
+    assert client.put_calls == []
+    assert client.stage_calls == []
+
+
+def test_json_document_rejects_legacy_aws_pair(tmp_path: Path):
+    client = FakeSecretsClient(
+        json.dumps(
+            {
+                "AWS_ACCESS_KEY_ID": "legacy-preserved-access",
+                "AWS_SECRET_ACCESS_KEY": "legacy-preserved-secret",
+                "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
+            }
+        )
+    )
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="restart or AWS authority",
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=tmp_path / "transaction.json",
+        )
+
+    assert client.put_calls == []
+    assert client.stage_calls == []
+
+
+def test_legacy_duplicate_name_rejects_differing_raw_values(tmp_path: Path):
+    client = FakeSecretsClient(
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED=false\n"
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED=true\n"
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="duplicate names",
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=tmp_path / "transaction.json",
+        )
+
+    assert client.put_calls == []
+    assert client.stage_calls == []
+
+
+@pytest.mark.parametrize(
+    "duplicated_records",
+    [
+        (
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+        ),
+        (
+            "GATEWAY_GIT_HELPER=/fixed/controller/helper.py\n"
+            "GATEWAY_GIT_HELPER=/fixed/controller/helper.py\n"
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+        ),
+    ],
+)
+def test_target_and_restart_authority_duplicates_remain_rejected(
+    duplicated_records: str,
+    tmp_path: Path,
+):
+    client = FakeSecretsClient(duplicated_records)
+
+    with pytest.raises(
+        operation.GatewayMinerSubmissionsDisableError,
+        match="duplicate names",
+    ):
+        operation._apply_gateway_miner_submissions_secret(
+            secrets_client=client,
+            expected_current_version_id=INITIAL_VERSION,
+            recovery_journal_path=tmp_path / "transaction.json",
+        )
 
     assert client.put_calls == []
     assert client.stage_calls == []
@@ -1024,7 +1234,11 @@ class _FakeSession:
         return self.secrets_client
 
 
-def test_instance_role_client_rejects_static_credential_environment():
+@pytest.mark.parametrize(
+    "name",
+    ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+)
+def test_instance_role_client_rejects_static_credential_environment(name: str):
     with pytest.raises(
         operation.GatewayMinerSubmissionsDisableError,
         match="credential configuration is forbidden",
@@ -1032,7 +1246,7 @@ def test_instance_role_client_rejects_static_credential_environment():
         operation._instance_role_secrets_client(
             environ={
                 "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
-                "AWS_ACCESS_KEY_ID": "must-not-be-used",
+                name: "must-not-be-used",
             },
             session_factory=_FakeSession,
         )

@@ -32,6 +32,16 @@ EXPECTED_AWS_REGION = "us-east-1"
 EXPECTED_GATEWAY_ROLE_NAME = "leadpoet-gateway-s3-cloudwatch-role"
 TARGET_ENV_NAME = "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
 TARGET_ENV_VALUE = "false"
+# One known unrelated legacy shell key occurs exactly twice.  Its parsed raw
+# assignment and semantic value must match; rendering preserves both records.
+_LEGACY_IDENTICAL_SHELL_DUPLICATE_NAME = (
+    "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED"
+)
+# Exact 0dd keeps this legacy pair in the canonical cache commitment, then its
+# ENV_SECRET renderer strips both.  Process instance-role checks still reject it.
+_LEGACY_PRESERVED_AWS_ENV_NAMES = frozenset(
+    {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+)
 RECOVERY_JOURNAL_SCHEMA_VERSION = "leadpoet.gateway_miner_disable_transaction.v1"
 DEFAULT_RECOVERY_JOURNAL_PATH = Path(
     "/home/ec2-user/.config/leadpoet/gateway-miner-disable-transaction-v1.json"
@@ -168,6 +178,20 @@ def _decode_shell_target_value(raw_value: str) -> str:
     return parts[0].split("=", 1)[1]
 
 
+def _decode_legacy_duplicate_value(raw_value: str) -> str:
+    try:
+        parts = shlex.split("VALUE=" + raw_value, posix=True)
+    except ValueError as exc:
+        raise GatewayMinerSubmissionsDisableError(
+            "gateway secret environment is malformed"
+        ) from exc
+    if len(parts) != 1 or not parts[0].startswith("VALUE="):
+        raise GatewayMinerSubmissionsDisableError(
+            "gateway secret environment is malformed"
+        )
+    return parts[0].split("=", 1)[1]
+
+
 def _shell_records(raw: str) -> tuple[list[tuple[str, str]], str]:
     if "\x00" in raw:
         if "\n" in raw or "\r" in raw:
@@ -199,6 +223,8 @@ def _shell_records(raw: str) -> tuple[list[tuple[str, str]], str]:
 
 def _parse_shell_environment(raw: str) -> dict[str, str]:
     values: dict[str, str] = {}
+    raw_values: dict[str, str] = {}
+    occurrences: dict[str, int] = {}
     for raw_record, _separator in _shell_records(raw)[0]:
         record = raw_record.strip()
         if not record or record.startswith("#"):
@@ -216,15 +242,30 @@ def _parse_shell_environment(raw: str) -> dict[str, str]:
             raise GatewayMinerSubmissionsDisableError(
                 "gateway secret environment contains an invalid name"
             )
-        if name in values:
-            raise GatewayMinerSubmissionsDisableError(
-                "gateway secret environment contains duplicate names"
-            )
-        values[name] = (
+        value = (
             _decode_shell_target_value(raw_value.strip())
             if name == TARGET_ENV_NAME
-            else raw_value
+            else (
+                _decode_legacy_duplicate_value(raw_value.strip())
+                if name == _LEGACY_IDENTICAL_SHELL_DUPLICATE_NAME
+                else raw_value
+            )
         )
+        if name in values:
+            if (
+                name != _LEGACY_IDENTICAL_SHELL_DUPLICATE_NAME
+                or occurrences[name] != 1
+                or raw_values[name] != raw_value
+                or values[name] != value
+            ):
+                raise GatewayMinerSubmissionsDisableError(
+                    "gateway secret environment contains duplicate names"
+                )
+            occurrences[name] += 1
+            continue
+        values[name] = value
+        raw_values[name] = raw_value
+        occurrences[name] = 1
     if not values:
         raise GatewayMinerSubmissionsDisableError("gateway secret environment is empty")
     return values
@@ -820,9 +861,16 @@ def _remove_recovery_journal(
 
 def _validated_candidate(initial_secret: str) -> tuple[str, str, str]:
     initial_environment, document_format = _parse_environment(initial_secret)
+    forbidden_aws_names = _FORBIDDEN_AWS_ENV_NAMES & set(initial_environment)
+    # This shell-only exception preserves bytes for the exact 0dd cache; it does
+    # not authorize either name in the helper process or rendered runtime env.
+    legacy_preserved_aws_pair = (
+        document_format == "shell"
+        and forbidden_aws_names == _LEGACY_PRESERVED_AWS_ENV_NAMES
+    )
     if (
         _FORBIDDEN_RESTART_AUTHORITY_NAMES & set(initial_environment)
-        or _FORBIDDEN_AWS_ENV_NAMES & set(initial_environment)
+        or (forbidden_aws_names and not legacy_preserved_aws_pair)
     ):
         raise GatewayMinerSubmissionsDisableError(
             "gateway secret contains restart or AWS authority"

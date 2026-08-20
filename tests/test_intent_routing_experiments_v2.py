@@ -2276,12 +2276,18 @@ def test_v2_fail_closed_on_timeout_malformed_retry_and_budget():
 
     evaluation = evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=failing_runner, adapters=adapters, require_isolation=False)
     assert all(item.holdout.adapter_failure_count >= 1 for item in evaluation.variants)
+    assert all(item.holdout.false_negative_count == 0 for item in evaluation.variants)
+    assert all(item.holdout.no_signal_credit_microunits == 0 for item in evaluation.variants)
+    assert all(item.calibration.false_negative_count == 0 for item in evaluation.variants)
+    assert all(item.calibration.no_signal_credit_microunits == 0 for item in evaluation.variants)
     assert len({request for _tool_id, _unit, request in calls}) == len(calls)
     def malformed_runner(binding, unit, request):
         del binding, unit, request
         return {}
     malformed = evaluate_routing_experiment_v2(spec, gold_labels=labels, runner=malformed_runner, adapters=adapters, require_isolation=False)
     assert all(item.holdout.adapter_failure_count >= 1 for item in malformed.variants)
+    assert all(item.holdout.false_negative_count == 0 for item in malformed.variants)
+    assert all(item.holdout.no_signal_credit_microunits == 0 for item in malformed.variants)
     class RetryAdapter(FakeV2Adapter):
         def execute_plan(self, plan, invoke):
             results = [invoke(plan.tools[0])]

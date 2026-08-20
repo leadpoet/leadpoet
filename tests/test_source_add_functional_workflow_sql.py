@@ -259,6 +259,9 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         if role == "validator_weights":

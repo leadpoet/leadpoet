@@ -6880,10 +6880,38 @@ def _v2_metrics(
     receipts_by_unit: Mapping[str, Sequence[ProviderReceipt]],
     baseline_positive_units: set[str],
 ) -> RoutingEvaluationMetrics:
-    predicted_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False))
-    true_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False) and gold_labels[unit_ref])
-    false_positive = sum(1 for unit_ref in unit_refs if predictions.get(unit_ref, False) and not gold_labels[unit_ref])
-    false_negative = sum(1 for unit_ref in unit_refs if not predictions.get(unit_ref, False) and gold_labels[unit_ref])
+    # An adapter failure is an incomplete observation, not negative evidence.
+    # Keep its cost, latency, and failure receipt in the audit metrics, but do
+    # not let it change precision, recall, rescue, or no-signal measurements.
+    failed_unit_refs = {
+        unit_ref
+        for unit_ref in unit_refs
+        if any(
+            receipt.outcome == ProviderOutcome.ADAPTER_FAILURE.value
+            for receipt in receipts_by_unit.get(unit_ref, ())
+        )
+    }
+    evaluable_unit_refs = tuple(
+        unit_ref for unit_ref in unit_refs if unit_ref not in failed_unit_refs
+    )
+    predicted_positive = sum(
+        1 for unit_ref in evaluable_unit_refs if predictions.get(unit_ref, False)
+    )
+    true_positive = sum(
+        1
+        for unit_ref in evaluable_unit_refs
+        if predictions.get(unit_ref, False) and gold_labels[unit_ref]
+    )
+    false_positive = sum(
+        1
+        for unit_ref in evaluable_unit_refs
+        if predictions.get(unit_ref, False) and not gold_labels[unit_ref]
+    )
+    false_negative = sum(
+        1
+        for unit_ref in evaluable_unit_refs
+        if not predictions.get(unit_ref, False) and gold_labels[unit_ref]
+    )
     verified = rejected = misses = failures = total_credit = no_signal_credit = rescues = rescue_credit = latency = receipt_count = overlap = 0
     for unit_ref in unit_refs:
         receipts = tuple(receipts_by_unit.get(unit_ref, ()))
@@ -6901,12 +6929,18 @@ def _v2_metrics(
                 misses += 1
             elif receipt.outcome == ProviderOutcome.ADAPTER_FAILURE.value:
                 failures += 1
-        if not predictions.get(unit_ref, False):
+        if unit_ref not in failed_unit_refs and not predictions.get(unit_ref, False):
             no_signal_credit += sum(item.credit_microunits for item in receipts)
-        if predictions.get(unit_ref, False) and unit_ref not in baseline_positive_units:
+        if (
+            unit_ref not in failed_unit_refs
+            and predictions.get(unit_ref, False)
+            and unit_ref not in baseline_positive_units
+        ):
             rescues += 1
             rescue_credit += sum(item.credit_microunits for item in receipts)
-    positive_count = sum(1 for unit_ref in unit_refs if gold_labels[unit_ref])
+    positive_count = sum(
+        1 for unit_ref in evaluable_unit_refs if gold_labels[unit_ref]
+    )
     precision = true_positive / predicted_positive if predicted_positive else 1.0
     recall = true_positive / positive_count if positive_count else 1.0
     return RoutingEvaluationMetrics(

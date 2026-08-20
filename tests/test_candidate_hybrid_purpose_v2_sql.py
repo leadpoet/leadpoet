@@ -52,7 +52,14 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
         assert match is not None, role
         historical_purposes = set(expected_purposes)
         if role == "gateway_scoring":
-            historical_purposes.discard("research_lab.model_compatibility.v2")
+            historical_purposes.difference_update(
+                {
+                    "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
+                }
+            )
         assert set(re.findall(r"'([^']+)'", match.group(1))) == historical_purposes
 
     assert re.search(
@@ -78,9 +85,16 @@ def test_model_compatibility_purpose_upgrade_matches_canonical_contract() -> Non
             re.DOTALL,
         )
         assert match is not None, role
-        assert set(re.findall(r"'([^']+)'", match.group(1))) == set(
-            expected_purposes
-        )
+        historical_purposes = set(expected_purposes)
+        if role == "gateway_scoring":
+            historical_purposes.difference_update(
+                {
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
+                }
+            )
+        assert set(re.findall(r"'([^']+)'", match.group(1))) == historical_purposes
     assert re.search(
         r"GRANT\s+EXECUTE\s+ON\s+FUNCTION[\s\S]+?"
         r"research_lab_candidate_hybrid_purpose_contract_v1\(\)"

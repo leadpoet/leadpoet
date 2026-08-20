@@ -267,6 +267,9 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         assert migrated_purposes == expected_at_126, role
@@ -458,6 +461,9 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         if role == "validator_weights":

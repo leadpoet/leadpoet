@@ -241,13 +241,19 @@ def build_routing_execution_envelope_v2(
 ) -> RoutingExperimentExecutionEnvelopeV2:
     """Resolve every spec binding through the already verified authorities."""
 
-    if any(
-        variant.artifact.to_dict()
-        != artifact_lineage.sourcing_model_identity().to_dict()
-        for variant in spec.variants
+    baseline = next(
+        (
+            variant
+            for variant in spec.variants
+            if variant.variant_id == spec.baseline_variant_id
+        ),
+        None,
+    )
+    if baseline is None or baseline.artifact.to_dict() != (
+        artifact_lineage.sourcing_model_identity().to_dict()
     ):
         raise RoutingExecutionEnvelopeError(
-            "routing execution artifact differs from the spec"
+            "routing execution baseline artifact differs from the release"
         )
     if spec.input.unit_input_set_hash != unit_dataset.unit_set_hash:
         raise RoutingExecutionEnvelopeError(

@@ -95,6 +95,46 @@ SEMANTIC_COMPATIBILITY_RUNTIME_INVARIANTS_SCHEMA_V1 = (
     "leadpoet.sourcing-model-runtime-invariants.v1"
 )
 SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION = "accepted"
+QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2 = (
+    "leadpoet.sourcing-model-qualification-compatibility-admission.v2"
+)
+QUALIFICATION_PROTOCOL_CONSUMER_API_V2 = (
+    "research-lab-qualification-consumer-api:v2"
+)
+QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2 = "qualification_protocol_v2"
+QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = Path(__file__).with_name(
+    "sourcing_model_qualification_outcome_v2.json"
+)
+_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
+    QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+)
+_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
+    "e618f73abddd2ddef88fa62d09fd7ad90b3ca7c69b97da7444424abdd8e9c0fa"
+)
+if (
+    not isinstance(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2, Mapping)
+    or hashlib.sha256(
+        json.dumps(
+            dict(_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    != _QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+):
+    raise RuntimeError("qualification outcome contract differs from protected policy")
+QUALIFICATION_PROTOCOL_POLICY_SHA256_V2 = (
+    f"sha256:{_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2}"
+)
+QUALIFICATION_PROTOCOL_ENTRYPOINT_V2 = str(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["entrypoint"]
+)
+QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2 = {
+    "adapter_metadata": (),
+    QUALIFICATION_PROTOCOL_ENTRYPOINT_V2: ("icp", "context"),
+}
 SEMANTIC_COMPATIBILITY_RECEIPT_FIELDS_V1 = frozenset(
     {
         "schema_version",
@@ -2561,6 +2601,284 @@ def verify_source_tree_contract(root: Path) -> List[str]:
         document=snapshot["contract"],
         reviewed_snapshot=snapshot,
         verify_snapshot_pair=True,
+    )
+
+
+def _qualification_protocol_entrypoint_declared_v2(root: Path) -> bool:
+    """Detect any static v2 declaration so invalid v2 cannot fall back.
+
+    A candidate must not evade v2 admission by binding the entrypoint through
+    an alias/assignment that the deliberately narrow ABI checker does not
+    understand.  Likewise, advertising the protocol metadata opts the whole
+    artifact into v2 even when the callable is missing or dynamically built.
+    These forms are routed to the v2 checker and rejected there, never retried
+    under the legacy semantic-v1 profile.
+    """
+
+    path = Path(root) / "research_lab_adapter.py"
+    try:
+        tree = ast.parse(path.read_bytes())
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return False
+    def _target_binds_name(target: ast.AST, name: str) -> bool:
+        if isinstance(target, ast.Name):
+            return target.id == name
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(_target_binds_name(item, name) for item in target.elts)
+        return False
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2:
+                return True
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                _target_binds_name(target, QUALIFICATION_PROTOCOL_ENTRYPOINT_V2)
+                for target in targets
+            ):
+                return True
+        elif isinstance(node, ast.Import):
+            if any(
+                (alias.asname or alias.name.split(".", 1)[0])
+                == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if any(
+                (alias.asname or alias.name) == QUALIFICATION_PROTOCOL_ENTRYPOINT_V2
+                for alias in node.names
+            ):
+                return True
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict) and any(
+            isinstance(key, ast.Constant)
+            and key.value == "qualification_outcome_protocol"
+            for key in node.keys
+        ):
+            return True
+        if (
+            isinstance(node, ast.keyword)
+            and node.arg == "qualification_outcome_protocol"
+        ):
+            return True
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "qualification_outcome_protocol"
+                for target in targets
+            ):
+                return True
+    return False
+
+
+def _qualification_protocol_adapter_surface_v2(root: Path) -> bool:
+    """Measure call compatibility, allowing harmless same-major evolution."""
+
+    path = Path(root) / "research_lab_adapter.py"
+    try:
+        tree = ast.parse(path.read_bytes())
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return False
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    metadata = functions.get("adapter_metadata")
+    outcome = functions.get(QUALIFICATION_PROTOCOL_ENTRYPOINT_V2)
+    if (
+        metadata is None
+        or outcome is None
+        or isinstance(metadata, ast.AsyncFunctionDef)
+        or isinstance(outcome, ast.AsyncFunctionDef)
+    ):
+        return False
+    metadata_args = [*metadata.args.posonlyargs, *metadata.args.args]
+    outcome_args = [*outcome.args.posonlyargs, *outcome.args.args]
+    metadata_required = len(metadata_args) - len(metadata.args.defaults)
+    outcome_required = len(outcome_args) - len(outcome.args.defaults)
+    return (
+        metadata_required == 0
+        and not any(item.arg is None for item in metadata.args.kwonlyargs)
+        and not any(default is None for default in metadata.args.kw_defaults)
+        and len(outcome_args) >= 2
+        and outcome_required <= 2
+        and not any(default is None for default in outcome.args.kw_defaults)
+    )
+
+
+def qualification_protocol_source_tree_admission_v2(
+    root: Path,
+    *,
+    manifest: Any,
+    source_tree_hash: str = "",
+) -> Dict[str, Any]:
+    """Build a provisional exact-artifact receipt for measured v2 probing."""
+
+    root = Path(root)
+    observed_hash = compute_compatibility_source_tree_hash_v1(root)
+    claimed_hash = str(source_tree_hash or "")
+    document = _manifest_document(manifest)
+    if (
+        (claimed_hash and claimed_hash != observed_hash)
+        or str(document.get("model_artifact_hash") or "") != observed_hash
+        or not re.fullmatch(r"[0-9a-f]{40}", str(document.get("git_commit_sha") or ""))
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(document.get("manifest_hash") or ""))
+        or not re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}",
+            str(document.get("image_digest") or ""),
+        )
+    ):
+        raise ValueError(
+            "qualification protocol source admission differs from signed artifact"
+        )
+    contract = document.get("compatibility_contract")
+    parity = document.get("consumer_parity_fixtures")
+    if not isinstance(contract, Mapping) or not isinstance(parity, Mapping):
+        raise ValueError(
+            "qualification protocol signed consumer documents are unavailable"
+        )
+    contract_path = root / str(contract.get("path") or "")
+    parity_path = root / str(parity.get("path") or "")
+    if (
+        not contract_path.is_file()
+        or not parity_path.is_file()
+        or _snapshot_sha256(contract_path) != str(contract.get("sha256") or "")
+        or _snapshot_sha256(parity_path) != str(parity.get("sha256") or "")
+        or not str(contract.get("contract_id") or "")
+    ):
+        raise ValueError(
+            "qualification protocol signed consumer documents differ from source"
+        )
+    body = {
+        "schema_version": QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+        "consumer_api_version": QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "admission_mode": QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+        "policy_hash": QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+        "source_tree_hash": observed_hash,
+        "git_commit_sha": str(document["git_commit_sha"]),
+        "manifest_hash": str(document["manifest_hash"]),
+        "image_digest": str(document["image_digest"]),
+        "contract_id": str(contract["contract_id"]),
+        "contract_hash": str(contract["sha256"]),
+        "parity_hash": str(parity["sha256"]),
+        "bindings": {},
+        "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
+    }
+    return {**body, "receipt_hash": _sha256_json(body)}
+
+
+def validate_qualification_protocol_source_receipt_v2(
+    receipt: Mapping[str, Any],
+    *,
+    manifest: Any,
+    source_tree_hash: str,
+) -> Dict[str, Any]:
+    normalized = dict(receipt)
+    document = _manifest_document(manifest)
+    body = {key: item for key, item in normalized.items() if key != "receipt_hash"}
+    fields = {
+        "schema_version",
+        "consumer_api_version",
+        "decision",
+        "admission_mode",
+        "policy_hash",
+        "source_tree_hash",
+        "git_commit_sha",
+        "manifest_hash",
+        "image_digest",
+        "contract_id",
+        "contract_hash",
+        "parity_hash",
+        "bindings",
+        "entrypoints",
+        "receipt_hash",
+    }
+    contract = document.get("compatibility_contract")
+    parity = document.get("consumer_parity_fixtures")
+    if (
+        set(normalized) != fields
+        or normalized.get("schema_version")
+        != QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2
+        or normalized.get("consumer_api_version")
+        != QUALIFICATION_PROTOCOL_CONSUMER_API_V2
+        or normalized.get("decision") != SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION
+        or normalized.get("admission_mode")
+        != QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2
+        or normalized.get("policy_hash") != QUALIFICATION_PROTOCOL_POLICY_SHA256_V2
+        or normalized.get("source_tree_hash") != source_tree_hash
+        or normalized.get("source_tree_hash")
+        != str(document.get("model_artifact_hash") or "")
+        or normalized.get("git_commit_sha")
+        != str(document.get("git_commit_sha") or "")
+        or normalized.get("manifest_hash")
+        != str(document.get("manifest_hash") or "")
+        or normalized.get("image_digest") != str(document.get("image_digest") or "")
+        or not isinstance(contract, Mapping)
+        or not isinstance(parity, Mapping)
+        or normalized.get("contract_id") != str(contract.get("contract_id") or "")
+        or normalized.get("contract_hash") != str(contract.get("sha256") or "")
+        or normalized.get("parity_hash") != str(parity.get("sha256") or "")
+        or normalized.get("bindings") != {}
+        or normalized.get("entrypoints")
+        != sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2)
+        or normalized.get("receipt_hash") != _sha256_json(body)
+    ):
+        raise ValueError(
+            "qualification protocol compatibility receipt differs from signed artifact"
+        )
+    return normalized
+
+
+def source_tree_compatibility_admission(
+    root: Path,
+    *,
+    manifest: Any = None,
+    source_tree_hash: str = "",
+    use_cache: bool = False,
+) -> Dict[str, Any]:
+    """Route exact legacy/semantic-v1 trees or measured protocol-v2 trees."""
+
+    if _qualification_protocol_entrypoint_declared_v2(root):
+        return qualification_protocol_source_tree_admission_v2(
+            root,
+            manifest=manifest,
+            source_tree_hash=source_tree_hash,
+        )
+    return source_tree_compatibility_admission_v1(
+        root,
+        manifest=manifest,
+        source_tree_hash=source_tree_hash,
+        use_cache=use_cache,
+    )
+
+
+def validate_source_tree_compatibility_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    manifest: Any,
+    source_tree_hash: str,
+    policy: Mapping[str, Any] | None = None,
+    policy_hash: str = "",
+) -> Dict[str, Any]:
+    if receipt.get("admission_mode") == QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2:
+        return validate_qualification_protocol_source_receipt_v2(
+            receipt,
+            manifest=manifest,
+            source_tree_hash=source_tree_hash,
+        )
+    return validate_source_tree_compatibility_receipt_v1(
+        receipt,
+        manifest=manifest,
+        source_tree_hash=source_tree_hash,
+        policy=policy,
+        policy_hash=policy_hash,
     )
 
 

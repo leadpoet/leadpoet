@@ -33,17 +33,20 @@ def run_common_champion(
     """Run one champion request without the legacy segmented executor."""
 
     transport = DockerModelRunnerTransport(runner)
-    start_request = transport.build_runner_start(
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=transport,
+        expected_release_identity=release_identity,
+    )
+    protocol.preflight(
+        host_capability_manifest=host_capability_manifest,
+    )
+    start_request = protocol.build_start(
         input=input,
         execution_mode=execution_mode,
         target_count=target_count,
         evaluated_on=evaluated_on,
         host_capability_manifest=host_capability_manifest,
         release_identity=release_identity,
-    )
-    protocol = ResearchLabModelRunnerProtocol(
-        transport=transport,
-        expected_release_identity=release_identity,
     )
     host = CommonModelRunnerHost(
         consumer_id="research-lab-champion",
@@ -52,7 +55,8 @@ def run_common_champion(
         persist_transition=persist_transition,
         load_completion=load_completion,
     )
-    return host.run(start_request, continuation=continuation)
+    result = host.run(start_request, continuation=continuation)
+    return protocol.validate_result(result, start_request=start_request)
 
 
 __all__ = ["run_common_champion"]

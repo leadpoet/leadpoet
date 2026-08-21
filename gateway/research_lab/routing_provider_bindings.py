@@ -355,6 +355,13 @@ _MODEL_TOOL_PROVIDER_IDS: Mapping[str, str] = {
     "intent.source_add.builtwith": "builtwith",
 }
 
+# The Model registers Sumble for deterministic routing and replay, but the Lab
+# has no reviewed, provider-bounded execution contract for it. A signed host
+# catalog cannot make this tool available until that contract is added here.
+EXPLICITLY_UNAVAILABLE_MODEL_TOOLS = frozenset(
+    {"intent.source_add.sumble"}
+)
+
 # These model-owned tools are multi-call workflows.  A direct action is not a
 # safe substitute.  The legacy direct-action admission projection remains
 # fail-closed; the composite workflow compiler below consumes the separate
@@ -597,6 +604,10 @@ class SignedRoutingBindingCatalogLoader:
             or validate_provider_binding_identity(binding)
         ):
             raise RoutingProviderBindingError("routing provider binding is invalid")
+        if binding.tool_id in EXPLICITLY_UNAVAILABLE_MODEL_TOOLS:
+            raise RoutingProviderBindingError(
+                "routing model tool is explicitly unavailable"
+            )
         action_id = str(row.get("action_id") or "")
         policy = DEEPLINE_ACTION_POLICIES.get(action_id)
         execution_kind = row.get("execution_kind")
@@ -704,6 +715,10 @@ class SignedRoutingBindingCatalogLoader:
             or validate_provider_binding_identity(binding)
         ):
             raise RoutingProviderBindingError("routing provider binding is invalid")
+        if binding.tool_id in EXPLICITLY_UNAVAILABLE_MODEL_TOOLS:
+            raise RoutingProviderBindingError(
+                "routing model tool is explicitly unavailable"
+            )
         workflow_id = row.get("workflow_id")
         workflow_hash = row.get("workflow_manifest_hash")
         if (
@@ -2186,6 +2201,7 @@ __all__ = [
     "ROUTING_UNIT_DATASET_SCHEMA",
     "DEEPLINE_COMPILER_FAMILY",
     "DEEPLINE_ACTION_POLICIES",
+    "EXPLICITLY_UNAVAILABLE_MODEL_TOOLS",
     "RoutingProviderBindingError",
     "DeeplineActionPolicy",
     "RoutingBindingManifest",

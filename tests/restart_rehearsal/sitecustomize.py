@@ -120,7 +120,6 @@ def _initial_gateway_secret_string() -> str:
     values["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] = (
         _initial_gateway_miner_submissions_state()
     )
-    values["GITHUB_REPO_URL"] = "https://github.com/leadpoet/leadpoet.git"
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 

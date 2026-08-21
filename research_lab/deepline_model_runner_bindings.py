@@ -135,7 +135,7 @@ def build_deepline_runner_binding(
         action_type="execute_intent_tool",
         tool_id=model_tool_id,
         binding_contract_sha256=binding_contract_sha256,
-        execute=lambda action: _execute_deepline_action(
+        dispatch=lambda action: _execute_deepline_action(
             client=client,
             contract=contract,
             action=action,

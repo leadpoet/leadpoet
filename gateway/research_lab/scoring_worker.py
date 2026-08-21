@@ -87,11 +87,14 @@ from gateway.research_lab.maintenance import (
 )
 from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
+    QualificationOutcomeCompleteV2,
+    QualificationOutcomeIncompleteV2Error,
     RETRYABLE_ATTESTED_ARTIFACT_PERSISTENCE_MARKER,
     RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
     V2_PROVIDER_PROFILE_ENV,
     _model_invocation_timeout_seconds,
     retry_attested_model_runner_v2,
+    validate_model_qualification_authority_v1,
 )
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
@@ -606,6 +609,8 @@ _BASELINE_CHECKPOINT_RUNTIME_HISTORY_LIMIT = 128
 _FULL_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD = "_attested_parent_receipt_hashes"
+_MODEL_QUALIFICATION_AUTHORITY_FIELD = "_model_qualification_authority"
+_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD = "_model_qualification_partial_count"
 _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP = 2
 
 
@@ -2404,9 +2409,25 @@ def _baseline_attempt_reason_code(
     has_outputs: bool,
     runtime_error: str,
     scorer_error: str,
+    model_qualification_authority: Mapping[str, Any] | None = None,
 ) -> str:
     """Describe empty attempts without claiming unverified provider execution."""
 
+    if model_qualification_authority is not None:
+        authority = validate_model_qualification_authority_v1(
+            model_qualification_authority
+        )
+        if authority["completion_state"] == "complete":
+            return (
+                "qualification_complete_nonempty"
+                if authority["disposition"] == "complete_nonempty"
+                else "qualification_complete_confirmed_empty"
+            )
+        return (
+            "qualification_incomplete_retryable"
+            if bool(authority["retryable"])
+            else "qualification_incomplete_terminal"
+        )
     if runtime_error:
         return "runtime_provider_error"
     if scorer_error:
@@ -2492,7 +2513,7 @@ def _baseline_attempt_checkpoint_row(
         or any(not _SHA256_RE.fullmatch(value) for value in normalized_receipts)
     ):
         raise ValueError("baseline attempt receipt roots are invalid")
-    return {
+    checkpoint_row = {
         **_baseline_progress_public_row(row),
         "_item_index": item_index,
         "_retry_round": normalized_round,
@@ -2505,6 +2526,30 @@ def _baseline_attempt_checkpoint_row(
         "_retry_backoff_seconds": backoff_seconds,
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: normalized_receipts,
     }
+    qualification_authority = row.get(_MODEL_QUALIFICATION_AUTHORITY_FIELD)
+    if qualification_authority is not None:
+        checkpoint_row[_MODEL_QUALIFICATION_AUTHORITY_FIELD] = (
+            validate_model_qualification_authority_v1(qualification_authority)
+        )
+        partial_count = row.get(_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD)
+        if (
+            not isinstance(partial_count, int)
+            or isinstance(partial_count, bool)
+            or partial_count < 0
+        ):
+            raise ValueError("model qualification partial count is invalid")
+        if partial_count != checkpoint_row[
+            _MODEL_QUALIFICATION_AUTHORITY_FIELD
+        ]["partial_company_count"]:
+            raise ValueError(
+                "model qualification partial count differs from authority"
+            )
+        checkpoint_row[_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD] = partial_count
+    elif row.get(_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD) is not None:
+        raise ValueError(
+            "model qualification partial count is missing its authority"
+        )
+    return checkpoint_row
 
 
 def _baseline_attempt_ledger_entry(
@@ -13935,6 +13980,11 @@ class ResearchLabGatewayScoringWorker:
                     item_summary.pop("_runtime_error", None)
                     item_summary.pop("_retry_backoff_seconds", None)
                     item_summary.pop(_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD, None)
+                    item_summary.pop(_MODEL_QUALIFICATION_AUTHORITY_FIELD, None)
+                    item_summary.pop(
+                        _MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD,
+                        None,
+                    )
                     per_icp_summaries.append(item_summary)
             baseline_resume_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
             for item_index, item in enumerate([] if batch_execution else window.benchmark_items, start=1):
@@ -15348,8 +15398,9 @@ class ResearchLabGatewayScoringWorker:
 
         The returned summary carries underscore-prefixed orchestration fields
         (_item_index, _retryable, _nonempty, _runtime_error,
-        _retry_backoff_seconds, _attested_parent_receipt_hashes) that MUST be
-        popped before the summary enters score_summary_doc.
+        _retry_backoff_seconds, _attested_parent_receipt_hashes,
+        _model_qualification_authority, _model_qualification_partial_count)
+        that MUST be popped before the summary enters score_summary_doc.
         """
         loop = asyncio.get_running_loop()
         item_start = time.time()
@@ -15399,6 +15450,8 @@ class ResearchLabGatewayScoringWorker:
         )
         runtime_error = ""
         runtime_error_class = ""
+        model_qualification_authority: dict[str, Any] | None = None
+        model_qualification_partial_count = 0
         scorer_error = ""
         scorer_error_class = ""
         retryable = False
@@ -15430,6 +15483,13 @@ class ResearchLabGatewayScoringWorker:
                     runner_call,
                 )
                 raw_outputs = await loop.run_in_executor(executor, runner_call)
+            if isinstance(raw_outputs, QualificationOutcomeCompleteV2):
+                model_qualification_authority = (
+                    validate_model_qualification_authority_v1(
+                        raw_outputs.model_qualification_authority
+                    )
+                )
+                model_qualification_partial_count = 0
             outputs = ensure_private_model_outputs(
                 raw_outputs,
                 context_label=f"{mode_label} for {label}",
@@ -15438,19 +15498,32 @@ class ResearchLabGatewayScoringWorker:
             # The shared benchmark diagnostics cannot initially distinguish a
             # legitimate no-match from missing provider work. Require one fresh
             # retry; provider-backed evidence can then establish a durable zero.
-            if not outputs:
+            if not outputs and model_qualification_authority is None:
                 retryable = True
         except PrivateModelRuntimeError as exc:
             outputs = []
             runtime_error = _short_error(exc)
             runtime_error_class = type(exc).__name__
-            # Classify from the full exception text: _short_error truncates to
-            # 300 chars and can drop the status marker the classifier needs.
-            retryable = _baseline_error_is_retryable(str(exc))
-            retry_backoff_seconds = max(
-                retry_backoff_seconds,
-                _baseline_429_retry_backoff_seconds(str(exc)),
-            )
+            if isinstance(exc, QualificationOutcomeIncompleteV2Error):
+                model_qualification_authority = (
+                    validate_model_qualification_authority_v1(
+                        exc.model_qualification_authority
+                    )
+                )
+                retryable = bool(exc.retryable)
+                model_qualification_partial_count = len(
+                    tuple(exc.partial_companies)
+                )
+            else:
+                # Classify from the full exception text: _short_error
+                # truncates to 300 chars and can drop the status marker the
+                # legacy classifier needs. Typed v2 outcomes never use prose
+                # for retry policy.
+                retryable = _baseline_error_is_retryable(str(exc))
+                retry_backoff_seconds = max(
+                    retry_backoff_seconds,
+                    _baseline_429_retry_backoff_seconds(str(exc)),
+                )
             logger.warning(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE ICP RUNTIME ERROR",
@@ -15563,6 +15636,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Score", f"{icp_score:.4f}"),
                     ("Companies", len(scores)),
                     ("Non-empty output", bool(outputs)),
+                    ("Incomplete partial count", model_qualification_partial_count),
                     ("Runtime error", runtime_error or "-"),
                     ("Scorer error", scorer_error or "-"),
                     ("ICP runtime", f"{item_elapsed:.1f}s"),
@@ -15578,14 +15652,61 @@ class ResearchLabGatewayScoringWorker:
             # Model output count BEFORE the scorer's employee-bucket
             # pre-filter, so the funnel's first stage is the true
             # "companies discovered" number.
-            sourced_count=len(outputs),
+            sourced_count=max(len(outputs), model_qualification_partial_count),
         )
+        if model_qualification_authority is not None:
+            diagnostics = dict(item_summary.get("diagnostics") or {})
+            diagnostics["model_qualification_disposition"] = str(
+                model_qualification_authority["disposition"]
+            )
+            diagnostics["model_qualification_partial_company_count"] = (
+                model_qualification_partial_count
+            )
+            if model_qualification_authority["completion_state"] == "complete":
+                diagnostics["sourcing_failed"] = False
+            if (
+                model_qualification_authority["disposition"]
+                == "complete_confirmed_empty"
+            ):
+                diagnostics["empty_result_provider_evidence_validated"] = True
+                diagnostics["empty_result_authority"] = (
+                    "model_receipt_joined_to_host_provider_observation"
+                )
+            item_summary["diagnostics"] = diagnostics
         if runtime_error or scorer_error:
             diagnostics = dict(item_summary.get("diagnostics") or {})
-            runtime_diagnostics = _runtime_error_diagnostics(runtime_error or scorer_error)
+            typed_qualification_reason = (
+                _baseline_attempt_reason_code(
+                    item_summary,
+                    has_outputs=bool(outputs),
+                    runtime_error=runtime_error,
+                    scorer_error=scorer_error,
+                    model_qualification_authority=(
+                        model_qualification_authority
+                    ),
+                )
+                if model_qualification_authority is not None and runtime_error
+                else ""
+            )
+            runtime_diagnostics = (
+                {
+                    "error_class": runtime_error_class,
+                    "provider": "sourcing_model",
+                    "status": 0,
+                    "category": typed_qualification_reason,
+                }
+                if typed_qualification_reason
+                else _runtime_error_diagnostics(runtime_error or scorer_error)
+            )
             categories = set(diagnostics.get("failure_categories") or [])
             if runtime_error:
-                categories.add("runtime_provider_error")
+                categories.add(
+                    typed_qualification_reason or "runtime_provider_error"
+                )
+                if model_qualification_authority is not None:
+                    diagnostics["model_qualification_failure_classes"] = list(
+                        model_qualification_authority["failure_classes"]
+                    )
             if scorer_error:
                 categories.add("scorer_provider_error")
             categories.add(str(runtime_diagnostics["category"]))
@@ -15603,11 +15724,15 @@ class ResearchLabGatewayScoringWorker:
             telemetry_model_role=telemetry_model_role,
         )
         _apply_provider_cost_baseline_outcome(item_summary)
-        if not outputs and _accept_provider_backed_empty_retry(
-            item_summary,
-            retry_round=retry_round,
-            runtime_error=runtime_error,
-            scorer_error=scorer_error,
+        if (
+            model_qualification_authority is None
+            and not outputs
+            and _accept_provider_backed_empty_retry(
+                item_summary,
+                retry_round=retry_round,
+                runtime_error=runtime_error,
+                scorer_error=scorer_error,
+            )
         ):
             retryable = False
         attempt_reason_code = _baseline_attempt_reason_code(
@@ -15615,6 +15740,7 @@ class ResearchLabGatewayScoringWorker:
             has_outputs=bool(outputs),
             runtime_error=runtime_error,
             scorer_error=scorer_error,
+            model_qualification_authority=model_qualification_authority,
         )
         diagnostics = item_summary.get("diagnostics")
         if isinstance(diagnostics, Mapping):
@@ -15629,6 +15755,13 @@ class ResearchLabGatewayScoringWorker:
         item_summary[_BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD] = sorted(
             attempt_receipt_hashes
         )
+        if model_qualification_authority is not None:
+            item_summary[_MODEL_QUALIFICATION_AUTHORITY_FIELD] = dict(
+                model_qualification_authority
+            )
+            item_summary[_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD] = (
+                model_qualification_partial_count
+            )
         if telemetry_session is not None and (runtime_error or scorer_error):
             await telemetry_session.lifecycle(
                 "attempt_failed",
@@ -15638,7 +15771,11 @@ class ResearchLabGatewayScoringWorker:
                     "retry_round": retry_round,
                     "retryable": retryable,
                     "failure_category": (
-                        "runtime_provider_error" if runtime_error else "scorer_provider_error"
+                        attempt_reason_code
+                        if model_qualification_authority is not None
+                        else "runtime_provider_error"
+                        if runtime_error
+                        else "scorer_provider_error"
                     ),
                     "error": runtime_error or scorer_error,
                 },
@@ -15665,7 +15802,10 @@ class ResearchLabGatewayScoringWorker:
             retry_round=retry_round,
             retryable=retryable,
             result_status=result_status,
-            sourced_company_count=len(outputs),
+            sourced_company_count=max(
+                len(outputs),
+                model_qualification_partial_count,
+            ),
             scored_company_count=len(scores),
             receipt_count=len(attempt_receipt_hashes),
             exception_class=(

@@ -53,13 +53,23 @@ def load_reviewed_routing_release_dependencies() -> (
 ):
     """Load the dependency bundle linked into the exact product release.
 
-    The open-source checkout has no release-owned model adapter and therefore
-    returns ``None``.  A release build may replace this fixed function with
-    its statically linked loader.  It must not resolve a module, URL, or
-    credential from a request or environment value.
+    The release builder supplies one fixed Python module at this import path.
+    That module is part of the attested release and exports the already
+    verified dependency bundle.  The open-source checkout does not contain
+    that release-owned module, so it remains disabled and fails closed.  This
+    fixed import is deliberately not configurable from a request or
+    environment value.
     """
 
-    return None
+    try:
+        from gateway.research_lab.routing_release_dependencies import (
+            REVIEWED_ROUTING_RELEASE_DEPENDENCIES,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "gateway.research_lab.routing_release_dependencies":
+            raise
+        return None
+    return REVIEWED_ROUTING_RELEASE_DEPENDENCIES
 
 
 def build_reviewed_routing_product_from_release(

@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import base64
 from email.message import Message
+import importlib
 import io
 import json
 import os
+import re
 import socket
 import threading
 from types import SimpleNamespace
@@ -26,6 +28,9 @@ from gateway.tee.sandbox_provider_socket_v2 import (
 )
 from gateway.tee.inter_enclave_tls import REPLAY_WAIT_SECONDS
 from leadpoet_canonical.attested_v2 import canonical_json
+from research_lab.eval.private_runtime import (
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2,
+)
 
 
 SOCKET_ENV = "LEADPOET_SANDBOX_PROVIDER_SOCKET"
@@ -37,6 +42,9 @@ SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
 PROVIDER_COST_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_SCOPE"
 PROVIDER_COST_CAP_MICROUSD_ENV = "RESEARCH_LAB_PROVIDER_COST_CAP_MICROUSD"
 PROVIDER_CALL_CAP_ENV = "RESEARCH_LAB_PROVIDER_CALL_CAP"
+QUALIFICATION_PROTOCOL_V2_ENV = "LEADPOET_QUALIFICATION_PROTOCOL_V2"
+LOCAL_REPLAY_KIND_FIELD = "local_replay_kind"
+LOCAL_REPLAY_KINDS = frozenset({"provider_evidence_cache", "snapshot"})
 DEFAULT_TIMEOUT_MS = 30000
 _CREDENTIAL_HEADERS = {
     "authorization",
@@ -45,6 +53,12 @@ _CREDENTIAL_HEADERS = {
     "x-api-key",
     "x-auth-token",
 }
+_QUALIFICATION_ROUTE_COMMITMENT_HEADER = (
+    "X-Leadpoet-Qualification-Route-Commitment"
+)
+_QUALIFICATION_ROUTE_COMMITMENT_RE = re.compile(
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2
+)
 _INSTALL_LOCK = threading.Lock()
 _INSTALLED = False
 
@@ -239,7 +253,71 @@ def _headers(headers: Mapping[str, Any]) -> Dict[str, str]:
     return {
         str(name): str(value)
         for name, value in headers.items()
-        if str(name).lower() not in _CREDENTIAL_HEADERS
+        if str(name).lower()
+        not in _CREDENTIAL_HEADERS
+        | {_QUALIFICATION_ROUTE_COMMITMENT_HEADER.lower()}
+    }
+
+
+def _qualification_route_transport_headers() -> Dict[str, str]:
+    """Read one atomic model-owned route observation at dispatch time.
+
+    Legacy artifacts do not ship the qualification-route module and therefore
+    produce no reserved header.  Once the module exists, its exact hook is
+    fail-closed: model code cannot smuggle arbitrary headers or malformed slot
+    commitments through this trusted transport boundary.
+    """
+
+    advertised_protocol_v2 = str(
+        os.getenv(QUALIFICATION_PROTOCOL_V2_ENV) or ""
+    ).strip()
+    if advertised_protocol_v2 not in {"", "1"}:
+        raise SandboxHTTPShimV2Error(
+            "qualification protocol environment is invalid"
+        )
+    require_hook = advertised_protocol_v2 == "1"
+    module_name = "sourcing_model.qualification_route"
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if not require_hook and exc.name in {"sourcing_model", module_name}:
+            return {}
+        raise SandboxHTTPShimV2Error(
+            "qualification route transport hook is unavailable"
+        ) from exc
+    except Exception as exc:
+        raise SandboxHTTPShimV2Error(
+            "qualification route transport hook is unavailable"
+        ) from exc
+    hook = getattr(module, "transport_headers", None)
+    if not callable(hook):
+        if not require_hook:
+            return {}
+        raise SandboxHTTPShimV2Error(
+            "qualification route transport hook is invalid"
+        )
+    try:
+        value = hook()
+    except Exception as exc:
+        raise SandboxHTTPShimV2Error(
+            "qualification route transport hook failed"
+        ) from exc
+    if value == {}:
+        return {}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {_QUALIFICATION_ROUTE_COMMITMENT_HEADER}
+        or not _QUALIFICATION_ROUTE_COMMITMENT_RE.fullmatch(
+            str(value.get(_QUALIFICATION_ROUTE_COMMITMENT_HEADER) or "")
+        )
+    ):
+        raise SandboxHTTPShimV2Error(
+            "qualification route transport headers are invalid"
+        )
+    return {
+        _QUALIFICATION_ROUTE_COMMITMENT_HEADER: str(
+            value[_QUALIFICATION_ROUTE_COMMITMENT_HEADER]
+        )
     }
 
 
@@ -303,26 +381,39 @@ def execute(
 ) -> Dict[str, Any]:
     _require_retired_cleanup()
     mode = _evidence_mode()
+    normalized_headers = _headers(headers)
+    # Capture the model-owned stage slot exactly once before any replay lookup.
+    # A local hit is still only a hint until the measured host independently
+    # resolves the exact run-bound cache/snapshot authority and records it.
+    normalized_headers.update(_qualification_route_transport_headers())
     snapshot = _snapshot_terminal(
         method=str(method).upper(),
         url=str(url),
         body=bytes(body),
     )
-    if snapshot is not None:
-        return snapshot
-    cached = _cached_terminal(
-        method=str(method).upper(),
-        url=str(url),
-        body=bytes(body),
-        mode=mode,
-        cache=_evidence_cache(),
-    )
-    if cached is not None:
-        return cached
+    replay_kind = "snapshot" if snapshot is not None else ""
+    cached = None
+    if snapshot is None:
+        cached = _cached_terminal(
+            method=str(method).upper(),
+            url=str(url),
+            body=bytes(body),
+            mode=mode,
+            cache=_evidence_cache(),
+        )
+        if cached is not None:
+            replay_kind = "provider_evidence_cache"
     socket_path = str(os.getenv(SOCKET_ENV) or "").strip()
+    if replay_kind and (
+        not socket_path
+        or str(os.getenv(QUALIFICATION_PROTOCOL_V2_ENV) or "").strip()
+        != "1"
+    ):
+        # The isolated developer replay path has no measured provider socket
+        # and legacy execution has no v2 completion authority to satisfy.
+        return dict(snapshot or cached or {})
     if not socket_path.startswith("/"):
         raise SandboxHTTPShimV2Error("provider socket is not configured")
-    normalized_headers = _headers(headers)
     cost_scope = str(os.getenv(PROVIDER_COST_SCOPE_ENV) or "").strip()
     raw_cost_cap = str(os.getenv(PROVIDER_COST_CAP_MICROUSD_ENV) or "").strip()
     raw_call_cap = str(os.getenv(PROVIDER_CALL_CAP_ENV) or "").strip()
@@ -356,6 +447,8 @@ def execute(
         "body_b64": base64.b64encode(bytes(body)).decode("ascii"),
         "timeout_ms": max(1, int(timeout_ms)),
     }
+    if replay_kind:
+        request[LOCAL_REPLAY_KIND_FIELD] = replay_kind
     encoded = canonical_json(request).encode("utf-8")
     if len(encoded) > MAX_SANDBOX_PROVIDER_FRAME_BYTES:
         raise SandboxHTTPShimV2Error("provider socket request exceeds limit")

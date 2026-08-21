@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, Optional
 import urllib.request
+import uuid
 
 import pytest
 
@@ -118,6 +120,16 @@ from gateway.research_lab.git_tree_models import (
 )
 
 
+@contextmanager
+def _production_named_temp_directory(prefix: str):
+    path = Path("/tmp") / f"{prefix}{uuid.uuid4().hex}"
+    path.mkdir(mode=0o700)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
 COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 
@@ -190,6 +202,34 @@ def _compact_weight_settlement_contract_fixture() -> dict[str, Any]:
 
 def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
+
+
+def test_gateway_cli_secret_matches_initial_durable_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv(
+        "REHEARSAL_FROM_SHA",
+        "7ac1553e32d85d9babda3b3836f4c93cf92e6d60",
+    )
+    monkeypatch.setenv("REHEARSAL_TRANSITION", "forward")
+    from tests.restart_rehearsal import contract_adapter
+
+    monkeypatch.setattr(
+        contract_adapter,
+        "GATEWAY_SECRET_STATE_PATH",
+        tmp_path / "missing-gateway-secret-state.json",
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "_initial_gateway_miner_submissions_state",
+        lambda: "false",
+    )
+
+    assert contract_adapter._current_gateway_secret() == json.loads(
+        rehearsal_sitecustomize._initial_gateway_secret_string()
+    )
 
 
 def _receipt_graph_seed_contract() -> tuple[
@@ -8905,13 +8945,12 @@ def test_module_provenance_follows_prepared_archive_python_path(
 def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     from tests.restart_rehearsal import contract_adapter
 
-    with tempfile.TemporaryDirectory(
-        dir="/tmp",
-        prefix="gateway-miner-maintenance-bootstrap.",
-    ) as raw:
-        bootstrap_root = Path(raw)
+    with _production_named_temp_directory(
+        "gateway-miner-maintenance-bootstrap."
+    ) as bootstrap_root:
         module_path = (
             bootstrap_root
             / "candidate/gateway/tee/gateway_miner_maintenance_restart_v1.py"

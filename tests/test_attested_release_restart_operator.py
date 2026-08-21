@@ -8,9 +8,12 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
+
+from tests.readiness_test_venv import build_dependency_complete_readiness_venv
 
 from gateway.tee.release_channel_v2 import (
     build_release_channel_v2,
@@ -128,6 +131,14 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "readiness-transition" in source
     assert "readiness-final" in source
     assert "leadpoet.deploy_readiness.v2" in source
+    assert "--local-python </absolute/venv/bin/python>" in source
+    assert '"$local_python_target" -I -S -B -c' in source
+    assert 'sys.path.insert(0, str(root))' in source
+    assert 'sys.path.append(str(site_packages))' in source
+    assert "leadpoet.local_readiness_python.v1" in source
+    assert "pure readiness imports loaded the validator wallet dependency" in source
+    assert source.count("run_local_readiness_python ") == 5
+    assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source
     assert "/weights/v2/release-evidence/" in source
@@ -248,6 +259,30 @@ def test_attested_release_restart_operator_rejects_invalid_input() -> None:
     assert "Fetching current public V2 compatibility authority" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    "local_python_args",
+    [[], ["--local-python="], ["--local-python", ""]],
+)
+def test_attested_release_restart_operator_requires_local_python(
+    local_python_args: list[str],
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--commit", commit, *local_python_args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "--local-python requires one absolute venv/bin/python path" in result.stderr
+    assert "Fetching current public V2 compatibility authority" not in result.stdout
+
+
 def test_miner_maintenance_operator_rejects_replace_ref_before_ssh(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +355,8 @@ def test_miner_maintenance_operator_rejects_replace_ref_before_ssh(
             str(copied_script),
             "--commit",
             official,
+            "--local-python",
+            sys.executable,
             "--component",
             "all",
             "--disable-miner-submissions-before-restart",
@@ -377,6 +414,8 @@ def test_miner_maintenance_operator_rejects_topology_override_before_ssh(
             str(SCRIPT),
             "--commit",
             "a" * 40,
+            "--local-python",
+            "/usr/bin/python3",
             "--component",
             "all",
             "--disable-miner-submissions-before-restart",
@@ -483,7 +522,18 @@ def test_gateway_cleanup_kills_term_ignoring_owned_process_group(
     assert not late_activation.exists()
 
 
-def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
+@pytest.fixture(scope="module")
+def dependency_complete_readiness_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_dependency_complete_readiness_venv(
+        tmp_path_factory.mktemp("restart-readiness-venv") / "venv"
+    )
+
+
+def _fake_operator_commands(
+    tmp_path: Path,
+    commit: str,
+    readiness_python: Path,
+) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     events = tmp_path / "events"
@@ -500,13 +550,22 @@ def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
     )
 
     real_git = shutil.which("git")
-    real_python = shutil.which("python3")
+    real_python = str(readiness_python)
     assert real_git
-    assert real_python
+    real_venv = Path(real_python).parent.parent
+    real_site_packages = (
+        real_venv
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    assert (real_venv / "pyvenv.cfg").is_file()
+    assert real_site_packages.is_dir()
     git = bin_dir / "git"
     git.write_text(
         f"""#!/bin/bash
 set -euo pipefail
+last_arg="${{!#}}"
 for arg in "$@"; do
   if [ "$arg" = "fetch" ]; then
     exit 0
@@ -516,6 +575,34 @@ for arg in "$@"; do
     exit 0
   fi
 done
+if [[ " $* " == *" rev-parse "* ]]; then
+  case "$last_arg" in
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"gateway/*|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_canonical/*|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*)
+      printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
+      exit 0
+      ;;
+  esac
+fi
+if [[ " $* " == *" hash-object --no-filters "* ]]; then
+  case "$last_arg" in
+    "$FAKE_OPERATOR_REPO_ROOT/"gateway/*|\
+    "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_canonical/*|\
+    "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_observability/*|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_REPO_ROOT/"validator_tee/*)
+      if [ -e "$FAKE_OPERATOR_SOURCE_DRIFT_MARKER" ]; then
+        printf '%s\\n' "$FAKE_OPERATOR_DRIFTED_SOURCE_BLOB"
+      else
+        printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
+      fi
+      exit 0
+      ;;
+  esac
+fi
 exec {real_git} "$@"
 """,
         encoding="utf-8",
@@ -532,6 +619,12 @@ record() {
 case "$command" in
   *"'readiness-transition' <<'PY'"*)
     record readiness_invalidated
+    if [ "${FAKE_RETARGET_LOCAL_PYTHON_AFTER_TRANSITION:-0}" = "1" ]; then
+      mv -f -- "$FAKE_OPERATOR_ALT_PYTHON" "$FAKE_OPERATOR_LOCAL_PYTHON"
+    fi
+    if [ "${FAKE_DRIFT_SOURCE_AFTER_TRANSITION:-0}" = "1" ]; then
+      touch "$FAKE_OPERATOR_SOURCE_DRIFT_MARKER"
+    fi
     ;;
   *"'readiness-final' <<'PY'"*)
     record readiness_finalized
@@ -648,16 +741,57 @@ esac
     )
     git.chmod(0o755)
     ssh.chmod(0o755)
+    (tmp_path / "pyvenv.cfg").write_text(
+        "home = test-local-readiness-adapter\n",
+        encoding="utf-8",
+    )
+    (
+        tmp_path
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    ).mkdir(parents=True)
     python = bin_dir / "python3"
     python.write_text(
-        f"""#!/bin/bash
+        """#!/bin/bash
 set -euo pipefail
-export PYTHONPATH="$FAKE_OPERATOR_SITE_ROOT${{PYTHONPATH:+:$PYTHONPATH}}"
-exec {real_python} "$@"
+if [ "$#" -ge 7 ] \
+    && [ "$1" = "-I" ] \
+    && [ "$2" = "-S" ] \
+    && [ "$3" = "-B" ] \
+    && [ "$4" = "-c" ]; then
+  bootstrap="$5"
+  root="$6"
+  shift 7
+  readiness_source="$(mktemp)"
+  trap 'rm -f -- "$readiness_source"' EXIT
+  cat > "$readiness_source"
+  if grep -Fq 'leadpoet.local_readiness_python.v1' "$readiness_source"; then
+    exec "$FAKE_OPERATOR_REAL_PYTHON" -I -S -B -c "$bootstrap" \
+      "$root" "$FAKE_OPERATOR_REAL_SITE_PACKAGES" \
+      "$FAKE_OPERATOR_REAL_PYTHON" "$FAKE_OPERATOR_REAL_VENV" \
+      "$FAKE_OPERATOR_REAL_PYTHON" "$FAKE_OPERATOR_REAL_SITE_PACKAGES" \
+      < "$readiness_source"
+  fi
+  {
+    printf '%s\n' \
+      'from leadpoet_canonical import attested_v2; attested_v2.verify_boot_identity_nitro = lambda *args, **kwargs: {}'
+    cat "$readiness_source"
+  } | "$FAKE_OPERATOR_REAL_PYTHON" -I -S -B -c "$bootstrap" \
+    "$root" "$FAKE_OPERATOR_REAL_SITE_PACKAGES" "$@"
+  exit "${PIPESTATUS[1]}"
+fi
+exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
 """,
         encoding="utf-8",
     )
     python.chmod(0o755)
+    alternate_python = bin_dir / "python3.alternate"
+    alternate_python.write_text(
+        "#!/bin/bash\nexit 99\n",
+        encoding="utf-8",
+    )
+    alternate_python.chmod(0o755)
 
     for name in ("gateway.pem", "validator.pem"):
         path = tmp_path / name
@@ -675,9 +809,19 @@ exec {real_python} "$@"
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
                 f"FAKE_VALIDATOR_COMMIT={commit}",
+                f"FAKE_OPERATOR_SELECTED_COMMIT={commit}",
                 f"FAKE_GATEWAY_OBSERVATION={gateway_observation}",
                 f"FAKE_VALIDATOR_OBSERVATION={validator_observation}",
                 f"FAKE_OPERATOR_SITE_ROOT={tmp_path}",
+                f"FAKE_OPERATOR_REAL_PYTHON={real_python}",
+                f"FAKE_OPERATOR_REAL_VENV={real_venv}",
+                f"FAKE_OPERATOR_REAL_SITE_PACKAGES={real_site_packages}",
+                f"FAKE_OPERATOR_REPO_ROOT={ROOT}",
+                f"FAKE_OPERATOR_SOURCE_BLOB={'f' * 40}",
+                f"FAKE_OPERATOR_DRIFTED_SOURCE_BLOB={'e' * 40}",
+                f"FAKE_OPERATOR_SOURCE_DRIFT_MARKER={tmp_path / 'source-drift'}",
+                f"FAKE_OPERATOR_LOCAL_PYTHON={python}",
+                f"FAKE_OPERATOR_ALT_PYTHON={alternate_python}",
             )
         )
         + "\n",
@@ -713,17 +857,36 @@ def _operator_env(tmp_path: Path, bin_dir: Path, commit: str) -> dict[str, str]:
     return values
 
 
+def _operator_argv(
+    bin_dir: Path,
+    commit: str,
+    *extra: str,
+) -> list[str]:
+    return [
+        "bash",
+        str(SCRIPT),
+        "--commit",
+        commit,
+        "--local-python",
+        str(bin_dir / "python3"),
+        *extra,
+    ]
+
+
 def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--commit", commit],
+        _operator_argv(bin_dir, commit),
         check=False,
         capture_output=True,
         text=True,
@@ -772,16 +935,21 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
 
 
-def test_gateway_only_operator_rejects_mismatched_validator(
+def test_operator_rejects_non_venv_local_python_before_ssh(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
-    environment = _operator_env(tmp_path, bin_dir, commit)
-    environment["FAKE_VALIDATOR_COMMIT"] = "b" * 40
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    standalone_dir = tmp_path / "standalone"
+    standalone_dir.mkdir()
+    standalone_python = standalone_dir / "python3"
+    standalone_python.symlink_to(sys.executable)
 
     result = subprocess.run(
         [
@@ -789,9 +957,127 @@ def test_gateway_only_operator_rejects_mismatched_validator(
             str(SCRIPT),
             "--commit",
             commit,
-            "--component",
-            "gateway",
+            "--local-python",
+            str(standalone_python),
         ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=_operator_env(tmp_path, bin_dir, commit),
+    )
+
+    assert result.returncode == 2
+    assert "must be a venv bin/python executable" in result.stderr
+    assert not events.exists()
+
+
+def test_operator_rejects_local_python_retarget_before_final_readiness(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_RETARGET_LOCAL_PYTHON_AFTER_TRANSITION"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "local readiness Python binding changed after preflight" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" in observed
+    assert "readiness_finalized" not in observed
+
+
+def test_operator_rejects_candidate_source_drift_before_final_readiness(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_DRIFT_SOURCE_AFTER_TRANSITION"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "local readiness candidate source differs from exact commit" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" in observed
+    assert "readiness_finalized" not in observed
+
+
+def test_operator_rejects_initial_candidate_source_drift_before_ssh(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    Path(environment["FAKE_OPERATOR_SOURCE_DRIFT_MARKER"]).touch()
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "local readiness candidate source differs from exact commit" in result.stderr
+    assert "local readiness Python preflight failed before production mutation" in result.stderr
+    assert "Local readiness Python preflight:" not in result.stdout
+    assert not events.exists()
+
+
+def test_gateway_only_operator_rejects_mismatched_validator(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_VALIDATOR_COMMIT"] = "b" * 40
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "gateway"),
         check=False,
         capture_output=True,
         text=True,
@@ -809,22 +1095,18 @@ def test_gateway_only_operator_rejects_mismatched_validator(
 
 def test_gateway_only_operator_requires_healthy_matching_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--commit",
-            commit,
-            "--component",
-            "gateway",
-        ],
+        _operator_argv(bin_dir, commit, "--component", "gateway"),
         check=False,
         capture_output=True,
         text=True,
@@ -858,24 +1140,20 @@ def test_gateway_only_operator_requires_healthy_matching_validator(
 
 def test_gateway_only_operator_rejects_unhealthy_matching_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_VALIDATOR_VERIFY_FAIL"] = "1"
 
     result = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--commit",
-            commit,
-            "--component",
-            "gateway",
-        ],
+        _operator_argv(bin_dir, commit, "--component", "gateway"),
         check=False,
         capture_output=True,
         text=True,
@@ -892,24 +1170,20 @@ def test_gateway_only_operator_rejects_unhealthy_matching_validator(
 
 def test_validator_only_operator_rejects_mismatched_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_COMMIT"] = "b" * 40
 
     result = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--commit",
-            commit,
-            "--component",
-            "validator",
-        ],
+        _operator_argv(bin_dir, commit, "--component", "validator"),
         check=False,
         capture_output=True,
         text=True,
@@ -927,22 +1201,18 @@ def test_validator_only_operator_rejects_mismatched_gateway(
 
 def test_validator_only_operator_requires_healthy_matching_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
 
     result = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--commit",
-            commit,
-            "--component",
-            "validator",
-        ],
+        _operator_argv(bin_dir, commit, "--component", "validator"),
         check=False,
         capture_output=True,
         text=True,
@@ -978,24 +1248,20 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
 
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_VERIFY_FAIL"] = "1"
 
     result = subprocess.run(
-        [
-            "bash",
-            str(SCRIPT),
-            "--commit",
-            commit,
-            "--component",
-            "validator",
-        ],
+        _operator_argv(bin_dir, commit, "--component", "validator"),
         check=False,
         capture_output=True,
         text=True,
@@ -1012,18 +1278,21 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
 
 def test_paired_operator_failure_marker_cleans_prepared_validator(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
 ) -> None:
     commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_RESTART_FAIL"] = "1"
     environment["FAKE_FAILURE_MARKER_DELAY_SECONDS"] = "0.5"
 
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--commit", commit],
+        _operator_argv(bin_dir, commit),
         check=False,
         capture_output=True,
         text=True,
@@ -1072,6 +1341,7 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
 )
 def test_paired_operator_final_probe_failure_leaves_resume_blocked(
     tmp_path: Path,
+    dependency_complete_readiness_python: Path,
     failure_flag: str,
     failed_event: str,
 ) -> None:
@@ -1079,12 +1349,14 @@ def test_paired_operator_final_probe_failure_leaves_resume_blocked(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
-    bin_dir, events = _fake_operator_commands(tmp_path, commit)
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment[failure_flag] = "1"
 
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--commit", commit],
+        _operator_argv(bin_dir, commit),
         check=False,
         capture_output=True,
         text=True,

@@ -41,6 +41,17 @@ elif operation == "build_runner_completion":
         payload["action"],
         payload["result"],
     )
+elif operation == "runner_preflight":
+    result = module.runner_preflight(
+        host_capability_manifest=payload["host_capability_manifest"],
+        release_identity=payload["release_identity"],
+    )
+elif operation == "validate_runner_result":
+    result = module.validate_runner_result(
+        payload["value"],
+        start_request=payload["start_request"],
+        expected_release_identity=payload["expected_release_identity"],
+    )
 else:
     raise RuntimeError("unsupported common runner operation")
 with contextlib.redirect_stdout(sys.stderr):
@@ -135,6 +146,36 @@ class DockerModelRunnerTransport:
         return self._call(
             "build_runner_completion",
             {"action": dict(action), "result": dict(result)},
+        )
+
+    def runner_preflight(
+        self,
+        *,
+        host_capability_manifest: Mapping[str, Any],
+        release_identity: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "runner_preflight",
+            {
+                "host_capability_manifest": dict(host_capability_manifest),
+                "release_identity": dict(release_identity),
+            },
+        )
+
+    def validate_runner_result(
+        self,
+        value: Mapping[str, Any],
+        *,
+        start_request: Mapping[str, Any],
+        expected_release_identity: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "validate_runner_result",
+            {
+                "value": dict(value),
+                "start_request": dict(start_request),
+                "expected_release_identity": dict(expected_release_identity),
+            },
         )
 
 

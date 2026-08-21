@@ -26,7 +26,7 @@ jobs:
   validate:
     if: vars.LEADPOET_PARITY_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 101
+    timeout-minutes: 106
     env:
       AWS_REGION: ${{ vars.LEADPOET_PARITY_AWS_REGION }}
       PRODUCTION_GATEWAY_URL: ${{ vars.LEADPOET_PARITY_PRODUCTION_GATEWAY_URL }}
@@ -64,7 +64,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.LEADPOET_PARITY_AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: 7200
+          role-duration-seconds: 7500
           unset-current-credentials: true
 
       - name: Require exact parity AWS account

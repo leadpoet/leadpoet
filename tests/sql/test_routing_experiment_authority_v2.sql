@@ -1448,6 +1448,16 @@ BEGIN
         decision_doc->>'plan_hash', decision_doc->>'route_hash', claim_key, 1,
         decision_doc
     );
+    append_result := public.research_lab_routing_append_decision_receipt_v3(
+        decision_receipt_id, experiment_hash, 'candidate', 'unit-one',
+        decision_doc->>'plan_hash', decision_doc->>'route_hash',
+        'sha256:' || repeat('9', 64), 2, decision_doc
+    );
+    IF append_result->'idempotent' IS DISTINCT FROM 'true'::JSONB THEN
+        RAISE EXCEPTION
+            'decision receipt was not reusable after claim recovery: %',
+            append_result;
+    END IF;
 
     evaluation_doc := pg_catalog.jsonb_build_object(
         'schema_version', 'leadpoet.research_lab.routing_evaluation.v3',
@@ -1476,6 +1486,15 @@ BEGIN
         evaluation_receipt_id, experiment_hash, evaluation_hash, 'candidate',
         claim_key, 1, evaluation_doc
     );
+    append_result := public.research_lab_routing_append_evaluation_v3(
+        evaluation_receipt_id, experiment_hash, evaluation_hash, 'candidate',
+        'sha256:' || repeat('9', 64), 2, evaluation_doc
+    );
+    IF append_result->'idempotent' IS DISTINCT FROM 'true'::JSONB THEN
+        RAISE EXCEPTION
+            'evaluation receipt was not reusable after claim recovery: %',
+            append_result;
+    END IF;
     promotion_experiment_hash := experiment_hash;
 
     SELECT public.research_lab_routing_jsonb_hash_v2(

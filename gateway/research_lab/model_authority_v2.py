@@ -53,7 +53,11 @@ from gateway.tee.source_bundle_v2 import (
     build_source_bundle_v2,
 )
 from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
-from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from leadpoet_canonical.attested_v2 import (
+    canonical_json,
+    sha256_json,
+    validate_transport_attempt,
+)
 from research_lab.eval import (
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
@@ -65,20 +69,28 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
+    QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2,
+    QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2,
+    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
+    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
+    qualification_outcome_required_route_terminal_satisfies_v2,
+    qualification_outcome_failure_class_valid_v2,
     context_with_runtime_options,
     validate_sourcing_adapter_metadata,
     validate_sourcing_runtime_receipt_entries,
     canonicalize_private_model_icp,
     publish_attested_receipt_hash,
     publish_incontainer_trace_entries,
+    validate_qualification_outcome_envelope_v2,
 )
 from research_lab.eval.provider_costs import summarize_provider_cost_trace_entries
 from research_lab.eval.provider_evidence_cache import icp_evidence_cache_key
 from research_lab.sourcing_model_contract_check import (
     SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
     semantic_compatibility_policy_identity_v1,
+    source_tree_compatibility_admission,
     source_tree_compatibility_admission_v1,
-    validate_source_tree_compatibility_receipt_v1,
+    validate_source_tree_compatibility_receipt,
 )
 
 
@@ -161,6 +173,549 @@ _HOST_ONLY_ENV_NAMES = frozenset(
 
 class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
     """The measured model result or one of its commitments is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        authority: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.authority = (
+            deepcopy(dict(authority))
+            if isinstance(authority, Mapping)
+            else None
+        )
+
+
+MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1 = (
+    "leadpoet.model-qualification-authority.v1"
+)
+_PLAIN_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validate_model_qualification_authority_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the payload-free host projection of model-owned authority."""
+
+    if not isinstance(value, Mapping):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model qualification authority is invalid"
+        )
+    document = deepcopy(dict(value))
+    fields = {
+        "schema_version",
+        "source_commit",
+        "git_commit_sha",
+        "source_tree_hash",
+        "model_artifact_digest",
+        "manifest_hash",
+        "model_manifest_sha256",
+        "image_digest",
+        "protocol_major",
+        "protocol_minor",
+        "contract_sha256",
+        "completion_state",
+        "disposition",
+        "retryable",
+        "failure_classes",
+        "partial_company_count",
+        "invocation_sha256",
+        "input_hash",
+        "route_completion_receipt_sha256",
+        "provider_terminal_observation_hash",
+        "host_provider_observation_root",
+        "execution_receipt_hash",
+        "authority_hash",
+    }
+    failures = document.get("failure_classes")
+    body = {
+        key: item for key, item in document.items() if key != "authority_hash"
+    }
+    completion_state = document.get("completion_state")
+    disposition = document.get("disposition")
+    if (
+        set(document) != fields
+        or document.get("schema_version")
+        != MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1
+        or not _GIT_SHA_RE.fullmatch(str(document.get("git_commit_sha") or ""))
+        or document.get("source_commit") != document.get("git_commit_sha")
+        or not _SHA256_RE.fullmatch(str(document.get("source_tree_hash") or ""))
+        or document.get("model_artifact_digest")
+        != document.get("source_tree_hash")
+        or not _SHA256_RE.fullmatch(str(document.get("manifest_hash") or ""))
+        or document.get("model_manifest_sha256")
+        != document.get("manifest_hash")
+        or re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}",
+            str(document.get("image_digest") or ""),
+        )
+        is None
+        or document.get("protocol_major") != QUALIFICATION_OUTCOME_PROTOCOL_MAJOR_V2
+        or type(document.get("protocol_minor")) is not int
+        or document["protocol_minor"] < 0
+        or not _PLAIN_SHA256_RE.fullmatch(
+            str(document.get("contract_sha256") or "")
+        )
+        or completion_state not in {"complete", "incomplete"}
+        or disposition
+        not in {
+            "complete_nonempty",
+            "complete_confirmed_empty",
+            "incomplete_retryable",
+            "incomplete_terminal",
+        }
+        or type(document.get("retryable")) is not bool
+        or not isinstance(failures, list)
+        or failures != sorted(failures)
+        or len(failures) > QUALIFICATION_OUTCOME_MAX_FAILURE_CLASSES_V2
+        or len(set(failures)) != len(failures)
+        or any(
+            not qualification_outcome_failure_class_valid_v2(item)
+            for item in failures
+        )
+        or type(document.get("partial_company_count")) is not int
+        or document["partial_company_count"] < 0
+        or not _PLAIN_SHA256_RE.fullmatch(
+            str(document.get("invocation_sha256") or "")
+        )
+        or any(
+            not _SHA256_RE.fullmatch(str(document.get(field) or ""))
+            for field in (
+                "input_hash",
+                "provider_terminal_observation_hash",
+                "host_provider_observation_root",
+                "execution_receipt_hash",
+            )
+        )
+        or not _PLAIN_SHA256_RE.fullmatch(
+            str(document.get("route_completion_receipt_sha256") or "")
+        )
+        or document.get("authority_hash") != sha256_json(body)
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model qualification authority differs from verified evidence"
+        )
+    if (
+        (completion_state == "complete")
+        != disposition.startswith("complete_")
+        or document["retryable"]
+        != (disposition == "incomplete_retryable")
+        or bool(failures) != (completion_state == "incomplete")
+        or (completion_state == "complete" and document["partial_company_count"])
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model qualification authority state is inconsistent"
+        )
+    return document
+
+
+class QualificationOutcomeIncompleteV2Error(AttestedPrivateModelRunnerV2Error):
+    """A signed model run completed technically but not semantically."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model_qualification_authority: Mapping[str, Any],
+        partial_companies: Sequence[Mapping[str, Any]] = (),
+        authority: Mapping[str, Any] | None = None,
+    ) -> None:
+        normalized_authority = validate_model_qualification_authority_v1(
+            model_qualification_authority
+        )
+        normalized_partial = list(
+            ensure_private_model_outputs(
+                list(partial_companies),
+                context_label="incomplete qualification outcome",
+                require_non_empty=False,
+            )
+        )
+        if len(normalized_partial) != normalized_authority[
+            "partial_company_count"
+        ]:
+            raise AttestedPrivateModelRunnerV2Error(
+                "incomplete qualification partial count differs"
+            )
+        super().__init__(message, authority=authority)
+        self.model_qualification_authority = normalized_authority
+        self.partial_companies = tuple(
+            deepcopy(dict(company)) for company in normalized_partial
+        )
+        self.retryable = bool(normalized_authority["retryable"])
+
+
+class QualificationOutcomeCompleteV2(list):
+    """List-compatible complete result with invocation-local authority."""
+
+    def __init__(
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        *,
+        model_qualification_authority: Mapping[str, Any],
+    ) -> None:
+        normalized_authority = validate_model_qualification_authority_v1(
+            model_qualification_authority
+        )
+        if normalized_authority["completion_state"] != "complete":
+            raise AttestedPrivateModelRunnerV2Error(
+                "complete qualification result has incomplete authority"
+            )
+        normalized_companies = list(
+            ensure_private_model_outputs(
+                list(companies),
+                context_label="complete qualification outcome",
+                require_non_empty=False,
+            )
+        )
+        expected_disposition = (
+            "complete_nonempty"
+            if normalized_companies
+            else "complete_confirmed_empty"
+        )
+        if normalized_authority["disposition"] != expected_disposition:
+            raise AttestedPrivateModelRunnerV2Error(
+                "complete qualification company count differs from authority"
+            )
+        super().__init__(deepcopy(normalized_companies))
+        self.companies = tuple(
+            deepcopy(dict(company)) for company in normalized_companies
+        )
+        self.model_qualification_authority = normalized_authority
+
+
+def _host_provider_observation_v1(
+    attempts: Sequence[Mapping[str, Any]],
+    sandbox_observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Corroborate the sandbox's payload-free view against signed attempts."""
+
+    if not isinstance(attempts, (list, tuple)) or not isinstance(
+        sandbox_observation, Mapping
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation is unavailable"
+        )
+    normalized_attempts: dict[str, dict[str, Any]] = {}
+    latest_by_operation: dict[str, tuple[int, dict[str, Any]]] = {}
+    for raw_attempt in attempts:
+        if not isinstance(raw_attempt, Mapping):
+            raise AttestedPrivateModelRunnerV2Error(
+                "model provider observation attempt is invalid"
+            )
+        attempt = dict(raw_attempt)
+        try:
+            validate_transport_attempt(attempt)
+        except Exception as exc:
+            raise AttestedPrivateModelRunnerV2Error(
+                "model provider observation attempt is invalid"
+            ) from exc
+        attempt_hash = str(attempt["attempt_hash"])
+        if attempt_hash in normalized_attempts:
+            raise AttestedPrivateModelRunnerV2Error(
+                "model provider observation attempt is duplicated"
+            )
+        normalized_attempts[attempt_hash] = attempt
+        operation_id = str(attempt["logical_operation_id"])
+        ordinal = int(attempt["attempt_number"])
+        current = latest_by_operation.get(operation_id)
+        if current is None or ordinal > current[0]:
+            latest_by_operation[operation_id] = (ordinal, attempt)
+
+    sandbox = dict(sandbox_observation)
+    raw_latest_hashes = sandbox.get("latest_terminal_attempt_hashes")
+    raw_successful_hashes = sandbox.get(
+        "successful_latest_terminal_attempt_hashes"
+    )
+    if not isinstance(raw_latest_hashes, list) or not isinstance(
+        raw_successful_hashes, list
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation hashes are invalid"
+        )
+    latest_hashes = [str(item) for item in raw_latest_hashes]
+    successful_hashes = [str(item) for item in raw_successful_hashes]
+    if (
+        latest_hashes != sorted(latest_hashes)
+        or len(set(latest_hashes)) != len(latest_hashes)
+        or any(item not in normalized_attempts for item in latest_hashes)
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation differs from signed attempts"
+        )
+    selected = [normalized_attempts[item] for item in latest_hashes]
+    if any(
+        latest_by_operation[str(item["logical_operation_id"])][1][
+            "attempt_hash"
+        ]
+        != item["attempt_hash"]
+        for item in selected
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation is not the latest attempt"
+        )
+    expected_successful = sorted(
+        str(item["attempt_hash"])
+        for item in selected
+        if item.get("terminal_status")
+        in {"authenticated_response", "attested_local_response"}
+        and type(item.get("http_status")) is int
+        and 200 <= int(item["http_status"]) <= 299
+    )
+    accepted_count = sum(
+        1
+        for item in selected
+        if item.get("terminal_status")
+        in {"authenticated_response", "attested_local_response"}
+    )
+    expected_counts = {
+        "request_intent_count": sandbox.get("request_intent_count"),
+        "terminal_count": sandbox.get("terminal_count"),
+        "latest_operation_count": len(selected),
+        "accepted_latest_terminal_count": accepted_count,
+        "successful_latest_terminal_count": len(expected_successful),
+        "failed_latest_terminal_count": len(selected) - accepted_count,
+        "unresolved_latest_terminal_count": (
+            len(selected) - len(expected_successful)
+        ),
+    }
+    if (
+        type(expected_counts["request_intent_count"]) is not int
+        or type(expected_counts["terminal_count"]) is not int
+        or expected_counts["request_intent_count"] < len(selected)
+        or expected_counts["request_intent_count"]
+        != expected_counts["terminal_count"]
+        or successful_hashes != expected_successful
+        or any(sandbox.get(key) != item for key, item in expected_counts.items())
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation differs from signed terminals"
+        )
+    required_terminals = sandbox.get("required_route_terminals")
+    required_commitments = sandbox.get("required_route_commitments")
+    if not isinstance(required_terminals, list) or not isinstance(
+        required_commitments, list
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model required-route observation is invalid"
+        )
+    if (
+        required_commitments != sorted(required_commitments)
+        or len(set(required_commitments)) != len(required_commitments)
+        or len(required_commitments)
+        > QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(item or "")) is None
+            for item in required_commitments
+        )
+        or len(required_terminals) != len(required_commitments)
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model required-route commitments are invalid"
+        )
+    safe_required_terminals = []
+    successful_required = 0
+    for index, raw_terminal in enumerate(required_terminals):
+        if not isinstance(raw_terminal, Mapping):
+            raise AttestedPrivateModelRunnerV2Error(
+                "model required-route terminal is invalid"
+            )
+        terminal = dict(raw_terminal)
+        attempt = normalized_attempts.get(str(terminal.get("attempt_hash") or ""))
+        if (
+            attempt is None
+            or index >= len(required_commitments)
+            or terminal.get("route_commitment") != required_commitments[index]
+            or terminal.get("terminal_status") != attempt["terminal_status"]
+            or terminal.get("http_status") != attempt["http_status"]
+        ):
+            raise AttestedPrivateModelRunnerV2Error(
+                "model required-route terminal differs from signed attempt"
+            )
+        successful = (
+            attempt["terminal_status"]
+            in {"authenticated_response", "attested_local_response"}
+            and type(attempt["http_status"]) is int
+            and 200 <= attempt["http_status"] <= 299
+        )
+        successful_required += int(successful)
+        safe_required_terminals.append(
+            {
+                "route_commitment": str(terminal["route_commitment"]),
+                "attempt_hash": str(attempt["attempt_hash"]),
+                "provider_id": str(attempt["provider_id"]),
+                "terminal_status": str(attempt["terminal_status"]),
+                "http_status": attempt.get("http_status"),
+                "failure_code": attempt.get("failure_code"),
+            }
+        )
+    expected_required_counts = {
+        "required_route_count": len(required_commitments),
+        "successful_required_route_count": successful_required,
+        "unresolved_required_route_count": (
+            len(required_commitments) - successful_required
+        ),
+    }
+    if any(
+        sandbox.get(key) != item
+        for key, item in expected_required_counts.items()
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model required-route counts differ from signed attempts"
+        )
+    safe_attempts = [
+        {
+            "attempt_hash": str(item["attempt_hash"]),
+            "provider_id": str(item["provider_id"]),
+            "terminal_status": str(item["terminal_status"]),
+            "http_status": item.get("http_status"),
+            "failure_code": item.get("failure_code"),
+        }
+        for item in selected
+    ]
+    body = {
+        "schema_version": "leadpoet.host-provider-observation.v1",
+        **expected_counts,
+        **expected_required_counts,
+        "required_route_commitments": list(required_commitments),
+        "required_route_terminals": safe_required_terminals,
+        "latest_terminals": safe_attempts,
+    }
+    return {**body, "observation_root": sha256_json(body)}
+
+
+def _model_qualification_authority_v1(
+    *,
+    envelope: Mapping[str, Any],
+    input_doc: Mapping[str, Any],
+    sandbox_result: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+    artifact: PrivateModelArtifactManifest,
+) -> dict[str, Any]:
+    """Join model semantics to exact input, artifact, receipt, and transport."""
+
+    validated_envelope = validate_qualification_outcome_envelope_v2(envelope)
+    receipt = dict(validated_envelope["route_completion_receipt"])
+    expected_invocation_sha256 = sha256_json(dict(input_doc)).removeprefix(
+        "sha256:"
+    )
+    sandbox_observation = sandbox_result.get(
+        "provider_terminal_observation"
+    )
+    if not isinstance(sandbox_observation, Mapping) or sandbox_result.get(
+        "provider_terminal_observation_hash"
+    ) != sha256_json(dict(sandbox_observation)):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model provider observation commitment differs"
+        )
+    host_observation = _host_provider_observation_v1(
+        outcome.get("transport_attempts") or (),
+        sandbox_observation,
+    )
+    execution_receipt = outcome.get("execution_receipt")
+    execution_graph = outcome.get("execution_receipt_graph")
+    execution_receipt_hash = (
+        str(execution_receipt.get("receipt_hash") or "")
+        if isinstance(execution_receipt, Mapping)
+        else ""
+    )
+    if (
+        receipt.get("invocation_sha256") != expected_invocation_sha256
+        or sandbox_result.get("input_hash") != sha256_json(dict(input_doc))
+        or not _SHA256_RE.fullmatch(execution_receipt_hash)
+        or not isinstance(execution_graph, Mapping)
+        or execution_graph.get("root_receipt_hash")
+        != execution_receipt_hash
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "model qualification input or execution authority differs"
+        )
+    disposition = str(receipt["disposition"])
+    bound_outcomes = receipt.get("extensions", {}).get(
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    )
+    bound_commitments = (
+        [item.get("commitment") for item in bound_outcomes]
+        if isinstance(bound_outcomes, list)
+        and all(isinstance(item, Mapping) for item in bound_outcomes)
+        else []
+    )
+    required_terminals = host_observation["required_route_terminals"]
+    if (
+        receipt.get("probe") is not None
+        or not isinstance(bound_outcomes, list)
+        or bound_commitments
+        != host_observation["required_route_commitments"]
+        or receipt["route_summary"]["attempted"]
+        != len(bound_commitments)
+        or any(
+            outcome.get("commitment") != terminal.get("route_commitment")
+            or (
+                outcome.get("state") in {"completed", "confirmed_empty"}
+                and not qualification_outcome_required_route_terminal_satisfies_v2(
+                    outcome.get("state"),
+                    terminal.get("terminal_status"),
+                    terminal.get("http_status"),
+                )
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "qualification outcome lacks exact required-route authority"
+        )
+    if disposition.startswith("complete_") and (
+        host_observation["required_route_count"] <= 0
+        or any(
+            outcome.get("state") not in {"completed", "confirmed_empty"}
+            or not qualification_outcome_required_route_terminal_satisfies_v2(
+                outcome.get("state"),
+                terminal.get("terminal_status"),
+                terminal.get("http_status"),
+            )
+            for outcome, terminal in zip(bound_outcomes, required_terminals)
+        )
+    ):
+        raise AttestedPrivateModelRunnerV2Error(
+            "complete outcome lacks successful provider completion"
+        )
+    companies = list(validated_envelope["companies"])
+    body = {
+        "schema_version": MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1,
+        "source_commit": artifact.git_commit_sha,
+        "git_commit_sha": artifact.git_commit_sha,
+        "source_tree_hash": artifact.model_artifact_hash,
+        "model_artifact_digest": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "model_manifest_sha256": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "protocol_major": int(validated_envelope["protocol_major"]),
+        "protocol_minor": int(validated_envelope["protocol_minor"]),
+        "contract_sha256": str(validated_envelope["contract_sha256"]),
+        "completion_state": str(validated_envelope["completion_state"]),
+        "disposition": disposition,
+        "retryable": bool(receipt["retryable"]),
+        "failure_classes": list(receipt["failure_classes"]),
+        "partial_company_count": (
+            len(companies)
+            if validated_envelope["completion_state"] == "incomplete"
+            else 0
+        ),
+        "invocation_sha256": expected_invocation_sha256,
+        "input_hash": str(sandbox_result["input_hash"]),
+        "route_completion_receipt_sha256": str(receipt["receipt_sha256"]),
+        "provider_terminal_observation_hash": str(
+            sandbox_result["provider_terminal_observation_hash"]
+        ),
+        "host_provider_observation_root": str(
+            host_observation["observation_root"]
+        ),
+        "execution_receipt_hash": execution_receipt_hash,
+    }
+    return validate_model_qualification_authority_v1(
+        {**body, "authority_hash": sha256_json(body)}
+    )
 
 
 def _model_invocation_timeout_seconds(model_timeout_seconds: float) -> float:
@@ -440,7 +995,7 @@ def _validated_cached_source_bundle_and_receipt_v2(
         bundle = deepcopy(cached_bundle)
         receipt = deepcopy(cached_receipt)
     try:
-        receipt = validate_source_tree_compatibility_receipt_v1(
+        receipt = validate_source_tree_compatibility_receipt(
             receipt,
             manifest=artifact,
             source_tree_hash=artifact.model_artifact_hash,
@@ -513,14 +1068,14 @@ def _source_bundle_and_compatibility_receipt_for_artifact(
                     "exact private model source differs from its signed artifact"
                 )
             try:
-                compatibility_receipt = source_tree_compatibility_admission_v1(
+                compatibility_receipt = source_tree_compatibility_admission(
                     source_root,
                     manifest=artifact,
                     source_tree_hash=observed_tree_hash,
                     use_cache=True,
                 )
                 compatibility_receipt = (
-                    validate_source_tree_compatibility_receipt_v1(
+                    validate_source_tree_compatibility_receipt(
                         compatibility_receipt,
                         manifest=artifact,
                         source_tree_hash=artifact.model_artifact_hash,
@@ -1212,6 +1767,58 @@ class AttestedPrivateModelRunnerV2:
         with self._shared_state["lock"]:
             return [dict(item) for item in self._shared_state["authorities"]]
 
+    def _retain_attested_authority(self, authority: Mapping[str, Any]) -> str:
+        """Retain one already-verified success or failure graph by its root.
+
+        Failed enclave jobs are still authoritative observations.  Their root
+        must reach the per-attempt checkpoint instead of disappearing when the
+        public runner interface raises ``PrivateModelRuntimeError``.
+        """
+
+        outcome = dict(authority)
+        graph = outcome.get("receipt_graph")
+        receipt = outcome.get("receipt")
+        if not isinstance(receipt, Mapping):
+            return ""
+        receipt_hash = str(receipt.get("receipt_hash") or "").lower()
+        graph_root = (
+            str(graph.get("root_receipt_hash") or "").lower()
+            if isinstance(graph, Mapping)
+            else (
+                receipt_hash
+                if getattr(self, "_execute", execute_scoring_v2)
+                is not execute_scoring_v2
+                else ""
+            )
+        )
+        if (
+            not _SHA256_RE.fullmatch(receipt_hash)
+            or graph_root != receipt_hash
+        ):
+            return ""
+        with self._shared_state["lock"]:
+            receipts = self._shared_state["receipts"]
+            if not any(
+                item.get("receipt_hash") == receipt_hash for item in receipts
+            ):
+                receipts.append(dict(receipt))
+            authorities = self._shared_state["authorities"]
+            if not any(
+                str(
+                    dict(item.get("receipt_graph") or {}).get(
+                        "root_receipt_hash"
+                    )
+                    or dict(item.get("receipt") or {}).get("receipt_hash")
+                    or ""
+                ).lower()
+                == receipt_hash
+                for item in authorities
+                if isinstance(item, Mapping)
+            ):
+                authorities.append(outcome)
+        publish_attested_receipt_hash(receipt_hash)
+        return receipt_hash
+
     def measured_compatibility_admission(self) -> dict[str, Any]:
         with self._shared_state["lock"]:
             admissions = self._shared_state.get("compatibility_admissions") or []
@@ -1298,6 +1905,8 @@ class AttestedPrivateModelRunnerV2:
             publish_provider_evidence_cache=True,
             additional_parent_graphs=cache_parent_graphs,
         )
+        if isinstance(result, QualificationOutcomeCompleteV2):
+            return result
         return list(
             ensure_private_model_outputs(
                 result,
@@ -1347,6 +1956,8 @@ class AttestedPrivateModelRunnerV2:
             publish_provider_evidence_cache=False,
             additional_parent_graphs=cache_parent_graphs,
         )
+        if isinstance(result, QualificationOutcomeCompleteV2):
+            return result
         return list(
             ensure_private_model_outputs(
                 result,
@@ -1422,7 +2033,13 @@ class AttestedPrivateModelRunnerV2:
                     message,
                     RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER,
                 )
-            raise AttestedPrivateModelRunnerV2Error(message) from exc
+            authority = exc.authority
+            if isinstance(authority, Mapping):
+                self._retain_attested_authority(authority)
+            raise AttestedPrivateModelRunnerV2Error(
+                message,
+                authority=authority,
+            ) from exc
         except TEEArtifactStoreV2Error as exc:
             message = str(exc)
             if any(
@@ -1835,6 +2452,22 @@ class AttestedPrivateModelRunnerV2:
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model output commitment differs"
             )
+        qualification_envelope: dict[str, Any] | None = None
+        if (
+            operation == "run_icp"
+            and compatibility_receipt.get("admission_mode")
+            == "qualification_protocol_v2"
+        ):
+            try:
+                qualification_envelope = (
+                    validate_qualification_outcome_envelope_v2(
+                        result.get("output")
+                    )
+                )
+            except PrivateModelRuntimeError as exc:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured model qualification outcome is invalid"
+                ) from exc
         generated_cache = result.get("generated_provider_evidence_cache")
         generated_cache_hash = str(
             result.get("generated_provider_evidence_cache_hash") or ""
@@ -1909,17 +2542,25 @@ class AttestedPrivateModelRunnerV2:
                     "trace_entries_hash": str(result.get("trace_entries_hash") or ""),
                     "cost_summary": dict(cost_summary),
                 }
+        model_qualification_authority: dict[str, Any] | None = None
+        retained_outcome = dict(outcome)
+        if qualification_envelope is not None:
+            model_qualification_authority = _model_qualification_authority_v1(
+                envelope=qualification_envelope,
+                input_doc=input_doc,
+                sandbox_result=result,
+                outcome=outcome,
+                artifact=self.artifact,
+            )
+            retained_outcome["model_qualification_authority"] = deepcopy(
+                model_qualification_authority
+            )
+        receipt_hash = self._retain_attested_authority(retained_outcome)
+        if not receipt_hash:
+            raise AttestedPrivateModelRunnerV2Error(
+                "measured model receipt authority root differs"
+            )
         with self._shared_state["lock"]:
-            receipt_hash = str(receipt.get("receipt_hash") or "")
-            receipts = self._shared_state["receipts"]
-            if not any(item.get("receipt_hash") == receipt_hash for item in receipts):
-                receipts.append(dict(receipt))
-            authorities = self._shared_state["authorities"]
-            if not any(
-                item.get("receipt", {}).get("receipt_hash") == receipt_hash
-                for item in authorities
-            ):
-                authorities.append(dict(outcome))
             if measured_compatibility_admission is not None:
                 admissions = self._shared_state.setdefault(
                     "compatibility_admissions", []
@@ -1930,7 +2571,23 @@ class AttestedPrivateModelRunnerV2:
                     for item in admissions
                 ):
                     admissions.append(deepcopy(measured_compatibility_admission))
-        publish_attested_receipt_hash(receipt_hash)
+        if qualification_envelope is not None:
+            companies = list(qualification_envelope["companies"])
+            if qualification_envelope["completion_state"] == "incomplete":
+                raise QualificationOutcomeIncompleteV2Error(
+                    "model qualification outcome is incomplete",
+                    model_qualification_authority=(
+                        model_qualification_authority or {}
+                    ),
+                    partial_companies=companies,
+                    authority=retained_outcome,
+                )
+            return QualificationOutcomeCompleteV2(
+                companies,
+                model_qualification_authority=(
+                    model_qualification_authority or {}
+                ),
+            )
         return result.get("output")
 
 

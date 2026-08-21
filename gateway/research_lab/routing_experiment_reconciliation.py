@@ -204,8 +204,16 @@ def _lineage(value: Any, spec: RoutingExperimentV2Spec) -> str:
         "feature_schema_hash": doc["feature_schema_hash"],
         "verifier_contract_hash": doc["verifier_contract_hash"],
     }
-    if any(variant.artifact.to_dict() != expected for variant in spec.variants):
-        _fail("routing reconciliation spec artifact lineage differs")
+    baseline = next(
+        (
+            variant
+            for variant in spec.variants
+            if variant.variant_id == spec.baseline_variant_id
+        ),
+        None,
+    )
+    if baseline is None or baseline.artifact.to_dict() != expected:
+        _fail("routing reconciliation baseline artifact lineage differs")
     return sha256_json({"schema_version": "leadpoet.routing_artifact_lineage.v2", **doc})
 
 

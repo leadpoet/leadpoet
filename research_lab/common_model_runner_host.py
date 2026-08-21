@@ -54,7 +54,7 @@ class HostActionBinding:
     action_type: str
     tool_id: str
     binding_contract_sha256: str
-    execute: Callable[[Mapping[str, Any]], HostActionResult]
+    dispatch: Callable[[Mapping[str, Any]], HostActionResult]
 
 
 class ModelRunnerProtocol(Protocol):
@@ -135,8 +135,8 @@ def _binding_index(
             raise ModelRunnerHostError("host action binding is duplicated")
         if binding.action_type not in _ACTION_TYPES:
             raise ModelRunnerHostError("host action binding type is invalid")
-        if not callable(binding.execute):
-            raise ModelRunnerHostError("host action binding is not executable")
+        if not callable(binding.dispatch):
+            raise ModelRunnerHostError("host action binding is not dispatchable")
         indexed[key] = binding
     return indexed
 
@@ -254,7 +254,7 @@ class CommonModelRunnerHost:
                 else None
             )
             if cached is None:
-                host_result = binding.execute(action)
+                host_result = binding.dispatch(action)
                 if not isinstance(host_result, HostActionResult):
                     raise ModelRunnerHostError(
                         "host binding must return HostActionResult"

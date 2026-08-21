@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -14,6 +17,7 @@ from gateway.tee.release_channel_v2 import (
 from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import sha256_json
 from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
+from tests.readiness_test_venv import build_dependency_complete_readiness_venv
 
 
 def _status(role: str, pcr0: str, *, allowed: bool, commits: list[str]) -> dict:
@@ -267,7 +271,7 @@ def _runtime_readiness(boots: dict[str, dict]) -> dict:
     }
 
 
-def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
+def _v2_host_observations(commit: str) -> tuple[dict, dict]:
     gateway_release, validator_release, lineage = _v2_release_authority(commit)
     current_roles = lineage["releases"][commit]["roles"]
     gateway_boots = {
@@ -279,6 +283,36 @@ def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
         current_roles["validator_weights"],
         "8",
     )
+    gateway = {
+        "schema_version": deploy_readiness.GATEWAY_READINESS_OBSERVATION_V2_SCHEMA_VERSION,
+        "source_commit": commit,
+        "build_commit": commit,
+        "gateway_release_manifest": gateway_release,
+        "validator_release_manifest": validator_release,
+        "compact_lineage": lineage,
+        "boot_identities": gateway_boots,
+        "expected_role_config_hashes": {
+            role: boot["config_hash"] for role, boot in gateway_boots.items()
+        },
+        "runtime_readiness": _runtime_readiness(gateway_boots),
+        "coordinator_attestation_pcr0": gateway_boots[
+            "gateway_coordinator"
+        ]["pcr0"],
+    }
+    validator = {
+        "schema_version": deploy_readiness.VALIDATOR_READINESS_OBSERVATION_V2_SCHEMA_VERSION,
+        "host_commit": commit,
+        "gateway_release_manifest": gateway_release,
+        "validator_release_manifest": validator_release,
+        "compact_lineage": lineage,
+        "boot_identity": validator_boot,
+        "expected_config_hash": validator_boot["config_hash"],
+    }
+    return gateway, validator
+
+
+def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
+    gateway_observation, validator_observation = _v2_host_observations(commit)
     verified = []
 
     def verify(boot, **kwargs):
@@ -286,30 +320,38 @@ def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
 
     gateway = deploy_readiness.build_gateway_v2_readiness_evidence(
         expected_commit=commit,
-        source_commit=commit,
-        build_commit=commit,
-        gateway_release_manifest=gateway_release,
-        validator_release_manifest=validator_release,
-        compact_lineage=lineage,
-        boot_identities=gateway_boots,
-        expected_role_config_hashes={
-            role: boot["config_hash"]
-            for role, boot in gateway_boots.items()
-        },
-        runtime_readiness=_runtime_readiness(gateway_boots),
-        coordinator_attestation_pcr0=gateway_boots["gateway_coordinator"]["pcr0"],
+        source_commit=gateway_observation["source_commit"],
+        build_commit=gateway_observation["build_commit"],
+        gateway_release_manifest=gateway_observation["gateway_release_manifest"],
+        validator_release_manifest=gateway_observation["validator_release_manifest"],
+        compact_lineage=gateway_observation["compact_lineage"],
+        boot_identities=gateway_observation["boot_identities"],
+        expected_role_config_hashes=gateway_observation[
+            "expected_role_config_hashes"
+        ],
+        runtime_readiness=gateway_observation["runtime_readiness"],
+        coordinator_attestation_pcr0=gateway_observation[
+            "coordinator_attestation_pcr0"
+        ],
         boot_verifier=verify,
     )
     validator = deploy_readiness.build_validator_v2_readiness_evidence(
         expected_commit=commit,
-        host_commit=commit,
-        gateway_release_manifest=gateway_release,
-        validator_release_manifest=validator_release,
-        compact_lineage=lineage,
-        boot_identity=validator_boot,
-        expected_config_hash=validator_boot["config_hash"],
+        host_commit=validator_observation["host_commit"],
+        gateway_release_manifest=validator_observation[
+            "gateway_release_manifest"
+        ],
+        validator_release_manifest=validator_observation[
+            "validator_release_manifest"
+        ],
+        compact_lineage=validator_observation["compact_lineage"],
+        boot_identity=validator_observation["boot_identity"],
+        expected_config_hash=validator_observation["expected_config_hash"],
         boot_verifier=verify,
     )
+    current_roles = gateway_observation["compact_lineage"]["releases"][commit][
+        "roles"
+    ]
     assert {role for role, _ in verified} == set(ROLE_SPECS) | {
         "validator_weights"
     }
@@ -319,6 +361,289 @@ def _v2_host_evidence(commit: str) -> tuple[dict, dict]:
         for role, values in verified
     )
     return gateway, validator
+
+
+def test_canonical_readiness_finalizer_runs_without_validator_wallet_dependency(
+    tmp_path: Path,
+) -> None:
+    """The local restart controller needs release validation, not a live wallet."""
+
+    commit = "1" * 40
+    gateway_release, validator_release, lineage = _v2_release_authority(commit)
+    gateway_evidence, validator_evidence = _v2_host_evidence(commit)
+    input_path = tmp_path / "readiness-input.json"
+    output_path = tmp_path / "deploy-readiness.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "commit": commit,
+                "gateway_release": gateway_release,
+                "validator_release": validator_release,
+                "lineage": lineage,
+                "gateway_evidence": gateway_evidence,
+                "validator_evidence": validator_evidence,
+            }
+        ),
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    controller = r"""
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+if importlib.util.find_spec("bittensor_wallet") is not None:
+    raise RuntimeError("dependency-minimal controller unexpectedly has bittensor_wallet")
+
+from gateway.deploy_readiness import (
+    _validated_v2_release_authority,
+    build_v2_deploy_readiness_manifest,
+    validate_v2_deploy_readiness_manifest,
+)
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+commit = payload["commit"]
+channel, _lineage, _current = _validated_v2_release_authority(
+    expected_commit=commit,
+    gateway_release_manifest=payload["gateway_release"],
+    validator_release_manifest=payload["validator_release"],
+    compact_lineage=payload["lineage"],
+)
+if channel["commit_sha"] != commit:
+    raise RuntimeError("validated release channel commit differs")
+
+tampered_validator = copy.deepcopy(payload["validator_evidence"])
+tampered_validator["channel_hash"] = "sha256:" + "f" * 64
+try:
+    build_v2_deploy_readiness_manifest(
+        expected_commit=commit,
+        gateway_evidence=payload["gateway_evidence"],
+        validator_evidence=tampered_validator,
+    )
+except RuntimeError as exc:
+    if "gateway and validator evidence differ at channel_hash" not in str(exc):
+        raise
+else:
+    raise RuntimeError("cross-host channel drift was accepted")
+
+manifest = build_v2_deploy_readiness_manifest(
+    expected_commit=commit,
+    gateway_evidence=payload["gateway_evidence"],
+    validator_evidence=payload["validator_evidence"],
+)
+validated = validate_v2_deploy_readiness_manifest(
+    manifest,
+    runtime_source_commit=commit,
+    runtime_build_commit=commit,
+)
+Path(sys.argv[2]).write_text(
+    json.dumps(validated, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+print("ready")
+"""
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            controller,
+            str(input_path),
+            str(output_path),
+        ],
+        cwd=repo_root,
+        env={"PATH": os.defpath, "PYTHONPATH": str(repo_root)},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "ready\n"
+    assert completed.stderr == ""
+    manifest = json.loads(output_path.read_text(encoding="ascii"))
+    assert manifest["schema_version"] == deploy_readiness.DEPLOY_READINESS_V2_SCHEMA_VERSION
+    assert manifest["expected_commit_sha"] == commit
+    assert manifest["ok"] is True
+    assert len(manifest["checks"]) == 14
+    assert all(check["ok"] is True for check in manifest["checks"])
+
+
+def test_isolated_dependency_complete_controller_builds_all_readiness_evidence(
+    tmp_path: Path,
+) -> None:
+    commit = "1" * 40
+    gateway_observation, validator_observation = _v2_host_observations(commit)
+    input_path = tmp_path / "readiness-observations.json"
+    output_path = tmp_path / "deploy-readiness.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "commit": commit,
+                "gateway": gateway_observation,
+                "validator": validator_observation,
+            }
+        ),
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    readiness_python = build_dependency_complete_readiness_venv(
+        tmp_path / "readiness-venv"
+    )
+    venv_root = readiness_python.parent.parent
+    site_packages = (
+        venv_root
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    assert site_packages.is_dir()
+    bootstrap = r"""
+from pathlib import Path
+import sys
+
+root = Path(sys.argv.pop(1)).resolve(strict=True)
+site_packages = Path(sys.argv.pop(1)).resolve(strict=True)
+sys.path.insert(0, str(root))
+sys.path.append(str(site_packages))
+source = sys.stdin.read()
+exec(
+    compile(source, "<test-local-readiness>", "exec"),
+    {"__name__": "__main__", "__builtins__": __builtins__},
+)
+"""
+    controller = r"""
+import json
+from pathlib import Path
+import sys
+
+if "site" in sys.modules or "sitecustomize" in sys.modules:
+    raise RuntimeError("isolated controller activated site configuration")
+if Path(sys.path[-1]).name != "site-packages":
+    raise RuntimeError("isolated controller site-packages does not follow stdlib")
+import argparse
+try:
+    Path(argparse.__file__).resolve(strict=True).relative_to(
+        Path(sys.path[-1]).resolve(strict=True)
+    )
+except ValueError:
+    pass
+else:
+    raise RuntimeError("site-packages shadowed the stdlib argparse module")
+
+from leadpoet_canonical import attested_v2, nitro
+
+available, diagnostic = nitro.verify_nitro_attestation_full(
+    attestation_b64="!",
+    expected_pcr0="1" * 96,
+)
+if available or "Missing required library" in str(diagnostic.get("error") or ""):
+    raise RuntimeError("Nitro verifier dependencies are unavailable")
+
+# Synthetic boot summaries exercise the exact observation join after the real
+# dependency import/execution probe above. Production never replaces this verifier.
+attested_v2.verify_boot_identity_nitro = lambda *args, **kwargs: {}
+
+from gateway.deploy_readiness import (
+    build_gateway_v2_readiness_evidence_from_observation,
+    build_validator_v2_readiness_evidence_from_observation,
+    build_v2_deploy_readiness_manifest,
+    validate_v2_deploy_readiness_manifest,
+)
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+commit = payload["commit"]
+gateway = build_gateway_v2_readiness_evidence_from_observation(
+    expected_commit=commit,
+    observation=payload["gateway"],
+)
+validator = build_validator_v2_readiness_evidence_from_observation(
+    expected_commit=commit,
+    observation=payload["validator"],
+)
+manifest = build_v2_deploy_readiness_manifest(
+    expected_commit=commit,
+    gateway_evidence=gateway,
+    validator_evidence=validator,
+)
+validate_v2_deploy_readiness_manifest(
+    manifest,
+    runtime_source_commit=commit,
+    runtime_build_commit=commit,
+)
+if any(
+    name == "bittensor_wallet" or name.startswith("bittensor_wallet.")
+    for name in sys.modules
+):
+    raise RuntimeError("readiness controller loaded the validator wallet")
+if "site" in sys.modules or "sitecustomize" in sys.modules:
+    raise RuntimeError("readiness controller activated site configuration")
+Path(sys.argv[2]).write_text(
+    json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="ascii",
+)
+print("full-readiness-ready")
+"""
+
+    completed = subprocess.run(
+        [
+            str(readiness_python),
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            bootstrap,
+            str(repo_root),
+            str(site_packages),
+            str(input_path),
+            str(output_path),
+        ],
+        cwd=repo_root,
+        env={"PATH": os.defpath},
+        input=controller,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "full-readiness-ready\n"
+    assert completed.stderr == ""
+    manifest = json.loads(output_path.read_text(encoding="ascii"))
+    assert manifest["schema_version"] == deploy_readiness.DEPLOY_READINESS_V2_SCHEMA_VERSION
+    assert manifest["expected_commit_sha"] == commit
+    assert manifest["ok"] is True
+    assert len(manifest["checks"]) == 14
+    assert all(check["ok"] is True for check in manifest["checks"])
+
+
+def test_validator_tee_package_preserves_authoritative_runtime_exports() -> None:
+    import validator_tee
+    from validator_tee.host import enclave_hotkey_v2, weight_authority_v2
+
+    assert set(validator_tee.__all__) == {
+        "AuthoritativeSetWeightsContextV2",
+        "AuthoritativeServeAxonContextV2",
+        "EnclaveBackedKeypairV2",
+        "EnclaveBackedWalletV2",
+        "build_enclave_backed_wallet_v2",
+        "build_authoritative_weight_bundle_v2",
+    }
+    for name in validator_tee.__all__:
+        source = (
+            weight_authority_v2
+            if name == "build_authoritative_weight_bundle_v2"
+            else enclave_hotkey_v2
+        )
+        assert getattr(validator_tee, name) is getattr(source, name)
+    assert set(validator_tee.__all__).issubset(dir(validator_tee))
+    with pytest.raises(AttributeError, match="has no attribute"):
+        getattr(validator_tee, "not_an_authoritative_export")
 
 
 def _write_v2_manifest(path: Path, commit: str) -> dict:

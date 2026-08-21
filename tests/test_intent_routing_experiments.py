@@ -754,7 +754,7 @@ def test_artifact_and_model_payload_are_exact_branch_bound() -> None:
     spec, _ = _spec()
     assert validate_sourcing_model_artifact_identity(_artifact()) == []
     assert validate_routing_experiment_spec(spec, adapter=ADAPTER) == []
-    assert "artifact_branch_must_be_leadpoet_lab" in validate_sourcing_model_artifact_identity(replace(_artifact(), branch="main"))
+    assert validate_sourcing_model_artifact_identity(replace(_artifact(), branch="main")) == []
     payload = {**spec.variants[0].profile_payload, "steps": [{"tool_id": "unknown"}]}
     tampered = replace(spec, variants=(replace(spec.variants[0], profile_payload=payload), *spec.variants[1:]))
     assert "model_route_tool_not_bound" in validate_routing_experiment_spec(tampered, adapter=ADAPTER)

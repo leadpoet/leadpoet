@@ -1182,9 +1182,12 @@ def test_adapter_dependency_abi_drift_is_quarantined(
 def _observe_future_runtime_dependencies(
     root: Path,
     compatibility_receipt: dict,
+    *,
+    execution_job_id: str,
 ) -> dict:
     observation_plan = model_sandbox_v2._runtime_probe_observation_plan_v1(
-        compatibility_receipt
+        compatibility_receipt,
+        execution_job_id=execution_job_id,
     )
     completed = subprocess.run(
         [
@@ -1230,7 +1233,11 @@ def test_adapter_dependency_runtime_protocols_match_consumer_expectations(
     _install_future_tree(tmp_path, monkeypatch)
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
-    observed = _observe_future_runtime_dependencies(tmp_path, receipt)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
 
     probe = model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
         observed["runtime_observation"],
@@ -1274,7 +1281,11 @@ def test_adapter_dependency_runtime_protocol_drift_is_quarantined(
     )
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
-    observed = _observe_future_runtime_dependencies(tmp_path, receipt)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
 
     with pytest.raises(
         model_sandbox_v2.ModelSandboxV2Error,
@@ -1327,7 +1338,11 @@ def test_adapter_dependency_bodies_and_unrelated_helpers_remain_additive(
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
     assert receipt["admission_mode"] == "semantic_v1"
-    observed = _observe_future_runtime_dependencies(tmp_path, receipt)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
     model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
         observed["runtime_observation"],
         compatibility_receipt=receipt,

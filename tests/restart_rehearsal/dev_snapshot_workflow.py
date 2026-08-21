@@ -122,6 +122,10 @@ def _redacted_cli_argv_shapes() -> dict[str, list[str]]:
             "<active-config-hash>",
             "--private-model-manifest-hash",
             "<active-manifest-hash>",
+            "--private-model-artifact",
+            "<refresh>/inputs/private_model_artifact.json",
+            "--compatibility-receipt",
+            "<refresh>/inputs/private_model_compatibility_receipt.json",
             "--timeout-seconds",
             "<snapshot-icp-timeout-seconds>",
             "--cancel-file",
@@ -166,16 +170,24 @@ def expected_cli_argv_contract_hashes() -> dict[str, str]:
     }
 
 
-def expected_docker_bootstrap_hashes() -> dict[str, str]:
-    from research_lab.eval import private_runtime
+def expected_docker_bootstrap_hashes(
+    artifact_document: Mapping[str, Any],
+    compatibility_receipt: Mapping[str, Any],
+) -> dict[str, str]:
+    from gateway.tee.model_sandbox_v2 import (
+        _model_adapter_bootstrap_for_compatibility_receipt_v1,
+    )
+    from research_lab.eval.artifacts import PrivateModelArtifactManifest
     from research_lab.eval.snapshot_store import (
         dev_record_bootstrap,
         dev_replay_bootstrap,
     )
 
-    docker_bootstrap = getattr(private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", "")
-    if not docker_bootstrap:
-        raise RuntimeError("candidate Docker adapter bootstrap is unavailable")
+    artifact = PrivateModelArtifactManifest.from_mapping(artifact_document)
+    docker_bootstrap = _model_adapter_bootstrap_for_compatibility_receipt_v1(
+        compatibility_receipt,
+        artifact=artifact,
+    )
     return {
         "record": "sha256:"
         + hashlib.sha256((dev_record_bootstrap() + docker_bootstrap).encode()).hexdigest(),
@@ -1115,14 +1127,30 @@ def _completed_baseline_fixture(
     return tables, total_icps, int(tree_policy.live_max_icps_per_node)
 
 
-_CHAMPION_ADAPTER = r'''import json
+_CHAMPION_ADAPTER = r'''import hashlib
+import json
 import os
 import sys
 
 import requests
 
 
-def run_icp(icp, context):
+_CONTRACT_SHA256 = "__QUALIFICATION_OUTCOME_CONTRACT_SHA256__"
+
+
+def adapter_metadata():
+    return {
+        "qualification_outcome_protocol": {
+            "protocol_id": "sourcing-model.qualification-outcome",
+            "major": 2,
+            "minor": 4,
+            "entrypoint": "run_icp_outcome",
+            "result_schema_version": "sourcing-model.qualification-outcome.v2",
+        }
+    }
+
+
+def run_icp_outcome(icp, context):
     icp_id = str(icp["icp_id"])
     exa = requests.post(
         "https://api.exa.ai/search",
@@ -1172,7 +1200,7 @@ def run_icp(icp, context):
         ],
     }
     sys.stderr.write("sourcing_branch_receipt " + json.dumps(receipt) + "\n")
-    return [
+    companies = [
         {
             "company_name": "Configured " + icp_id,
             "company_website": "https://" + icp_id + ".example",
@@ -1187,7 +1215,81 @@ def run_icp(icp, context):
             "intent_date": "2026-08-15",
         }
     ]
+    summary = {
+        "attempted": 1,
+        "completed": 1,
+        "confirmed_empty": 0,
+        "retryable_failed": 0,
+        "terminal_failed": 0,
+        "skipped": 0,
+        "retried": 0,
+    }
+    receipt = {
+        "schema_version": "sourcing-model.route-completion-receipt.v1",
+        "contract_sha256": _CONTRACT_SHA256,
+        "outcome_authority": "sourcing_model",
+        "completion_state": "complete",
+        "disposition": "complete_nonempty",
+        "retryable": False,
+        "partial": False,
+        "returned_count": len(companies),
+        "invocation_sha256": hashlib.sha256(icp_id.encode("utf-8")).hexdigest(),
+        "route_summary": summary,
+        "failure_classes": [],
+        "probe": None,
+        "extensions": {
+            "com.leadpoet.required-route-outcomes": [
+                {"commitment": "f" * 64, "state": "completed"}
+            ]
+        },
+    }
+    receipt["receipt_sha256"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": "sourcing-model.qualification-outcome.v2",
+        "protocol_major": 2,
+        "protocol_minor": 4,
+        "contract_sha256": _CONTRACT_SHA256,
+        "completion_state": "complete",
+        "companies": companies,
+        "route_completion_receipt": receipt,
+        "extensions": {},
+    }
 '''
+
+
+def _qualification_compatibility_receipt(
+    artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    from research_lab.canonical import sha256_json
+    from research_lab.sourcing_model_contract_check import (
+        QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+        QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+        QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+        QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+        QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2,
+    )
+
+    contract = dict(artifact["compatibility_contract"])
+    parity = dict(artifact["consumer_parity_fixtures"])
+    body = {
+        "schema_version": QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+        "consumer_api_version": QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+        "decision": "accepted",
+        "admission_mode": QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+        "policy_hash": QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+        "source_tree_hash": artifact["model_artifact_hash"],
+        "git_commit_sha": artifact["git_commit_sha"],
+        "manifest_hash": artifact["manifest_hash"],
+        "image_digest": artifact["image_digest"],
+        "contract_id": contract["contract_id"],
+        "contract_hash": contract["sha256"],
+        "parity_hash": parity["sha256"],
+        "bindings": {},
+        "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
+    }
+    return {**body, "receipt_hash": sha256_json(body)}
 
 
 def _child_environment(
@@ -1318,7 +1420,8 @@ def _run_negative_boundary_probes(env: Mapping[str, str]) -> None:
 async def _run_production_refresh(state: Mapping[str, Any]) -> dict[str, Any]:
     from gateway.research_lab.dev_eval_runner import snapshot_readiness
     from gateway.research_lab.git_tree_models import TreePolicy
-    from gateway.research_lab.snapshot_refresh import maybe_refresh_dev_snapshot
+    from gateway.research_lab import snapshot_refresh
+    from research_lab.eval.artifacts import PrivateModelArtifactManifest
 
     identity = dict(state["active_artifact"])
     active_load_count = 0
@@ -1328,10 +1431,16 @@ async def _run_production_refresh(state: Mapping[str, Any]) -> dict[str, Any]:
         if register_bootstrap:
             raise RuntimeError("snapshot refresh requested an unexpected bootstrap")
         active_load_count += 1
-        return SimpleNamespace(artifact=SimpleNamespace(**identity))
+        return SimpleNamespace(
+            artifact=PrivateModelArtifactManifest.from_mapping(identity)
+        )
+
+    snapshot_refresh._active_model_compatibility_receipt = (
+        lambda _active: dict(state["compatibility_receipt"])
+    )
 
     tree_policy = TreePolicy.from_env()
-    result = await maybe_refresh_dev_snapshot(
+    result = await snapshot_refresh.maybe_refresh_dev_snapshot(
         SimpleNamespace(),
         worker_index=0,
         tree_policy=tree_policy,
@@ -1492,6 +1601,9 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
     candidate_sha = _candidate_sha(source_root)
     now = datetime.now(timezone.utc)
     active_artifact = {
+        "model_artifact_hash": sha256_json(
+            {"purpose": "dev-snapshot-rehearsal-source", "candidate": candidate_sha}
+        ),
         "image_digest": (
             "rehearsal.invalid/leadpoet/champion@sha256:"
             + sha256_json({"candidate": candidate_sha}).split(":", 1)[1]
@@ -1503,7 +1615,21 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
         "manifest_hash": sha256_json(
             {"purpose": "dev-snapshot-rehearsal-manifest", "candidate": candidate_sha}
         ),
+        "component_registry_version": "sourcing-model-components:v2",
+        "scoring_adapter_version": "qualification-company-scorer:v1",
+        "manifest_uri": "s3://rehearsal/model/manifest.json",
+        "signature_ref": "kms://rehearsal/model-signature",
+        "compatibility_contract": {
+            "contract_id": "sourcing-model-qualification-outcome:v2",
+            "path": "consumer-contract.json",
+            "sha256": sha256_json({"contract": "qualification-outcome-v2"}),
+        },
+        "consumer_parity_fixtures": {
+            "path": "consumer-parity.json",
+            "sha256": sha256_json({"parity": "qualification-outcome-v2"}),
+        },
     }
+    compatibility_receipt = _qualification_compatibility_receipt(active_artifact)
     tables, total_icps, tree_width = _completed_baseline_fixture(
         now=now,
         manifest_hash=active_artifact["manifest_hash"],
@@ -1514,8 +1640,16 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
         champion_root = root / "champion"
         champion_root.mkdir(parents=True)
         (root / "tmp").mkdir()
+        from research_lab.eval.private_runtime import (
+            QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        )
+
         (champion_root / "research_lab_adapter.py").write_text(
-            _CHAMPION_ADAPTER, encoding="utf-8"
+            _CHAMPION_ADAPTER.replace(
+                "__QUALIFICATION_OUTCOME_CONTRACT_SHA256__",
+                QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+            ),
+            encoding="utf-8",
         )
         state = {
             "schema_version": BOUNDARY_SCHEMA,
@@ -1526,6 +1660,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             "base_prefix": _BASE_PREFIX,
             "kms_key_id": _KMS_KEY_ID,
             "active_artifact": active_artifact,
+            "compatibility_receipt": compatibility_receipt,
             "supabase_tables": tables,
             "result_path": str(root / "result.json"),
             "selection_seed": _SELECTION_SEED,
@@ -1533,7 +1668,10 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
             "expected_cli_argv_contract_hashes": (
                 expected_cli_argv_contract_hashes()
             ),
-            "expected_docker_bootstrap_hashes": expected_docker_bootstrap_hashes(),
+            "expected_docker_bootstrap_hashes": expected_docker_bootstrap_hashes(
+                active_artifact,
+                compatibility_receipt,
+            ),
         }
         state_path = root / "boundary-state.json"
         state_path.write_text(
@@ -1665,7 +1803,10 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
         container_counts = Counter(
             str(event.get("operation") or "") for event in all_container_events
         )
-        expected_bootstrap_hashes = expected_docker_bootstrap_hashes()
+        expected_bootstrap_hashes = expected_docker_bootstrap_hashes(
+            active_artifact,
+            compatibility_receipt,
+        )
         record_events = [
             event for event in container_events if event.get("operation") == "record"
         ]

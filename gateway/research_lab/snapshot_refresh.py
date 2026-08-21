@@ -134,6 +134,17 @@ def _write_state(path: Path, state: Mapping[str, Any]) -> None:
     os.replace(staging, path)
 
 
+def _write_private_json(path: Path, document: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    staging.write_text(
+        json.dumps(dict(document), sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(staging, 0o600)
+    os.replace(staging, path)
+
+
 def _write_record_cancel_marker(path: Path) -> None:
     staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     staging.write_text("active_private_model_changed\n", encoding="utf-8")
@@ -430,6 +441,17 @@ def _artifact_identity(active: Any) -> tuple[str, str, str, str]:
         str(artifact.git_commit_sha or ""),
         str(artifact.config_hash or ""),
         str(artifact.manifest_hash or ""),
+    )
+
+
+def _active_model_compatibility_receipt(active: Any) -> dict[str, Any]:
+    from gateway.research_lab.model_authority_v2 import (
+        private_model_compatibility_receipt_v2,
+    )
+
+    return private_model_compatibility_receipt_v2(
+        active.artifact,
+        timeout_seconds=DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
     )
 
 
@@ -753,6 +775,20 @@ async def maybe_refresh_dev_snapshot(
                 )
                 if bank_size > MAX_DEV_SNAPSHOT_BANK_ICP_COUNT:
                     raise RuntimeError("snapshot exporter bank size exceeds the safety cap")
+                artifact_document = active_before.artifact.to_dict()
+                compatibility_receipt = await asyncio.to_thread(
+                    _active_model_compatibility_receipt,
+                    active_before,
+                )
+                artifact_path = inputs_dir / "private_model_artifact.json"
+                compatibility_receipt_path = (
+                    inputs_dir / "private_model_compatibility_receipt.json"
+                )
+                _write_private_json(artifact_path, artifact_document)
+                _write_private_json(
+                    compatibility_receipt_path,
+                    compatibility_receipt,
+                )
                 record_timeout_seconds = max(
                     timeout_seconds,
                     snapshot_record_workflow_timeout_seconds(
@@ -775,6 +811,10 @@ async def maybe_refresh_dev_snapshot(
                     identity_before[2],
                     "--private-model-manifest-hash",
                     identity_before[3],
+                    "--private-model-artifact",
+                    str(artifact_path),
+                    "--compatibility-receipt",
+                    str(compatibility_receipt_path),
                     "--timeout-seconds",
                     str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
                     "--cancel-file",

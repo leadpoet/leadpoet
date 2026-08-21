@@ -46,7 +46,6 @@ def run_common_champion(
         target_count=target_count,
         evaluated_on=evaluated_on,
         host_capability_manifest=host_capability_manifest,
-        release_identity=release_identity,
     )
     host = CommonModelRunnerHost(
         consumer_id="research-lab-champion",

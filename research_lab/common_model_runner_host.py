@@ -45,6 +45,7 @@ class HostActionResult:
     cost_credits: float
     latency_ms: float
     provider_request_id: str | None = None
+    provider_receipt_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,9 @@ def _host_receipt(
         "provider_request_id_sha256": request_id_hash,
         "provider_response_sha256": str(
             completion.get("provider_response_sha256") or ""
+        ),
+        "provider_receipt_ref": str(
+            completion.get("provider_receipt_ref") or ""
         ),
         "completion_sha256": str(completion.get("completion_sha256") or ""),
         "outcome": str(completion.get("outcome") or ""),

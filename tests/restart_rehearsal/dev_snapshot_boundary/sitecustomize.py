@@ -55,6 +55,7 @@ if _state_path_raw and not _spawn_gate_invocation:
     _base_prefix = str(_state["base_prefix"]).strip("/") + "/"
     _kms_key_id = str(_state["kms_key_id"])
     _active_artifact = dict(_state["active_artifact"])
+    _compatibility_receipt = dict(_state["compatibility_receipt"])
     _image_digest = str(_active_artifact["image_digest"])
     _selection_seed = str(_state["selection_seed"])
     _provider_model_ids = [
@@ -807,6 +808,10 @@ if _state_path_raw and not _spawn_gate_invocation:
                 "<active-config-hash>",
                 "--private-model-manifest-hash",
                 "<active-manifest-hash>",
+                "--private-model-artifact",
+                "<refresh>/inputs/private_model_artifact.json",
+                "--compatibility-receipt",
+                "<refresh>/inputs/private_model_compatibility_receipt.json",
                 "--timeout-seconds",
                 "<snapshot-icp-timeout-seconds>",
                 "--cancel-file",
@@ -923,6 +928,14 @@ if _state_path_raw and not _spawn_gate_invocation:
                 str(_active_artifact["config_hash"]),
                 "--private-model-manifest-hash",
                 str(_active_artifact["manifest_hash"]),
+                "--private-model-artifact",
+                str(work_dir / "inputs" / "private_model_artifact.json"),
+                "--compatibility-receipt",
+                str(
+                    work_dir
+                    / "inputs"
+                    / "private_model_compatibility_receipt.json"
+                ),
                 "--timeout-seconds",
                 str(DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS),
                 "--cancel-file",
@@ -980,7 +993,11 @@ if _state_path_raw and not _spawn_gate_invocation:
         timeout: Any,
     ) -> subprocess.CompletedProcess[str]:
         _require_declared_boundary("docker_daemon", "run")
+        from gateway.tee.model_sandbox_v2 import (
+            _model_adapter_bootstrap_for_compatibility_receipt_v1,
+        )
         from research_lab.eval import private_runtime
+        from research_lab.eval.artifacts import PrivateModelArtifactManifest
         from research_lab.eval.snapshot_store import (
             MISS_POLICY_STRICT,
             SNAPSHOT_DIR_ENV,
@@ -1032,8 +1049,9 @@ if _state_path_raw and not _spawn_gate_invocation:
         ):
             raise RuntimeError("dev-snapshot Docker staging mount differs")
 
-        docker_bootstrap = getattr(
-            private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", ""
+        docker_bootstrap = _model_adapter_bootstrap_for_compatibility_receipt_v1(
+            _compatibility_receipt,
+            artifact=PrivateModelArtifactManifest.from_mapping(_active_artifact),
         )
         expected_bootstrap = (
             dev_replay_bootstrap() if read_only else dev_record_bootstrap()
@@ -1058,6 +1076,10 @@ if _state_path_raw and not _spawn_gate_invocation:
                 miss_policy=MISS_POLICY_STRICT,
             ).items():
                 env_args.extend(("-e", f"{name}={value}"))
+            if _compatibility_receipt.get("admission_mode") == (
+                "qualification_protocol_v2"
+            ):
+                env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             for group in PROVIDER_KEY_GROUPS:
                 for name in group:
                     env_args.extend(("-e", f"{name}=research-lab-offline-replay"))
@@ -1096,6 +1118,10 @@ if _state_path_raw and not _spawn_gate_invocation:
             for name in private_runtime.private_model_env_passthrough():
                 if name in environment:
                     env_args.extend(("-e", name))
+            if _compatibility_receipt.get("admission_mode") == (
+                "qualification_protocol_v2"
+            ):
+                env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             base = [
                 "docker",
                 "run",

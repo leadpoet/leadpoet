@@ -1796,6 +1796,90 @@ def semantic_compatibility_policy_identity_v1() -> tuple[Dict[str, Any], str]:
     return policy, hash_after
 
 
+def qualification_protocol_policy_identity_v2() -> tuple[Dict[str, Any], str]:
+    """Load the canonical qualification-v2 policy identity without model code."""
+
+    try:
+        policy_before = json.loads(
+            QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+        )
+        policy_after = json.loads(
+            QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "qualification protocol compatibility policy is unavailable"
+        ) from exc
+    if not isinstance(policy_before, dict) or not isinstance(policy_after, dict):
+        raise ValueError("qualification protocol compatibility policy is invalid")
+    hash_before = _sha256_json(policy_before)
+    hash_after = _sha256_json(policy_after)
+    if (
+        hash_before != QUALIFICATION_PROTOCOL_POLICY_SHA256_V2
+        or hash_after != QUALIFICATION_PROTOCOL_POLICY_SHA256_V2
+    ):
+        raise ValueError(
+            "qualification protocol compatibility policy changed during admission"
+        )
+    return policy_before, hash_before
+
+
+COMPATIBILITY_ADMISSION_POLICY_PROFILE_REGISTRY = (
+    (
+        (
+            SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
+            SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
+            "legacy_exact",
+            SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        ),
+        "semantic_policy_v1",
+    ),
+    (
+        (
+            SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
+            SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
+            "semantic_v1",
+            SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        ),
+        "semantic_policy_v1",
+    ),
+    (
+        (
+            QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+            QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+            QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+            SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        ),
+        "qualification_policy_v2",
+    ),
+)
+
+
+def compatibility_admission_policy_identity(
+    receipt: Mapping[str, Any],
+) -> tuple[Dict[str, Any], str]:
+    """Resolve and revalidate the policy for one admitted receipt profile."""
+
+    profile_key = (
+        receipt.get("schema_version"),
+        receipt.get("consumer_api_version"),
+        receipt.get("admission_mode"),
+        receipt.get("decision"),
+    )
+    profile = dict(COMPATIBILITY_ADMISSION_POLICY_PROFILE_REGISTRY).get(
+        profile_key
+    )
+    if profile == "semantic_policy_v1":
+        policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    elif profile == "qualification_policy_v2":
+        policy, policy_hash = qualification_protocol_policy_identity_v2()
+    else:
+        raise ValueError("compatibility admission policy profile is unsupported")
+    if receipt.get("policy_hash") != policy_hash:
+        raise ValueError("compatibility admission policy differs from its profile")
+    return policy, policy_hash
+
+
 def _safe_json_document(path: Path, *, label: str, violations: List[str]) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))

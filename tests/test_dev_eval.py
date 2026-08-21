@@ -378,8 +378,22 @@ def test_urllib_record_and_replay_preserve_standard_header_contract(tmp_path):
     record_probe = r'''
 import http.server
 import json
+import sys
 import threading
+import types
 import urllib.request
+
+route_calls = []
+package = types.ModuleType("sourcing_model")
+package.__path__ = []
+route = types.ModuleType("sourcing_model.qualification_route")
+def transport_headers():
+    route_calls.append("record")
+    return {"X-Leadpoet-Qualification-Route-Commitment": "a" * 64}
+route.transport_headers = transport_headers
+package.qualification_route = route
+sys.modules["sourcing_model"] = package
+sys.modules["sourcing_model.qualification_route"] = route
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -407,21 +421,36 @@ try:
 finally:
     server.shutdown()
     server.server_close()
-print(json.dumps({"outcome": outcome, "url": url}, sort_keys=True))
+print(json.dumps({"outcome": outcome, "route_calls": route_calls, "url": url}, sort_keys=True))
 '''
     recorded = subprocess.run(
         [sys.executable, "-c", dev_record_bootstrap() + record_probe],
         text=True,
         capture_output=True,
         timeout=60,
-        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
         check=False,
     )
     assert recorded.returncode == 0, recorded.stderr
     recorded_doc = json.loads(recorded.stdout)
 
     replay_probe = (
-        "\nimport json, urllib.request\n"
+        "\nimport json, sys, types, urllib.request\n"
+        "route_calls = []\n"
+        "package = types.ModuleType('sourcing_model')\n"
+        "package.__path__ = []\n"
+        "route = types.ModuleType('sourcing_model.qualification_route')\n"
+        "def transport_headers():\n"
+        "    route_calls.append('replay')\n"
+        "    return {'X-Leadpoet-Qualification-Route-Commitment': 'b' * 64}\n"
+        "route.transport_headers = transport_headers\n"
+        "package.qualification_route = route\n"
+        "sys.modules['sourcing_model'] = package\n"
+        "sys.modules['sourcing_model.qualification_route'] = route\n"
         f"with urllib.request.urlopen({recorded_doc['url']!r}) as response:\n"
         "    outcome = {\n"
         "        'body': response.read().decode(response.headers.get_content_charset()),\n"
@@ -429,23 +458,63 @@ print(json.dumps({"outcome": outcome, "url": url}, sort_keys=True))
         "        'header': response.getheader('CONTENT-TYPE'),\n"
         "        'headers': dict(response.getheaders()),\n"
         "    }\n"
-        "print(json.dumps(outcome, sort_keys=True))\n"
+        "print(json.dumps({'outcome': outcome, 'route_calls': route_calls}, sort_keys=True))\n"
     )
     replayed = subprocess.run(
         [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
         text=True,
         capture_output=True,
         timeout=60,
-        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
         check=False,
     )
     assert replayed.returncode == 0, replayed.stderr
-    assert json.loads(replayed.stdout) == recorded_doc["outcome"]
+    replayed_doc = json.loads(replayed.stdout)
+    assert replayed_doc["outcome"] == recorded_doc["outcome"]
+    assert recorded_doc["route_calls"] == ["record"]
+    assert replayed_doc["route_calls"] == ["replay"]
     assert recorded_doc["outcome"]["body"] == '{"ok": true}'
     assert recorded_doc["outcome"]["charset"] == "iso-8859-1"
     assert recorded_doc["outcome"]["header"] == (
         "application/json; charset=iso-8859-1"
     )
+
+
+def test_v2_replay_bootstrap_rejects_invalid_route_headers_before_lookup(tmp_path):
+    probe = r'''
+import sys
+import types
+import urllib.request
+
+package = types.ModuleType("sourcing_model")
+package.__path__ = []
+route = types.ModuleType("sourcing_model.qualification_route")
+route.transport_headers = lambda: {"X-Untrusted": "value"}
+package.qualification_route = route
+sys.modules["sourcing_model"] = package
+sys.modules["sourcing_model.qualification_route"] = route
+urllib.request.urlopen("https://api.exa.ai/search")
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(tmp_path),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "qualification route transport headers are invalid" in completed.stderr
+    assert "research_lab_dev_snapshot_miss" not in completed.stderr
 
 
 def test_replay_bootstrap_serves_httpx_async_client_from_snapshot_dir(tmp_path):
@@ -1822,6 +1891,92 @@ print(json.dumps({
     assert not (snapshot_dir / "record_failures.jsonl").exists()
 
 
+def test_urllib_unexpected_eof_is_recorded_and_replayed(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    record_probe = r'''
+import http.client
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+class TruncatedHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", "64")
+        self.end_headers()
+        self.wfile.write(b'{"ok":')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args):
+        pass
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TruncatedHandler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/agent/runs" % server.server_port
+try:
+    urllib.request.urlopen(url, timeout=2)
+except http.client.IncompleteRead as exc:
+    outcome = {"error_type": type(exc).__name__}
+else:
+    raise AssertionError("truncated response did not raise IncompleteRead")
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+snapshots = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots")
+failures = os.path.join(os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "record_failures.jsonl")
+print(json.dumps({
+    "failure_file_exists": os.path.exists(failures),
+    "outcome": outcome,
+    "snapshot_count": len(os.listdir(snapshots)),
+    "url": url,
+}))
+'''
+    recorded = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + record_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert recorded.returncode == 0, recorded.stderr
+    recorded_doc = json.loads(recorded.stdout)
+    assert recorded_doc["outcome"] == {"error_type": "IncompleteRead"}
+    assert recorded_doc["snapshot_count"] == 1
+    assert recorded_doc["failure_file_exists"] is False
+
+    replay_probe = (
+        "\nimport http.client, json, urllib.request\n"
+        "try:\n"
+        f"    urllib.request.urlopen({recorded_doc['url']!r}, timeout=1)\n"
+        "except http.client.IncompleteRead as exc:\n"
+        "    print(json.dumps({'error_type': type(exc).__name__, "
+        "'partial_bytes': len(exc.partial), 'expected': exc.expected}))\n"
+        "else:\n"
+        "    raise AssertionError('replayed EOF was not preserved')\n"
+    )
+    replayed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert replayed.returncode == 0, replayed.stderr
+    assert json.loads(replayed.stdout) == {
+        "error_type": "IncompleteRead",
+        "partial_bytes": 0,
+        "expected": 1,
+    }
+
+
 def test_direct_urllib_timeout_is_recorded_and_replayed(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     record_probe = r'''
@@ -2152,6 +2307,35 @@ def test_inprocess_urllib_replay_preserves_dns_failure(tmp_path):
 
     assert isinstance(raised.value.reason, socket.gaierror)
     assert "live detail" not in str(raised.value)
+
+
+def test_inprocess_urllib_replay_preserves_unexpected_eof(tmp_path):
+    import http.client
+    import urllib.request
+
+    recorder = _record_store(tmp_path)
+    url = "https://api.exa.ai/agent/runs"
+    recorder.record_urllib_transport_error(
+        build_snapshot_request("POST", url, body={"query": "bounded"}),
+        error=http.client.IncompleteRead(b"provider fragment", 91),
+    )
+    snapshot_text = next((tmp_path / "snapshot_set" / "snapshots").iterdir()).read_text(
+        encoding="utf-8"
+    )
+    assert "provider fragment" not in snapshot_text
+    assert '"reason_type":"unexpected_eof"' in snapshot_text
+
+    request = urllib.request.Request(
+        url,
+        data=b'{"query":"bounded"}',
+        headers={"content-type": "application/json"},
+    )
+    with _replay_store(tmp_path).replay_installed():
+        with pytest.raises(http.client.IncompleteRead) as raised:
+            urllib.request.urlopen(request)
+
+    assert raised.value.partial == b""
+    assert raised.value.expected == 1
 
 
 def test_inprocess_urllib_transport_recording_rejects_http_error(tmp_path):

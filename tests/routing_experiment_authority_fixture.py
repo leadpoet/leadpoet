@@ -164,7 +164,14 @@ def authority_fixture():
         variants=tuple(
             replace(
                 item,
-                artifact=artifact,
+                artifact=replace(
+                    artifact,
+                    branch=(
+                        "main"
+                        if item.variant_id == base.baseline_variant_id
+                        else "leadpoet-lab"
+                    ),
+                ),
                 artifact_authority_manifest=authority_manifest,
             )
             for item in base.variants

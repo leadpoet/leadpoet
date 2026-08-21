@@ -23,6 +23,7 @@ from gateway.research_lab.routing_product_composition import (
     AUTHORITY_BUNDLE_HASH_ENV,
     BINDING_CATALOG_MANIFEST_HASH_ENV,
     MODEL_ROUTING_CATALOG_HASH_ENV,
+    SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV,
     PROTECTED_RELEASE_BOOT_IDENTITY_HASH_ENV,
     PROTECTED_RELEASE_BUILD_MANIFEST_HASH_ENV,
     PROTECTED_RELEASE_COMMIT_SHA_ENV,
@@ -85,6 +86,7 @@ BINDING_CATALOG = "sha256:" + "d" * 64
 BUNDLE = "sha256:" + "e" * 64
 UNIT_MANIFEST = "sha256:" + "f" * 64
 UNIT_SET = "sha256:" + "1" * 64
+SITE_MODEL_RELEASE = "sha256:" + "7" * 64
 _AUTHORITY_FIXTURE = authority_fixture()
 _PROTECTED_RELEASE_RECEIPT = dict(
     _AUTHORITY_FIXTURE["attempts"][0]["attempt_doc"][
@@ -256,11 +258,24 @@ class _ModelRunnerRegistry(ExactModelRunnerRegistry):
     def preflight_all(self):
         return {"reviewed": {"preflight_sha256": "9" * 64}}
 
-    def resolve(self, _artifact):
+    def resolve(self, artifact):
+        artifact_identity = (
+            artifact.to_dict()
+            if callable(getattr(artifact, "to_dict", None))
+            else dict(artifact)
+        )
         return SimpleNamespace(
             key="reviewed",
             preflight=lambda: {"preflight_sha256": "9" * 64},
             host_capability_manifest={"bindings": []},
+            artifact_identity=artifact_identity,
+            protocol=SimpleNamespace(
+                release_identity={
+                    "release_identity_sha256": (
+                        SITE_MODEL_RELEASE.removeprefix("sha256:")
+                    )
+                }
+            ),
         )
 
 
@@ -360,6 +375,7 @@ def _env():
         "RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION": PRODUCT_COMPOSITION_VERSION,
         "RESEARCH_LAB_ROUTING_MODEL_COMMIT_SHA": COMMIT,
         MODEL_ROUTING_CATALOG_HASH_ENV: MODEL_CATALOG,
+        SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV: SITE_MODEL_RELEASE,
         BINDING_CATALOG_MANIFEST_HASH_ENV: BINDING_CATALOG,
         "RESEARCH_LAB_ROUTING_CONTRACT_HASH": CONTRACT,
         AUTHORITY_BUNDLE_HASH_ENV: BUNDLE,
@@ -392,6 +408,22 @@ def test_reviewed_gate_keeps_model_and_protected_release_identities_separate():
     assert _PROTECTED_RELEASE_RECEIPT["commit_sha"] != COMMIT
     authority = build_reviewed_admission_authority(_inputs(), environment=_env())
     assert authority.inputs.artifact_lineage.commit_sha == COMMIT
+    assert authority.site_production_model_release_identity_sha256 == (
+        SITE_MODEL_RELEASE.removeprefix("sha256:")
+    )
+
+
+def test_reviewed_gate_requires_site_production_model_release_identity():
+    environment = _env()
+    environment.pop(SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV)
+
+    with pytest.raises(
+        RoutingProductCompositionError,
+        match="Site production model release identity",
+    ):
+        build_reviewed_admission_authority(
+            _inputs(), environment=environment
+        )
 
 
 def test_reviewed_gate_rejects_missing_model_registry_before_provider_rpc():
@@ -743,6 +775,7 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
             "lineage"
         ].commit_sha,
         MODEL_ROUTING_CATALOG_HASH_ENV: context["lineage"].routing_catalog_hash,
+        SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV: SITE_MODEL_RELEASE,
         BINDING_CATALOG_MANIFEST_HASH_ENV: context["catalog"].manifest_hash,
         "RESEARCH_LAB_ROUTING_CONTRACT_HASH": context[
             "lineage"

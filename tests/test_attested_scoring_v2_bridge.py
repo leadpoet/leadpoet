@@ -33,6 +33,7 @@ from gateway.tee.execution_job_manager_v2 import (
 from gateway.tee.model_sandbox_v2 import (
     ModelSandboxFailureProjectionV1,
     ModelSandboxV2Error,
+    _runtime_probe_observation_plan_v1,
 )
 from Leadpoet.utils.subnet_epoch import CUTOVER_PATH_ENV
 from gateway.tee.coordinator_executor_v2 import (
@@ -78,10 +79,39 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
     build_compact_ancestry_proof_from_delta_v2,
     issue_ancestry_certificate_v2,
 )
+from research_lab.eval.private_runtime import (
+    qualification_outcome_contract_sha256_v2,
+)
 
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+def _qualification_compatibility_receipt() -> dict:
+    body = {
+        "schema_version": (
+            "leadpoet.sourcing-model-qualification-compatibility-admission.v2"
+        ),
+        "consumer_api_version": (
+            "research-lab-qualification-consumer-api:v2"
+        ),
+        "decision": "accepted",
+        "admission_mode": "qualification_protocol_v2",
+        "policy_hash": (
+            "sha256:" + qualification_outcome_contract_sha256_v2()
+        ),
+        "source_tree_hash": _hash("8"),
+        "git_commit_sha": "7" * 40,
+        "manifest_hash": _hash("6"),
+        "image_digest": "example.invalid/model@" + _hash("5"),
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v59",
+        "contract_hash": _hash("4"),
+        "parity_hash": _hash("3"),
+        "bindings": {},
+        "entrypoints": ["adapter_metadata", "run_icp_outcome"],
+    }
+    return {**body, "receipt_hash": sha256_json(body)}
 
 
 def _authenticated_source_catalog_row() -> dict:
@@ -746,15 +776,26 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     monkeypatch,
 ):
     release = _release()
-    client = _Client(
-        release,
-        executor=lambda _operation, payload, _context: ExecutionResultV2(
+    compatibility_receipt = _qualification_compatibility_receipt()
+    observed_probe_plans = []
+
+    def execute_compatibility(_operation, _payload, context):
+        plan = _runtime_probe_observation_plan_v1(
+            compatibility_receipt,
+            execution_job_id=context.job_id,
+        )
+        observed_probe_plans.append(plan)
+        return ExecutionResultV2(
             output={
                 "schema_version": "test.model_compatibility.v1",
-                "payload_hash": sha256_json(payload),
+                "consumer_runtime_observation_plan": plan,
             },
             artifact_hashes=(_hash("9"),),
-        ),
+        )
+
+    client = _Client(
+        release,
+        executor=execute_compatibility,
     )
     durable_row = None
     durable_graph = None
@@ -841,7 +882,12 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
 
     second = await execute_scoring_v2(**common)
 
+    assert len(observed_probe_plans) == 2
+    assert observed_probe_plans[0] == observed_probe_plans[1]
     assert len(observed_current_receipts) == 2
+    assert observed_current_receipts[0]["output_root"] == (
+        observed_current_receipts[1]["output_root"]
+    )
     assert observed_current_receipts[0]["receipt_hash"] != (
         observed_current_receipts[1]["receipt_hash"]
     )

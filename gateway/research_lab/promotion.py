@@ -65,7 +65,7 @@ from research_lab.eval.promotion_metric import (
     promotion_improvement_metric,
 )
 from research_lab.sourcing_model_contract_check import (
-    semantic_compatibility_policy_identity_v1,
+    compatibility_admission_policy_identity,
 )
 
 
@@ -1109,9 +1109,12 @@ async def _revalidate_private_model_activation_references(
         != admitted.artifact_identity
     ):
         raise RuntimeError("private model artifact or signed pointer changed across activation")
-    _policy, policy_hash = semantic_compatibility_policy_identity_v1()
-    if str(admitted.compatibility_receipt.get("policy_hash") or "") != policy_hash:
-        raise RuntimeError("private model compatibility policy changed across activation")
+    try:
+        compatibility_admission_policy_identity(admitted.compatibility_receipt)
+    except ValueError as exc:
+        raise RuntimeError(
+            "private model compatibility policy changed across activation"
+        ) from exc
     if admitted.branch_fence_mode == "immutable_manifest_only":
         if (
             admitted.mode

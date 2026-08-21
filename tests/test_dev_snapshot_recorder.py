@@ -24,6 +24,103 @@ from research_lab.eval.snapshot_store import (
 from scripts import record_research_lab_dev_snapshots as recorder
 
 
+def _artifact_document() -> dict[str, object]:
+    return {
+        "model_artifact_hash": "sha256:" + "1" * 64,
+        "git_commit_sha": "2" * 40,
+        "image_digest": "example.invalid/model@sha256:" + "3" * 64,
+        "config_hash": "sha256:" + "4" * 64,
+        "component_registry_version": "registry-v1",
+        "scoring_adapter_version": "adapter-v1",
+        "manifest_uri": "s3://private/model.json",
+        "manifest_hash": "sha256:" + "5" * 64,
+        "signature_ref": "kms:test",
+    }
+
+
+def test_snapshot_adapter_authority_selects_artifact_bound_bootstrap(
+    monkeypatch, tmp_path
+):
+    artifact = _artifact_document()
+    receipt = {"admission_mode": "qualification_protocol_v2"}
+    artifact_path = tmp_path / "artifact.json"
+    receipt_path = tmp_path / "receipt.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    observed = {}
+
+    def select(value, *, artifact):
+        observed["receipt"] = dict(value)
+        observed["artifact"] = artifact.to_dict()
+        return "selected-v2-bootstrap"
+
+    monkeypatch.setattr(
+        "gateway.tee.model_sandbox_v2."
+        "_model_adapter_bootstrap_for_compatibility_receipt_v1",
+        select,
+    )
+
+    assert recorder._load_snapshot_adapter_authority(
+        artifact_path=str(artifact_path),
+        compatibility_receipt_path=str(receipt_path),
+        image_digest=str(artifact["image_digest"]),
+        source_commit=str(artifact["git_commit_sha"]),
+        model_config_hash=str(artifact["config_hash"]),
+        manifest_hash=str(artifact["manifest_hash"]),
+    ) == ("selected-v2-bootstrap", "qualification_protocol_v2")
+    assert observed["receipt"] == receipt
+    assert {
+        key: observed["artifact"][key] for key in artifact
+    } == artifact
+
+
+def test_snapshot_adapter_authority_rejects_identity_drift(tmp_path):
+    artifact = _artifact_document()
+    artifact_path = tmp_path / "artifact.json"
+    receipt_path = tmp_path / "receipt.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    receipt_path.write_text(
+        json.dumps({"admission_mode": "qualification_protocol_v2"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="differs from recorder identity"):
+        recorder._load_snapshot_adapter_authority(
+            artifact_path=str(artifact_path),
+            compatibility_receipt_path=str(receipt_path),
+            image_digest=str(artifact["image_digest"]),
+            source_commit="6" * 40,
+            model_config_hash=str(artifact["config_hash"]),
+            manifest_hash=str(artifact["manifest_hash"]),
+        )
+
+
+def test_v2_snapshot_output_requires_complete_typed_outcome(monkeypatch):
+    monkeypatch.setattr(
+        "research_lab.eval.private_runtime.validate_qualification_outcome_envelope_v2",
+        lambda value: dict(value),
+    )
+    complete = {
+        "completion_state": "complete",
+        "companies": [{"company_name": "Example"}],
+    }
+    assert recorder._decode_adapter_companies(
+        complete,
+        admission_mode="qualification_protocol_v2",
+    ) == complete["companies"]
+
+    with pytest.raises(RuntimeError, match="qualification outcome is incomplete"):
+        recorder._decode_adapter_companies(
+            {"completion_state": "incomplete", "companies": []},
+            admission_mode="qualification_protocol_v2",
+        )
+
+
+def test_legacy_snapshot_output_remains_a_company_array():
+    companies = [{"company_name": "Example"}]
+    assert recorder._decode_adapter_companies(companies, admission_mode="legacy") == companies
+
+
 def test_recording_failure_summary_deduplicates_events_and_icps(tmp_path):
     failure_file = tmp_path / "record_failures.jsonl"
     rows = [
@@ -268,6 +365,11 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
         "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
         lambda *args, **kwargs: {},
     )
+    monkeypatch.setattr(
+        recorder,
+        "_decode_adapter_companies",
+        lambda *args, **kwargs: [],
+    )
 
     assert recorder._record_icp_with_docker(
         image_digest="example.invalid/model@sha256:" + "1" * 64,
@@ -281,6 +383,8 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
         timeout_seconds=300,
         reuse_existing=reuse_existing,
         retry_transient=retry_transient,
+        adapter_bootstrap="selected-v2-bootstrap",
+        admission_mode="qualification_protocol_v2",
     ) == []
 
     docker_environment = [
@@ -292,6 +396,8 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
     assert (expected in docker_environment) is reuse_existing
     retry_expected = f"{SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV}=true"
     assert (retry_expected in docker_environment) is retry_transient
+    assert "LEADPOET_QUALIFICATION_PROTOCOL_V2=1" in docker_environment
+    assert any("selected-v2-bootstrap" in argument for argument in captured["command"])
 
 
 def test_snapshot_record_retry_reuses_partial_immutable_capture(
@@ -568,6 +674,11 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
         "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
         lambda *args, **kwargs: {},
     )
+    monkeypatch.setattr(
+        recorder,
+        "_decode_adapter_companies",
+        lambda *args, **kwargs: [],
+    )
 
     assert recorder._replay_icp_with_docker(
         image_digest="example.invalid/model@sha256:" + "1" * 64,
@@ -579,6 +690,7 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
         },
         snapshot_dir=str(tmp_path),
         timeout_seconds=300,
+        admission_mode="qualification_protocol_v2",
     ) == []
 
     command = captured["command"]
@@ -591,6 +703,7 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
     for group in recorder.PROVIDER_KEY_GROUPS:
         for name in group:
             assert f"{name}=research-lab-offline-replay" in replay_environment
+    assert "LEADPOET_QUALIFICATION_PROTOCOL_V2=1" in replay_environment
     assert all("sk-or-" not in value.lower() for value in replay_environment)
 
 

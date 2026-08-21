@@ -1585,8 +1585,13 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
         selected_root: Path,
         selected_receipt,
         selected_artifact,
+        *,
+        execution_job_id: str,
     ):
-        observation_plan = _runtime_probe_observation_plan_v1(selected_receipt)
+        observation_plan = _runtime_probe_observation_plan_v1(
+            selected_receipt,
+            execution_job_id=execution_job_id,
+        )
         metadata_completed = subprocess.run(
             [
                 sys.executable,
@@ -1629,16 +1634,72 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
             observation_plan=observation_plan,
         )
 
+    consumer_job_id = (
+        "scoring-v2:run-model-sandbox-v2:" + "1" * 32
+    )
+    other_job_id = "scoring-v2:run-model-sandbox-v2:" + "2" * 32
+    consumer_plan = _runtime_probe_observation_plan_v1(
+        compatibility_receipt,
+        execution_job_id=consumer_job_id,
+    )
+    repeated_consumer_plan = _runtime_probe_observation_plan_v1(
+        compatibility_receipt,
+        execution_job_id=consumer_job_id,
+    )
+    other_job_plan = _runtime_probe_observation_plan_v1(
+        compatibility_receipt,
+        execution_job_id=other_job_id,
+    )
+    successor_plan = _runtime_probe_observation_plan_v1(
+        successor_receipt,
+        execution_job_id=consumer_job_id,
+    )
+    assert repeated_consumer_plan == consumer_plan
+    assert other_job_plan["qualification_outcome_probes"] != (
+        consumer_plan["qualification_outcome_probes"]
+    )
+    assert successor_plan["qualification_outcome_probes"] != (
+        consumer_plan["qualification_outcome_probes"]
+    )
+
+    tampered_receipt = deepcopy(compatibility_receipt)
+    tampered_receipt["source_tree_hash"] = HASH_A
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="probe identity is invalid",
+    ):
+        _runtime_probe_observation_plan_v1(
+            tampered_receipt,
+            execution_job_id=consumer_job_id,
+        )
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="probe identity is invalid",
+    ):
+        _runtime_probe_observation_plan_v1(
+            compatibility_receipt,
+            execution_job_id="scoring-v2:run-model-sandbox-v2:not-exact",
+        )
+
     consumer_probe = measure_metadata_and_nonce_probes(
         source_root,
         compatibility_receipt,
         artifact,
+        execution_job_id=consumer_job_id,
+    )
+    repeated_consumer_probe = measure_metadata_and_nonce_probes(
+        source_root,
+        compatibility_receipt,
+        artifact,
+        execution_job_id=consumer_job_id,
     )
     successor_probe = measure_metadata_and_nonce_probes(
         successor_root,
         successor_receipt,
         successor_artifact,
+        execution_job_id=other_job_id,
     )
+    assert repeated_consumer_probe == consumer_probe
     assert consumer_probe["invariants"]["profile"] == "qualification_protocol_v2"
     assert set(
         consumer_probe["invariants"]["qualification_outcome_protocol"]["cases"]

@@ -365,6 +365,11 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
         "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
         lambda *args, **kwargs: {},
     )
+    monkeypatch.setattr(
+        recorder,
+        "_decode_adapter_companies",
+        lambda *args, **kwargs: [],
+    )
 
     assert recorder._record_icp_with_docker(
         image_digest="example.invalid/model@sha256:" + "1" * 64,
@@ -379,6 +384,7 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
         reuse_existing=reuse_existing,
         retry_transient=retry_transient,
         adapter_bootstrap="selected-v2-bootstrap",
+        admission_mode="qualification_protocol_v2",
     ) == []
 
     docker_environment = [
@@ -390,6 +396,7 @@ def test_record_docker_only_enables_existing_snapshot_reuse_when_requested(
     assert (expected in docker_environment) is reuse_existing
     retry_expected = f"{SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV}=true"
     assert (retry_expected in docker_environment) is retry_transient
+    assert "LEADPOET_QUALIFICATION_PROTOCOL_V2=1" in docker_environment
     assert any("selected-v2-bootstrap" in argument for argument in captured["command"])
 
 
@@ -667,6 +674,11 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
         "research_lab.eval.private_runtime.validate_sourcing_runtime_receipt",
         lambda *args, **kwargs: {},
     )
+    monkeypatch.setattr(
+        recorder,
+        "_decode_adapter_companies",
+        lambda *args, **kwargs: [],
+    )
 
     assert recorder._replay_icp_with_docker(
         image_digest="example.invalid/model@sha256:" + "1" * 64,
@@ -678,6 +690,7 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
         },
         snapshot_dir=str(tmp_path),
         timeout_seconds=300,
+        admission_mode="qualification_protocol_v2",
     ) == []
 
     command = captured["command"]
@@ -690,6 +703,7 @@ def test_offline_replay_uses_only_nonsecret_key_sentinels(monkeypatch, tmp_path)
     for group in recorder.PROVIDER_KEY_GROUPS:
         for name in group:
             assert f"{name}=research-lab-offline-replay" in replay_environment
+    assert "LEADPOET_QUALIFICATION_PROTOCOL_V2=1" in replay_environment
     assert all("sk-or-" not in value.lower() for value in replay_environment)
 
 

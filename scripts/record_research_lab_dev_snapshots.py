@@ -485,6 +485,8 @@ def _record_icp_with_docker(
     for name in private_runtime.private_model_env_passthrough():
         if name in os.environ:
             env_args.extend(["-e", name])
+    if admission_mode == "qualification_protocol_v2":
+        env_args.extend(["-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"])
     if reuse_existing:
         env_args.extend(["-e", f"{SNAPSHOT_RECORD_REUSE_EXISTING_ENV}=true"])
     if retry_transient:
@@ -724,6 +726,8 @@ def _replay_icp_with_docker(
         container_dir, miss_policy=MISS_POLICY_STRICT
     ).items():
         env_args.extend(["-e", f"{name}={value}"])
+    if admission_mode == "qualification_protocol_v2":
+        env_args.extend(["-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"])
     # The measured sourcing adapter validates provider-key presence before it
     # issues its first request. Replay never receives real credentials and has
     # no network; these non-secret sentinels only let startup reach the strict

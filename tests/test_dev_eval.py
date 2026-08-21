@@ -378,8 +378,22 @@ def test_urllib_record_and_replay_preserve_standard_header_contract(tmp_path):
     record_probe = r'''
 import http.server
 import json
+import sys
 import threading
+import types
 import urllib.request
+
+route_calls = []
+package = types.ModuleType("sourcing_model")
+package.__path__ = []
+route = types.ModuleType("sourcing_model.qualification_route")
+def transport_headers():
+    route_calls.append("record")
+    return {"X-Leadpoet-Qualification-Route-Commitment": "a" * 64}
+route.transport_headers = transport_headers
+package.qualification_route = route
+sys.modules["sourcing_model"] = package
+sys.modules["sourcing_model.qualification_route"] = route
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -407,21 +421,36 @@ try:
 finally:
     server.shutdown()
     server.server_close()
-print(json.dumps({"outcome": outcome, "url": url}, sort_keys=True))
+print(json.dumps({"outcome": outcome, "route_calls": route_calls, "url": url}, sort_keys=True))
 '''
     recorded = subprocess.run(
         [sys.executable, "-c", dev_record_bootstrap() + record_probe],
         text=True,
         capture_output=True,
         timeout=60,
-        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
         check=False,
     )
     assert recorded.returncode == 0, recorded.stderr
     recorded_doc = json.loads(recorded.stdout)
 
     replay_probe = (
-        "\nimport json, urllib.request\n"
+        "\nimport json, sys, types, urllib.request\n"
+        "route_calls = []\n"
+        "package = types.ModuleType('sourcing_model')\n"
+        "package.__path__ = []\n"
+        "route = types.ModuleType('sourcing_model.qualification_route')\n"
+        "def transport_headers():\n"
+        "    route_calls.append('replay')\n"
+        "    return {'X-Leadpoet-Qualification-Route-Commitment': 'b' * 64}\n"
+        "route.transport_headers = transport_headers\n"
+        "package.qualification_route = route\n"
+        "sys.modules['sourcing_model'] = package\n"
+        "sys.modules['sourcing_model.qualification_route'] = route\n"
         f"with urllib.request.urlopen({recorded_doc['url']!r}) as response:\n"
         "    outcome = {\n"
         "        'body': response.read().decode(response.headers.get_content_charset()),\n"
@@ -429,23 +458,63 @@ print(json.dumps({"outcome": outcome, "url": url}, sort_keys=True))
         "        'header': response.getheader('CONTENT-TYPE'),\n"
         "        'headers': dict(response.getheaders()),\n"
         "    }\n"
-        "print(json.dumps(outcome, sort_keys=True))\n"
+        "print(json.dumps({'outcome': outcome, 'route_calls': route_calls}, sort_keys=True))\n"
     )
     replayed = subprocess.run(
         [sys.executable, "-c", dev_replay_bootstrap() + replay_probe],
         text=True,
         capture_output=True,
         timeout=60,
-        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
         check=False,
     )
     assert replayed.returncode == 0, replayed.stderr
-    assert json.loads(replayed.stdout) == recorded_doc["outcome"]
+    replayed_doc = json.loads(replayed.stdout)
+    assert replayed_doc["outcome"] == recorded_doc["outcome"]
+    assert recorded_doc["route_calls"] == ["record"]
+    assert replayed_doc["route_calls"] == ["replay"]
     assert recorded_doc["outcome"]["body"] == '{"ok": true}'
     assert recorded_doc["outcome"]["charset"] == "iso-8859-1"
     assert recorded_doc["outcome"]["header"] == (
         "application/json; charset=iso-8859-1"
     )
+
+
+def test_v2_replay_bootstrap_rejects_invalid_route_headers_before_lookup(tmp_path):
+    probe = r'''
+import sys
+import types
+import urllib.request
+
+package = types.ModuleType("sourcing_model")
+package.__path__ = []
+route = types.ModuleType("sourcing_model.qualification_route")
+route.transport_headers = lambda: {"X-Untrusted": "value"}
+package.qualification_route = route
+sys.modules["sourcing_model"] = package
+sys.modules["sourcing_model.qualification_route"] = route
+urllib.request.urlopen("https://api.exa.ai/search")
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(tmp_path),
+            "LEADPOET_QUALIFICATION_PROTOCOL_V2": "1",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "qualification route transport headers are invalid" in completed.stderr
+    assert "research_lab_dev_snapshot_miss" not in completed.stderr
 
 
 def test_replay_bootstrap_serves_httpx_async_client_from_snapshot_dir(tmp_path):

@@ -1713,6 +1713,55 @@ _RL_DEV_HTTPX_TRANSPORT_ERROR_TYPES = frozenset({
     "WriteError",
     "WriteTimeout",
 })
+_RL_DEV_QUALIFICATION_PROTOCOL_V2_ENV = "LEADPOET_QUALIFICATION_PROTOCOL_V2"
+_RL_DEV_QUALIFICATION_ROUTE_HEADER = (
+    "X-Leadpoet-Qualification-Route-Commitment"
+)
+_RL_DEV_QUALIFICATION_ROUTE_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _rl_dev_observe_qualification_transport():
+    # Mirror the V2 sandbox route hook at the snapshot transport boundary.
+    advertised = str(
+        os.environ.get(_RL_DEV_QUALIFICATION_PROTOCOL_V2_ENV, "") or ""
+    ).strip()
+    if advertised not in ("", "1"):
+        raise RuntimeError("qualification protocol environment is invalid")
+    require_hook = advertised == "1"
+    module_name = "sourcing_model.qualification_route"
+    try:
+        import importlib
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if not require_hook and exc.name in ("sourcing_model", module_name):
+            return
+        raise RuntimeError(
+            "qualification route transport hook is unavailable"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "qualification route transport hook is unavailable"
+        ) from exc
+    hook = getattr(module, "transport_headers", None)
+    if not callable(hook):
+        if not require_hook:
+            return
+        raise RuntimeError("qualification route transport hook is invalid")
+    try:
+        value = hook()
+    except Exception as exc:
+        raise RuntimeError("qualification route transport hook failed") from exc
+    if value == {}:
+        return
+    from collections.abc import Mapping
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {_RL_DEV_QUALIFICATION_ROUTE_HEADER}
+        or not _RL_DEV_QUALIFICATION_ROUTE_RE.fullmatch(
+            str(value.get(_RL_DEV_QUALIFICATION_ROUTE_HEADER) or "")
+        )
+    ):
+        raise RuntimeError("qualification route transport headers are invalid")
 
 
 def _rl_dev_canonical_json(data):
@@ -2203,6 +2252,7 @@ def _rl_dev_install_replay():
         url = getattr(req, "full_url", req if isinstance(req, str) else "")
         method = getattr(req, "get_method", lambda: "GET")()
         data = getattr(req, "data", None)
+        _rl_dev_observe_qualification_transport()
         return _rl_dev_urllib_response(
             str(url), _rl_dev_lookup(method, str(url), data)
         )
@@ -2213,6 +2263,7 @@ def _rl_dev_install_replay():
         import requests as _rl_requests
 
         def _rl_dev_replay_requests_send(session, prepared, *args, **kwargs):
+            _rl_dev_observe_qualification_transport()
             doc = _rl_dev_lookup(str(prepared.method or "GET"), str(prepared.url or ""), prepared.body)
             response = _rl_requests.models.Response()
             response.status_code = int(doc.get("status") or 0)
@@ -2235,6 +2286,7 @@ def _rl_dev_install_replay():
         import httpx as _rl_httpx
 
         def _rl_dev_replay_httpx_send(client, request, *args, **kwargs):
+            _rl_dev_observe_qualification_transport()
             doc = _rl_dev_lookup(
                 str(request.method or "GET"),
                 str(request.url or ""),
@@ -2268,6 +2320,7 @@ def _rl_dev_install_replay():
             body = kwargs.get("json")
             if body is None:
                 body = kwargs.get("data")
+            _rl_dev_observe_qualification_transport()
             doc = _rl_dev_lookup(
                 str(method or "GET"),
                 str(str_or_url),
@@ -2442,6 +2495,7 @@ def _rl_dev_install_record():
         url = str(getattr(req, "full_url", req if isinstance(req, str) else ""))
         method = getattr(req, "get_method", lambda: "GET")()
         data = getattr(req, "data", None)
+        _rl_dev_observe_qualification_transport()
         existing = _rl_dev_lookup_existing(method, url, data)
         if existing is not None:
             return _rl_dev_urllib_response(url, existing)
@@ -2506,6 +2560,7 @@ def _rl_dev_install_record():
         _rl_dev_original_requests_send = _rl_requests.Session.send
 
         def _rl_dev_record_requests_send(session, prepared, *args, **kwargs):
+            _rl_dev_observe_qualification_transport()
             existing = _rl_dev_lookup_existing(
                 str(prepared.method or "GET"),
                 str(prepared.url or ""),
@@ -2563,6 +2618,7 @@ def _rl_dev_install_record():
         _rl_dev_original_httpx_send = _rl_httpx.Client.send
 
         def _rl_dev_record_httpx_send(client, request, *args, **kwargs):
+            _rl_dev_observe_qualification_transport()
             existing = _rl_dev_lookup_existing(
                 str(request.method or "GET"),
                 str(request.url or ""),
@@ -2624,6 +2680,7 @@ def _rl_dev_install_record():
         _rl_dev_original_httpx_async_send = _rl_httpx.AsyncClient.send
 
         async def _rl_dev_record_httpx_async_send(client, request, *args, **kwargs):
+            _rl_dev_observe_qualification_transport()
             existing = _rl_dev_lookup_existing(
                 str(request.method or "GET"),
                 str(request.url or ""),
@@ -2694,6 +2751,7 @@ def _rl_dev_install_record():
             body = kwargs.get("json")
             if body is None:
                 body = kwargs.get("data")
+            _rl_dev_observe_qualification_transport()
             existing = _rl_dev_lookup_existing(
                 str(method or "GET"),
                 str(str_or_url),

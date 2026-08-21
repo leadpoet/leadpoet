@@ -3092,12 +3092,12 @@
       "symbol": "RUNSC_FAILURE_CODES_V1"
     },
     {
-      "ast_sha256": "sha256:45731476a74752fd45c6c6edde11bc57eb933429a092aa9d36aa6a3be6a15daa",
+      "ast_sha256": "sha256:c981af7e1388798afa5e505024e15bd125e32520b833dcdfe76eeaa25b509afc",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
     {
-      "ast_sha256": "sha256:027f8ca6bf110e4f63325c67786dd95ddff48d2cb41e2494d352d68f605e760e",
+      "ast_sha256": "sha256:a92a7c9a81d971740d35c23d9b44e89d3342ac7e6c1a2437021f686d60f3cca8",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2._run_metadata_compatibility"
     },
@@ -3140,6 +3140,11 @@
       "ast_sha256": "sha256:7d28b2f8d831e5ca80f41e97c45bbafdd01e94b88d777d86fe377b09ca34ef95",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_current_cgroup_v1_paths"
+    },
+    {
+      "ast_sha256": "sha256:1d724e122b21734fa7bb7f75274f3d6e40d2a675b1d6f8cb24b21663ef16559f",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_deterministic_qualification_probe_nonce_v1"
     },
     {
       "ast_sha256": "sha256:e8cec3ff5f58e3a1c37e2d94b67b2540972b8248c5f47c9e5279cb35ae7451c1",
@@ -3217,7 +3222,7 @@
       "symbol": "_runtime_probe_expected_invariants"
     },
     {
-      "ast_sha256": "sha256:1b1af00eb09e5f3ad17a968f6cc98a9ff7decef5fa70914e518f4bc3b2ee89d9",
+      "ast_sha256": "sha256:1a805ac70c6ef5f7bf78577bbbd3137b70ceeb7296ea4dcdb8d7331ceea822e5",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_runtime_probe_observation_plan_v1"
     },
@@ -6347,7 +6352,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:32d1f915ae28beb18dfb8f157e80109de88be49e0772365f373d5da70e507559",
-  "protected_source_commit": "590c26aa0573e5a16bc6d45a6d1c4574c4bc315f",
+  "manifest_hash": "sha256:4f891096876cf3b985c682d2b079879495cca978b1c2268615eaf5c83b9c8345",
+  "protected_source_commit": "214eaed38b0f651c52b402f71504ab987e7add47",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

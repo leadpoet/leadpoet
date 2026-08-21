@@ -1098,6 +1098,8 @@ def _runtime_probe_expected_invariants(
 
 def _runtime_probe_observation_plan_v1(
     compatibility_receipt: Mapping[str, Any],
+    *,
+    execution_job_id: str,
 ) -> dict[str, Any]:
     invariant_policy = _runtime_invariant_policy_v1(compatibility_receipt)
     document = {
@@ -1117,13 +1119,76 @@ def _runtime_probe_observation_plan_v1(
                 "qualification_outcome_probes": [
             {
                 "case_id": case_id,
-                "nonce": secrets.token_hex(24),
+                "nonce": _deterministic_qualification_probe_nonce_v1(
+                    compatibility_receipt,
+                    execution_job_id=execution_job_id,
+                    case_id=case_id,
+                ),
             }
             for case_id in QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1
                 ],
             }
         )
     return document
+
+
+def _deterministic_qualification_probe_nonce_v1(
+    compatibility_receipt: Mapping[str, Any],
+    *,
+    execution_job_id: str,
+    case_id: str,
+) -> str:
+    """Derive one replay-stable challenge from the exact execution identity."""
+
+    receipt = dict(compatibility_receipt)
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    receipt_body = {
+        name: value for name, value in receipt.items() if name != "receipt_hash"
+    }
+    artifact_identity = {
+        "source_tree_hash": str(receipt.get("source_tree_hash") or ""),
+        "git_commit_sha": str(receipt.get("git_commit_sha") or ""),
+        "manifest_hash": str(receipt.get("manifest_hash") or ""),
+        "image_digest": str(receipt.get("image_digest") or ""),
+        "compatibility_policy_hash": str(receipt.get("policy_hash") or ""),
+        "compatibility_receipt_hash": receipt_hash,
+    }
+    if (
+        re.fullmatch(
+            r"scoring-v2:run-model-sandbox-v2:[0-9a-f]{32}",
+            str(execution_job_id or ""),
+        )
+        is None
+        or case_id not in QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1
+        or receipt_hash != sha256_json(receipt_body)
+        or not _HASH_RE.fullmatch(artifact_identity["source_tree_hash"])
+        or re.fullmatch(r"[0-9a-f]{40}", artifact_identity["git_commit_sha"])
+        is None
+        or not _HASH_RE.fullmatch(artifact_identity["manifest_hash"])
+        or re.fullmatch(
+            r"[^\s@]+@sha256:[0-9a-f]{64}",
+            artifact_identity["image_digest"],
+        )
+        is None
+        or not _HASH_RE.fullmatch(
+            artifact_identity["compatibility_policy_hash"]
+        )
+        or not _HASH_RE.fullmatch(
+            artifact_identity["compatibility_receipt_hash"]
+        )
+    ):
+        raise ModelSandboxV2Error(
+            "qualification runtime probe identity is invalid"
+        )
+    nonce_root = sha256_json(
+        {
+            "schema_version": "leadpoet.qualification-probe-nonce.v1",
+            "execution_job_id": execution_job_id,
+            "case_id": case_id,
+            "artifact_identity": artifact_identity,
+        }
+    )
+    return nonce_root.removeprefix("sha256:")
 
 
 def _consumer_runtime_probe_v1(
@@ -3729,7 +3794,8 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         stdin_payload = {
             "observation_plan": _runtime_probe_observation_plan_v1(
-                compatibility_receipt
+                compatibility_receipt,
+                execution_job_id=job_id,
             )
         }
         bundle = tmp_root / "bundle"

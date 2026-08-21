@@ -1228,6 +1228,7 @@ PROTECTED_SYMBOLS = {
         "_runtime_invariant_policy_v1",
         "_runtime_probe_expected_invariants",
         "_runtime_probe_observation_plan_v1",
+        "_deterministic_qualification_probe_nonce_v1",
         "_consumer_runtime_probe_v1",
         "validate_consumer_runtime_probe_v1",
         "_build_consumer_runtime_probe_from_observation_v1",

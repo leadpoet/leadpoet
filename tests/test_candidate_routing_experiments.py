@@ -42,10 +42,10 @@ def H(char: str) -> str:
     return "sha256:" + char * 64
 
 
-def _artifact() -> SourcingModelArtifactIdentity:
+def _artifact(*, branch: str = "leadpoet-lab") -> SourcingModelArtifactIdentity:
     return SourcingModelArtifactIdentity(
         repository="leadpoet/Sourcing_model",
-        branch="leadpoet-lab",
+        branch=branch,
         commit_sha="1" * 40,
         artifact_uri="s3://research-lab/model/candidate.tar.gz",
         model_artifact_hash=H("1"),
@@ -73,7 +73,8 @@ def _binding() -> ProviderBindingIdentity:
 
 
 def _spec() -> RoutingExperimentV2Spec:
-    artifact = _artifact()
+    champion_artifact = _artifact(branch="main")
+    challenger_artifact = _artifact()
     binding = _binding()
     feature_payload = {
         "schema_version": "routing-feature-set:v1",
@@ -92,14 +93,14 @@ def _spec() -> RoutingExperimentV2Spec:
     baseline = RoutingExperimentV2Variant(
         variant_id="baseline",
         stage="candidate_acquisition",
-        artifact=artifact,
+        artifact=champion_artifact,
         routing_payload={"profile_id": "baseline", "tools": [binding.tool_id]},
         binding_ids=(binding.binding_id,),
     )
     candidate = RoutingExperimentV2Variant(
         variant_id="candidate",
         stage="candidate_acquisition",
-        artifact=artifact,
+        artifact=challenger_artifact,
         routing_payload={"profile_id": "candidate", "tools": [binding.tool_id]},
         binding_ids=(binding.binding_id,),
     )
@@ -494,7 +495,7 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
     not os.environ.get("SOURCING_MODEL_CHECKOUT"),
     reason="requires an exact Sourcing_model checkout",
 )
-def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
+def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
     checkout = Path(os.environ["SOURCING_MODEL_CHECKOUT"]).resolve()
     fixture_spec = importlib.util.spec_from_file_location(
         "exact_pr274_model_runner_fixture",
@@ -503,11 +504,27 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
     assert fixture_spec is not None and fixture_spec.loader is not None
     fixture = importlib.util.module_from_spec(fixture_spec)
     original_path = list(sys.path)
-    sys.path.insert(0, str(checkout))
-    try:
-        fixture_spec.loader.exec_module(fixture)
-    finally:
+    isolated_prefixes = ("gateway", "qualification", "sourcing_model")
+    original_modules = {
+        name: module
+        for name, module in tuple(sys.modules.items())
+        if name in isolated_prefixes
+        or name.startswith(tuple(prefix + "." for prefix in isolated_prefixes))
+    }
+    for name in original_modules:
+        sys.modules.pop(name, None)
+    def restore_import_state() -> None:
         sys.path[:] = original_path
+        for name in tuple(sys.modules):
+            if name in isolated_prefixes or name.startswith(
+                tuple(prefix + "." for prefix in isolated_prefixes)
+            ):
+                sys.modules.pop(name, None)
+        sys.modules.update(original_modules)
+
+    request.addfinalizer(restore_import_state)
+    sys.path.insert(0, str(checkout))
+    fixture_spec.loader.exec_module(fixture)
     manifest = fixture._capability_manifest()
     identity = fixture._release_identity(manifest)
     start = fixture.build_model_start_request(
@@ -521,22 +538,71 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
         host_capability_manifest=manifest,
         release_identity=identity,
     )
-    terminal, _transitions = fixture._run(
-        start,
-        identity,
-        fixture._candidate(),
-    )
+    candidate = fixture._candidate()
+
+    def run_exact(*, candidate_latency_ms: float = 10):
+        current = fixture.continue_model_runner(
+            start,
+            expected_release_identity=identity,
+        )
+        provider_receipt = None
+        while current["status"] == "action_required":
+            action = current["action"]
+            completion = fixture._completion_for(action, candidate)
+            if action["action_type"] == "execute_candidate_tool":
+                provider_identity = {
+                    "binding_id": "binding.exact-model-runner",
+                    "tool_id": action["tool_id"],
+                    "binding_version": "model-runner-v1",
+                    "source_lineage_id": "lineage.exact-model-runner",
+                    "unit_ref": "icp.exact-model-runner",
+                    "request_fingerprint": H("f"),
+                    "outcome": "verified",
+                    "evidence_hash": H("e"),
+                    "credit_microunits": 0,
+                    "latency_ms": 10,
+                    "execution_mode": ReceiptExecutionMode.FIXTURE.value,
+                }
+                provider_receipt = ProviderReceipt(
+                    receipt_ref="provider_receipt:"
+                    + sha256_json(provider_identity).split(":", 1)[1][:16],
+                    **provider_identity,
+                )
+                completion = fixture.build_model_action_completion(
+                    action,
+                    outcome=completion["outcome"],
+                    reason_code=completion["reason_code"],
+                    provider_response=completion["provider_response"],
+                    calls=completion["calls"],
+                    cost_credits=completion["cost_credits"],
+                    latency_ms=candidate_latency_ms,
+                    provider_receipt_ref=provider_receipt.receipt_ref,
+                )
+            current = fixture.continue_model_runner(
+                start,
+                expected_release_identity=identity,
+                continuation=current["continuation"],
+                completion=completion,
+            )
+        assert provider_receipt is not None
+        return current, provider_receipt
+
+    terminal, provider_receipt = run_exact()
 
     adapted = adapt_exact_model_candidate_receipt(
         terminal,
         expected_release_identity_sha256=identity["release_identity_sha256"],
         expected_binding_contracts_sha256=manifest["binding_contracts_sha256"],
+        authoritative_provider_receipts=(provider_receipt,),
     )
     assert adapted["candidate_attempt_metrics"]
     assert adapted["candidate_attempt_metrics"][0][
-        "provider_returned_count"
+        "raw_candidate_count"
     ] == 1
     assert adapted["candidate_attempt_metrics"][0]["provider_call_count"] == 1
+    assert adapted["candidate_attempt_metrics"][0][
+        "provider_receipt_ref"
+    ] == provider_receipt.receipt_ref
     assert adapted["candidate_stop_reason"] == "target_reached"
     assert adapted["candidate_route"]["candidate_plan_sha256"]
 
@@ -551,6 +617,40 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
             expected_binding_contracts_sha256=manifest[
                 "binding_contracts_sha256"
             ],
+            authoritative_provider_receipts=(provider_receipt,),
+        )
+
+    mismatched_accounting_terminal, mismatched_accounting_provider = run_exact(
+        candidate_latency_ms=11
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="differs_from_provider_receipt",
+    ):
+        adapt_exact_model_candidate_receipt(
+            mismatched_accounting_terminal,
+            expected_release_identity_sha256=identity[
+                "release_identity_sha256"
+            ],
+            expected_binding_contracts_sha256=manifest[
+                "binding_contracts_sha256"
+            ],
+            authoritative_provider_receipts=(mismatched_accounting_provider,),
+        )
+
+    with pytest.raises(RoutingExperimentError, match="coverage_differs"):
+        adapt_exact_model_candidate_receipt(
+            terminal,
+            expected_release_identity_sha256=identity[
+                "release_identity_sha256"
+            ],
+            expected_binding_contracts_sha256=manifest[
+                "binding_contracts_sha256"
+            ],
+            authoritative_provider_receipts=(
+                provider_receipt,
+                _provider_receipt("icp.unreferenced"),
+            ),
         )
 
 

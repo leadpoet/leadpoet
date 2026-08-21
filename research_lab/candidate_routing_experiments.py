@@ -42,6 +42,10 @@ EXACT_MODEL_RUNNER_RECEIPT_VERSION = "model-runner-receipt:v1"
 EXACT_MODEL_CANDIDATE_METRIC_VERSION = (
     "leadpoet.exact_model_candidate_attempt_projection:v1"
 )
+EXACT_MODEL_CANDIDATE_WATERFALL_VERSION = "candidate-waterfall-receipt:v1"
+EXACT_MODEL_CANDIDATE_ATTEMPT_VERSION = (
+    "candidate-waterfall-attempt:v1"
+)
 
 _LAB_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MODEL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -52,6 +56,13 @@ _PROVIDER_RECEIPT_RE = re.compile(r"^provider_receipt:[0-9a-f]{16}$")
 _EVALUATION_RECEIPT_RE = re.compile(r"^routing_evaluation_v2:[0-9a-f]{16}$")
 _WATERFALL_RECEIPT_RE = re.compile(r"^candidate_waterfall:[0-9a-f]{24}$")
 _DISPOSITIONS = frozenset({"succeeded", "missed", "failed", "deferred", "skipped"})
+_PROVIDER_OUTCOME_BY_MODEL_OUTCOME = {
+    "succeeded": ProviderOutcome.VERIFIED.value,
+    "empty": ProviderOutcome.SOURCE_MISS.value,
+    "unavailable": ProviderOutcome.ADAPTER_FAILURE.value,
+    "timeout": ProviderOutcome.ADAPTER_FAILURE.value,
+    "failed": ProviderOutcome.ADAPTER_FAILURE.value,
+}
 
 
 def _safe_ref(value: Any, field_name: str) -> str:
@@ -88,13 +99,15 @@ def adapt_exact_model_candidate_receipt(
     *,
     expected_release_identity_sha256: str,
     expected_binding_contracts_sha256: str,
+    authoritative_provider_receipts: Sequence[ProviderReceipt],
 ) -> Mapping[str, Any]:
-    """Validate and project PR274's canonical candidate receipt only.
+    """Validate and project the canonical candidate waterfall receipt.
 
     This function does not receive a runtime, provider binding, route
-    compiler, endpoint, credential, or execution callback. PR274 has already
-    selected and executed the route. Lab only verifies its canonical receipt
-    and exposes candidate metrics for PR93 evaluation.
+    compiler, endpoint, credential, or execution callback. The model has
+    already selected and executed the route. Lab verifies the signed model
+    receipt against the independently persisted provider receipts, then
+    exposes candidate metrics for the shared routing evaluation.
     """
 
     if not isinstance(terminal_result, Mapping) or (
@@ -124,6 +137,26 @@ def adapt_exact_model_candidate_receipt(
         or sha256_json(receipt).split(":", 1)[1] != claimed_receipt_hash
     ):
         raise RoutingExperimentError("exact_model_candidate_receipt_identity_differs")
+    raw_waterfall = receipt.get("candidate_waterfall")
+    if not isinstance(raw_waterfall, Mapping):
+        raise RoutingExperimentError("exact_model_candidate_waterfall_is_missing")
+    waterfall = dict(raw_waterfall)
+    claimed_waterfall_hash = _model_hash(
+        waterfall.pop("waterfall_sha256", None),
+        "candidate_waterfall_hash",
+    )
+    if (
+        waterfall.get("schema_version")
+        != EXACT_MODEL_CANDIDATE_WATERFALL_VERSION
+        or not _model_hash(
+            waterfall.get("contract_sha256"),
+            "candidate_waterfall_contract_sha256",
+        )
+        or sha256_json(waterfall).split(":", 1)[1] != claimed_waterfall_hash
+        or waterfall.get("start_request_sha256")
+        != receipt.get("start_request_sha256")
+    ):
+        raise RoutingExperimentError("exact_model_candidate_waterfall_identity_differs")
     result = terminal_result.get("result")
     if not isinstance(result, Mapping) or (
         sha256_json(result).split(":", 1)[1]
@@ -171,52 +204,173 @@ def adapt_exact_model_candidate_receipt(
     route_payload["route"] = compiled_route_payload
     if sha256_json(route_payload).split(":", 1)[1] != claimed_route_hash:
         raise RoutingExperimentError("exact_model_candidate_route_receipt_differs")
-    raw_attempts = orchestration_receipt.get("tool_attempts")
+    raw_attempts = waterfall.get("attempts")
     if not isinstance(raw_attempts, list):
         raise RoutingExperimentError("exact_model_candidate_attempts_are_invalid")
+    if not isinstance(authoritative_provider_receipts, Sequence) or isinstance(
+        authoritative_provider_receipts, (str, bytes)
+    ):
+        raise RoutingExperimentError("exact_model_provider_receipts_are_invalid")
+    providers_by_ref: dict[str, ProviderReceipt] = {}
+    for provider_receipt in authoritative_provider_receipts:
+        if not isinstance(provider_receipt, ProviderReceipt):
+            raise RoutingExperimentError("exact_model_provider_receipt_is_not_typed")
+        provider_errors = validate_provider_receipt(provider_receipt)
+        if provider_errors:
+            raise RoutingExperimentError(
+                "exact_model_provider_receipt_is_invalid:"
+                + ";".join(provider_errors)
+            )
+        if provider_receipt.receipt_ref in providers_by_ref:
+            raise RoutingExperimentError("exact_model_provider_receipt_is_duplicated")
+        providers_by_ref[provider_receipt.receipt_ref] = provider_receipt
     metrics: list[Mapping[str, Any]] = []
-    for raw_attempt in raw_attempts:
+    previous_attempt_sha256 = "0" * 64
+    aggregate_counts = {
+        "raw_candidate_count": 0,
+        "normalized_candidate_count": 0,
+        "unique_candidate_count": 0,
+        "verified_qualified_candidate_count": 0,
+        "provider_call_count": 0,
+        "credit_microunits": 0,
+    }
+    for attempt_index, raw_attempt in enumerate(raw_attempts):
         if not isinstance(raw_attempt, Mapping):
             raise RoutingExperimentError("exact_model_candidate_attempt_is_invalid")
-        if raw_attempt.get("stage") != "candidate_acquisition":
-            continue
-        tool_id = str(raw_attempt.get("tool_id") or "")
-        provider_returned_count = _nonnegative_int(
-            raw_attempt.get("result_count"),
-            "provider_returned_count",
+        attempt = dict(raw_attempt)
+        claimed_attempt_hash = _model_hash(
+            attempt.pop("attempt_sha256", None),
+            "candidate_attempt_hash",
+        )
+        if (
+            attempt.get("schema_version")
+            != EXACT_MODEL_CANDIDATE_ATTEMPT_VERSION
+            or attempt.get("attempt_index") != attempt_index
+            or attempt.get("previous_attempt_sha256")
+            != previous_attempt_sha256
+            or sha256_json(attempt).split(":", 1)[1] != claimed_attempt_hash
+        ):
+            raise RoutingExperimentError("exact_model_candidate_attempt_identity_differs")
+        previous_attempt_sha256 = claimed_attempt_hash
+        tool_id = str(attempt.get("tool_id") or "")
+        raw_count = _nonnegative_int(
+            attempt.get("raw_candidate_count"),
+            "raw_candidate_count",
+        )
+        normalized_count = _nonnegative_int(
+            attempt.get("normalized_candidate_count"),
+            "normalized_candidate_count",
+        )
+        unique_count = _nonnegative_int(
+            attempt.get("unique_candidate_count"),
+            "unique_candidate_count",
+        )
+        verified_count = _nonnegative_int(
+            attempt.get("verified_qualified_candidate_count"),
+            "verified_qualified_candidate_count",
+        )
+        if not raw_count >= normalized_count >= unique_count >= verified_count:
+            raise RoutingExperimentError("exact_model_candidate_counts_are_not_monotonic")
+        raw_verification_hashes = attempt.get(
+            "company_verification_receipt_sha256s"
+        )
+        if not isinstance(raw_verification_hashes, list) or len(
+            raw_verification_hashes
+        ) != verified_count:
+            raise RoutingExperimentError(
+                "exact_model_candidate_verification_receipts_differ"
+            )
+        verification_hashes = tuple(
+            _model_hash(value, "company_verification_receipt_sha256")
+            for value in raw_verification_hashes
         )
         provider_call_count = _nonnegative_int(
-            raw_attempt.get("calls"),
+            attempt.get("provider_call_count"),
             "provider_call_count",
         )
-        cost_credits = raw_attempt.get("cost_credits")
-        latency_ms = raw_attempt.get("latency_ms")
+        credit_microunits = _nonnegative_int(
+            attempt.get("credit_microunits"),
+            "credit_microunits",
+        )
+        latency_ms = attempt.get("latency_ms")
         if (
             not _CANDIDATE_TOOL_RE.fullmatch(tool_id)
-            or raw_attempt.get("plan_sha256") != claimed_route_hash
-            or isinstance(cost_credits, bool)
-            or not isinstance(cost_credits, (int, float))
-            or not math.isfinite(cost_credits)
-            or cost_credits < 0
+            or attempt.get("plan_sha256") != claimed_route_hash
             or isinstance(latency_ms, bool)
             or not isinstance(latency_ms, (int, float))
             or not math.isfinite(latency_ms)
             or latency_ms < 0
         ):
             raise RoutingExperimentError("exact_model_candidate_attempt_differs")
+        provider_receipt_ref = str(attempt.get("provider_receipt_ref") or "")
+        model_outcome = str(attempt.get("outcome") or "")
+        provider_outcome = "skipped"
+        if provider_receipt_ref:
+            provider_receipt = providers_by_ref.pop(provider_receipt_ref, None)
+            if provider_receipt is None:
+                raise RoutingExperimentError(
+                    "exact_model_candidate_provider_receipt_is_missing"
+                )
+            expected_provider_outcome = _PROVIDER_OUTCOME_BY_MODEL_OUTCOME.get(
+                model_outcome
+            )
+            if (
+                expected_provider_outcome is None
+                or provider_call_count != 1
+                or provider_receipt.tool_id != tool_id
+                or provider_receipt.outcome != expected_provider_outcome
+                or provider_receipt.credit_microunits != credit_microunits
+                or provider_receipt.latency_ms != latency_ms
+            ):
+                raise RoutingExperimentError(
+                    "exact_model_candidate_attempt_differs_from_provider_receipt"
+                )
+            _model_hash(attempt.get("action_sha256"), "candidate_action_sha256")
+            _model_hash(
+                attempt.get("completion_sha256"),
+                "candidate_completion_sha256",
+            )
+            provider_outcome = provider_receipt.outcome
+        elif (
+            model_outcome not in {"not_invoked", "not_attempted"}
+            or provider_call_count != 0
+            or credit_microunits != 0
+            or latency_ms != 0
+            or attempt.get("action_sha256") is not None
+            or attempt.get("completion_sha256") is not None
+        ):
+            raise RoutingExperimentError(
+                "exact_model_candidate_invoked_attempt_requires_provider_receipt"
+            )
+        for field_name, value in (
+            ("raw_candidate_count", raw_count),
+            ("normalized_candidate_count", normalized_count),
+            ("unique_candidate_count", unique_count),
+            ("verified_qualified_candidate_count", verified_count),
+            ("provider_call_count", provider_call_count),
+            ("credit_microunits", credit_microunits),
+        ):
+            aggregate_counts[field_name] += value
         metric = {
             "schema_version": EXACT_MODEL_CANDIDATE_METRIC_VERSION,
             "tool_id": tool_id,
-            "outcome": _safe_ref(raw_attempt.get("outcome"), "attempt_outcome"),
+            "outcome": _safe_ref(model_outcome, "attempt_outcome"),
             "reason_code": _safe_ref(
-                raw_attempt.get("reason_code"),
+                attempt.get("reason_code"),
                 "attempt_reason_code",
             ),
-            "provider_returned_count": provider_returned_count,
+            "provider_receipt_ref": provider_receipt_ref,
+            "provider_outcome": provider_outcome,
+            "raw_candidate_count": raw_count,
+            "normalized_candidate_count": normalized_count,
+            "unique_candidate_count": unique_count,
+            "verified_qualified_candidate_count": verified_count,
+            "company_verification_receipt_sha256s": verification_hashes,
             "provider_call_count": provider_call_count,
-            "billed_cost_credits": float(cost_credits),
+            "billed_credit_microunits": credit_microunits,
             "latency_ms": float(latency_ms),
             "candidate_plan_sha256": claimed_route_hash,
+            "attempt_sha256": claimed_attempt_hash,
         }
         metrics.append(
             {
@@ -226,12 +380,22 @@ def adapt_exact_model_candidate_receipt(
         )
     if not metrics:
         raise RoutingExperimentError("exact_model_candidate_attempts_are_missing")
+    if providers_by_ref:
+        raise RoutingExperimentError(
+            "exact_model_provider_receipt_coverage_differs_from_waterfall"
+        )
+    if any(
+        waterfall.get(field_name) != value
+        for field_name, value in aggregate_counts.items()
+    ):
+        raise RoutingExperimentError("exact_model_candidate_waterfall_totals_differ")
     return {
         "model_receipt_sha256": claimed_receipt_hash,
         "orchestration_receipt_sha256": claimed_orchestration_hash,
+        "candidate_waterfall_sha256": claimed_waterfall_hash,
         "candidate_route": dict(route),
         "candidate_stop_reason": _safe_ref(
-            orchestration_receipt.get("stop_reason"),
+            waterfall.get("stop_reason"),
             "stop_reason",
         ),
         "candidate_attempt_metrics": tuple(metrics),

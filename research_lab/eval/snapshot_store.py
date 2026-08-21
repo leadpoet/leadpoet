@@ -273,6 +273,7 @@ def _redact_runtime_secret_values(value: Any) -> tuple[Any, int]:
 def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
     """Return a bounded replay document for supported urllib failures."""
 
+    import http.client
     import socket
     import ssl
     from urllib.error import HTTPError, URLError
@@ -282,6 +283,12 @@ def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
             "outcome": URLLIB_TRANSPORT_OUTCOME,
             "error_type": "TimeoutError",
             "reason_type": "timeout",
+        }
+    if isinstance(error, http.client.IncompleteRead):
+        return {
+            "outcome": URLLIB_TRANSPORT_OUTCOME,
+            "error_type": "IncompleteRead",
+            "reason_type": "unexpected_eof",
         }
     if isinstance(error, HTTPError) or not isinstance(error, URLError):
         return None
@@ -317,6 +324,7 @@ def _urllib_transport_response(error: BaseException) -> dict[str, Any] | None:
 def _raise_urllib_transport_response(doc: Mapping[str, Any]) -> None:
     """Reconstruct a supported urllib failure without persisting its message."""
 
+    import http.client
     import socket
     import ssl
     from urllib.error import URLError
@@ -327,6 +335,8 @@ def _raise_urllib_transport_response(doc: Mapping[str, Any]) -> None:
     reason_type = str(doc.get("reason_type") or "")
     if error_type == "TimeoutError" and reason_type == "timeout":
         raise TimeoutError("replayed urllib transport timeout")
+    if error_type == "IncompleteRead" and reason_type == "unexpected_eof":
+        raise http.client.IncompleteRead(b"", 1)
     if error_type != "URLError":
         raise DevSnapshotStoreError("unsupported urllib transport snapshot")
 
@@ -1989,6 +1999,7 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
 
 
 def _rl_dev_urllib_transport_response(error):
+    import http.client
     import socket
     import ssl
     import urllib.error
@@ -1998,6 +2009,12 @@ def _rl_dev_urllib_transport_response(error):
             "outcome": _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
             "error_type": "TimeoutError",
             "reason_type": "timeout",
+        }
+    if isinstance(error, http.client.IncompleteRead):
+        return {
+            "outcome": _RL_DEV_URLLIB_TRANSPORT_OUTCOME,
+            "error_type": "IncompleteRead",
+            "reason_type": "unexpected_eof",
         }
     if isinstance(error, urllib.error.HTTPError) or not isinstance(
         error, urllib.error.URLError
@@ -2032,6 +2049,7 @@ def _rl_dev_urllib_transport_response(error):
 
 
 def _rl_dev_raise_urllib_transport_response(doc):
+    import http.client
     import socket
     import ssl
     import urllib.error
@@ -2042,6 +2060,8 @@ def _rl_dev_raise_urllib_transport_response(doc):
     reason_type = str(doc.get("reason_type") or "")
     if error_type == "TimeoutError" and reason_type == "timeout":
         raise TimeoutError("replayed urllib transport timeout")
+    if error_type == "IncompleteRead" and reason_type == "unexpected_eof":
+        raise http.client.IncompleteRead(b"", 1)
     if error_type != "URLError":
         raise RuntimeError("unsupported urllib transport snapshot")
     reason_factories = {

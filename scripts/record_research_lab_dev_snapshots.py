@@ -164,6 +164,58 @@ def _load_json_file(path: str) -> Any:
     return json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
 
 
+def _load_snapshot_adapter_authority(
+    *,
+    artifact_path: str,
+    compatibility_receipt_path: str,
+    image_digest: str,
+    source_commit: str,
+    model_config_hash: str,
+    manifest_hash: str,
+) -> tuple[str, str]:
+    """Select the host-owned model ABI from an exact artifact-bound receipt."""
+
+    from gateway.tee.model_sandbox_v2 import (
+        _model_adapter_bootstrap_for_compatibility_receipt_v1,
+    )
+    from research_lab.eval.artifacts import PrivateModelArtifactManifest
+
+    artifact_doc = _load_json_file(artifact_path)
+    receipt = _load_json_file(compatibility_receipt_path)
+    if not isinstance(artifact_doc, Mapping) or not isinstance(receipt, Mapping):
+        raise ValueError("snapshot model authority documents are invalid")
+    artifact = PrivateModelArtifactManifest.from_mapping(artifact_doc)
+    if (
+        artifact.image_digest != image_digest
+        or artifact.git_commit_sha != source_commit
+        or artifact.config_hash != model_config_hash
+        or artifact.manifest_hash != manifest_hash
+    ):
+        raise ValueError("snapshot model authority differs from recorder identity")
+    bootstrap = _model_adapter_bootstrap_for_compatibility_receipt_v1(
+        receipt,
+        artifact=artifact,
+    )
+    return bootstrap, str(receipt.get("admission_mode") or "")
+
+
+def _decode_adapter_companies(value: Any, *, admission_mode: str) -> list[Mapping[str, Any]]:
+    """Decode the selected model ABI without reinterpreting model authority."""
+
+    if admission_mode == "qualification_protocol_v2":
+        from research_lab.eval.private_runtime import (
+            validate_qualification_outcome_envelope_v2,
+        )
+
+        envelope = validate_qualification_outcome_envelope_v2(value)
+        if envelope["completion_state"] != "complete":
+            raise RuntimeError("qualification outcome is incomplete")
+        return list(envelope["companies"])
+    if not isinstance(value, list):
+        raise RuntimeError("champion adapter must return a JSON array")
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
 def _load_source_items(path: str) -> list[dict[str, Any]]:
     decoded = _load_json_file(path)
     if isinstance(decoded, Mapping):
@@ -399,6 +451,8 @@ def _record_icp_with_docker(
     docker_executable: str = "docker",
     reuse_existing: bool = False,
     retry_transient: bool = False,
+    adapter_bootstrap: str | None = None,
+    admission_mode: str = "",
 ) -> list[Mapping[str, Any]]:
     """Run one champion ICP through docker with the snapshot dir mounted.
 
@@ -411,7 +465,9 @@ def _record_icp_with_docker(
         dev_record_bootstrap,
     )
 
-    docker_bootstrap = getattr(private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", None)
+    docker_bootstrap = adapter_bootstrap or getattr(
+        private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", None
+    )
     if not docker_bootstrap:
         raise RuntimeError("private_runtime docker adapter bootstrap is unavailable")
     if "@sha256:" not in image_digest:
@@ -475,10 +531,9 @@ def _record_icp_with_docker(
         completed.stderr,
         expected_runtime_options=payload["context"]["runtime_options"],
     )
-    decoded = json.loads(completed.stdout)
-    if not isinstance(decoded, list):
-        raise RuntimeError("docker champion adapter must return a JSON array")
-    return decoded
+    return _decode_adapter_companies(
+        json.loads(completed.stdout), admission_mode=admission_mode
+    )
 
 
 def _record_icp_with_retries(
@@ -495,6 +550,8 @@ def _record_icp_with_retries(
     item_count: int,
     max_attempts: int = MAX_SNAPSHOT_RECORD_ATTEMPTS,
     cancel_file: Path | None = None,
+    adapter_bootstrap: str | None = None,
+    admission_mode: str = "",
 ) -> list[Mapping[str, Any]]:
     """Retry one model run without repeating already recorded requests."""
 
@@ -513,6 +570,8 @@ def _record_icp_with_retries(
                 timeout_seconds=timeout_seconds,
                 reuse_existing=reuse_existing or attempt > 1,
                 retry_transient=attempt > 1,
+                adapter_bootstrap=adapter_bootstrap,
+                admission_mode=admission_mode,
             )
         except Exception:  # noqa: BLE001 - bounded retry remains fail closed
             if attempt >= max_attempts:
@@ -541,6 +600,8 @@ def _close_snapshot_request_set(
     timeout_seconds: int,
     max_rounds: int = MAX_SNAPSHOT_CLOSURE_ROUNDS,
     cancel_file: Path | None = None,
+    adapter_bootstrap: str | None = None,
+    admission_mode: str = "",
 ) -> dict[str, Any]:
     """Record newly exposed request identities until every ICP is stable."""
 
@@ -568,6 +629,8 @@ def _close_snapshot_request_set(
                     item_index=item_index,
                     item_count=len(items),
                     cancel_file=cancel_file,
+                    adapter_bootstrap=adapter_bootstrap,
+                    admission_mode=admission_mode,
                 )
             except SnapshotRecordingCancelled:
                 raise
@@ -629,6 +692,8 @@ def _replay_icp_with_docker(
     snapshot_dir: str,
     timeout_seconds: int,
     docker_executable: str = "docker",
+    adapter_bootstrap: str | None = None,
+    admission_mode: str = "",
 ) -> list[Mapping[str, Any]]:
     """Replay one ICP with networking disabled to prove the set is complete."""
     from research_lab.eval import private_runtime
@@ -638,7 +703,9 @@ def _replay_icp_with_docker(
         dev_replay_bootstrap,
     )
 
-    docker_bootstrap = getattr(private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", None)
+    docker_bootstrap = adapter_bootstrap or getattr(
+        private_runtime, "_DOCKER_ADAPTER_BOOTSTRAP", None
+    )
     if not docker_bootstrap:
         raise RuntimeError("private_runtime docker adapter bootstrap is unavailable")
     container_dir = "/research_lab_dev_snapshots"
@@ -701,10 +768,9 @@ def _replay_icp_with_docker(
         completed.stderr,
         expected_runtime_options=payload["context"]["runtime_options"],
     )
-    decoded = json.loads(completed.stdout)
-    if not isinstance(decoded, list):
-        raise RuntimeError("offline replay adapter must return a JSON array")
-    return [dict(item) for item in decoded if isinstance(item, Mapping)]
+    return _decode_adapter_companies(
+        json.loads(completed.stdout), admission_mode=admission_mode
+    )
 
 
 def _print_plan(
@@ -860,6 +926,8 @@ def main() -> int:
     parser.add_argument("--source-commit", default=os.getenv("RESEARCH_LAB_PRIVATE_COMMIT_SHA", ""))
     parser.add_argument("--model-config-hash", default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_CONFIG_HASH", ""))
     parser.add_argument("--private-model-manifest-hash", required=True)
+    parser.add_argument("--private-model-artifact", required=True)
+    parser.add_argument("--compatibility-receipt", required=True)
     parser.add_argument(
         "--provider-model-id",
         action="append",
@@ -1002,6 +1070,21 @@ def main() -> int:
     ):
         print("ERROR: daily baseline model manifest differs from the active champion")
         return 1
+    try:
+        adapter_bootstrap, admission_mode = _load_snapshot_adapter_authority(
+            artifact_path=args.private_model_artifact,
+            compatibility_receipt_path=args.compatibility_receipt,
+            image_digest=args.champion_image,
+            source_commit=str(args.source_commit),
+            model_config_hash=str(args.model_config_hash),
+            manifest_hash=str(args.private_model_manifest_hash),
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-closed CLI authority boundary
+        print(
+            "ERROR: could not validate snapshot model authority: "
+            f"{type(exc).__name__}"
+        )
+        return 1
     declared_provider_model_ids = sorted(
         {str(item).strip() for item in args.provider_model_id if str(item).strip()}
     )
@@ -1038,6 +1121,8 @@ def main() -> int:
                     item_index=item_index,
                     item_count=len(dev_set.items),
                     cancel_file=cancel_file,
+                    adapter_bootstrap=adapter_bootstrap,
+                    admission_mode=admission_mode,
                 )
                 print(
                     f"recorded daily ICP {item_index}/{len(dev_set.items)}: "
@@ -1073,6 +1158,8 @@ def main() -> int:
                 snapshot_dir=str(staging),
                 timeout_seconds=args.timeout_seconds,
                 cancel_file=cancel_file,
+                adapter_bootstrap=adapter_bootstrap,
+                admission_mode=admission_mode,
             )
             runner_failure_refs.extend(closure_result["runner_failure_refs"])
 
@@ -1123,6 +1210,8 @@ def main() -> int:
                     icp=item["icp"],
                     snapshot_dir=str(staging),
                     timeout_seconds=args.timeout_seconds,
+                    adapter_bootstrap=adapter_bootstrap,
+                    admission_mode=admission_mode,
                 )
                 encoded = json.dumps(outputs, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
                 replay_output_hashes.append(

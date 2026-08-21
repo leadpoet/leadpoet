@@ -33,12 +33,16 @@ def _active(
     config_hash: str = CONFIG_HASH,
     manifest_hash: str = MODEL_MANIFEST_HASH,
 ):
+    artifact_document = {
+        "image_digest": image,
+        "git_commit_sha": commit,
+        "config_hash": config_hash,
+        "manifest_hash": manifest_hash,
+    }
     return SimpleNamespace(
         artifact=SimpleNamespace(
-            image_digest=image,
-            git_commit_sha=commit,
-            config_hash=config_hash,
-            manifest_hash=manifest_hash,
+            **artifact_document,
+            to_dict=lambda: dict(artifact_document),
         )
     )
 
@@ -391,6 +395,14 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
         str(tmp_path / "work"),
     )
     monkeypatch.setenv(SNAPSHOT_URI_ENV, "s3://private-bucket/dev/current.json")
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_active_model_compatibility_receipt",
+        lambda _active_model: {
+            "admission_mode": "qualification_protocol_v2",
+            "receipt_hash": "sha256:" + "9" * 64,
+        },
+    )
 
 
 def test_cancellation_keeps_refresh_lock_and_workdir_until_command_is_gone(
@@ -982,6 +994,7 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
     _configure(monkeypatch, tmp_path)
     monkeypatch.delenv(snapshot_refresh.PROVIDER_MODEL_IDS_ENV)
     commands: list[list[str]] = []
+    authority_documents: dict[str, Any] = {}
     readiness = iter(
         [
             _ready(ready=False, reason="snapshot_not_ready"),
@@ -995,6 +1008,23 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
+        if command[1].endswith("record_research_lab_dev_snapshots.py"):
+            artifact_path = Path(
+                command[command.index("--private-model-artifact") + 1]
+            )
+            receipt_path = Path(
+                command[command.index("--compatibility-receipt") + 1]
+            )
+            authority_documents["artifact"] = json.loads(
+                artifact_path.read_text(encoding="utf-8")
+            )
+            authority_documents["receipt"] = json.loads(
+                receipt_path.read_text(encoding="utf-8")
+            )
+            authority_documents["modes"] = (
+                artifact_path.stat().st_mode & 0o777,
+                receipt_path.stat().st_mode & 0o777,
+            )
         return _pipeline_output(command)
 
     result = asyncio.run(
@@ -1013,6 +1043,13 @@ def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
     record_command = commands[1]
     assert record_command[1].endswith("record_research_lab_dev_snapshots.py")
     assert "--provider-model-id" not in record_command
+    assert "--private-model-artifact" in record_command
+    assert "--compatibility-receipt" in record_command
+    assert authority_documents["artifact"]["manifest_hash"] == MODEL_MANIFEST_HASH
+    assert authority_documents["receipt"]["admission_mode"] == (
+        "qualification_protocol_v2"
+    )
+    assert authority_documents["modes"] == (0o600, 0o600)
 
 
 def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_path):

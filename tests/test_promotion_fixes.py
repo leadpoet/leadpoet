@@ -55,6 +55,11 @@ from research_lab.eval.promotion_metric import (
 )
 from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
 from research_lab.sourcing_model_contract_check import (
+    QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+    QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+    QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+    QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+    QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2,
     SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
     SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
     SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
@@ -72,6 +77,9 @@ _REAL_PREFLIGHT_PRIVATE_MODEL_ACTIVATION = (
 )
 _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION = (
     promotion._activate_private_model_generation
+)
+_REAL_REVALIDATE_PRIVATE_MODEL_ACTIVATION_REFERENCES = (
+    promotion._revalidate_private_model_activation_references
 )
 
 
@@ -557,8 +565,10 @@ def _compatibility_receipt(
     *,
     admission_mode: str = "legacy_exact",
     binding_suffix: str = "",
+    policy_hash_override: str = "",
 ) -> dict[str, Any]:
-    _policy, policy_hash = semantic_compatibility_policy_identity_v1()
+    _policy, default_policy_hash = semantic_compatibility_policy_identity_v1()
+    policy_hash = policy_hash_override or default_policy_hash
     source_body = {
         "schema_version": SEMANTIC_COMPATIBILITY_RECEIPT_SCHEMA_V1,
         "consumer_api_version": SEMANTIC_COMPATIBILITY_CONSUMER_API_V1,
@@ -623,6 +633,103 @@ def _compatibility_receipt(
         ],
         "combined_receipt_hash": sha256_json(combined_body),
     }
+
+
+def _qualification_compatibility_receipt(
+    artifact: FakeArtifact,
+    *,
+    admission_mode: str = QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2,
+    policy_hash: str = QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+) -> dict[str, Any]:
+    source_body = {
+        "schema_version": QUALIFICATION_PROTOCOL_COMPATIBILITY_RECEIPT_SCHEMA_V2,
+        "consumer_api_version": QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "admission_mode": admission_mode,
+        "policy_hash": policy_hash,
+        "source_tree_hash": artifact.model_artifact_hash,
+        "git_commit_sha": artifact.git_commit_sha,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "contract_id": artifact.compatibility_contract["contract_id"],
+        "contract_hash": artifact.compatibility_contract["sha256"],
+        "parity_hash": artifact.consumer_parity_fixtures["sha256"],
+        "bindings": {},
+        "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
+    }
+    source_receipt = {
+        **source_body,
+        "receipt_hash": sha256_json(source_body),
+    }
+    measured_body = {
+        "schema_version": (
+            model_authority_v2.MEASURED_COMPATIBILITY_ADMISSION_SCHEMA_V1
+        ),
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "admission_mode": admission_mode,
+        "consumer_api_version": QUALIFICATION_PROTOCOL_CONSUMER_API_V2,
+        "compatibility_policy_hash": policy_hash,
+        "compatibility_admission_hash": source_receipt["receipt_hash"],
+        "source_tree_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "image_digest": artifact.image_digest,
+        "module_name": "research_lab_adapter",
+        "callable_name": "adapter_metadata",
+        "consumer_runtime_probe_hash": sha256_json(
+            {"probe": artifact.manifest_hash, "profile": admission_mode}
+        ),
+        "adapter_metadata_hash": sha256_json(
+            {"metadata": artifact.manifest_hash, "profile": admission_mode}
+        ),
+        "execution_receipt_hash": sha256_json(
+            {"execution": artifact.manifest_hash, "profile": admission_mode}
+        ),
+    }
+    measured = {
+        **measured_body,
+        "receipt_hash": sha256_json(measured_body),
+    }
+    combined_body = {
+        "decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "host_compatibility_receipt_hash": source_receipt["receipt_hash"],
+        "measured_runtime_receipt_hash": measured["receipt_hash"],
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+    }
+    return {
+        **source_receipt,
+        "measured_runtime_admission": measured,
+        "measured_runtime_decision": SEMANTIC_COMPATIBILITY_ACCEPTED_DECISION,
+        "measured_runtime_probe_hash": measured[
+            "consumer_runtime_probe_hash"
+        ],
+        "combined_receipt_hash": sha256_json(combined_body),
+    }
+
+
+def _activation_admission(
+    artifact: FakeArtifact,
+    receipt: Mapping[str, Any],
+) -> promotion._PrivateModelActivationAdmission:
+    return promotion._PrivateModelActivationAdmission(
+        mode=promotion.PRIVATE_MODEL_ACTIVATION_MODE_EXACT_HEAD,
+        artifact=artifact,
+        artifact_identity=promotion._private_artifact_compatibility_identity(
+            artifact
+        ),
+        compatibility_receipt=dict(receipt),
+        compatibility_receipt_hash=sha256_json(receipt),
+        pointer_uri="s3://bucket/current.json",
+        branch_sha=artifact.git_commit_sha,
+        branch_fence_mode="remote_branch_stable",
+        generation_hash=sha256_json(
+            {
+                "artifact": artifact.manifest_hash,
+                "compatibility_receipt": receipt,
+            }
+        ),
+    )
 
 
 @pytest.mark.parametrize("admission_mode", ["legacy_exact", "semantic_v1"])
@@ -1253,6 +1360,143 @@ def _active_row(artifact: FakeArtifact) -> dict[str, Any]:
     }
 
 
+async def _exercise_full_activation_policy_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    artifact: FakeArtifact,
+    receipt: Mapping[str, Any],
+) -> promotion._PrivateModelLineageSnapshot:
+    admitted = _activation_admission(artifact, receipt)
+    active_row = _active_row(artifact)
+    snapshot = promotion._PrivateModelLineageSnapshot(
+        generation=7,
+        active_rows=(active_row,),
+        target_rows=(dict(active_row),),
+        has_any_row=True,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_load_valid_artifact",
+        lambda _uri: artifact,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: artifact.git_commit_sha,
+    )
+
+    async def _stable_snapshot(
+        *, target_artifact_hash: str, probe_any_row: bool = False,
+    ) -> promotion._PrivateModelLineageSnapshot:
+        assert target_artifact_hash == artifact.model_artifact_hash
+        assert probe_any_row is False
+        return snapshot
+
+    monkeypatch.setattr(
+        promotion,
+        "_stable_private_model_lineage_snapshot",
+        _stable_snapshot,
+    )
+    return await promotion._fence_private_model_activation(
+        _config(),
+        admitted,
+        version_id=active_row["private_model_version_id"],
+        activation_event={
+            "seq": active_row["current_event_seq"],
+            "anchored_hash": active_row["current_event_hash"],
+        },
+        minimum_generation=snapshot.generation,
+        initial_snapshot=snapshot,
+    )
+
+
+@pytest.mark.parametrize(
+    "admission_mode",
+    ["legacy_exact", "semantic_v1", QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2],
+)
+async def test_full_activation_fence_accepts_admitted_policy_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    admission_mode: str,
+) -> None:
+    artifact = _valid_fake_artifact_for_mode(admission_mode)
+    receipt = (
+        _qualification_compatibility_receipt(artifact)
+        if admission_mode == QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2
+        else _compatibility_receipt(artifact, admission_mode=admission_mode)
+    )
+
+    snapshot = await _exercise_full_activation_policy_fence(
+        monkeypatch,
+        artifact=artifact,
+        receipt=receipt,
+    )
+
+    assert snapshot.active_rows[0]["model_artifact_hash"] == (
+        artifact.model_artifact_hash
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "qualification_policy_changed",
+        "qualification_with_semantic_policy",
+        "semantic_with_qualification_policy",
+        "legacy_with_qualification_policy",
+        "unknown_profile",
+    ],
+)
+async def test_full_activation_fence_rejects_changed_or_cross_profile_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    _semantic_policy, semantic_policy_hash = (
+        semantic_compatibility_policy_identity_v1()
+    )
+    admission_mode = (
+        "semantic_v1"
+        if case == "semantic_with_qualification_policy"
+        else "legacy_exact"
+        if case == "legacy_with_qualification_policy"
+        else QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2
+    )
+    artifact = _valid_fake_artifact_for_mode(admission_mode)
+    if case == "qualification_policy_changed":
+        receipt = _qualification_compatibility_receipt(
+            artifact,
+            policy_hash="sha256:" + "0" * 64,
+        )
+    elif case == "qualification_with_semantic_policy":
+        receipt = _qualification_compatibility_receipt(
+            artifact,
+            policy_hash=semantic_policy_hash,
+        )
+    elif case in {
+        "semantic_with_qualification_policy",
+        "legacy_with_qualification_policy",
+    }:
+        receipt = _compatibility_receipt(
+            artifact,
+            admission_mode=admission_mode,
+            policy_hash_override=QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+        )
+    else:
+        receipt = _qualification_compatibility_receipt(
+            artifact,
+            admission_mode="qualification_protocol_v3",
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="private model compatibility policy changed across activation",
+    ):
+        await _exercise_full_activation_policy_fence(
+            monkeypatch,
+            artifact=artifact,
+            receipt=receipt,
+        )
+
+
 def _assert_db_doc_safe(doc: Mapping[str, Any]) -> None:
     encoded = json.dumps(doc, sort_keys=True, default=str)
     assert not promotion._DB_DOC_FORBIDDEN_RE.search(encoded)
@@ -1764,6 +2008,133 @@ async def test_activation_uses_bounded_queries_and_resumes_after_later_event(
     assert lineage_shapes
     assert all(limit == 2 for _table, _filters, limit in lineage_shapes)
     assert store.select_all_calls == []
+
+
+async def test_v2_activation_resumes_without_writes_after_policy_fence_failure(
+    store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = FakeArtifact()
+    target = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="9" * 40,
+        manifest_uri="s3://bucket/qualification-v2-target.json",
+    )
+    parent_row = _active_row(parent)
+    store.select_many_results[
+        "research_lab_private_model_version_current:unfiltered"
+    ] = [parent_row]
+    store.select_many_results[
+        "research_lab_private_model_version_current:active"
+    ] = [parent_row]
+    admitted = _activation_admission(
+        target,
+        _qualification_compatibility_receipt(target),
+    )
+
+    async def _same_admission(
+        _config_value: Any,
+        artifact: FakeArtifact,
+        *,
+        pointer_uri: str,
+        mode: str,
+        expected_branch_sha: str = "",
+    ) -> promotion._PrivateModelActivationAdmission:
+        assert artifact is target
+        assert pointer_uri == admitted.pointer_uri
+        assert mode == admitted.mode
+        assert expected_branch_sha == admitted.branch_sha
+        return admitted
+
+    monkeypatch.setattr(
+        promotion,
+        "_preflight_private_model_activation",
+        _same_admission,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_load_valid_artifact",
+        lambda _uri: target,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: target.git_commit_sha,
+    )
+    reference_fence_attempts = 0
+
+    async def _fail_policy_fence_once(
+        config: Any,
+        activation: promotion._PrivateModelActivationAdmission,
+    ) -> None:
+        nonlocal reference_fence_attempts
+        reference_fence_attempts += 1
+        if reference_fence_attempts == 1:
+            raise RuntimeError("injected post-mutation policy fence failure")
+        await _REAL_REVALIDATE_PRIVATE_MODEL_ACTIVATION_REFERENCES(
+            config,
+            activation,
+        )
+
+    monkeypatch.setattr(
+        promotion,
+        "_revalidate_private_model_activation_references",
+        _fail_policy_fence_once,
+    )
+    event_doc = {
+        "source_candidate_id": "candidate:qualification-v2",
+        "source_score_bundle_id": "score:qualification-v2",
+        "source_benchmark_bundle_id": "benchmark:qualification-v2",
+    }
+    call = {
+        "expected_active_row": parent_row,
+        "source_candidate_id": event_doc["source_candidate_id"],
+        "source_score_bundle_id": event_doc["source_score_bundle_id"],
+        "source_benchmark_bundle_id": event_doc[
+            "source_benchmark_bundle_id"
+        ],
+        "activation_reason": "qualification_v2_repo_head_activated",
+        "activation_event_doc": event_doc,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="injected post-mutation policy fence failure",
+    ):
+        await _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION(
+            _config(),
+            admitted,
+            **call,
+        )
+
+    active_rows = [
+        row
+        for row in store._lineage_rows()
+        if row.get("current_version_status") == "active"
+    ]
+    assert len(active_rows) == 1
+    assert active_rows[0]["model_artifact_hash"] == target.model_artifact_hash
+    assert parent_row["current_version_status"] == "superseded"
+    target_row = dict(active_rows[0])
+    original_activation_event = dict(store.version_event_writes[-1])
+    writes_after_failure = (
+        len(store.version_writes),
+        len(store.version_event_writes),
+    )
+
+    resumed = await _REAL_ACTIVATE_PRIVATE_MODEL_GENERATION(
+        _config(),
+        admitted,
+        **{**call, "expected_active_row": target_row},
+    )
+
+    assert reference_fence_attempts == 2
+    assert resumed.activation_event == original_activation_event
+    assert resumed.superseded_event is None
+    assert (
+        len(store.version_writes),
+        len(store.version_event_writes),
+    ) == writes_after_failure == (1, 2)
 
 
 async def test_promotion_rejects_existing_target_with_other_provenance(

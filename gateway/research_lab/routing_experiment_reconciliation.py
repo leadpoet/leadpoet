@@ -170,11 +170,13 @@ LINEAGE_FIELDS = {
 
 def _lineage(value: Any, spec: RoutingExperimentV2Spec) -> str:
     doc = _exact(value, LINEAGE_FIELDS, "artifact lineage")
+    branch = str(doc["branch"] or "")
+    pointer_uri = str(doc["pointer_uri"] or "")
     if (
         doc["repository"] != "leadpoet/Sourcing_model"
-        or doc["branch"] != "leadpoet-lab"
+        or branch not in {"main", "leadpoet-lab"}
         or not re.fullmatch(r"[0-9a-f]{40}", str(doc["commit_sha"] or ""))
-        or not str(doc["pointer_uri"] or "").endswith("/branches/leadpoet-lab/current.json")
+        or not pointer_uri.endswith(f"/branches/{branch}/current.json")
         or "/branches/" in str(doc["immutable_manifest_uri"] or "")
         or "/branches/" in str(doc["routing_lineage_manifest_uri"] or "")
         or doc["signature_algorithm"] != "ECDSA_SHA_256"

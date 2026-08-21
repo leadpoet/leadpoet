@@ -137,7 +137,8 @@ def _routing_protected_receipt():
 
 def authority_fixture():
     base, adapters, labels, _tool, _source = _spec("intent_evidence")
-    pointer_uri = "s3://private-model/branches/leadpoet-lab/current.json"
+    main_pointer_uri = "s3://private-model/branches/main/current.json"
+    challenger_pointer_uri = "s3://private-model/branches/leadpoet-lab/current.json"
     route_hashes = {
         "routing_contract_hash": _hash("c"),
         "routing_catalog_hash": _hash("d"),
@@ -154,23 +155,25 @@ def authority_fixture():
         repository="leadpoet/Sourcing_model",
         branch="leadpoet-lab",
         commit_sha="1" * 40,
-        artifact_uri=pointer_uri,
+        artifact_uri=challenger_pointer_uri,
         model_artifact_hash=_hash("a"),
         manifest_hash=authority_manifest["manifest_hash"],
         **route_hashes,
+    )
+    baseline_artifact = replace(
+        artifact,
+        branch="main",
+        artifact_uri=main_pointer_uri,
     )
     spec = replace(
         base,
         variants=tuple(
             replace(
                 item,
-                artifact=replace(
-                    artifact,
-                    branch=(
-                        "main"
-                        if item.variant_id == base.baseline_variant_id
-                        else "leadpoet-lab"
-                    ),
+                artifact=(
+                    baseline_artifact
+                    if item.variant_id == base.baseline_variant_id
+                    else artifact
                 ),
                 artifact_authority_manifest=authority_manifest,
             )
@@ -270,29 +273,29 @@ def authority_fixture():
             )
         )
     lineage = {
-        "repository": artifact.repository,
-        "branch": artifact.branch,
-        "commit_sha": artifact.commit_sha,
-        "pointer_uri": pointer_uri,
+        "repository": baseline_artifact.repository,
+        "branch": baseline_artifact.branch,
+        "commit_sha": baseline_artifact.commit_sha,
+        "pointer_uri": baseline_artifact.artifact_uri,
         "pointer_document_hash": _hash("1"),
         "immutable_manifest_uri": "s3://private-model/releases/manifest-1.json",
         "routing_lineage_manifest_uri": "s3://private-model/releases/routing-lineage-1.json",
         "routing_lineage_manifest_hash": _hash("2"),
-        "manifest_hash": artifact.manifest_hash,
+        "manifest_hash": baseline_artifact.manifest_hash,
         "signature_ref": "s3://private-model/signatures/manifest-1.sig",
         "signature_key_id": "kms-model-key",
         "signature_algorithm": "ECDSA_SHA_256",
-        "model_artifact_hash": artifact.model_artifact_hash,
+        "model_artifact_hash": baseline_artifact.model_artifact_hash,
         "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@" + _hash("3"),
         "config_hash": _hash("4"),
         "build_id": "build-1",
         "component_registry_version": "components-v2",
         "scoring_adapter_version": "adapter-v2",
-        "routing_contract_hash": artifact.routing_contract_hash,
-        "routing_catalog_hash": artifact.routing_catalog_hash,
-        "routing_policy_hash": artifact.routing_policy_hash,
-        "feature_schema_hash": artifact.feature_schema_hash,
-        "verifier_contract_hash": artifact.verifier_contract_hash,
+        "routing_contract_hash": baseline_artifact.routing_contract_hash,
+        "routing_catalog_hash": baseline_artifact.routing_catalog_hash,
+        "routing_policy_hash": baseline_artifact.routing_policy_hash,
+        "feature_schema_hash": baseline_artifact.feature_schema_hash,
+        "verifier_contract_hash": baseline_artifact.verifier_contract_hash,
     }
     label_authority = {
         "manifest_uri": "s3://routing-labels/releases/labels-1.json",

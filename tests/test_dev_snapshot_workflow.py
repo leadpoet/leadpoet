@@ -23,8 +23,10 @@ from tests.restart_rehearsal.dev_snapshot_workflow import (
     _PROCESS_GROUP_REGISTRY_SCHEMA,
     _PROCESS_GROUP_SPAWN_DIR,
     _cleanup_registered_process_groups,
+    _qualification_compatibility_receipt,
     _run_in_new_process_group,
     _source_root,
+    dev_snapshot_artifact_fixture,
     expected_cli_argv_contract_hashes,
     expected_docker_bootstrap_hashes,
     exercise_dev_snapshot_downstream_publication,
@@ -77,6 +79,8 @@ def test_exact_dev_snapshot_downstream_publication(
     monkeypatch.setenv("REHEARSAL_SOURCE_ROOT", str(source_root))
     monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate)
     result = exercise_dev_snapshot_downstream_publication()
+    artifact = dev_snapshot_artifact_fixture(candidate)
+    compatibility_receipt = _qualification_compatibility_receipt(artifact)
 
     assert result["scenario"] == SCENARIO_NAME
     assert result["invariant"] == SCENARIO_INVARIANT
@@ -92,7 +96,7 @@ def test_exact_dev_snapshot_downstream_publication(
         expected_cli_argv_contract_hashes().values()
     )
     assert result["docker_bootstrap_contract_hashes"] == (
-        expected_docker_bootstrap_hashes()
+        expected_docker_bootstrap_hashes(artifact, compatibility_receipt)
     )
     assert result["negative_probe_ids"] == {
         "requests": 1,
@@ -112,6 +116,15 @@ def _boundary_state(tmp_path: Path, source_root: Path) -> Path:
     champion_root = tmp_path / "champion"
     champion_root.mkdir(exist_ok=True)
     state_path = tmp_path / "state.json"
+    artifact = dev_snapshot_artifact_fixture("b" * 40)
+    artifact.update(
+        {
+            "image_digest": "rehearsal.invalid/champion@sha256:" + "a" * 64,
+            "config_hash": "sha256:" + "c" * 64,
+            "manifest_hash": "sha256:" + "d" * 64,
+        }
+    )
+    compatibility_receipt = _qualification_compatibility_receipt(artifact)
     state_path.write_text(
         json.dumps(
             {
@@ -122,19 +135,18 @@ def _boundary_state(tmp_path: Path, source_root: Path) -> Path:
                 "bucket": "rehearsal-dev-snapshots",
                 "base_prefix": "research-lab/dev-snapshots/",
                 "kms_key_id": "alias/rehearsal-dev-snapshot",
-                "active_artifact": {
-                    "image_digest": "rehearsal.invalid/champion@sha256:" + "a" * 64,
-                    "git_commit_sha": "b" * 40,
-                    "config_hash": "sha256:" + "c" * 64,
-                    "manifest_hash": "sha256:" + "d" * 64,
-                },
+                "active_artifact": artifact,
+                "compatibility_receipt": compatibility_receipt,
                 "selection_seed": "exact-rehearsal-snapshot",
                 "provider_model_ids": ["openai/rehearsal-model"],
                 "expected_cli_argv_contract_hashes": (
                     expected_cli_argv_contract_hashes()
                 ),
                 "expected_docker_bootstrap_hashes": (
-                    expected_docker_bootstrap_hashes()
+                    expected_docker_bootstrap_hashes(
+                        artifact,
+                        compatibility_receipt,
+                    )
                 ),
                 "supabase_tables": {},
             },

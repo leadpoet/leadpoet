@@ -1076,6 +1076,10 @@ if _state_path_raw and not _spawn_gate_invocation:
                 miss_policy=MISS_POLICY_STRICT,
             ).items():
                 env_args.extend(("-e", f"{name}={value}"))
+            if _compatibility_receipt.get("admission_mode") == (
+                "qualification_protocol_v2"
+            ):
+                env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             for group in PROVIDER_KEY_GROUPS:
                 for name in group:
                     env_args.extend(("-e", f"{name}=research-lab-offline-replay"))
@@ -1114,6 +1118,10 @@ if _state_path_raw and not _spawn_gate_invocation:
             for name in private_runtime.private_model_env_passthrough():
                 if name in environment:
                     env_args.extend(("-e", name))
+            if _compatibility_receipt.get("admission_mode") == (
+                "qualification_protocol_v2"
+            ):
+                env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             base = [
                 "docker",
                 "run",

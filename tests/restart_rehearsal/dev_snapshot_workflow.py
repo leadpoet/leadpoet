@@ -196,6 +196,40 @@ def expected_docker_bootstrap_hashes(
     }
 
 
+def dev_snapshot_artifact_fixture(candidate_sha: str) -> dict[str, Any]:
+    from research_lab.canonical import sha256_json
+
+    return {
+        "model_artifact_hash": sha256_json(
+            {"purpose": "dev-snapshot-rehearsal-source", "candidate": candidate_sha}
+        ),
+        "image_digest": (
+            "rehearsal.invalid/leadpoet/champion@sha256:"
+            + sha256_json({"candidate": candidate_sha}).split(":", 1)[1]
+        ),
+        "git_commit_sha": candidate_sha,
+        "config_hash": sha256_json(
+            {"purpose": "dev-snapshot-rehearsal-config", "candidate": candidate_sha}
+        ),
+        "manifest_hash": sha256_json(
+            {"purpose": "dev-snapshot-rehearsal-manifest", "candidate": candidate_sha}
+        ),
+        "component_registry_version": "sourcing-model-components:v2",
+        "scoring_adapter_version": "qualification-company-scorer:v1",
+        "manifest_uri": "s3://rehearsal/model/manifest.json",
+        "signature_ref": "kms://rehearsal/model-signature",
+        "compatibility_contract": {
+            "contract_id": "sourcing-model-qualification-outcome:v2",
+            "path": "consumer-contract.json",
+            "sha256": sha256_json({"contract": "qualification-outcome-v2"}),
+        },
+        "consumer_parity_fixtures": {
+            "path": "consumer-parity.json",
+            "sha256": sha256_json({"parity": "qualification-outcome-v2"}),
+        },
+    }
+
+
 def _signal_process_group(process: subprocess.Popen[str], signum: int) -> bool:
     try:
         os.killpg(process.pid, signum)
@@ -1259,6 +1293,13 @@ def run_icp_outcome(icp, context):
 '''
 
 
+_QUALIFICATION_ROUTE_FIXTURE = r'''def transport_headers():
+    return {
+        "X-Leadpoet-Qualification-Route-Commitment": "f" * 64,
+    }
+'''
+
+
 def _qualification_compatibility_receipt(
     artifact: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1600,35 +1641,7 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
     source_root = _source_root()
     candidate_sha = _candidate_sha(source_root)
     now = datetime.now(timezone.utc)
-    active_artifact = {
-        "model_artifact_hash": sha256_json(
-            {"purpose": "dev-snapshot-rehearsal-source", "candidate": candidate_sha}
-        ),
-        "image_digest": (
-            "rehearsal.invalid/leadpoet/champion@sha256:"
-            + sha256_json({"candidate": candidate_sha}).split(":", 1)[1]
-        ),
-        "git_commit_sha": candidate_sha,
-        "config_hash": sha256_json(
-            {"purpose": "dev-snapshot-rehearsal-config", "candidate": candidate_sha}
-        ),
-        "manifest_hash": sha256_json(
-            {"purpose": "dev-snapshot-rehearsal-manifest", "candidate": candidate_sha}
-        ),
-        "component_registry_version": "sourcing-model-components:v2",
-        "scoring_adapter_version": "qualification-company-scorer:v1",
-        "manifest_uri": "s3://rehearsal/model/manifest.json",
-        "signature_ref": "kms://rehearsal/model-signature",
-        "compatibility_contract": {
-            "contract_id": "sourcing-model-qualification-outcome:v2",
-            "path": "consumer-contract.json",
-            "sha256": sha256_json({"contract": "qualification-outcome-v2"}),
-        },
-        "consumer_parity_fixtures": {
-            "path": "consumer-parity.json",
-            "sha256": sha256_json({"parity": "qualification-outcome-v2"}),
-        },
-    }
+    active_artifact = dev_snapshot_artifact_fixture(candidate_sha)
     compatibility_receipt = _qualification_compatibility_receipt(active_artifact)
     tables, total_icps, tree_width = _completed_baseline_fixture(
         now=now,
@@ -1649,6 +1662,13 @@ def exercise_dev_snapshot_downstream_publication() -> dict[str, Any]:
                 "__QUALIFICATION_OUTCOME_CONTRACT_SHA256__",
                 QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
             ),
+            encoding="utf-8",
+        )
+        sourcing_model_root = champion_root / "sourcing_model"
+        sourcing_model_root.mkdir()
+        (sourcing_model_root / "__init__.py").write_text("", encoding="utf-8")
+        (sourcing_model_root / "qualification_route.py").write_text(
+            _QUALIFICATION_ROUTE_FIXTURE,
             encoding="utf-8",
         )
         state = {

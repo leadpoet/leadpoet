@@ -1407,7 +1407,7 @@
       "symbol": "_labels"
     },
     {
-      "ast_sha256": "sha256:1ad7e5d3c16f8c44dcc808bb1a481a58bcd81e0e22fe7778e7bdb196a402da23",
+      "ast_sha256": "sha256:ffa1fe75fbaae0454459658de2a429d575efa44a5de89f0395dd70aca2ddce84",
       "path": "gateway/research_lab/routing_experiment_reconciliation.py",
       "symbol": "_lineage"
     },
@@ -6907,7 +6907,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4003928959309368b19f69b695f85683f19cc9693026a1149b35bc18009eabc4",
-  "protected_source_commit": "d07b119db01ec2e0b27064ecc79c0f0f1f8b4a8a",
+  "manifest_hash": "sha256:1e340160a8d9e8c9c3b22de57a90f2a539d7c7569b9537afe4060dccf880fa26",
+  "protected_source_commit": "cb7750e0849272df9e76fb42c81d759d4d84f195",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

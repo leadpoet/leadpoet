@@ -14,7 +14,20 @@ full contract.
 | `duration_ms` | `12.4` |
 
 No bodies, query strings, headers, DB statements, model I/O, prompts, or
-completions. Health/liveness routes are suppressed entirely.
+completions.
+
+**Suppression is three exact paths, not a family.** `_SUPPRESSED_ROUTES` is
+`{"/health", "/health/live", "/health/ready"}`, matched against the concrete
+request path. Every other health or liveness route is traced normally —
+`/health/v2-authority`, `/attest/health` and `/attestation/health` all export
+spans, and `/health/v2-authority` is one of the busier routes on the gateway.
+
+**`duration_ms` above is an attribute name, not a column name.** The middleware
+sets it as a float count of milliseconds, and it does arrive. But the span's
+*duration column* is `duration_ns` — Int64 nanoseconds, derived by the store
+from the span's start and end timestamps. Query `duration_ns` (divide by `1e6`
+for milliseconds); a query written against a `duration_ms` column matches
+nothing.
 
 ## Enabling (gateway host only)
 

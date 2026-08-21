@@ -1432,6 +1432,11 @@
       "symbol": "_CommandCancellationRequested"
     },
     {
+      "ast_sha256": "sha256:4c1ff72e8e1dcff53ae0bbb3e3a0413c61848c99b8fff7421af57e332f8b817d",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_active_model_compatibility_receipt"
+    },
+    {
       "ast_sha256": "sha256:dd0bb94bd9ed51e682819326d6322ab45a5262efe5d3c4f87168e716db24f66d",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_await_command_completion"
@@ -1472,12 +1477,17 @@
       "symbol": "_wait_for_process_group_exit"
     },
     {
+      "ast_sha256": "sha256:60480bc7eb4ccfcd9b25084676ba0b9823f8aa70d7fab39387631fe18bb668c1",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "_write_private_json"
+    },
+    {
       "ast_sha256": "sha256:bd80865b2a81911cc786b7ee9740b6be954a789eb26e72d295a65c4421c71455",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "_write_record_cancel_marker"
     },
     {
-      "ast_sha256": "sha256:819c69525035b5d2fece8b0db2576a3c930f4ffd60f730b38f4ee1e70e54086e",
+      "ast_sha256": "sha256:d3d0a7e3452124850176c9f9943a9cb52caf23ae89c64020d5270d2f46f784cc",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -6112,14 +6122,24 @@
       "symbol": "SnapshotRecordingCancelled"
     },
     {
-      "ast_sha256": "sha256:9e500fd173f109e9cb21ca7293ac62758ab20c29862c7e1658db74793ea00cb0",
+      "ast_sha256": "sha256:0088dd7124d8c7daac9b4d6e6dc98268651df268af9990df955788e31983bd26",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_close_snapshot_request_set"
+    },
+    {
+      "ast_sha256": "sha256:bae0f9acef324071da3a376c778e555e013fadb5a41fcf3dc9d4d23a5845ca75",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_decode_adapter_companies"
     },
     {
       "ast_sha256": "sha256:a3390c4a230b91b5cf74bf7d51b77baed8cada50f717fd9e3201a5a6acc37cbb",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_load_json_file"
+    },
+    {
+      "ast_sha256": "sha256:34f05dfb93ecb4cb5871a66d4f1edb2e0b663a957d6e29d4b555716d82135d63",
+      "path": "scripts/record_research_lab_dev_snapshots.py",
+      "symbol": "_load_snapshot_adapter_authority"
     },
     {
       "ast_sha256": "sha256:e2bcdb16acbc6fad0bbecf643b6f66b5e78e8eb7423da55e19222f04b891a764",
@@ -6137,12 +6157,12 @@
       "symbol": "_raise_if_snapshot_record_cancelled"
     },
     {
-      "ast_sha256": "sha256:13921ea63378e9d1a0fba0cc720c3e1f6f7be37dec5c8ebdfacde04717e3b400",
+      "ast_sha256": "sha256:f525fcd5527febf22c550086ff528b8ead15be0e3e9fc81ecbefed3390271fdc",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_record_icp_with_docker"
     },
     {
-      "ast_sha256": "sha256:9d74d5e9d2ecd97ee29152bd4340a8840f6803e3853c5b833bfe885b326a6c3b",
+      "ast_sha256": "sha256:a21ca588b194b7bd2a5f447547bd8be364c463486b5ba3c1007ddbaff683eddf",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_record_icp_with_retries"
     },
@@ -6162,7 +6182,7 @@
       "symbol": "_recording_is_complete"
     },
     {
-      "ast_sha256": "sha256:f254845dd65ae5d738047256b8c9b184a97196b7ba0e7dc03581357b47667e50",
+      "ast_sha256": "sha256:37a40f6c4a2366034309017383f670bbe6c279d4785ae4c1d8181e8171d2edbd",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "_replay_icp_with_docker"
     },
@@ -6197,7 +6217,7 @@
       "symbol": "_terminate_snapshot_recorder_on_signal"
     },
     {
-      "ast_sha256": "sha256:47bdd28b9f2ca6272077ca2a4a6c7bc2c7bd340c32f53a00c36e98f21e4fa94e",
+      "ast_sha256": "sha256:5ef6e6c6cf76a9dcd08d276a89b78f12761f5e5f3639d97ac3c42b6bb452a7d5",
       "path": "scripts/record_research_lab_dev_snapshots.py",
       "symbol": "main"
     },
@@ -6327,7 +6347,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6a5a580a1f887eb6c420db579cdb85486b7916986247f58ebeef7d3c92a23c0a",
-  "protected_source_commit": "068d4de8c2fb244b34ce656fe28f00f19a65699c",
+  "manifest_hash": "sha256:fc27fdd2a85b5c01a9bd84aad9610de0d2695006cd02ab9df9b2b5540dcd6de7",
+  "protected_source_commit": "709b3d6cbc3d22cc4c0e384c1b9bcf141c4abfdb",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

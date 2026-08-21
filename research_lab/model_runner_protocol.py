@@ -64,6 +64,17 @@ class ResearchLabModelRunnerProtocol:
     ) -> None:
         if not isinstance(expected_release_identity, Mapping):
             raise ModelRunnerHostError("model release identity is required")
+        for method_name in (
+            "continue_runner",
+            "build_runner_completion",
+            "runner_preflight",
+            "validate_runner_result",
+            "build_runner_start",
+        ):
+            if not callable(getattr(transport, method_name, None)):
+                raise ModelRunnerHostError(
+                    f"artifact transport method {method_name} is unavailable"
+                )
         self._transport = transport
         self._release_identity = dict(expected_release_identity)
 

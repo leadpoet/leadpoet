@@ -130,6 +130,33 @@ def test_execution_envelope_binds_exact_spec_catalog_and_signed_authorities():
     ).envelope_hash() == envelope.envelope_hash()
 
 
+def test_execution_envelope_binds_challenger_artifact_through_spec_hash():
+    spec, catalog, units, labels, lineage, observation = _authorities()
+    challenger_artifact = replace(
+        spec.variants[1].artifact,
+        commit_sha="2" * 40,
+        artifact_uri="s3://routing/releases/challenger.tar.gz",
+        model_artifact_hash=_hash("9"),
+    )
+    challenger = replace(spec.variants[1], artifact=challenger_artifact)
+    spec = replace(spec, variants=(spec.variants[0], challenger))
+
+    envelope = build_routing_execution_envelope_v2(
+        spec=spec,
+        artifact_lineage=lineage,
+        binding_catalog=catalog,
+        unit_dataset=units,
+        gold_labels=labels,
+        model_binding_observation=observation,
+    )
+    validate_routing_execution_envelope_v2(
+        spec=spec,
+        envelope=envelope,
+        binding_catalog=catalog,
+    )
+    assert envelope.experiment_hash == spec.experiment_hash()
+
+
 def test_execution_envelope_rejects_spec_hash_missing_extra_and_action_substitution():
     spec, catalog, _units, _labels, _lineage, envelope = _envelope()
     with pytest.raises(RoutingExecutionEnvelopeError, match="experiment hash"):

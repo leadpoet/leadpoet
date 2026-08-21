@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
+import gateway.research_lab.routing_product_bootstrap as bootstrap
 from gateway.research_lab.routing_product_bootstrap import (
     RoutingProductBootstrapError,
     ReviewedRoutingBootstrapDependencies,
@@ -60,3 +62,13 @@ def test_startup_uses_fixed_loader_and_ignores_app_state(monkeypatch) -> None:
     )
     assert install_reviewed_routing_product_at_startup(app) is None
     assert called == [True]
+
+
+def test_release_loader_reads_only_the_fixed_attested_module(monkeypatch) -> None:
+    module_name = "gateway.research_lab.routing_release_dependencies"
+    module = ModuleType(module_name)
+    sentinel = object()
+    module.REVIEWED_ROUTING_RELEASE_DEPENDENCIES = sentinel
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    assert bootstrap.load_reviewed_routing_release_dependencies() is sentinel

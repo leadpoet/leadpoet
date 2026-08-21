@@ -40,7 +40,7 @@ CANDIDATE_WATERFALL_METRIC_VERSION = (
 )
 EXACT_MODEL_RUNNER_RECEIPT_VERSION = "model-runner-receipt:v1"
 EXACT_MODEL_CANDIDATE_METRIC_VERSION = (
-    "model-runner-candidate-attempt-metric:v1"
+    "leadpoet.exact_model_candidate_attempt_projection:v1"
 )
 
 _LAB_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -124,50 +124,116 @@ def adapt_exact_model_candidate_receipt(
         or sha256_json(receipt).split(":", 1)[1] != claimed_receipt_hash
     ):
         raise RoutingExperimentError("exact_model_candidate_receipt_identity_differs")
-    raw_metrics = receipt.get("candidate_attempt_metrics")
-    if not isinstance(raw_metrics, list):
-        raise RoutingExperimentError("exact_model_candidate_metrics_are_invalid")
+    result = terminal_result.get("result")
+    if not isinstance(result, Mapping) or (
+        sha256_json(result).split(":", 1)[1]
+        != receipt.get("model_result_sha256")
+    ):
+        raise RoutingExperimentError("exact_model_candidate_result_identity_differs")
+    result_receipt = result.get("receipt")
+    if not isinstance(result_receipt, Mapping):
+        raise RoutingExperimentError("exact_model_candidate_result_receipt_is_missing")
+    orchestration_receipt = dict(result_receipt)
+    claimed_orchestration_hash = _model_hash(
+        orchestration_receipt.pop("receipt_sha256", None),
+        "orchestration_receipt_hash",
+    )
+    if (
+        sha256_json(orchestration_receipt).split(":", 1)[1]
+        != claimed_orchestration_hash
+        or receipt.get("orchestration_receipt_sha256")
+        != claimed_orchestration_hash
+    ):
+        raise RoutingExperimentError(
+            "exact_model_candidate_orchestration_receipt_differs"
+        )
+    route = orchestration_receipt.get("candidate_plan")
+    if not isinstance(route, Mapping):
+        raise RoutingExperimentError("exact_model_candidate_route_receipt_is_invalid")
+    route_payload = dict(route)
+    claimed_route_hash = _model_hash(
+        route_payload.pop("candidate_plan_sha256", None),
+        "candidate_route_hash",
+    )
+    compiled_route = route_payload.get("route")
+    if not isinstance(compiled_route, Mapping):
+        raise RoutingExperimentError("exact_model_candidate_compiled_route_is_invalid")
+    compiled_route_payload = dict(compiled_route)
+    claimed_compiled_route_hash = _model_hash(
+        compiled_route_payload.pop("plan_sha256", None),
+        "compiled_route_hash",
+    )
+    if (
+        sha256_json(compiled_route_payload).split(":", 1)[1]
+        != claimed_compiled_route_hash
+    ):
+        raise RoutingExperimentError("exact_model_candidate_compiled_route_differs")
+    route_payload["route"] = compiled_route_payload
+    if sha256_json(route_payload).split(":", 1)[1] != claimed_route_hash:
+        raise RoutingExperimentError("exact_model_candidate_route_receipt_differs")
+    raw_attempts = orchestration_receipt.get("tool_attempts")
+    if not isinstance(raw_attempts, list):
+        raise RoutingExperimentError("exact_model_candidate_attempts_are_invalid")
     metrics: list[Mapping[str, Any]] = []
-    for raw_metric in raw_metrics:
-        if not isinstance(raw_metric, Mapping):
-            raise RoutingExperimentError("exact_model_candidate_metric_is_invalid")
-        metric = dict(raw_metric)
-        claimed_metric_hash = _model_hash(
-            metric.pop("metric_sha256", None),
-            "candidate_metric_hash",
+    for raw_attempt in raw_attempts:
+        if not isinstance(raw_attempt, Mapping):
+            raise RoutingExperimentError("exact_model_candidate_attempt_is_invalid")
+        if raw_attempt.get("stage") != "candidate_acquisition":
+            continue
+        tool_id = str(raw_attempt.get("tool_id") or "")
+        provider_returned_count = _nonnegative_int(
+            raw_attempt.get("result_count"),
+            "provider_returned_count",
         )
-        counts = tuple(
-            _nonnegative_int(metric.get(name), name)
-            for name in (
-                "provider_returned_count",
-                "normalized_count",
-                "unique_count",
-                "verified_qualified_count",
-            )
+        provider_call_count = _nonnegative_int(
+            raw_attempt.get("calls"),
+            "provider_call_count",
         )
+        cost_credits = raw_attempt.get("cost_credits")
+        latency_ms = raw_attempt.get("latency_ms")
         if (
-            metric.get("schema_version")
-            != EXACT_MODEL_CANDIDATE_METRIC_VERSION
-            or not _CANDIDATE_TOOL_RE.fullmatch(str(metric.get("tool_id") or ""))
-            or not counts[3] <= counts[2] <= counts[1] <= counts[0]
-            or sha256_json(metric).split(":", 1)[1] != claimed_metric_hash
+            not _CANDIDATE_TOOL_RE.fullmatch(tool_id)
+            or raw_attempt.get("plan_sha256") != claimed_route_hash
+            or isinstance(cost_credits, bool)
+            or not isinstance(cost_credits, (int, float))
+            or not math.isfinite(cost_credits)
+            or cost_credits < 0
+            or isinstance(latency_ms, bool)
+            or not isinstance(latency_ms, (int, float))
+            or not math.isfinite(latency_ms)
+            or latency_ms < 0
         ):
-            raise RoutingExperimentError("exact_model_candidate_metric_differs")
-        metrics.append({**metric, "metric_sha256": claimed_metric_hash})
-    route = receipt.get("candidate_route")
-    if route is not None:
-        if not isinstance(route, Mapping):
-            raise RoutingExperimentError("exact_model_candidate_route_receipt_is_invalid")
-        route_payload = dict(route)
-        claimed_route_hash = _model_hash(
-            route_payload.pop("candidate_route_sha256", None),
-            "candidate_route_hash",
+            raise RoutingExperimentError("exact_model_candidate_attempt_differs")
+        metric = {
+            "schema_version": EXACT_MODEL_CANDIDATE_METRIC_VERSION,
+            "tool_id": tool_id,
+            "outcome": _safe_ref(raw_attempt.get("outcome"), "attempt_outcome"),
+            "reason_code": _safe_ref(
+                raw_attempt.get("reason_code"),
+                "attempt_reason_code",
+            ),
+            "provider_returned_count": provider_returned_count,
+            "provider_call_count": provider_call_count,
+            "billed_cost_credits": float(cost_credits),
+            "latency_ms": float(latency_ms),
+            "candidate_plan_sha256": claimed_route_hash,
+        }
+        metrics.append(
+            {
+                **metric,
+                "metric_sha256": sha256_json(metric).split(":", 1)[1],
+            }
         )
-        if sha256_json(route_payload).split(":", 1)[1] != claimed_route_hash:
-            raise RoutingExperimentError("exact_model_candidate_route_receipt_differs")
+    if not metrics:
+        raise RoutingExperimentError("exact_model_candidate_attempts_are_missing")
     return {
         "model_receipt_sha256": claimed_receipt_hash,
-        "candidate_route": None if route is None else dict(route),
+        "orchestration_receipt_sha256": claimed_orchestration_hash,
+        "candidate_route": dict(route),
+        "candidate_stop_reason": _safe_ref(
+            orchestration_receipt.get("stop_reason"),
+            "stop_reason",
+        ),
         "candidate_attempt_metrics": tuple(metrics),
     }
 
@@ -323,7 +389,7 @@ class CandidateWaterfallReceipt:
     disposition: str
     outcome_code: str
     provider_call_count: int
-    cost_microusd: int
+    billed_credit_microunits: int
     latency_ms: int
     raw_count: int
     normalized_count: int
@@ -390,7 +456,7 @@ class CandidateWaterfallReceipt:
             "attempt_sequence",
             "target_verified_qualified_count",
             "provider_call_count",
-            "cost_microusd",
+            "billed_credit_microunits",
             "latency_ms",
             "raw_count",
             "normalized_count",
@@ -551,6 +617,9 @@ def candidate_waterfall_receipt_from_model(
         provider_receipt_ref = ""
         execution_mode = decision_receipt.execution_mode
         provider_outcome = "skipped"
+        authoritative_provider_call_count = 0
+        authoritative_billed_credit_microunits = 0
+        authoritative_latency_ms = 0
     else:
         provider_errors = validate_provider_receipt(provider_receipt)
         if provider_errors:
@@ -595,6 +664,17 @@ def candidate_waterfall_receipt_from_model(
         provider_receipt_ref = provider_receipt.receipt_ref
         execution_mode = provider_receipt.execution_mode
         provider_outcome = provider_receipt.outcome
+        authoritative_provider_call_count = 1
+        authoritative_billed_credit_microunits = provider_receipt.credit_microunits
+        authoritative_latency_ms = provider_receipt.latency_ms
+    if model_receipt.provider_call_count != authoritative_provider_call_count:
+        raise RoutingExperimentError(
+            "model_candidate_provider_call_count_differs_from_provider_receipt"
+        )
+    if round(model_receipt.latency_seconds * 1_000) != authoritative_latency_ms:
+        raise RoutingExperimentError(
+            "model_candidate_latency_differs_from_provider_receipt"
+        )
     published = _nonnegative_int(published_count, "published_count")
     if published > model_receipt.verified_qualified_count:
         raise RoutingExperimentError("candidate_published_count_exceeds_verified_count")
@@ -627,9 +707,9 @@ def candidate_waterfall_receipt_from_model(
         attempt_sequence=model_receipt.attempt,
         disposition=model_receipt.disposition,
         outcome_code=model_receipt.outcome_code,
-        provider_call_count=model_receipt.provider_call_count,
-        cost_microusd=round(model_receipt.estimated_cost_usd * 1_000_000),
-        latency_ms=round(model_receipt.latency_seconds * 1_000),
+        provider_call_count=authoritative_provider_call_count,
+        billed_credit_microunits=authoritative_billed_credit_microunits,
+        latency_ms=authoritative_latency_ms,
         raw_count=model_receipt.raw_candidate_count,
         normalized_count=model_receipt.normalized_candidate_count,
         unique_count=model_receipt.unique_candidate_count,
@@ -652,7 +732,7 @@ class CandidateWaterfallMetric:
     fulfilled_unit_count: int
     waterfall_attempt_count: int
     provider_call_count: int
-    total_cost_microusd: int
+    total_billed_credit_microunits: int
     total_latency_ms: int
     raw_count: int
     normalized_count: int
@@ -664,7 +744,7 @@ class CandidateWaterfallMetric:
     fulfillment_rate: float
     verification_rate: float
     publication_rate: float
-    verified_qualified_per_usd: float
+    verified_qualified_per_credit: float
     waterfall_receipt_refs: tuple[str, ...]
     provider_receipt_refs: tuple[str, ...]
     decision_receipt_refs: tuple[str, ...]
@@ -683,7 +763,7 @@ class CandidateWaterfallMetric:
             "fulfilled_unit_count",
             "waterfall_attempt_count",
             "provider_call_count",
-            "total_cost_microusd",
+            "total_billed_credit_microunits",
             "total_latency_ms",
             "raw_count",
             "normalized_count",
@@ -760,13 +840,13 @@ class CandidateWaterfallMetric:
             ):
                 raise RoutingExperimentError(f"candidate_metric_{field_name}_is_invalid")
         if (
-            isinstance(self.verified_qualified_per_usd, bool)
-            or not isinstance(self.verified_qualified_per_usd, (int, float))
-            or not math.isfinite(self.verified_qualified_per_usd)
-            or self.verified_qualified_per_usd < 0
+            isinstance(self.verified_qualified_per_credit, bool)
+            or not isinstance(self.verified_qualified_per_credit, (int, float))
+            or not math.isfinite(self.verified_qualified_per_credit)
+            or self.verified_qualified_per_credit < 0
         ):
             raise RoutingExperimentError(
-                "candidate_metric_verified_qualified_per_usd_is_invalid"
+                "candidate_metric_verified_qualified_per_credit_is_invalid"
             )
         if (
             self.immutable is not True
@@ -944,7 +1024,9 @@ def evaluate_candidate_waterfall_metrics(
             raw_count = sum(item.raw_count for item in selected)
             verified_count = sum(item.verified_qualified_count for item in selected)
             published_count = sum(item.published_count for item in selected)
-            total_cost = sum(item.cost_microusd for item in selected)
+            total_billed_credits = sum(
+                item.billed_credit_microunits for item in selected
+            )
             fulfilled_count = sum(value >= target for value in verified_by_unit.values())
             results.append(
                 CandidateWaterfallMetric(
@@ -958,7 +1040,7 @@ def evaluate_candidate_waterfall_metrics(
                     fulfilled_unit_count=fulfilled_count,
                     waterfall_attempt_count=len(selected),
                     provider_call_count=sum(item.provider_call_count for item in selected),
-                    total_cost_microusd=total_cost,
+                    total_billed_credit_microunits=total_billed_credits,
                     total_latency_ms=sum(item.latency_ms for item in selected),
                     raw_count=raw_count,
                     normalized_count=sum(item.normalized_count for item in selected),
@@ -974,9 +1056,13 @@ def evaluate_candidate_waterfall_metrics(
                         if verified_count
                         else 0.0
                     ),
-                    verified_qualified_per_usd=(
-                        round(verified_count / (total_cost / 1_000_000), 8)
-                        if total_cost
+                    verified_qualified_per_credit=(
+                        round(
+                            verified_count
+                            / (total_billed_credits / 1_000_000),
+                            8,
+                        )
+                        if total_billed_credits
                         else 0.0
                     ),
                     waterfall_receipt_refs=tuple(item.receipt_id for item in selected),

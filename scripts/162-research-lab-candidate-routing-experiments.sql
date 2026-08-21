@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     ),
     outcome_code                  TEXT NOT NULL,
     provider_call_count           INTEGER NOT NULL CHECK (provider_call_count >= 0),
-    cost_microusd                 BIGINT NOT NULL CHECK (cost_microusd >= 0),
+    billed_credit_microunits      BIGINT NOT NULL CHECK (billed_credit_microunits >= 0),
     latency_ms                    BIGINT NOT NULL CHECK (latency_ms >= 0),
     raw_count                     INTEGER NOT NULL CHECK (raw_count >= 0),
     normalized_count              INTEGER NOT NULL CHECK (normalized_count >= 0),
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         'disposition', disposition,
         'outcome_code', outcome_code,
         'provider_call_count', provider_call_count,
-        'cost_microusd', cost_microusd,
+        'billed_credit_microunits', billed_credit_microunits,
         'latency_ms', latency_ms,
         'raw_count', raw_count,
         'normalized_count', normalized_count,
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
     ),
     waterfall_attempt_count         INTEGER NOT NULL CHECK (waterfall_attempt_count >= 0),
     provider_call_count             INTEGER NOT NULL CHECK (provider_call_count >= 0),
-    total_cost_microusd             BIGINT NOT NULL CHECK (total_cost_microusd >= 0),
+    total_billed_credit_microunits  BIGINT NOT NULL CHECK (total_billed_credit_microunits >= 0),
     total_latency_ms                BIGINT NOT NULL CHECK (total_latency_ms >= 0),
     raw_count                       INTEGER NOT NULL CHECK (raw_count >= 0),
     normalized_count                INTEGER NOT NULL CHECK (normalized_count >= 0),
@@ -217,8 +217,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
     publication_rate                DOUBLE PRECISION NOT NULL CHECK (
         publication_rate >= 0 AND publication_rate <= 1
     ),
-    verified_qualified_per_usd      DOUBLE PRECISION NOT NULL CHECK (
-        verified_qualified_per_usd >= 0
+    verified_qualified_per_credit   DOUBLE PRECISION NOT NULL CHECK (
+        verified_qualified_per_credit >= 0
     ),
     metric_doc                      JSONB NOT NULL CHECK (
         jsonb_typeof(metric_doc) = 'object'
@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
         'fulfilled_unit_count', fulfilled_unit_count,
         'waterfall_attempt_count', waterfall_attempt_count,
         'provider_call_count', provider_call_count,
-        'total_cost_microusd', total_cost_microusd,
+        'total_billed_credit_microunits', total_billed_credit_microunits,
         'total_latency_ms', total_latency_ms,
         'raw_count', raw_count,
         'normalized_count', normalized_count,
@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
         'fulfillment_rate', fulfillment_rate,
         'verification_rate', verification_rate,
         'publication_rate', publication_rate,
-        'verified_qualified_per_usd', verified_qualified_per_usd,
+        'verified_qualified_per_credit', verified_qualified_per_credit,
         'waterfall_receipt_refs', metric_doc->'waterfall_receipt_refs',
         'provider_receipt_refs', metric_doc->'provider_receipt_refs',
         'decision_receipt_refs', metric_doc->'decision_receipt_refs',

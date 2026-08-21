@@ -13,11 +13,14 @@ This PR adds four candidate-only parts:
    attaches the current attempted step to the existing V2 provider and
    decision receipts. It attaches a skipped step to the existing
    skipped-decision reason without inventing a provider receipt. Prefix hashes
-   prevent sidecars from different valid executions from being mixed.
+   prevent sidecars from different valid executions from being mixed. Provider
+   call count, billed credits, and latency come from the authoritative provider
+   receipt. A different Model call count or latency fails closed.
 2. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
    metrics for raw, normalized, unique, verified-qualified, and published
-   companies. It requires complete sidecar coverage for every provider and
-   decision receipt in the shared evaluation. It rejects a reused provider
+   companies. Cost efficiency is measured in billed provider credits, not a
+   Model USD estimate. It requires complete sidecar coverage for every provider
+   and decision receipt in the shared evaluation. It rejects a reused provider
    receipt, a different compiled target, or a broken attempt chain, so omitted
    or duplicated outcomes cannot improve the metrics. These metrics are
    sidecars. They do not select or promote a route.

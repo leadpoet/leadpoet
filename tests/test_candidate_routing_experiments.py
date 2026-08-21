@@ -124,6 +124,29 @@ def _spec() -> RoutingExperimentV2Spec:
     )
 
 
+def _model_receipt(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "plan_sha256": "a" * 64,
+        "stop_policy_sha256": "b" * 64,
+        "step_order": 0,
+        "attempt": 0,
+        "tool_id": "candidate.registry_feed",
+        "disposition": "succeeded",
+        "outcome_code": "verified_candidates",
+        "provider_call_count": 1,
+        "estimated_cost_usd": 0.0125,
+        "latency_seconds": 0.25,
+        "raw_candidate_count": 8,
+        "normalized_candidate_count": 6,
+        "unique_candidate_count": 4,
+        "verified_qualified_count": 2,
+        "verification_receipt_sha256": "e" * 64,
+        "sha256": lambda: "d" * 64,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _adapter(
     *,
     contract_hash: str = "c" * 64,
@@ -131,24 +154,7 @@ def _adapter(
     target: int = 2,
     artifact_errors: tuple[str, ...] = (),
 ):
-    attempt = receipt or SimpleNamespace(
-        plan_sha256="a" * 64,
-        stop_policy_sha256="b" * 64,
-        step_order=0,
-        attempt=0,
-        tool_id="candidate.registry_feed",
-        disposition="succeeded",
-        outcome_code="verified_candidates",
-        provider_call_count=1,
-        estimated_cost_usd=0.0125,
-        latency_seconds=0.25,
-        raw_candidate_count=8,
-        normalized_candidate_count=6,
-        unique_candidate_count=4,
-        verified_qualified_count=2,
-        verification_receipt_sha256="e" * 64,
-        sha256=lambda: "d" * 64,
-    )
+    attempt = receipt or _model_receipt()
     identity = {
         "contract_version": "candidate-waterfall-execution:v1",
         "stop_policy_schema_version": "candidate-stop-policy:v1",
@@ -364,7 +370,7 @@ def test_model_receipt_adapter_uses_shared_experiment_provider_and_decision_cont
     assert receipt.model_contract_sha256 == "c" * 64
     assert receipt.verified_qualified_count == 2
     assert receipt.published_count == 1
-    assert receipt.cost_microusd == 12_500
+    assert receipt.billed_credit_microunits == provider.credit_microunits
     assert receipt.target_verified_qualified_count == 2
     assert receipt.prior_attempt_receipt_sha256 == ""
     assert receipt.to_dict()["receipt_hash"].startswith("sha256:")
@@ -411,6 +417,34 @@ def test_model_receipt_adapter_rejects_unlinked_provider_receipt():
             spec=spec,
             decision=decision,
             provider=other,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_receipt", "message"),
+    (
+        (
+            _model_receipt(provider_call_count=2),
+            "provider_call_count_differs_from_provider_receipt",
+        ),
+        (
+            _model_receipt(latency_seconds=0.5),
+            "latency_differs_from_provider_receipt",
+        ),
+    ),
+)
+def test_model_receipt_adapter_rejects_operational_metric_drift(
+    model_receipt: object,
+    message: str,
+):
+    spec = _spec()
+    provider = _provider_receipt()
+    with pytest.raises(RoutingExperimentError, match=message):
+        _adapt_receipt(
+            spec=spec,
+            decision=_decision(spec, provider),
+            provider=provider,
+            adapter=_adapter(receipt=model_receipt),
         )
 
 
@@ -500,15 +534,15 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible():
     )
     assert adapted["candidate_attempt_metrics"]
     assert adapted["candidate_attempt_metrics"][0][
-        "verified_qualified_count"
+        "provider_returned_count"
     ] == 1
-    assert adapted["candidate_route"]["stop_reason"] == "target_reached"
+    assert adapted["candidate_attempt_metrics"][0]["provider_call_count"] == 1
+    assert adapted["candidate_stop_reason"] == "target_reached"
+    assert adapted["candidate_route"]["candidate_plan_sha256"]
 
     forged = copy.deepcopy(terminal)
-    forged["model_receipt"]["candidate_attempt_metrics"][0][
-        "verified_qualified_count"
-    ] = 50
-    with pytest.raises(RoutingExperimentError, match="receipt_identity_differs"):
+    forged["result"]["receipt"]["tool_attempts"][0]["result_count"] = 50
+    with pytest.raises(RoutingExperimentError, match="result_identity_differs"):
         adapt_exact_model_candidate_receipt(
             forged,
             expected_release_identity_sha256=identity[
@@ -548,7 +582,8 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
     assert baseline_calibration.fulfillment_rate == 1.0
     assert baseline_calibration.verification_rate == 0.25
     assert baseline_calibration.publication_rate == 0.5
-    assert baseline_calibration.verified_qualified_per_usd == 160.0
+    assert baseline_calibration.total_billed_credit_microunits == 25
+    assert baseline_calibration.verified_qualified_per_credit == 80_000.0
     assert baseline_calibration.metric_hash.startswith("sha256:")
     assert metrics[1].waterfall_attempt_count == 0
 

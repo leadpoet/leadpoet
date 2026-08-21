@@ -409,8 +409,8 @@ def validate_sourcing_model_artifact_identity(
     errors: list[str] = []
     if identity.repository != "leadpoet/Sourcing_model":
         errors.append("artifact_repository_must_be_leadpoet_sourcing_model")
-    if identity.branch != "leadpoet-lab":
-        errors.append("artifact_branch_must_be_leadpoet_lab")
+    if identity.branch not in {"main", "leadpoet-lab"}:
+        errors.append("artifact_branch_must_be_main_or_leadpoet_lab")
     try:
         _ensure_git_sha(identity.commit_sha, "commit_sha")
     except RoutingExperimentError as exc:
@@ -4784,6 +4784,8 @@ def validate_routing_experiment_v2_spec(
         (item for item in spec.variants if item.variant_id == spec.baseline_variant_id),
         None,
     )
+    if baseline_variant is not None and baseline_variant.artifact.branch != "main":
+        errors.append("v2_baseline_artifact_branch_must_be_main")
     baseline_artifact_key = (
         _v2_variant_artifact_key(baseline_variant) if baseline_variant is not None else ""
     )
@@ -4872,6 +4874,14 @@ def validate_routing_experiment_v2_spec(
                     + type(exc).__name__
                 )
     for variant in spec.variants:
+        if (
+            variant.variant_id != spec.baseline_variant_id
+            and variant.artifact.branch != "leadpoet-lab"
+        ):
+            errors.append(
+                "v2_challenger_artifact_branch_must_be_leadpoet_lab:"
+                + variant.variant_id
+            )
         if variant.stage != spec.input.stage:
             errors.append(f"v2_variant_stage_mismatch:{variant.variant_id}")
         errors.extend(validate_sourcing_model_artifact_identity(variant.artifact))

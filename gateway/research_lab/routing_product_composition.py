@@ -87,6 +87,9 @@ PRODUCT_COMPOSITION_ENV = "RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION"
 PRODUCT_COMPOSITION_VERSION = "reviewed_v2"
 MODEL_COMMIT_SHA_ENV = "RESEARCH_LAB_ROUTING_MODEL_COMMIT_SHA"
 MODEL_ROUTING_CATALOG_HASH_ENV = "RESEARCH_LAB_ROUTING_MODEL_CATALOG_HASH"
+SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV = (
+    "RESEARCH_LAB_SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_SHA256"
+)
 BINDING_CATALOG_MANIFEST_HASH_ENV = (
     "RESEARCH_LAB_ROUTING_BINDING_CATALOG_MANIFEST_HASH"
 )
@@ -790,6 +793,10 @@ def validate_reviewed_release_inputs(
         raise RoutingProductCompositionError(
             "routing model catalog identity differs"
         )
+    _require_hash(
+        env.get(SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV),
+        "Site production model release identity",
+    )
     binding_catalog_hash = _require_hash(
         env.get(BINDING_CATALOG_MANIFEST_HASH_ENV),
         "binding catalog manifest hash",
@@ -901,6 +908,7 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
     """Build and validate the immutable envelope before the first SQL write."""
 
     inputs: ReviewedRoutingReleaseInputs
+    site_production_model_release_identity_sha256: str
 
     def admit(self, spec: RoutingExperimentV2Spec) -> RoutingExperimentExecutionEnvelopeV2:
         try:
@@ -975,15 +983,34 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
                 raise RoutingProductCompositionError(
                     "exact baseline artifact is unavailable"
                 )
+            if baseline.artifact_identity.get("branch") != "main":
+                raise RoutingProductCompositionError(
+                    "baseline must use the Site-selected main artifact"
+                )
+            if baseline.protocol.release_identity.get(
+                "release_identity_sha256"
+            ) != self.site_production_model_release_identity_sha256:
+                raise RoutingProductCompositionError(
+                    "baseline differs from the Site production model release"
+                )
             artifact_keys = set()
             for variant in spec.variants:
-                artifact_key = registrations[variant.variant_id].key
+                registration = registrations[variant.variant_id]
+                artifact_key = registration.key
                 if (
                     variant.variant_id != spec.baseline_variant_id
                     and artifact_key == baseline.key
                 ):
                     raise RoutingProductCompositionError(
                         "each challenger must use a distinct exact Model artifact"
+                    )
+                if (
+                    variant.variant_id != spec.baseline_variant_id
+                    and registration.artifact_identity.get("branch")
+                    != "leadpoet-lab"
+                ):
+                    raise RoutingProductCompositionError(
+                        "challenger must use a leadpoet-lab artifact"
                     )
                 if artifact_key in artifact_keys:
                     raise RoutingProductCompositionError(
@@ -1007,7 +1034,17 @@ def build_reviewed_admission_authority(
     """Build the API admission authority from verified bootstrap inputs."""
 
     validate_reviewed_release_inputs(inputs, environment=environment)
-    return ReviewedRoutingAdmissionAuthority(inputs=inputs)
+    env = os.environ if environment is None else environment
+    site_release = _require_hash(
+        env.get(SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV),
+        "Site production model release identity",
+    )
+    return ReviewedRoutingAdmissionAuthority(
+        inputs=inputs,
+        site_production_model_release_identity_sha256=(
+            site_release.removeprefix("sha256:")
+        ),
+    )
 
 
 def build_exact_model_runner_factory(
@@ -1194,6 +1231,7 @@ __all__ = [
     "PRODUCT_COMPOSITION_VERSION",
     "MODEL_COMMIT_SHA_ENV",
     "MODEL_ROUTING_CATALOG_HASH_ENV",
+    "SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV",
     "BINDING_CATALOG_MANIFEST_HASH_ENV",
     "ROUTING_CONTRACT_HASH_ENV",
     "AUTHORITY_BUNDLE_HASH_ENV",

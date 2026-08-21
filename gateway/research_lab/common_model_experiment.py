@@ -319,6 +319,7 @@ class ReviewedProtectedModelActionDispatcher:
                 calls=1,
                 cost_credits=receipt.credit_microunits / 1_000_000,
                 latency_ms=receipt.latency_ms,
+                provider_receipt_ref=receipt.receipt_ref,
             ),
             provider_receipt=receipt,
             replay_ref={

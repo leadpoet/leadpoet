@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Mapping, Protocol
 
 from .common_model_runner_host import (
@@ -50,6 +51,7 @@ class DeeplineCallReceipt:
     cost_credits: float
     latency_ms: float
     provider_request_id: str | None = None
+    provider_receipt_ref: str | None = None
 
 
 class DeeplineRunnerClient(Protocol):
@@ -92,6 +94,13 @@ def _execute_deepline_action(
         raise ModelRunnerHostError("Deepline client receipt is invalid")
     if receipt.calls < 1:
         raise ModelRunnerHostError("Deepline call receipt has no call")
+    if not re.fullmatch(
+        r"provider_receipt:[0-9a-f]{16,64}",
+        str(receipt.provider_receipt_ref or ""),
+    ):
+        raise ModelRunnerHostError(
+            "Deepline provider receipt reference is invalid"
+        )
     if not 0 <= receipt.cost_credits <= contract.maximum_cost_credits:
         raise ModelRunnerHostError("Deepline call exceeded its cost limit")
     if not 200 <= receipt.status_code < 300:
@@ -103,6 +112,7 @@ def _execute_deepline_action(
             cost_credits=receipt.cost_credits,
             latency_ms=receipt.latency_ms,
             provider_request_id=receipt.provider_request_id,
+            provider_receipt_ref=receipt.provider_receipt_ref,
         )
     return HostActionResult(
         outcome="succeeded",
@@ -117,6 +127,7 @@ def _execute_deepline_action(
         cost_credits=receipt.cost_credits,
         latency_ms=receipt.latency_ms,
         provider_request_id=receipt.provider_request_id,
+        provider_receipt_ref=receipt.provider_receipt_ref,
     )
 
 

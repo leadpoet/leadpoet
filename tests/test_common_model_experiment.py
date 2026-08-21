@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from research_lab.common_model_runner_host import HostActionResult
 from research_lab.model_runner_protocol import (
     ExactModelRunnerRegistration,
@@ -48,6 +50,7 @@ def _release():
         "candidate_profiles_sha256": "2" * 64,
         "intent_profiles_sha256": "3" * 64,
         "feature_schema_sha256": HASHES["feature"],
+        "candidate_waterfall_contract_sha256": "4" * 64,
         "tool_binding_manifest_sha256": HASHES["binding"],
         "release_identity_sha256": HASHES["release"],
     }
@@ -80,7 +83,11 @@ class _Transport:
             "candidate_profiles_sha256": release["candidate_profiles_sha256"],
             "intent_profiles_sha256": release["intent_profiles_sha256"],
             "feature_schema_sha256": release["feature_schema_sha256"],
+            "host_capability_manifest_sha256": HASHES["manifest"],
             "binding_contracts_sha256": release["tool_binding_manifest_sha256"],
+            "candidate_waterfall_contract_sha256": release[
+                "candidate_waterfall_contract_sha256"
+            ],
         }
 
     def continue_runner(self, _start, *, continuation, completion, **_values):
@@ -111,6 +118,7 @@ class _Transport:
 
 def _registration():
     manifest = {
+        "manifest_sha256": HASHES["manifest"],
         "bindings": [{
             "action_type": "execute_candidate_tool",
             "tool_id": "candidate.reviewed",
@@ -126,6 +134,21 @@ def _registration():
         protocol=protocol,
         host_capability_manifest=manifest,
     )
+
+
+def test_exact_registration_accepts_site_main_champion_identity():
+    registration = _registration()
+    main_registration = replace(
+        registration,
+        artifact_identity={
+            **registration.artifact_identity,
+            "branch": "main",
+        },
+    )
+
+    assert main_registration.preflight()[
+        "release_identity_sha256"
+    ] == HASHES["release"]
 
 
 class _Transitions:
@@ -171,6 +194,7 @@ class _Dispatcher:
                 calls=1,
                 cost_credits=0.00001,
                 latency_ms=20,
+                provider_receipt_ref=receipt.receipt_ref,
             ),
             provider_receipt=receipt,
         )

@@ -162,6 +162,7 @@ class ResearchLabModelRunnerProtocol:
                 "calls": result.calls,
                 "cost_credits": result.cost_credits,
                 "latency_ms": result.latency_ms,
+                "provider_receipt_ref": result.provider_receipt_ref,
             },
         )
         if not isinstance(completion, Mapping):
@@ -213,7 +214,9 @@ class ExactModelRunnerRegistration:
         release = dict(self.protocol.release_identity)
         if str(artifact.get("repository") or "") != "leadpoet/Sourcing_model":
             raise ModelRunnerHostError("artifact repository is invalid")
-        if str(artifact.get("branch") or "") != "leadpoet-lab":
+        if str(artifact.get("branch") or "") not in {
+            "main", "leadpoet-lab"
+        }:
             raise ModelRunnerHostError("artifact branch is invalid")
         if str(release.get("source_commit") or "") != str(
             artifact.get("commit_sha") or ""
@@ -255,8 +258,14 @@ class ExactModelRunnerRegistration:
             "feature_schema_sha256": release.get(
                 "feature_schema_sha256"
             ),
+            "host_capability_manifest_sha256": (
+                self.host_capability_manifest.get("manifest_sha256")
+            ),
             "binding_contracts_sha256": release.get(
                 "tool_binding_manifest_sha256"
+            ),
+            "candidate_waterfall_contract_sha256": release.get(
+                "candidate_waterfall_contract_sha256"
             ),
         }
         if any(receipt.get(name) != value for name, value in expected.items()):

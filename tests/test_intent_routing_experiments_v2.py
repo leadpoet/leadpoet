@@ -451,7 +451,7 @@ def _spec(stage: str = "intent_evidence", *, with_source_add: bool = False, two_
     provenance = ()
     if with_source_add:
         provenance = (SourceAddProvenance("source-add-request", sha256_json(source_request), source_tool, stage, source_manifest, candidate_artifact_for_variant.commit_sha, True, source_request),)
-    baseline = RoutingExperimentV2Variant("baseline", stage, artifact, {"stage": stage, "tools": [tool], "manifest_hashes": {tool: manifest}, "signal_type": "HIRING" if stage == "intent_evidence" else "", "route_change_class": "custom"}, ("baseline",), "route_only", (), authority)
+    baseline = RoutingExperimentV2Variant("baseline", stage, replace(artifact, branch="main"), {"stage": stage, "tools": [tool], "manifest_hashes": {tool: manifest}, "signal_type": "HIRING" if stage == "intent_evidence" else "", "route_change_class": "custom"}, ("baseline",), "route_only", (), authority)
     candidate = RoutingExperimentV2Variant(
         "candidate",
         stage,
@@ -1470,7 +1470,7 @@ def test_v2_baseline_registered_source_add_can_be_rerouted_without_new_declarati
     rerouted = replace(
         spec.variants[1],
         variant_id="registered-reroute",
-        artifact=baseline.artifact,
+        artifact=replace(baseline.artifact, branch="leadpoet-lab"),
         artifact_authority_manifest=baseline.artifact_authority_manifest,
         change_kind="route_only",
         source_add_provenance=(),
@@ -2022,7 +2022,9 @@ def test_v2_route_only_requires_an_exact_model_route_change(stage):
         spec.variants[1],
         variant_id="changed-route",
         routing_payload=changed_payload,
-        artifact=spec.variants[0].artifact,
+        artifact=replace(
+            spec.variants[0].artifact, branch="leadpoet-lab"
+        ),
         source_add_provenance=(),
         new_tool_ids=(),
         change_kind="route_only",
@@ -2051,7 +2053,7 @@ def test_v2_supports_stage_specific_default_and_icp_payloads(stage):
     spec, adapters, labels, tool, _source_tool = _spec(stage)
     payload = dict(spec.variants[1].routing_payload)
     payload["profile_scope"] = "default"
-    broad = RoutingExperimentV2Variant("broad", stage, spec.variants[0].artifact, payload, ("baseline",), "route_only", (), spec.variants[0].artifact_authority_manifest)
+    broad = RoutingExperimentV2Variant("broad", stage, replace(spec.variants[0].artifact, branch="leadpoet-lab"), payload, ("baseline",), "route_only", (), spec.variants[0].artifact_authority_manifest)
     spec = RoutingExperimentV2Spec(spec.experiment_id + "-broad", spec.input, (spec.variants[0], broad), "baseline", spec.provider_bindings, spec.credit_budget, spec.gates)
     assert validate_routing_experiment_v2_spec(spec, adapters={"baseline": adapters["baseline"], "broad": adapters["candidate"]}) == []
     payload["profile_scope"] = "icp.company_size.201_500"

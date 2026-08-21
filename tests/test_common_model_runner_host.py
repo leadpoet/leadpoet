@@ -86,6 +86,7 @@ class FakeArtifactTransport:
             "calls": result["calls"],
             "cost_credits": result["cost_credits"],
             "latency_ms": result["latency_ms"],
+            "provider_receipt_ref": result["provider_receipt_ref"],
             "provider_response_sha256": "d" * 64,
             "completion_sha256": "e" * 64,
         }
@@ -114,6 +115,7 @@ class FakeDeeplineClient:
             cost_credits=self.cost,
             latency_ms=20,
             provider_request_id="private-provider-id",
+            provider_receipt_ref="provider_receipt:" + "a" * 16,
         )
 
 
@@ -146,6 +148,9 @@ def test_lab_dispatches_deepline_through_the_artifact_protocol():
     )
     assert artifact.completion_inputs[0]["provider_response"]["provider"] == (
         "deepline"
+    )
+    assert artifact.completion_inputs[0]["provider_receipt_ref"] == (
+        "provider_receipt:" + "a" * 16
     )
     assert "private-provider-id" not in str(persisted[0]["host_receipt"])
 

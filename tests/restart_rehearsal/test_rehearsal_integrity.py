@@ -1155,6 +1155,8 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
             "research_lab_compact_weight_authorities_v2",
+            "research_lab_candidate_waterfall_receipts",
+            "research_lab_candidate_waterfall_metrics",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {

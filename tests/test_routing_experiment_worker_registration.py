@@ -66,6 +66,7 @@ def _exact_identity_fixture():
     unit_hash = "sha256:" + "a" * 64
     spec = SimpleNamespace(
         input=SimpleNamespace(
+            stage="intent_evidence",
             calibration_unit_refs=("unit.cal",),
             holdout_unit_refs=("unit.hold",),
             unit_input_set_hash=unit_hash,

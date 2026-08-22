@@ -642,6 +642,33 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_waterfall_receipts",
+        (
+            "receipt_id",
+            "experiment_hash",
+            "decision_receipt_id",
+            "provider_receipt_ref",
+            "attempt_receipt_sha256",
+            "prior_attempt_receipt_sha256",
+            "attempt_chain_sha256",
+            "target_verified_qualified_count",
+            "receipt_doc",
+        ),
+    ),
+    (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_waterfall_metrics",
+        (
+            "metric_id",
+            "evaluation_receipt_id",
+            "experiment_hash",
+            "variant_id",
+            "split",
+            "metric_doc",
+        ),
+    ),
+    (
         "scripts/157-research-lab-routing-experiment-authority.sql",
         "research_lab_routing_decision_receipts_v2",
         ("receipt_id", "experiment_hash", "variant_id", "decision_doc"),

@@ -11,6 +11,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -55,6 +56,13 @@ from research_lab.routing_experiments import (
     RoutingExperimentV2Spec,
 )
 from research_lab.canonical import sha256_json
+from research_lab.candidate_routing_experiments import (
+    CandidateModelUnitTerminalReceipt,
+    CandidateWaterfallReceipt,
+    candidate_model_unit_terminal_from_exact_model,
+    candidate_waterfall_receipts_from_exact_model,
+    evaluate_candidate_waterfall_metrics,
+)
 
 
 class RoutingExperimentWorkerError(RuntimeError):
@@ -378,6 +386,14 @@ def _validate_exact_unit_and_label_identity(
         raise RoutingExperimentWorkerError(
             "reviewed routing label hash differs from the spec"
         )
+    if spec.input.stage == "candidate_acquisition":
+        target = spec.input.target_verified_qualified_count
+        for unit_ref in refs:
+            unit_input, _unit_hash = unit_dataset.resolve(unit_ref)
+            if unit_input.get("target_count") != target:
+                raise RoutingExperimentWorkerError(
+                    "signed Model unit target differs from the exact experiment target"
+                )
     return normalized
 
 
@@ -868,6 +884,13 @@ class RoutingExperimentWorker:
                         raise RoutingExperimentWorkerError(
                             "signed Model unit input is invalid"
                         )
+                    if (
+                        spec.input.stage == "candidate_acquisition"
+                        and target_count != spec.input.target_verified_qualified_count
+                    ):
+                        raise RoutingExperimentWorkerError(
+                            "signed Model unit target differs from the exact experiment target"
+                        )
                     coordinator = ExactModelExperimentCoordinator(
                         experiment_hash=spec.experiment_hash(),
                         registration=registration,
@@ -891,12 +914,132 @@ class RoutingExperimentWorker:
                 raise RoutingExperimentWorkerError(
                     "canonical Model decision receipts are invalid"
                 )
+            decisions_by_unit: dict[tuple[str, str], tuple[RoutingDecisionReceiptV2, ...]] = {}
             for receipt in decisions:
                 if not isinstance(receipt, RoutingDecisionReceiptV2):
                     raise RoutingExperimentWorkerError(
                         "canonical Model decision receipt is invalid"
                     )
                 self.service.store.append_decision(
+                    experiment_hash=spec.experiment_hash(),
+                    receipt=receipt,
+                    claim=claim,
+                )
+                key = (receipt.variant_id, receipt.unit_ref)
+                decisions_by_unit[key] = (*decisions_by_unit.get(key, ()), receipt)
+
+            candidate_receipts: list[CandidateWaterfallReceipt] = []
+            candidate_terminals: dict[tuple[str, str], CandidateModelUnitTerminalReceipt] = {}
+            candidate_provider_receipts = []
+            for variant in spec.variants:
+                registration = inputs.registry.resolve(variant.artifact.to_dict())
+                release_identity = registration.protocol.release_identity
+                release_identity_sha256 = str(
+                    release_identity.get("release_identity_sha256") or ""
+                ).removeprefix("sha256:")
+                binding_contracts_sha256 = str(
+                    release_identity.get("tool_binding_manifest_sha256") or ""
+                ).removeprefix("sha256:")
+                candidate_waterfall_contract_sha256 = str(
+                    release_identity.get("candidate_waterfall_contract_sha256") or ""
+                ).removeprefix("sha256:")
+                for unit_ref in ordered_units:
+                    unit_result = unit_results[variant.variant_id][unit_ref]
+                    unit_decisions = tuple(
+                        item
+                        for item in decisions_by_unit.get(
+                            (variant.variant_id, unit_ref), ()
+                        )
+                        if item.stage == "candidate_acquisition"
+                    )
+                    if len(unit_decisions) != 1:
+                        raise RoutingExperimentWorkerError(
+                            "exact Model candidate decision coverage is invalid"
+                        )
+                    authoritative_candidate_receipts = tuple(
+                        item
+                        for item in unit_result.provider_receipts
+                        if item.tool_id.startswith("candidate.")
+                    )
+                    candidate_provider_receipts.extend(authoritative_candidate_receipts)
+                    terminal = candidate_model_unit_terminal_from_exact_model(
+                        spec=spec,
+                        variant_id=variant.variant_id,
+                        decision_receipt=unit_decisions[0],
+                        terminal_result=unit_result.terminal_result,
+                        expected_release_identity_sha256=release_identity_sha256,
+                        expected_binding_contracts_sha256=binding_contracts_sha256,
+                        expected_candidate_waterfall_contract_sha256=(
+                            candidate_waterfall_contract_sha256
+                        ),
+                        authoritative_provider_receipts=authoritative_candidate_receipts,
+                    )
+                    self.service.store.append_candidate_model_unit_terminal(
+                        experiment_hash=spec.experiment_hash(),
+                        receipt=terminal,
+                        claim=claim,
+                    )
+                    candidate_terminals[(variant.variant_id, unit_ref)] = terminal
+            for variant in spec.variants:
+                registration = inputs.registry.resolve(variant.artifact.to_dict())
+                release_identity = registration.protocol.release_identity
+                release_identity_sha256 = str(
+                    release_identity.get("release_identity_sha256") or ""
+                ).removeprefix("sha256:")
+                binding_contracts_sha256 = str(
+                    release_identity.get("tool_binding_manifest_sha256") or ""
+                ).removeprefix("sha256:")
+                candidate_waterfall_contract_sha256 = str(
+                    release_identity.get("candidate_waterfall_contract_sha256") or ""
+                ).removeprefix("sha256:")
+                for unit_ref in ordered_units:
+                    unit_result = unit_results[variant.variant_id][unit_ref]
+                    unit_decisions = tuple(
+                        item
+                        for item in decisions_by_unit.get(
+                            (variant.variant_id, unit_ref), ()
+                        )
+                        if item.stage == "candidate_acquisition"
+                    )
+                    if len(unit_decisions) != 1:
+                        raise RoutingExperimentWorkerError(
+                            "exact Model candidate decision coverage is invalid"
+                        )
+                    authoritative_candidate_receipts = tuple(
+                        item
+                        for item in unit_result.provider_receipts
+                        if item.tool_id.startswith("candidate.")
+                    )
+                    projected = candidate_waterfall_receipts_from_exact_model(
+                        spec=spec,
+                        variant_id=variant.variant_id,
+                        decision_receipt=unit_decisions[0],
+                        terminal_result=unit_result.terminal_result,
+                        expected_release_identity_sha256=release_identity_sha256,
+                        expected_binding_contracts_sha256=binding_contracts_sha256,
+                        expected_candidate_waterfall_contract_sha256=(
+                            candidate_waterfall_contract_sha256
+                        ),
+                        authoritative_provider_receipts=authoritative_candidate_receipts,
+                        model_terminal_receipt=candidate_terminals[(variant.variant_id, unit_ref)],
+                    )
+                    candidate_receipts.extend(projected)
+            if not candidate_receipts:
+                raise RoutingExperimentWorkerError(
+                    "exact Model candidate waterfall receipts are missing"
+                )
+            target_counts = {
+                result.target_verified_qualified_count
+                for per_variant in unit_results.values()
+                for result in per_variant.values()
+            }
+            if len(target_counts) != 1:
+                raise RoutingExperimentWorkerError(
+                    "exact Model candidate target is inconsistent across units"
+                )
+            target_count = next(iter(target_counts))
+            for receipt in candidate_receipts:
+                self.service.store.append_candidate_waterfall_receipt(
                     experiment_hash=spec.experiment_hash(),
                     receipt=receipt,
                     claim=claim,
@@ -913,11 +1056,24 @@ class RoutingExperimentWorker:
                 raise RoutingExperimentWorkerError(
                     "canonical Model evaluation is invalid"
                 )
+            candidate_metrics = evaluate_candidate_waterfall_metrics(
+                spec=spec,
+                evaluation=evaluation,
+                receipts=tuple(candidate_receipts),
+                target_verified_qualified_count=target_count,
+                authoritative_provider_receipts=tuple(candidate_provider_receipts),
+            )
             self.service.store.append_evaluation(
                 spec=spec,
                 evaluation=evaluation,
                 claim=claim,
             )
+            for metric in candidate_metrics:
+                self.service.store.append_candidate_waterfall_metric(
+                    experiment_hash=spec.experiment_hash(),
+                    metric=metric,
+                    claim=claim,
+                )
             self._append_execution_event(
                 spec=spec,
                 claim=claim,

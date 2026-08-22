@@ -258,6 +258,9 @@ ROUTING_ADAPTER_FAILURES_MIGRATION = (
 EXACT_MODEL_TRANSITIONS_MIGRATION = (
     "161-research-lab-exact-model-transitions.sql"
 )
+CANDIDATE_WATERFALL_SIDECARS_MIGRATION = (
+    "162-research-lab-candidate-routing-experiments.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -320,6 +323,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ROUTING_EXECUTION_QUEUE_MIGRATION,
     ROUTING_ADAPTER_FAILURES_MIGRATION,
     EXACT_MODEL_TRANSITIONS_MIGRATION,
+    CANDIDATE_WATERFALL_SIDECARS_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -354,6 +358,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
     "post_161_exact_model_transition_contract_valid",
+    "post_162_candidate_waterfall_sidecars_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5603,6 +5608,110 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-161 exact Model transition contract differs"
+            )
+        database.apply_migration(
+            scripts / CANDIDATE_WATERFALL_SIDECARS_MIGRATION
+        )
+        applied.append(CANDIDATE_WATERFALL_SIDECARS_MIGRATION)
+        candidate_sidecar_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'forced_rls', (
+                        SELECT pg_catalog.bool_and(
+                            relation_meta.relrowsecurity
+                            AND relation_meta.relforcerowsecurity
+                        )
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relname IN (
+                              'research_lab_candidate_waterfall_receipts',
+                              'research_lab_candidate_waterfall_metrics'
+                          )
+                    ),
+                    'relation_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relkind = 'r'
+                          AND relation_meta.relname IN (
+                              'research_lab_candidate_waterfall_receipts',
+                              'research_lab_candidate_waterfall_metrics'
+                          )
+                    ),
+                    'foreign_key_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'f'
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                    ),
+                    'composite_lineage_foreign_key_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'f'
+                          AND pg_catalog.array_length(constraint_meta.conkey, 1) = 2
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                    ),
+                    'content_hash_check_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'c'
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                          AND pg_catalog.pg_get_constraintdef(
+                              constraint_meta.oid
+                          ) LIKE '%research_lab_routing_jsonb_hash_v2%'
+                    ),
+                    'append_only_trigger_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE NOT trigger_meta.tgisinternal
+                          AND trigger_meta.tgrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                          AND trigger_meta.tgname LIKE '%no_mutation'
+                    ),
+                    'provider_receipt_unique', EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.pg_indexes index_meta
+                        WHERE index_meta.schemaname = 'public'
+                          AND index_meta.tablename =
+                              'research_lab_candidate_waterfall_receipts'
+                          AND index_meta.indexname =
+                              'idx_research_lab_candidate_waterfall_provider_receipt'
+                          AND index_meta.indexdef LIKE 'CREATE UNIQUE INDEX%'
+                          AND index_meta.indexdef LIKE '%provider_receipt_ref%'
+                          AND index_meta.indexdef LIKE '%WHERE%'
+                    )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if candidate_sidecar_contract != {
+            "forced_rls": True,
+            "relation_count": 2,
+            "foreign_key_count": 4,
+            "composite_lineage_foreign_key_count": 2,
+            "content_hash_check_count": 2,
+            "append_only_trigger_count": 2,
+            "provider_receipt_unique": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-162 candidate waterfall sidecar contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

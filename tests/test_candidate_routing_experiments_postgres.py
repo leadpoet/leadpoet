@@ -216,7 +216,7 @@ def postgres162():
     psql_bin = _postgres_bin("psql")
     if initdb is None or pg_ctl is None or psql_bin is None:
         pytest.skip("native PostgreSQL server binaries are unavailable")
-    temp_root = Path(tempfile.mkdtemp(prefix="lab162-pg.", dir="/private/tmp"))
+    temp_root = Path(tempfile.mkdtemp(prefix="lab162-pg."))
     data = temp_root / "data"
     socket = temp_root / "socket"
     log = temp_root / "postgres.log"

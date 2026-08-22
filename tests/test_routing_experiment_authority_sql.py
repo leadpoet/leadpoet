@@ -287,6 +287,9 @@ def test_exact_model_transition_migration_is_redacted_and_retires_v2_mutations()
         in sql
     )
     assert sql.count("REVOKE ALL ON FUNCTION public.research_lab_routing_") == 12
+    assert "research_lab_routing_exact_model_transition_contract_v1" in sql
+    assert "leadpoet.research_lab.exact_model_transition_contract.v1" in sql
+    assert "GRANT EXECUTE ON FUNCTION" in sql
     for preserved in (
         "research_lab_routing_submit_experiment_v2",
         "research_lab_routing_request_execution_v2",

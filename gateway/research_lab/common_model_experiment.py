@@ -194,6 +194,7 @@ class ReviewedProtectedModelActionDispatcher:
             registration=self._registrations[variant_id],
             action=action,
             provider_binding=binding,
+            allowed_binding_ids=variant.binding_ids,
         )
         binding_contract = str(action.get("binding_contract_sha256") or "")
         if binding.execution_contract_hash != "sha256:" + binding_contract:
@@ -260,6 +261,7 @@ class ReviewedProtectedModelActionDispatcher:
             registration=self._registrations[variant_id],
             action=action,
             provider_binding=binding,
+            allowed_binding_ids=variant.binding_ids,
         )
         protected = self._runner.replay_model_action(
             binding=binding,
@@ -548,6 +550,7 @@ def _validate_variant_provider_binding(
     registration: ExactModelRunnerRegistration,
     action: Mapping[str, Any],
     provider_binding: ProviderBindingIdentity,
+    allowed_binding_ids: tuple[str, ...],
 ) -> None:
     """Require the active variant to authorize this exact provider tool.
 
@@ -556,6 +559,10 @@ def _validate_variant_provider_binding(
     This check runs before the protected dispatch runner is called.
     """
 
+    if provider_binding.binding_id not in allowed_binding_ids:
+        raise CommonModelExperimentError(
+            "Model variant did not declare the selected provider binding"
+        )
     manifest = registration.host_capability_manifest
     raw_bindings = manifest.get("bindings") if isinstance(manifest, Mapping) else None
     if not isinstance(raw_bindings, (list, tuple)):

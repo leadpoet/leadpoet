@@ -943,6 +943,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_routing_append_fenced_event_v3",
     ),
     (
+        "scripts/161-research-lab-exact-model-transitions.sql",
+        "research_lab_routing_exact_model_transition_contract_v1",
+    ),
+    (
         "scripts/157-research-lab-routing-experiment-authority.sql",
         "research_lab_routing_recover_claim_v3",
     ),

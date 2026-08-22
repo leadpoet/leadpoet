@@ -1240,6 +1240,10 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
             }
         ],
     }
+    active_model_graph = {
+        "root_receipt_hash": "sha256:" + "a" * 64,
+        "receipts": [],
+    }
 
     async def load_tape_graphs(**kwargs):
         assert kwargs == {"cache_ref": cache_ref, "cache_hash": cache_hash}
@@ -1313,6 +1317,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         epoch_id=24001,
         execute=execute,
         catalog_snapshot_loader=_load_empty_catalog,
+        parent_graphs=(active_model_graph,),
     )
     entries, token = begin_incontainer_trace_collection()
     receipt_hashes, receipt_token = begin_attested_receipt_hash_collection()
@@ -1340,6 +1345,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert payload["provider_evidence_cache_ref"] == cache_ref
     assert observed[0]["parent_graphs"] == (
         tape_graph,
+        active_model_graph,
         tape_lineage_graph,
         _catalog_outcome()["execution_receipt_graph"],
         _catalog_outcome()["receipt_graph"],
@@ -1469,6 +1475,12 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
         worker_index=0,
         execute=execute,
         catalog_snapshot_loader=reject_catalog_load,
+        parent_graphs=(
+            {
+                "root_receipt_hash": "sha256:" + "a" * 64,
+                "receipts": [],
+            },
+        ),
     )
     assert runner.metadata() == _ready_adapter_metadata()
     metadata_call = observed[0]
@@ -1493,6 +1505,7 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
     assert metadata_call["provider_credential_ref_hashes"] == {}
     assert metadata_call["additional_job_credential_envelope_builder"] is None
     assert metadata_call["require_egress_proxy"] is False
+    assert metadata_call["parent_graphs"] == ()
     profile = metadata_call["provider_profile_loader"](
         "default",
         execution_role="gateway_scoring",

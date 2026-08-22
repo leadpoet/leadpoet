@@ -44,6 +44,7 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.autoresearch_runtime import AutoResearchLoopEvent
 from gateway.tee.autoresearch_executor_v2 import (
     AUTORESEARCH_REQUEST_SCHEMA_VERSION,
+    COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2,
     HOST_APPEND_EVENT,
     HOST_EVENT_RESULT_SCHEMA_VERSION,
     HOST_GIT_TREE,
@@ -597,7 +598,12 @@ def _stale_parent_payload(tmp_path: Path):
     }, draft
 
 
-def _component_registry_graph(component_result, *, parent_graph=None):
+def _component_registry_graph(
+    component_result,
+    *,
+    parent_graph=None,
+    purpose=COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2,
+):
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes_raw().hex()
     boot = create_boot_identity(
@@ -626,7 +632,7 @@ def _component_registry_graph(component_result, *, parent_graph=None):
     receipt = create_signed_execution_receipt(
         body=build_execution_receipt_body(
             role="gateway_scoring",
-            purpose="research_lab.private_model_run.v2",
+            purpose=purpose,
             job_id="model-metadata",
             epoch_id=1,
             sequence=0,
@@ -1188,6 +1194,35 @@ def test_autoresearch_executor_rejects_registry_not_derived_from_measured_metada
         with pytest.raises(
             AutoresearchExecutorV2Error,
             match="component registry differs from measured model metadata",
+        ):
+            executor._validate_request(payload)
+    finally:
+        executor.close()
+
+
+def test_autoresearch_executor_rejects_obsolete_component_registry_purpose(
+    tmp_path,
+):
+    payload = _payload(tmp_path)
+    component_evidence = payload["component_registry_evidence"]
+    component_evidence["receipt_graph"] = _component_registry_graph(
+        component_evidence["result"],
+        purpose="research_lab.private_model_run.v2",
+    )
+    component_evidence["root_receipt_hash"] = component_evidence[
+        "receipt_graph"
+    ]["root_receipt_hash"]
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider must not be called"),
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            ValueError,
+            match="missing required purpose research_lab.model_compatibility.v2",
         ):
             executor._validate_request(payload)
     finally:

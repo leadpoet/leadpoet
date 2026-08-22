@@ -2698,7 +2698,28 @@ async def test_planner_reference_repair_resolves_symbol_and_builds_once(
 async def test_generation_retry_keeps_the_same_committed_branch_objective(tmp_path):
     events = []
     calls = []
-    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+    source_context = _source_context(tmp_path)
+    runtime_path = source_context.source_root / "sourcing_model" / "routing" / "runtime.py"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        "class SourceAddRoutingRegistration:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    editable_files = tuple(
+        sorted((*source_context.editable_files, "sourcing_model/routing/runtime.py"))
+    )
+    source_context = replace(
+        source_context,
+        editable_files=editable_files,
+        planner_source_index=build_source_symbol_index(
+            source_root=source_context.source_root,
+            editable_files=editable_files,
+            source_tree_hash=source_context.source_tree_hash,
+            parent_image_digest_hash=source_context.parent_image_digest_hash,
+        ),
+    )
+    builder = _PlannerBuildsCandidateBuilder(source_context)
     builder.config.planner_reference_repair_enabled = True
 
     async def call_model(messages, timeout_seconds, max_tokens, stage):
@@ -2737,9 +2758,12 @@ async def test_generation_retry_keeps_the_same_committed_branch_objective(tmp_pa
                 content=json.dumps(
                     {
                         "no_viable_patch": True,
-                        "failure_class": "binding_plan_unimplementable",
-                        "reason": "discover_companiez is not present in editable source",
-                        "missing_references": ["discover_companiez"],
+                        "failure_class": "insufficient_source_context",
+                        "reason": "the registration contract has not been inspected",
+                        "missing_references": [
+                            "SourceAddRoutingRegistration",
+                            "BuiltWithTrendsAdapter",
+                        ],
                     }
                 ),
                 provider_usage={"provider": "openrouter", "response_id": "draft-miss"},
@@ -2750,6 +2774,13 @@ async def test_generation_retry_keeps_the_same_committed_branch_objective(tmp_pa
                 "Context JSON:\n", 1
             )[1].split("\n\nBounded fallback pass:", 1)[0]
             context = json.loads(context_text)
+            inspection_context = context["source_inspection_context"]
+            assert "sourcing_model/routing/runtime.py" in inspection_context["read_files"]
+            assert any(
+                item.get("path") == "sourcing_model/routing/runtime.py"
+                and "SourceAddRoutingRegistration" in item.get("content", "")
+                for item in inspection_context["results"]
+            )
             plan = context["loop_direction_plan"]
             assert plan["selected_path_id"] == "misspelled_discovery_symbol"
             assert [item["path_id"] for item in plan["ranked_paths"]] == [
@@ -2811,6 +2842,16 @@ async def test_generation_retry_keeps_the_same_committed_branch_objective(tmp_pa
     assert "loop_planner_reference_repair" not in calls
     assert calls.count("code_edit_draft") == 1
     assert calls.count("code_edit_fallback") == 1
+    repair_events = [
+        event
+        for event in events
+        if event.event_type in {"source_inspection_requested", "source_inspection_resolved"}
+        and event.event_doc.get("mode") == "draft_missing_reference_repair"
+    ]
+    assert [event.event_type for event in repair_events] == [
+        "source_inspection_requested",
+        "source_inspection_resolved",
+    ]
     selected = result.selected_candidates[0]
     assert selected.tree_branch_objective_path_id == "misspelled_discovery_symbol"
     assert selected.tree_generation_attempt_count == 2

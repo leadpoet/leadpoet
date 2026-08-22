@@ -46,7 +46,8 @@ from research_lab.eval import (
     verify_private_artifact_manifest_signature,
 )
 from research_lab.sourcing_model_contract_check import (
-    source_tree_compatibility_admission_v1,
+    _qualification_protocol_entrypoint_declared_v2,
+    source_tree_compatibility_admission,
     validate_reviewed_legacy_release_manifest_identity_v1,
 )
 
@@ -1062,7 +1063,7 @@ class CodeEditCandidateBuilder:
                 raise CodeEditEmptyOrNoopPatchError("code edit produced no repository changes")
             try:
                 _py_compile_changed_files(repo_dir, changed_files)
-                _sourcing_contract_gate(repo_dir)
+                _sourcing_contract_prebuild_gate(repo_dir)
                 private_test_env = _candidate_private_test_env(
                     self._build_env(
                         draft_path=draft_path,
@@ -1116,15 +1117,6 @@ class CodeEditCandidateBuilder:
                     len(commit_excluded_paths),
                     ", ".join(commit_excluded_paths[:20]),
                 )
-            admitted_source = _sourcing_contract_gate(
-                repo_dir,
-                force_enforce=True,
-            )
-            if admitted_source is None:
-                raise CodeEditPrivateTestError(
-                    "candidate source compatibility admission did not return a receipt"
-                )
-            candidate_source_tree_hash, candidate_source_receipt = admitted_source
             # §5.3: make sure the parent image is cached locally BEFORE the build
             # command starts, so a cold registry pull never eats the build budget
             # (matters especially on the source_context path, which touches no
@@ -1155,6 +1147,16 @@ class CodeEditCandidateBuilder:
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )
+            admitted_source = _sourcing_contract_gate(
+                repo_dir,
+                manifest=candidate_manifest,
+                force_enforce=True,
+            )
+            if admitted_source is None:
+                raise CodeEditPrivateTestError(
+                    "candidate source compatibility admission did not return a receipt"
+                )
+            candidate_source_tree_hash, candidate_source_receipt = admitted_source
             _verify_built_candidate_artifact(
                 candidate_manifest,
                 source_tree_hash=candidate_source_tree_hash,
@@ -2543,6 +2545,7 @@ def _sourcing_contract_check_mode() -> str:
 def _sourcing_contract_gate(
     repo_dir: Path,
     *,
+    manifest: PrivateModelArtifactManifest | Mapping[str, Any] | None = None,
     force_enforce: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Admit the patched model source through the unified consumer contract.
@@ -2561,8 +2564,9 @@ def _sourcing_contract_gate(
         return None
     try:
         source_tree_hash = compute_private_source_tree_hash(repo_dir)
-        receipt = source_tree_compatibility_admission_v1(
+        receipt = source_tree_compatibility_admission(
             repo_dir,
+            manifest=manifest,
             source_tree_hash=source_tree_hash,
         )
     except ValueError as exc:
@@ -2585,6 +2589,26 @@ def _sourcing_contract_gate(
             ) from exc
         return None
     return source_tree_hash, receipt
+
+
+def _sourcing_contract_prebuild_gate(repo_dir: Path) -> None:
+    """Apply legacy source admission before build and defer v2 to its manifest.
+
+    Qualification-protocol-v2 admission binds the source tree, candidate Git
+    commit, image digest, and signed manifest. Those values do not exist until
+    the candidate build completes. The final enforced gate therefore admits
+    v2 only after the signed manifest exists; malformed declarations still
+    fail closed there and in the measured runtime probe.
+    """
+
+    if _sourcing_contract_check_mode() == "disabled":
+        return
+    if _qualification_protocol_entrypoint_declared_v2(repo_dir):
+        logger.info(
+            "sourcing_contract_prebuild_deferred admission=qualification_protocol_v2"
+        )
+        return
+    _sourcing_contract_gate(repo_dir)
 
 
 def _run_git_apply(

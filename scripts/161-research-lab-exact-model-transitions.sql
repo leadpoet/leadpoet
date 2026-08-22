@@ -216,9 +216,40 @@ REVOKE ALL ON FUNCTION public.research_lab_routing_promote_v2(
     TEXT, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB
 ) FROM service_role;
 
+-- This distinct, read-only capability is created only after the transition
+-- event contract and all legacy mutation revocations above have committed in
+-- the same transaction. Restart preflight uses its presence to distinguish a
+-- complete migration 161 database from the earlier migration 157 V3 surface.
+CREATE OR REPLACE FUNCTION
+public.research_lab_routing_exact_model_transition_contract_v1()
+RETURNS JSONB
+LANGUAGE SQL
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $exact_model_transition_contract_v1$
+    SELECT pg_catalog.jsonb_build_object(
+        'schema_version',
+        'leadpoet.research_lab.exact_model_transition_contract.v1',
+        'event_type',
+        'model_transition_completed'
+    );
+$exact_model_transition_contract_v1$;
+
+REVOKE ALL ON FUNCTION
+public.research_lab_routing_exact_model_transition_contract_v1()
+FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION
+public.research_lab_routing_exact_model_transition_contract_v1()
+TO service_role;
+
 COMMENT ON FUNCTION public.research_lab_routing_append_fenced_event_v3(
     TEXT, TEXT, TEXT, TEXT, BIGINT, JSONB
 ) IS 'Appends V3 claim-fenced lifecycle events and redacted exact-Model transition markers.';
+
+COMMENT ON FUNCTION
+public.research_lab_routing_exact_model_transition_contract_v1() IS
+    'Read-only migration capability proving the exact-Model transition contract and legacy V2 revocations committed atomically.';
 
 NOTIFY pgrst, 'reload schema';
 

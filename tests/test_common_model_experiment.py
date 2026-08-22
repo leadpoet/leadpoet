@@ -464,8 +464,12 @@ def test_variant_provider_binding_is_checked_against_its_own_manifest():
         provider_binding=type(
             "Binding",
             (),
-            {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+            {
+                "binding_id": "reviewed-binding",
+                "execution_contract_hash": "sha256:" + HASHES["binding"],
+            },
         )(),
+        allowed_binding_ids=("reviewed-binding",),
     )
 
     forged_registration = replace(
@@ -482,10 +486,38 @@ def test_variant_provider_binding_is_checked_against_its_own_manifest():
             provider_binding=type(
                 "Binding",
                 (),
-                {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+                {
+                    "binding_id": "reviewed-binding",
+                    "execution_contract_hash": "sha256:" + HASHES["binding"],
+                },
             )(),
+            allowed_binding_ids=("reviewed-binding",),
         )
     except CommonModelExperimentError as exc:
         assert "variant" in str(exc)
     else:
         raise AssertionError("variant binding substitution must fail closed")
+
+
+def test_variant_provider_binding_must_be_declared_before_dispatch():
+    registration = _registration()
+    try:
+        _validate_variant_provider_binding(
+            registration=registration,
+            action=_action(),
+            provider_binding=type(
+                "Binding",
+                (),
+                {
+                    "binding_id": "manifest-authorized-but-undeclared",
+                    "execution_contract_hash": "sha256:" + HASHES["binding"],
+                },
+            )(),
+            allowed_binding_ids=("declared-only",),
+        )
+    except CommonModelExperimentError as exc:
+        assert "did not declare" in str(exc)
+    else:
+        raise AssertionError(
+            "a globally available binding excluded from the variant must fail closed"
+        )

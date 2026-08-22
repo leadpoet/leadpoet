@@ -215,6 +215,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/158-research-lab-routing-experiment-purposes.sql",
     "scripts/159-research-lab-routing-execution-queue.sql",
     "scripts/160-research-lab-routing-adapter-failures.sql",
+    "scripts/161-research-lab-exact-model-transitions.sql",
     "scripts/162-research-lab-candidate-routing-experiments.sql",
     "gateway/api/weights.py",
     "gateway/tee/coordinator_chain_source_v2.py",

@@ -36,6 +36,7 @@ from research_lab.employee_buckets import (
 from research_lab.sourcing_model_contract_check import (
     QUALIFICATION_PROTOCOL_ENTRYPOINT_V2,
     QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
+    _qualification_protocol_entrypoint_declared_v2,
     compute_compatibility_source_tree_hash_v1,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_profiles,
@@ -1870,16 +1871,21 @@ def build_local_private_artifact_manifest(
     source_tree_hash = compute_private_source_tree_hash(source_root)
     source_snapshot = resolve_reviewed_consumer_snapshot(source_root)
     if source_snapshot is None:
-        try:
-            source_tree_compatibility_admission_v1(
-                source_root,
-                source_tree_hash=source_tree_hash,
-            )
-        except ValueError as exc:
-            raise PrivateModelRuntimeError(
-                "private model source has no reviewed contract/parity pair and "
-                "failed semantic compatibility: " + str(exc)
-            ) from exc
+        if not _qualification_protocol_entrypoint_declared_v2(source_root):
+            try:
+                source_tree_compatibility_admission_v1(
+                    source_root,
+                    source_tree_hash=source_tree_hash,
+                )
+            except ValueError as exc:
+                raise PrivateModelRuntimeError(
+                    "private model source has no reviewed contract/parity pair and "
+                    "failed semantic compatibility: " + str(exc)
+                ) from exc
+        # V2 admission requires the exact manifest identity that this helper
+        # is constructing. The caller must sign the result and pass the built
+        # source plus manifest through unified admission and the measured
+        # qualification-protocol probe before it can execute or enter scoring.
         source_snapshot = {
             "contract": source_contract,
             "contract_sha256": sha256_bytes(contract_path.read_bytes()),

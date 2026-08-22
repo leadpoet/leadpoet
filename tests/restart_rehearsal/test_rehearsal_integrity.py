@@ -1209,6 +1209,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_routing_exact_model_transition_contract_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
@@ -1485,6 +1486,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_routing_exact_model_transition_contract_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
+  "baseline_commit": "7e042236bf4af9087c834f398ea3d821e9aa6d14",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -742,7 +742,7 @@
       "symbol": "reconcile_champion_reward_statuses"
     },
     {
-      "ast_sha256": "sha256:3b3d7ca31305e010f0c9ed9e595f27efdc400bd6efdc5af83544ac9b29892d1e",
+      "ast_sha256": "sha256:39a4ac66c5d06abece6e3c062f4c1dd6f7568d32851c32e952cfb0664216e8c4",
       "path": "gateway/research_lab/model_authority_v2.py",
       "symbol": "AttestedPrivateModelRunnerV2"
     },
@@ -6352,7 +6352,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4f891096876cf3b985c682d2b079879495cca978b1c2268615eaf5c83b9c8345",
-  "protected_source_commit": "214eaed38b0f651c52b402f71504ab987e7add47",
+  "manifest_hash": "sha256:56295bdea1f3b2398a8025eecdc3fc316d39ba032124cabf20cee9cab0a13801",
+  "protected_source_commit": "7e042236bf4af9087c834f398ea3d821e9aa6d14",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

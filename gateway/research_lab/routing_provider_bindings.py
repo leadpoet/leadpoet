@@ -1265,9 +1265,18 @@ class ReviewedDeeplineActionCompiler:
         core_request_fingerprint: str,
     ) -> Mapping[str, Any]:
         policy = DEEPLINE_ACTION_POLICIES[prepared.action_id]
+        call_count = broker_result.get("call_count")
+        if type(call_count) is not int or not 1 <= call_count <= 10_000:
+            raise RoutingProviderBindingError(
+                "routing broker physical call count is invalid"
+            )
         if broker_result.get("terminal_status") != "authenticated_response":
             return _projected_failure(
-                prepared, core_request_fingerprint, broker_result, billing_state="uncertain"
+                prepared,
+                core_request_fingerprint,
+                broker_result,
+                billing_state="uncertain",
+                call_count=call_count,
             )
         attempt = broker_result.get("transport_attempt")
         if not isinstance(attempt, Mapping):
@@ -1308,6 +1317,7 @@ class ReviewedDeeplineActionCompiler:
                 billing_state=billing_state,
                 credit=credit,
                 latency_ms=latency_ms,
+                call_count=call_count,
             )
         rows = _extract_rows(response, policy.result_paths)
         qualifying = _qualifying_direct_rows(
@@ -1331,6 +1341,7 @@ class ReviewedDeeplineActionCompiler:
             ),
             "credit_microunits": credit,
             "latency_ms": latency_ms,
+            "call_count": call_count,
             "billing_state": billing_state,
             "binding_id": prepared.binding.binding_id,
             "provider_id": prepared.binding.provider_id,
@@ -2174,6 +2185,7 @@ def _projected_failure(
     billing_state: str,
     credit: int = 0,
     latency_ms: int = 0,
+    call_count: int,
 ) -> Mapping[str, Any]:
     return {
         "outcome": "adapter_failure",
@@ -2186,6 +2198,7 @@ def _projected_failure(
         ),
         "credit_microunits": credit,
         "latency_ms": latency_ms,
+        "call_count": call_count,
         "billing_state": billing_state,
         "binding_id": prepared.binding.binding_id,
         "provider_id": prepared.binding.provider_id,

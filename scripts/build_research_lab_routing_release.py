@@ -27,6 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     manifest = load_manifest(args.protected_manifest)
     output = args.output.resolve()
+    provider = output.parent / "attested_routing_release_authorities.py"
+    if provider.is_symlink() or not provider.is_file():
+        parser.error(
+            "the fixed attested_routing_release_authorities.py provider must be packaged"
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         render_generated_release_module(

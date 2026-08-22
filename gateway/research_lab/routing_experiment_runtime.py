@@ -1070,6 +1070,7 @@ _ROUTING_DISPATCH_PROJECTION_FIELDS = frozenset(
         "evidence_hash",
         "credit_microunits",
         "latency_ms",
+        "call_count",
         "billing_state",
         "binding_id",
         "provider_id",
@@ -1760,6 +1761,7 @@ class ProviderBrokerRoutingRunner:
             "evidence_hash",
             "credit_microunits",
             "latency_ms",
+            "call_count",
             "billing_state",
             "binding_id",
             "provider_id",
@@ -1776,7 +1778,15 @@ class ProviderBrokerRoutingRunner:
             raise RoutingExperimentRuntimeError("routing broker billing state is invalid")
         credit = result.get("credit_microunits")
         latency = result.get("latency_ms")
-        if type(credit) is not int or credit < 0 or type(latency) is not int or latency < 0:
+        call_count = result.get("call_count")
+        if (
+            type(credit) is not int
+            or credit < 0
+            or type(latency) is not int
+            or latency < 0
+            or type(call_count) is not int
+            or not 1 <= call_count <= 10_000
+        ):
             raise RoutingExperimentRuntimeError("routing broker cost or latency is invalid")
         if (
             result.get("binding_id") != binding.binding_id
@@ -1802,6 +1812,7 @@ class ProviderBrokerRoutingRunner:
             "evidence_hash": result.get("evidence_hash"),
             "credit_microunits": credit,
             "latency_ms": latency,
+            "call_count": call_count,
             "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
         }
         return ProviderReceipt(

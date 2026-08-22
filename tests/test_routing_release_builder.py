@@ -137,15 +137,18 @@ def test_generated_release_module_loads_without_sys_modules_injection(
     provider_dir = tmp_path / "release_provider"
     provider_dir.mkdir()
     (provider_dir / "attested_routing_release_authorities.py").write_text(
+        "import os\n"
         "from tests.test_routing_release_builder import _sources_and_environment\n"
         "def load_reviewed_routing_release_authority_sources():\n"
-        "    return _sources_and_environment()[0]\n",
+        "    sources, environment, _ = _sources_and_environment()\n"
+        "    os.environ.update(environment)\n"
+        "    return sources\n",
         encoding="utf-8",
     )
     import gateway.research_lab as research_lab_package
 
     original_path = list(research_lab_package.__path__)
-    research_lab_package.__path__.append(str(provider_dir))
+    research_lab_package.__path__.insert(0, str(provider_dir))
     generated = tmp_path / "routing_release_dependencies.py"
     generated.write_text(
         render_generated_release_module(

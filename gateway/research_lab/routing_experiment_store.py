@@ -1397,6 +1397,7 @@ class SupabaseRoutingExperimentStore:
             or projection.get("evidence_hash") != receipt.evidence_hash
             or projection.get("credit_microunits") != receipt.credit_microunits
             or projection.get("latency_ms") != receipt.latency_ms
+            or projection.get("call_count") != receipt.call_count
             or projection.get("binding_id") != receipt.binding_id
             or projection.get("tool_id") != receipt.tool_id
             or projection.get("request_fingerprint") != receipt.request_fingerprint

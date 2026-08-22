@@ -490,7 +490,7 @@ def _runner(binding, unit_ref, request_fingerprint):
         "source_lineage_id": binding.source_lineage_id, "unit_ref": unit_ref,
         "request_fingerprint": request_fingerprint, "outcome": "verified" if verified else "source_miss",
         "evidence_hash": sha256_json({"unit": unit_ref, "tool": binding.tool_id}), "credit_microunits": 10,
-        "latency_ms": 2, "execution_mode": "fixture",
+        "latency_ms": 2, "call_count": 1, "execution_mode": "fixture",
     }
     identity["receipt_ref"] = "provider_receipt:" + sha256_json({key: value for key, value in identity.items() if key != "receipt_ref"}).split(":", 1)[1][:16]
     return identity

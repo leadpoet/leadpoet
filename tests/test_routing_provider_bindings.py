@@ -208,6 +208,7 @@ def _broker_result(request, response):
     return {
         "terminal_status": "authenticated_response",
         "http_status": 200,
+        "call_count": 1,
         "headers": {},
         "body_b64": base64.b64encode(body).decode(),
         "encrypted_request_artifact_id": _hash("d"),
@@ -831,8 +832,10 @@ def test_deepline_success_projects_only_reviewed_evidence_and_authoritative_bill
     assert result["credit_microunits"] == 90_000
     assert result["billing_state"] == "known"
     assert result["latency_ms"] == 25
+    assert result["call_count"] == 1
     assert set(result) == {
         "outcome", "evidence_hash", "credit_microunits", "latency_ms",
+        "call_count",
         "billing_state", "binding_id", "provider_id", "tool_id", "request_fingerprint",
     }
 

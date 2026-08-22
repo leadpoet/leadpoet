@@ -334,12 +334,16 @@ class ReviewedProtectedModelActionDispatcher:
             provider_response = {
                 **dict(response),
             }
+        if receipt.call_count is None:
+            raise CommonModelExperimentError(
+                "measured provider receipt call count is missing"
+            )
         return ProtectedModelActionResult(
             host_result=HostActionResult(
                 outcome=outcome,
                 reason_code="protected_provider_" + receipt.outcome,
                 provider_response=provider_response,
-                calls=1,
+                calls=receipt.call_count,
                 cost_credits=receipt.credit_microunits / 1_000_000,
                 latency_ms=receipt.latency_ms,
                 provider_receipt_ref=receipt.receipt_ref,

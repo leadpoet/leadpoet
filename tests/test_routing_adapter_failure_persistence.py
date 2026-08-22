@@ -56,6 +56,7 @@ def _failure(*, evidence: str = "d") -> ProviderReceipt:
         "evidence_hash": _hash(evidence),
         "credit_microunits": 0,
         "latency_ms": 0,
+        "call_count": 0,
         "execution_mode": "measured_lab",
     }
     return ProviderReceipt(
@@ -249,6 +250,7 @@ def test_non_failure_receipt_does_not_use_pre_dispatch_failure_path():
         evidence_hash=receipt.evidence_hash,
         credit_microunits=0,
         latency_ms=0,
+        call_count=0,
         execution_mode=receipt.execution_mode,
     )
     key = provider_receipt_key(

@@ -338,6 +338,7 @@ def _call_fixture(
     result = {
         "terminal_status": "authenticated_response",
         "http_status": http_status,
+        "call_count": 1,
         "headers": {},
         "body_b64": base64.b64encode(response_body).decode(),
         "encrypted_request_artifact_id": _h("8"),
@@ -892,6 +893,50 @@ def test_terminal_rejects_uncertain_or_boolean_billing(response):
             prepared_call=prepared,
             broker_request=request,
             broker_result=result,
+            provider_record=record,
+            trusted_coordinator_boot_identity=boot,
+            raw_response_body=body,
+            binding_catalog=compiler.binding_catalog,
+            unit_dataset=compiler.unit_dataset,
+        )
+
+
+def test_terminal_receipt_commits_authoritative_multi_call_count():
+    compiler, prepared, request, proof, broker_result, record, boot, body, _, _ = (
+        _call_fixture({"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}})
+    )
+    broker_result = dict(broker_result)
+    broker_result["call_count"] = 3
+
+    result = execute_protected_routing_provider_terminal_v2(
+        authorization_proof=proof,
+        prepared_call=prepared,
+        broker_request=request,
+        broker_result=broker_result,
+        provider_record=record,
+        trusted_coordinator_boot_identity=boot,
+        raw_response_body=body,
+        binding_catalog=compiler.binding_catalog,
+        unit_dataset=compiler.unit_dataset,
+    )
+
+    assert result["projection"]["call_count"] == 3
+    assert result["provider_receipt"]["call_count"] == 3
+
+
+def test_terminal_rejects_missing_authoritative_multi_call_count():
+    compiler, prepared, request, proof, broker_result, record, boot, body, _, _ = (
+        _call_fixture({"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}})
+    )
+    broker_result = dict(broker_result)
+    broker_result.pop("call_count")
+
+    with pytest.raises(ProtectedRoutingProviderTerminalError, match="call count"):
+        execute_protected_routing_provider_terminal_v2(
+            authorization_proof=proof,
+            prepared_call=prepared,
+            broker_request=request,
+            broker_result=broker_result,
             provider_record=record,
             trusted_coordinator_boot_identity=boot,
             raw_response_body=body,

@@ -372,6 +372,7 @@ def _receipt(binding: ProviderBindingIdentity, unit_ref: str, outcome: ProviderO
         "evidence_hash": HASH_E,
         "credit_microunits": 10,
         "latency_ms": 25,
+        "call_count": 1,
         "execution_mode": execution_mode,
     }
     return ProviderReceipt(receipt_ref="provider_receipt:" + sha256_json(payload).split(":", 1)[1][:16], **payload)

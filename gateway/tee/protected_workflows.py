@@ -184,6 +184,10 @@ PROTECTED_SYMBOLS = {
         "build_reviewed_routing_release_dependencies",
         "render_generated_release_module",
     ),
+    "gateway/research_lab/attested_routing_release_authorities.py": (
+        "AttestedRoutingTeeJobRpc",
+        "load_reviewed_routing_release_authority_sources",
+    ),
     "gateway/research_lab/routing_execution_authorization.py": (
         "ROUTING_PROVIDER_AUTHORIZATION_OPERATION_V2",
         "ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2",

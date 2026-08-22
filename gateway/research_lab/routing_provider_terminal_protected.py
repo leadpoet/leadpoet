@@ -752,6 +752,11 @@ def execute_protected_routing_provider_terminal_v2(
         raise ProtectedRoutingProviderTerminalError(
             "routing protected terminal requires authenticated provider response"
         )
+    call_count = broker_result.get("call_count")
+    if type(call_count) is not int or not 1 <= call_count <= 10_000:
+        raise ProtectedRoutingProviderTerminalError(
+            "routing protected terminal physical call count is invalid"
+        )
     try:
         result_body = base64.b64decode(
             str(broker_result.get("body_b64") or ""), validate=True
@@ -837,7 +842,7 @@ def execute_protected_routing_provider_terminal_v2(
         )
     allowed_projection = {
         "outcome", "evidence_hash", "credit_microunits", "latency_ms",
-        "billing_state", "binding_id", "provider_id", "tool_id",
+        "call_count", "billing_state", "binding_id", "provider_id", "tool_id",
         "request_fingerprint",
     }
     if set(derived) != allowed_projection:
@@ -855,6 +860,7 @@ def execute_protected_routing_provider_terminal_v2(
         or derived["request_fingerprint"] != authorization.core_request_fingerprint
         or type(derived["credit_microunits"]) is not int
         or type(derived["latency_ms"]) is not int
+        or derived["call_count"] != call_count
         or derived["credit_microunits"] > prepared_call.credit_ceiling_microunits
         or derived["latency_ms"] > prepared_call.timeout_ms
     ):
@@ -872,6 +878,7 @@ def execute_protected_routing_provider_terminal_v2(
         "evidence_hash": derived["evidence_hash"],
         "credit_microunits": derived["credit_microunits"],
         "latency_ms": derived["latency_ms"],
+        "call_count": derived["call_count"],
         "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
     }
     provider_receipt = ProviderReceipt(

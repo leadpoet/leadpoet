@@ -4248,11 +4248,16 @@ BEGIN
             !~ '^[0-9]+$'
        OR coalesce(billing_projection->>'latency_ms', '')
             !~ '^[0-9]+$'
+       OR coalesce(billing_projection->>'call_count', '')
+            !~ '^[0-9]+$'
        OR coalesce(
             terminal_result->'provider_receipt'->>'credit_microunits', ''
           ) !~ '^[0-9]+$'
        OR coalesce(
             terminal_result->'provider_receipt'->>'latency_ms', ''
+          ) !~ '^[0-9]+$'
+       OR coalesce(
+            terminal_result->'provider_receipt'->>'call_count', ''
           ) !~ '^[0-9]+$'
        OR coalesce(terminal_result->>'transport_attempt_hash', '')
             !~ '^sha256:[0-9a-f]{64}$'
@@ -4290,6 +4295,8 @@ BEGIN
        OR billing_projection->>'outcome' IS DISTINCT FROM p_outcome
        OR (billing_projection->>'credit_microunits')::BIGINT IS DISTINCT FROM p_credit_microunits
        OR (billing_projection->>'latency_ms')::BIGINT IS DISTINCT FROM p_latency_ms
+       OR billing_projection->>'call_count' IS DISTINCT FROM
+            terminal_result->'provider_receipt'->>'call_count'
        OR billing_projection->>'billing_state' IS DISTINCT FROM 'known'
        OR billing_projection->>'binding_id' IS DISTINCT FROM p_binding_id
        OR billing_projection->>'tool_id' IS DISTINCT FROM p_tool_id
@@ -4313,6 +4320,10 @@ BEGIN
             IS DISTINCT FROM p_credit_microunits
        OR (terminal_result->'provider_receipt'->>'latency_ms')::BIGINT
             IS DISTINCT FROM p_latency_ms
+       OR (billing_projection->>'call_count')::BIGINT < 1
+       OR (billing_projection->>'call_count')::BIGINT > 10000
+       OR (terminal_result->'provider_receipt'->>'call_count')::BIGINT < 1
+       OR (terminal_result->'provider_receipt'->>'call_count')::BIGINT > 10000
        OR p_billing_state IS DISTINCT FROM 'known'
        OR p_authoritative_billed_credit_microunits IS DISTINCT FROM p_credit_microunits
     THEN

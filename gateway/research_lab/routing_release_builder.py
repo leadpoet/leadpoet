@@ -112,7 +112,8 @@ def _require_callable(value: Any, label: str) -> Callable[..., Any]:
 
 
 def _require_rpc(value: Any, label: str) -> Any:
-    _require_callable(value, f"{label} RPC")
+    if value is None:
+        raise RoutingReleaseDependencyError(f"routing release {label} RPC is unavailable")
     for method in ("submit_job", "put_chunk", "seal", "status", "result", "receipts"):
         if not callable(getattr(value, method, None)):
             raise RoutingReleaseDependencyError(

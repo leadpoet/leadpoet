@@ -145,6 +145,7 @@ def _terminal_fixture():
         "evidence_hash": provider_record["record_hash"],
         "credit_microunits": 90_000,
         "latency_ms": 240,
+        "call_count": 1,
         "execution_mode": "measured_lab",
     }
     receipt_ref = "provider_receipt:" + sha256_json(projection_identity).split(":", 1)[1][:16]
@@ -167,6 +168,7 @@ def _terminal_fixture():
             "evidence_hash": provider_record["record_hash"],
             "credit_microunits": 90_000,
             "latency_ms": 240,
+            "call_count": 1,
             "billing_state": "known",
         },
     )

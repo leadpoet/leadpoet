@@ -5724,7 +5724,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "relation_count": 3,
             "foreign_key_count": 7,
             "composite_lineage_foreign_key_count": 4,
-            "content_hash_check_count": 3,
+            "content_hash_check_count": 4,
             "append_only_trigger_count": 3,
             "provider_receipt_unique": True,
         }:

@@ -63,7 +63,31 @@ _PROVIDER_OUTCOME_BY_MODEL_OUTCOME = {
     "unavailable": ProviderOutcome.ADAPTER_FAILURE.value,
     "timeout": ProviderOutcome.ADAPTER_FAILURE.value,
     "failed": ProviderOutcome.ADAPTER_FAILURE.value,
+    "deferred": ProviderOutcome.ADAPTER_FAILURE.value,
 }
+_PROVIDER_OUTCOME_BY_DISPOSITION = {
+    "succeeded": ProviderOutcome.VERIFIED.value,
+    "missed": ProviderOutcome.SOURCE_MISS.value,
+    "failed": ProviderOutcome.ADAPTER_FAILURE.value,
+    "deferred": ProviderOutcome.ADAPTER_FAILURE.value,
+    "skipped": "skipped",
+}
+_MODEL_DISPOSITION_BY_OUTCOME = {
+    "succeeded": "succeeded",
+    "empty": "missed",
+    "not_invoked": "skipped",
+    "not_attempted": "skipped",
+    "failed": "failed",
+    "unavailable": "failed",
+    "timeout": "failed",
+    "deferred": "deferred",
+}
+
+
+def _ordered_verification_receipt_sha256(values: Sequence[str]) -> str:
+    """Hash the complete verification reference list in its original order."""
+
+    return sha256_json(list(values)).split(":", 1)[1] if values else ""
 
 
 def _safe_ref(value: Any, field_name: str) -> str:
@@ -438,6 +462,12 @@ def adapt_exact_model_candidate_receipt(
             raise RoutingExperimentError("exact_model_candidate_attempt_differs")
         provider_receipt_ref = str(attempt.get("provider_receipt_ref") or "")
         model_outcome = str(attempt.get("outcome") or "")
+        model_disposition = attempt.get("disposition")
+        expected_disposition = _MODEL_DISPOSITION_BY_OUTCOME.get(model_outcome)
+        if model_disposition is not None and model_disposition != expected_disposition:
+            raise RoutingExperimentError(
+                "exact_model_candidate_disposition_differs_from_outcome"
+            )
         provider_outcome = "skipped"
         authoritative_provider_call_count = 0
         authoritative_billed_credit_microunits = 0
@@ -510,15 +540,14 @@ def adapt_exact_model_candidate_receipt(
             raise RoutingExperimentError(
                 "exact_model_candidate_published_count_exceeds_verified_count"
             )
-        verification_bundle_sha256 = (
-            sha256_json(list(verification_hashes)).split(":", 1)[1]
-            if verification_hashes
-            else ""
+        verification_receipt_sha256 = _ordered_verification_receipt_sha256(
+            verification_hashes
         )
         metric = {
             "schema_version": EXACT_MODEL_CANDIDATE_METRIC_VERSION,
             "tool_id": tool_id,
             "outcome": _safe_ref(model_outcome, "attempt_outcome"),
+            "disposition": attempt.get("disposition"),
             "reason_code": _safe_ref(
                 attempt.get("reason_code"),
                 "attempt_reason_code",
@@ -530,7 +559,7 @@ def adapt_exact_model_candidate_receipt(
             "unique_candidate_count": unique_count,
             "verified_qualified_candidate_count": verified_count,
             "company_verification_receipt_sha256s": verification_hashes,
-            "verification_receipt_bundle_sha256": verification_bundle_sha256,
+            "verification_receipt_sha256": verification_receipt_sha256,
             "published_count": published_count,
             "provider_call_count": authoritative_provider_call_count,
             "billed_credit_microunits": authoritative_billed_credit_microunits,
@@ -573,6 +602,10 @@ def adapt_exact_model_candidate_receipt(
     if waterfall_published_count > aggregate_counts["verified_qualified_candidate_count"]:
         raise RoutingExperimentError(
             "exact_model_candidate_published_count_exceeds_verified_count"
+        )
+    if waterfall_published_count != 0:
+        raise RoutingExperimentError(
+            "exact_model_candidate_publication_authority_missing"
         )
     return {
         "model_receipt_sha256": claimed_receipt_hash,
@@ -642,6 +675,17 @@ def candidate_waterfall_receipts_from_exact_model(
     bindings_by_tool = {item.tool_id: item for item in variant_bindings}
     if len(bindings_by_tool) != len(variant_bindings):
         raise RoutingExperimentError("candidate_variant_bindings_are_duplicated")
+    expected_artifact_key = sha256_json(
+        {
+            "model_artifact_hash": variants[0].artifact.model_artifact_hash,
+            "manifest_hash": variants[0].artifact.manifest_hash,
+            "commit_sha": variants[0].artifact.commit_sha,
+        }
+    )
+    if decision_receipt.artifact_key != expected_artifact_key:
+        raise RoutingExperimentError(
+            "candidate_decision_receipt_artifact_differs_from_variant"
+        )
     providers_by_ref = {item.receipt_ref: item for item in authoritative_provider_receipts}
     model_contract = _model_hash(
         expected_candidate_waterfall_contract_sha256,
@@ -650,16 +694,7 @@ def candidate_waterfall_receipts_from_exact_model(
     previous_attempt_hash = ""
     attempt_hashes: list[str] = []
     receipts: list[CandidateWaterfallReceipt] = []
-    disposition_by_outcome = {
-        "succeeded": "succeeded",
-        "empty": "missed",
-        "not_invoked": "skipped",
-        "not_attempted": "skipped",
-        "failed": "failed",
-        "unavailable": "failed",
-        "timeout": "failed",
-        "deferred": "deferred",
-    }
+    disposition_by_outcome = _MODEL_DISPOSITION_BY_OUTCOME
     for metric in metrics:
         if not isinstance(metric, Mapping):
             raise RoutingExperimentError("candidate_exact_model_attempt_metric_is_invalid")
@@ -673,13 +708,14 @@ def candidate_waterfall_receipts_from_exact_model(
             raise RoutingExperimentError("candidate_attempt_provider_receipt_is_missing")
         if provider is not None:
             if (
-                provider.binding_id != binding.binding_id
+                provider_ref not in decision_receipt.provider_receipt_refs
+                or provider.binding_id != binding.binding_id
                 or provider.tool_id != tool_id
                 or provider.unit_ref != decision_receipt.unit_ref
                 or provider.execution_mode != decision_receipt.execution_mode
             ):
                 raise RoutingExperimentError("candidate_attempt_provider_identity_differs")
-            provider_call_count = getattr(provider, "call_count", 1)
+            provider_call_count = getattr(provider, "call_count", None)
             billed_credit = provider.credit_microunits
             latency_ms = provider.latency_ms
         else:
@@ -692,6 +728,11 @@ def candidate_waterfall_receipts_from_exact_model(
             raise RoutingExperimentError("candidate_attempt_provider_credit_differs")
         if int(float(metric.get("latency_ms") or 0)) != latency_ms:
             raise RoutingExperimentError("candidate_attempt_provider_latency_differs")
+        if model_hash_to_lab(
+            _model_hash(metric.get("candidate_plan_sha256"), "candidate_plan_sha256"),
+            "candidate_model_plan_hash",
+        ) != decision_receipt.plan_hash:
+            raise RoutingExperimentError("candidate_attempt_plan_differs_from_decision")
         attempt_hash = _model_hash(metric.get("attempt_sha256"), "attempt_sha256")
         expected_index = len(receipts)
         if (
@@ -705,20 +746,26 @@ def candidate_waterfall_receipts_from_exact_model(
         raw_verification_hashes = metric.get("company_verification_receipt_sha256s")
         if not isinstance(raw_verification_hashes, tuple):
             raise RoutingExperimentError("candidate_attempt_verification_receipts_are_invalid")
-        verification_hash = str(metric.get("verification_receipt_bundle_sha256") or "")
+        verification_hash = str(metric.get("verification_receipt_sha256") or "")
         if raw_verification_hashes:
-            expected_bundle_hash = sha256_json(list(raw_verification_hashes)).split(
-                ":", 1
-            )[1]
+            expected_bundle_hash = _ordered_verification_receipt_sha256(
+                raw_verification_hashes
+            )
             if verification_hash != expected_bundle_hash:
                 raise RoutingExperimentError(
-                    "candidate_attempt_verification_receipt_bundle_differs"
+                    "candidate_attempt_verification_receipt_order_differs"
                 )
         elif verification_hash:
             raise RoutingExperimentError(
-                "candidate_attempt_verification_receipt_bundle_is_invalid"
+                "candidate_attempt_verification_receipt_is_invalid"
             )
+        verification_hash = _model_hash(
+            verification_hash,
+            "verification_receipt_sha256",
+            optional=True,
+        )
         model_outcome = str(metric.get("outcome") or "")
+        model_disposition = str(metric.get("disposition") or "")
         provider_outcome = str(metric.get("provider_outcome") or "skipped")
         if provider is None:
             if provider_outcome != "skipped":
@@ -730,8 +777,21 @@ def candidate_waterfall_receipts_from_exact_model(
                 "candidate_attempt_provider_outcome_differs"
             )
         disposition = disposition_by_outcome.get(model_outcome)
+        if model_disposition:
+            if model_disposition not in _DISPOSITIONS:
+                raise RoutingExperimentError(
+                    "candidate_attempt_model_disposition_is_invalid"
+                )
+            if model_disposition != disposition:
+                raise RoutingExperimentError(
+                    "candidate_attempt_model_disposition_differs"
+                )
         if disposition is None or (disposition == "skipped") != (provider is None):
             raise RoutingExperimentError("candidate_attempt_disposition_differs")
+        if disposition == "skipped" and tool_id in decision_receipt.attempted_tool_ids:
+            raise RoutingExperimentError(
+                "candidate_attempt_skipped_tool_was_attempted"
+            )
         receipts.append(
             CandidateWaterfallReceipt(
                 experiment_id=spec.experiment_id,
@@ -1036,8 +1096,21 @@ class CandidateWaterfallReceipt:
             raise RoutingExperimentError(
                 "candidate_company_verification_receipt_hashes_are_invalid"
             )
+        if len(self.company_verification_receipt_sha256s) != (
+            self.verified_qualified_count
+        ):
+            raise RoutingExperimentError(
+                "candidate_verification_receipts_differ_from_verified_count"
+            )
         for value in self.company_verification_receipt_sha256s:
             _model_hash(value, "company_verification_receipt_sha256")
+        expected_verification_receipt = _ordered_verification_receipt_sha256(
+            self.company_verification_receipt_sha256s
+        )
+        if self.verification_receipt_sha256 != expected_verification_receipt:
+            raise RoutingExperimentError(
+                "candidate_verification_receipt_order_differs"
+            )
         for field_name in (
             "step_order",
             "attempt_sequence",
@@ -1059,6 +1132,12 @@ class CandidateWaterfallReceipt:
                 self.provider_receipt_ref
                 or self.provider_outcome != "skipped"
                 or self.provider_call_count != 0
+                or self.billed_credit_microunits != 0
+                or self.latency_ms != 0
+                or self.raw_count != 0
+                or self.normalized_count != 0
+                or self.unique_count != 0
+                or self.verified_qualified_count != 0
             ):
                 raise RoutingExperimentError(
                     "candidate_skipped_attempt_cannot_claim_provider_receipt"
@@ -1067,6 +1146,14 @@ class CandidateWaterfallReceipt:
             raise RoutingExperimentError(
                 "candidate_attempt_requires_one_unique_provider_receipt"
             )
+        expected_provider_outcome = _PROVIDER_OUTCOME_BY_DISPOSITION.get(
+            self.disposition
+        )
+        if (
+            expected_provider_outcome is None
+            or self.provider_outcome != expected_provider_outcome
+        ):
+            raise RoutingExperimentError("candidate_disposition_provider_outcome_differs")
         if self.target_verified_qualified_count < 1:
             raise RoutingExperimentError("candidate_receipt_target_must_be_positive")
         if not (
@@ -1089,6 +1176,10 @@ class CandidateWaterfallReceipt:
             )
         if self.immutable is not True:
             raise RoutingExperimentError("candidate_waterfall_receipt_must_be_immutable")
+        if self.published_count != 0:
+            raise RoutingExperimentError(
+                "candidate_publication_authority_is_missing"
+            )
         if self.contract_version != CANDIDATE_WATERFALL_RECEIPT_VERSION:
             raise RoutingExperimentError("candidate_waterfall_receipt_version_is_invalid")
 
@@ -1205,6 +1296,10 @@ def candidate_waterfall_receipt_from_model(
             raise RoutingExperimentError(
                 "model_candidate_attempt_without_provider_receipt_must_be_skipped"
             )
+        if model_receipt.tool_id in decision_receipt.attempted_tool_ids:
+            raise RoutingExperimentError(
+                "model_candidate_skipped_tool_was_attempted"
+            )
         skipped_by_tool = dict(decision_receipt.skipped_tool_reasons)
         if model_receipt.tool_id not in skipped_by_tool:
             raise RoutingExperimentError(
@@ -1268,13 +1363,42 @@ def candidate_waterfall_receipt_from_model(
         provider_receipt_ref = provider_receipt.receipt_ref
         execution_mode = provider_receipt.execution_mode
         provider_outcome = provider_receipt.outcome
-        authoritative_provider_call_count = getattr(provider_receipt, "call_count", None)
+        expected_provider_outcome = _PROVIDER_OUTCOME_BY_DISPOSITION.get(
+            model_receipt.disposition
+        )
+        if expected_provider_outcome != provider_outcome:
+            raise RoutingExperimentError(
+                "model_candidate_disposition_differs_from_provider_outcome"
+            )
+        authoritative_provider_call_count = getattr(
+            provider_receipt, "call_count", None
+        )
         if type(authoritative_provider_call_count) is not int or authoritative_provider_call_count < 1:
             raise RoutingExperimentError(
                 "candidate_provider_receipt_call_count_is_invalid"
             )
         authoritative_billed_credit_microunits = provider_receipt.credit_microunits
         authoritative_latency_ms = provider_receipt.latency_ms
+    raw_verification_hashes = getattr(
+        model_receipt, "company_verification_receipt_sha256s", None
+    )
+    if raw_verification_hashes is None:
+        singular_verification_hash = str(
+            getattr(model_receipt, "verification_receipt_sha256", "") or ""
+        )
+        raw_verification_hashes = (
+            (singular_verification_hash,) if singular_verification_hash else ()
+        )
+    if not isinstance(raw_verification_hashes, (tuple, list)) or len(
+        raw_verification_hashes
+    ) != model_receipt.verified_qualified_count:
+        raise RoutingExperimentError(
+            "model_candidate_verification_receipts_differ_from_verified_count"
+        )
+    verification_hashes = tuple(
+        _model_hash(value, "company_verification_receipt_sha256")
+        for value in raw_verification_hashes
+    )
     if model_receipt.provider_call_count != authoritative_provider_call_count:
         raise RoutingExperimentError(
             "model_candidate_provider_call_count_differs_from_provider_receipt"
@@ -1284,6 +1408,8 @@ def candidate_waterfall_receipt_from_model(
             "model_candidate_latency_differs_from_provider_receipt"
         )
     published = _nonnegative_int(published_count, "published_count")
+    if published != 0:
+        raise RoutingExperimentError("candidate_publication_authority_is_missing")
     if published > model_receipt.verified_qualified_count:
         raise RoutingExperimentError("candidate_published_count_exceeds_verified_count")
     attempt_hashes = tuple(item.sha256() for item in model_receipts)
@@ -1309,7 +1435,9 @@ def candidate_waterfall_receipt_from_model(
             attempt_hashes[-2] if len(attempt_hashes) > 1 else ""
         ),
         attempt_chain_sha256=_attempt_chain_sha256(attempt_hashes),
-        verification_receipt_sha256=model_receipt.verification_receipt_sha256,
+        verification_receipt_sha256=_ordered_verification_receipt_sha256(
+            verification_hashes
+        ),
         target_verified_qualified_count=stop_policy.target_verified_qualified_count,
         step_order=model_receipt.step_order,
         attempt_sequence=model_receipt.attempt,
@@ -1323,11 +1451,7 @@ def candidate_waterfall_receipt_from_model(
         unique_count=model_receipt.unique_candidate_count,
         verified_qualified_count=model_receipt.verified_qualified_count,
         published_count=published,
-        company_verification_receipt_sha256s=(
-            (model_receipt.verification_receipt_sha256,)
-            if model_receipt.verification_receipt_sha256
-            else ()
-        ),
+        company_verification_receipt_sha256s=verification_hashes,
     )
 
 
@@ -1404,6 +1528,10 @@ class CandidateWaterfallMetric:
         ):
             raise RoutingExperimentError(
                 "candidate_metric_counts_must_decrease_from_raw_to_published"
+            )
+        if self.published_count != 0 or self.publication_rate != 0:
+            raise RoutingExperimentError(
+                "candidate_publication_authority_is_missing"
             )
         if self.failed_attempt_count + self.missed_attempt_count > self.waterfall_attempt_count:
             raise RoutingExperimentError(
@@ -1704,7 +1832,7 @@ def evaluate_candidate_waterfall_metrics(
             }
             raw_count = sum(item.raw_count for item in selected)
             verified_count = sum(item.verified_qualified_count for item in selected)
-            published_count = sum(item.published_count for item in selected)
+            published_count = 0
             total_billed_credits = sum(
                 item.billed_credit_microunits for item in selected
             )
@@ -1732,11 +1860,7 @@ def evaluate_candidate_waterfall_metrics(
                     missed_attempt_count=sum(item.disposition == "missed" for item in selected),
                     fulfillment_rate=round(fulfilled_count / len(units), 8),
                     verification_rate=round(verified_count / raw_count, 8) if raw_count else 0.0,
-                    publication_rate=(
-                        round(published_count / verified_count, 8)
-                        if verified_count
-                        else 0.0
-                    ),
+                    publication_rate=0.0,
                     verified_qualified_per_credit=(
                         round(
                             verified_count

@@ -188,7 +188,10 @@ def _model_receipt(**overrides: object) -> SimpleNamespace:
         "normalized_candidate_count": 6,
         "unique_candidate_count": 4,
         "verified_qualified_count": 2,
-        "verification_receipt_sha256": "e" * 64,
+        "company_verification_receipt_sha256s": ("e" * 64, "f" * 64),
+        "verification_receipt_sha256": sha256_json(
+            ["e" * 64, "f" * 64]
+        ).split(":", 1)[1],
         "sha256": lambda: "d" * 64,
     }
     values.update(overrides)
@@ -436,7 +439,7 @@ def test_model_receipt_adapter_uses_shared_experiment_provider_and_decision_cont
         spec=spec,
         decision=decision,
         provider=provider,
-        published_count=1,
+        published_count=0,
     )
 
     assert receipt.experiment_hash == spec.experiment_hash()
@@ -444,11 +447,18 @@ def test_model_receipt_adapter_uses_shared_experiment_provider_and_decision_cont
     assert receipt.provider_receipt_ref == provider.receipt_ref
     assert receipt.model_contract_sha256 == "c" * 64
     assert receipt.verified_qualified_count == 2
-    assert receipt.published_count == 1
+    assert receipt.published_count == 0
     assert receipt.billed_credit_microunits == provider.credit_microunits
     assert receipt.target_verified_qualified_count == 2
     assert receipt.prior_attempt_receipt_sha256 == ""
     assert receipt.to_dict()["receipt_hash"].startswith("sha256:")
+    challenger = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider, variant_id="candidate"),
+        provider=provider,
+    )
+    assert challenger.variant_id == "candidate"
+    assert challenger.artifact_key == _artifact_key(spec, "candidate")
 
 
 def test_exact_model_contract_preflight_fails_closed():
@@ -757,6 +767,90 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
     assert metrics[0].provider_receipt_refs == ()
 
 
+def test_model_skipped_receipt_rejects_decision_that_attempted_the_tool():
+    spec = _spec()
+    provider = _provider_receipt()
+    skipped_model_receipt = SimpleNamespace(
+        **{
+            **vars(_model_receipt()),
+            "disposition": "skipped",
+            "provider_call_count": 0,
+            "estimated_cost_usd": 0.0,
+            "latency_seconds": 0.0,
+            "raw_candidate_count": 0,
+            "normalized_candidate_count": 0,
+            "unique_candidate_count": 0,
+            "verified_qualified_count": 0,
+            "verification_receipt_sha256": "",
+            "company_verification_receipt_sha256s": (),
+        }
+    )
+    decision = replace(
+        _decision(spec, provider, skipped=True),
+        attempted_tool_ids=(provider.tool_id,),
+        skipped_tool_reasons=(),
+        outcome_reasons=((provider.tool_id, provider.outcome),),
+        provider_receipt_refs=(provider.receipt_ref,),
+        total_credit_microunits=provider.credit_microunits,
+        latency_ms=provider.latency_ms,
+    )
+    decision = replace(
+        decision,
+        receipt_id="routing_decision:"
+        + sha256_json(
+            {**decision.to_dict(), "receipt_id": "routing_decision:pending"}
+        ).split(":", 1)[1][:16],
+    )
+    with pytest.raises(RoutingExperimentError, match="skipped_tool_was_attempted"):
+        _adapt_receipt(
+            spec=spec,
+            decision=decision,
+            provider=None,
+            adapter=_adapter(receipt=skipped_model_receipt),
+        )
+
+
+def test_candidate_receipt_binds_ordered_verification_hash_and_disposition():
+    spec = _spec()
+    provider = _provider_receipt()
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+    )
+    with pytest.raises(RoutingExperimentError, match="verification_receipt"):
+        replace(
+            receipt,
+            company_verification_receipt_sha256s=("f" * 64,),
+        )
+    with pytest.raises(RoutingExperimentError, match="disposition_provider_outcome"):
+        replace(receipt, provider_outcome="source_miss")
+    skipped = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider, skipped=True),
+        provider=None,
+        adapter=_adapter(
+            receipt=SimpleNamespace(
+                **{
+                    **vars(_model_receipt()),
+                    "disposition": "skipped",
+                    "provider_call_count": 0,
+                    "estimated_cost_usd": 0.0,
+                    "latency_seconds": 0.0,
+                    "raw_candidate_count": 0,
+                    "normalized_candidate_count": 0,
+                        "unique_candidate_count": 0,
+                        "verified_qualified_count": 0,
+                        "verification_receipt_sha256": "",
+                        "company_verification_receipt_sha256s": (),
+                }
+            )
+        ),
+    )
+    with pytest.raises(RoutingExperimentError, match="skipped_attempt_cannot_claim"):
+        replace(skipped, billed_credit_microunits=1)
+
+
 @pytest.mark.skipif(
     not os.environ.get("SOURCING_MODEL_CHECKOUT"),
     reason="requires an exact Sourcing_model checkout",
@@ -940,7 +1034,7 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
         spec=spec,
         decision=decision,
         provider=provider,
-        published_count=1,
+        published_count=0,
     )
     metrics = evaluate_candidate_waterfall_metrics(
         spec=spec,
@@ -960,7 +1054,7 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
     assert baseline_calibration.fulfilled_unit_count == 1
     assert baseline_calibration.fulfillment_rate == 1.0
     assert baseline_calibration.verification_rate == 0.25
-    assert baseline_calibration.publication_rate == 0.5
+    assert baseline_calibration.publication_rate == 0.0
     assert baseline_calibration.total_billed_credit_microunits == 25
     assert baseline_calibration.verified_qualified_per_credit == 80_000.0
     assert baseline_calibration.metric_hash.startswith("sha256:")
@@ -1146,6 +1240,8 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "FOR SELECT TO service_role USING (true)" in sql
     assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_receipt_v1" in sql
     assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_metric_v1" in sql
+    assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_metric_projection_v1" in sql
+    assert "SECURITY INVOKER" in sql
     assert "REVOKE ALL ON TABLE" in sql
     assert "provider_receipt_ref = ''" in sql
     assert "disposition = 'skipped'" in sql
@@ -1164,6 +1260,11 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "attempt_chain_sha256" in sql
     assert sql.count("= jsonb_build_object(") == 2
     assert "provider_outcome IN (" in sql
+    assert "authoritative_billed_credit_microunits" in sql
+    assert "{provider_receipt,call_count}" in sql
+    assert "CHECK (published_count = 0)" in sql
+    assert "CHECK (publication_rate = 0)" in sql
+    assert "research_lab_candidate_promotion_metric_not_authoritative" in sql
     assert sql.count("jsonb_typeof(metric_doc->") == 3
     assert "auth.role()" not in sql
     assert "DROP TABLE" not in sql

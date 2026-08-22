@@ -858,6 +858,43 @@ def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
     assert "Error in sitecustomize" not in result.stderr
 
 
+def test_sitecustomize_accepts_only_exact_regional_s3_client_options() -> None:
+    from botocore.config import Config
+
+    exact = {
+        "region_name": "us-east-1",
+        "endpoint_url": "https://s3.us-east-1.amazonaws.com",
+        "config": Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options("s3", exact)
+
+    invalid = (
+        {**exact, "endpoint_url": "https://example.invalid"},
+        {**exact, "region_name": " us-east-1"},
+        {
+            **exact,
+            "config": Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+        },
+        {**exact, "config": Config(signature_version="s3")},
+        {**exact, "use_ssl": True},
+    )
+    for options in invalid:
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "kms", exact
+        )
+
+
 def test_chain_settlement_boundary_persists_zero_credit_readback(
     tmp_path,
 ) -> None:

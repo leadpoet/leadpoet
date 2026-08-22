@@ -3847,6 +3847,32 @@ class _LocalS3:
         }
 
 
+def _validate_local_boto3_client_options(
+    service_name: str,
+    options: Mapping[str, Any],
+) -> None:
+    if set(options) - {"region_name", "endpoint_url", "config"}:
+        raise ValueError("local boto3 client options differ")
+    config = options.get("config")
+    if config is None:
+        return
+    expected_config = {
+        "signature_version": "s3v4",
+        "s3": {"addressing_style": "virtual"},
+    }
+    region = options.get("region_name")
+    if (
+        service_name != "s3"
+        or getattr(config, "_user_provided_options", None) != expected_config
+        or not isinstance(region, str)
+        or region != region.strip()
+        or not region
+        or options.get("endpoint_url")
+        != f"https://s3.{region}.amazonaws.com"
+    ):
+        raise ValueError("local boto3 client options differ")
+
+
 class _LocalKMS:
     def verify(
         self,
@@ -4502,8 +4528,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
             raise ValueError("local boto3 AWS service is unknown")
         if args:
             raise ValueError("local boto3 client positional arguments differ")
-        if set(kwargs) - {"region_name", "endpoint_url"}:
-            raise ValueError("local boto3 client options differ")
+        _validate_local_boto3_client_options(str(service_name), kwargs)
         return client_type()
 
     boto3.client = _local_boto3_client

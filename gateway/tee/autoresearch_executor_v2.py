@@ -131,6 +131,9 @@ from research_lab.probe_catalog import (
 
 AUTORESEARCH_REQUEST_SCHEMA_VERSION = "leadpoet.autoresearch_request.v2"
 AUTORESEARCH_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_result.v2"
+COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2 = (
+    "research_lab.model_compatibility.v2"
+)
 OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION = "leadpoet.openrouter_guard_request.v3"
 OPENROUTER_GUARD_RESULT_SCHEMA_VERSION = "leadpoet.openrouter_guard_result.v3"
 STALE_PARENT_REPAIR_REQUEST_SCHEMA_VERSION = (
@@ -2672,7 +2675,7 @@ class AutoresearchExecutorV2:
         )
         validate_receipt_graph(
             component_graph,
-            required_purposes=("research_lab.private_model_run.v2",),
+            required_purposes=(COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2,),
             require_boot_attestation_verification=(
                 component_boot_verification_enabled
             ),
@@ -2710,7 +2713,7 @@ class AutoresearchExecutorV2:
             canonical_json(component_result).encode("utf-8")
         )
         if not any(
-            receipt.get("purpose") == "research_lab.private_model_run.v2"
+            receipt.get("purpose") == COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2
             and receipt.get("output_root") == expected_result_root
             for receipt in component_graph.get("receipts", [])
         ):

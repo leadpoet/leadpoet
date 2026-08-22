@@ -606,7 +606,7 @@ def test_exact_evaluation_is_bound_to_validated_receipts(monkeypatch):
             )
 
 
-def test_exact_evaluation_allows_content_addressed_receipt_reuse(monkeypatch):
+def test_exact_evaluation_rejects_provider_receipt_reuse_across_variants(monkeypatch):
     variants = (
         SimpleNamespace(
             variant_id="baseline",
@@ -700,12 +700,13 @@ def test_exact_evaluation_allows_content_addressed_receipt_reuse(monkeypatch):
         ),
     )
 
-    worker_module._validate_exact_model_evaluation(
-        spec=spec,
-        evaluation=evaluation,
-        decisions_by_unit=decisions_by_unit,
-        unit_results=unit_results,
-    )
+    with pytest.raises(RoutingExperimentWorkerError, match="duplicated"):
+        worker_module._validate_exact_model_evaluation(
+            spec=spec,
+            evaluation=evaluation,
+            decisions_by_unit=decisions_by_unit,
+            unit_results=unit_results,
+        )
 
 
 def test_claim_heartbeat_uses_sql_expiry_after_a_delayed_renewal():

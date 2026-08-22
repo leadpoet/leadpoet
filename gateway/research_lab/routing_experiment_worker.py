@@ -464,17 +464,18 @@ def _validate_exact_model_evaluation(
                 for receipt in decisions_by_unit[(item.variant_id, unit_ref)]
             )
         )
-        expected_provider_refs = tuple(
-            sorted(
-                {
-                    receipt.receipt_ref
-                    for unit_ref in ordered_units
-                    for receipt in unit_results[item.variant_id][
-                        unit_ref
-                    ].provider_receipts
-                }
-            )
+        observed_provider_refs = tuple(
+            receipt.receipt_ref
+            for unit_ref in ordered_units
+            for receipt in unit_results[item.variant_id][
+                unit_ref
+            ].provider_receipts
         )
+        if len(observed_provider_refs) != len(set(observed_provider_refs)):
+            raise RoutingExperimentWorkerError(
+                "canonical Model evaluation provider receipt is duplicated"
+            )
+        expected_provider_refs = tuple(sorted(observed_provider_refs))
         if (
             item.artifact_key
             != routing_experiment_v2_artifact_key(variant)
@@ -488,8 +489,12 @@ def _validate_exact_model_evaluation(
             )
         all_decision_refs.extend(expected_decision_refs)
         all_provider_refs.extend(expected_provider_refs)
+    if len(all_provider_refs) != len(set(all_provider_refs)):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation provider receipt is duplicated"
+        )
     expected_all_decisions = tuple(sorted(set(all_decision_refs)))
-    expected_all_providers = tuple(sorted(set(all_provider_refs)))
+    expected_all_providers = tuple(sorted(all_provider_refs))
     if (
         evaluation.decision_receipt_refs != expected_all_decisions
         or evaluation.provider_receipt_refs != expected_all_providers

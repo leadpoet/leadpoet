@@ -2697,6 +2697,7 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     result = _broker(transport).execute(_request())
     assert result == {
         "terminal_status": "transport_failure",
+        "call_count": 1,
         "failure_code": "proxy_failure",
         "failure_stage": "provider_transport",
         "failure_error_type": "RuntimeError",

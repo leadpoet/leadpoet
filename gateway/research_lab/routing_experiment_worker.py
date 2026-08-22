@@ -42,7 +42,10 @@ from gateway.research_lab.common_model_experiment import (
 from gateway.research_lab.routing_provider_bindings import (
     VerifiedRoutingUnitDataset,
 )
-from research_lab.model_runner_protocol import ExactModelRunnerRegistry
+from research_lab.model_runner_protocol import (
+    ExactModelRunnerRegistration,
+    ExactModelRunnerRegistry,
+)
 from research_lab.routing_experiments import (
     ProviderReceiptStore,
     RoutingDecisionReceiptV2,
@@ -325,6 +328,7 @@ class ExactModelRoutingRunInputs:
     """Exact artifact and PR93 authorities validated before the V3 claim."""
 
     registry: ExactModelRunnerRegistry
+    registry_registrations: Mapping[str, ExactModelRunnerRegistration]
     gold_labels: Mapping[str, bool]
     unit_dataset: VerifiedRoutingUnitDataset
     reviewed_runner: ReviewedProviderBrokerRoutingRunner
@@ -407,6 +411,7 @@ class ExactModelRoutingRunFactory:
     billing_rollup_factory: Callable[
         [RoutingExperimentV2Spec], Callable[..., Mapping[str, Any]]
     ]
+    site_production_model_release_identity_sha256: str | None = None
     durable_authority_identity: str | None = None
     name: str = REVIEWED_ROUTING_FACTORY_NAME
 
@@ -460,12 +465,31 @@ class ExactModelRoutingRunFactory:
             raise RoutingExperimentWorkerError(
                 "exact baseline artifact is unavailable"
             )
+        if baseline.artifact_identity.get("branch") != "main":
+            raise RoutingExperimentWorkerError(
+                "baseline must use the Site-selected main artifact"
+            )
+        if self.site_production_model_release_identity_sha256 is not None:
+            if baseline.protocol.release_identity.get(
+                "release_identity_sha256"
+            ) != self.site_production_model_release_identity_sha256:
+                raise RoutingExperimentWorkerError(
+                    "baseline differs from the Site production model release"
+                )
         artifact_keys: set[str] = set()
         for variant in spec.variants:
             registration = registrations[variant.variant_id]
             registration.validate_variant_audit_payload(
                 variant.routing_payload
             )
+            if (
+                variant.variant_id != spec.baseline_variant_id
+                and registration.artifact_identity.get("branch")
+                != "leadpoet-lab"
+            ):
+                raise RoutingExperimentWorkerError(
+                    "challenger must use a leadpoet-lab artifact"
+                )
             if (
                 variant.variant_id != spec.baseline_variant_id
                 and registration.key == baseline.key
@@ -507,6 +531,7 @@ class ExactModelRoutingRunFactory:
             )
         return ExactModelRoutingRunInputs(
             registry=self.registry,
+            registry_registrations=registrations,
             gold_labels=labels,
             unit_dataset=self.unit_dataset,
             reviewed_runner=runner,
@@ -771,6 +796,7 @@ class RoutingExperimentWorker:
             )
             dispatcher = ReviewedProtectedModelActionDispatcher(
                 spec=spec,
+                registrations=inputs.registry_registrations,
                 runner=inputs.reviewed_runner,
                 claim=claim,
                 deadline_supplier=lambda: heartbeat.deadline_monotonic,

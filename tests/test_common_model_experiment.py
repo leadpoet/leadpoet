@@ -15,12 +15,13 @@ from gateway.research_lab.common_model_experiment import (
     ExactModelExperimentCoordinator,
     FencedModelTransitionRepository,
     ProtectedModelActionResult,
+    _validate_variant_provider_binding,
 )
 
 
 HASHES = {name: char * 64 for name, char in zip(
     ("artifact", "manifest", "contract", "catalog", "policy", "feature", "binding", "release"),
-    "abcdefgh",
+    "abcdef12",
 )}
 
 
@@ -385,3 +386,38 @@ def test_exact_variant_payload_is_identity_only_and_tamper_evident():
             assert "exact Model artifact identity" in str(exc)
         else:
             raise AssertionError("forged variant payload must fail closed")
+
+
+def test_variant_provider_binding_is_checked_against_its_own_manifest():
+    registration = _registration()
+    _validate_variant_provider_binding(
+        registration=registration,
+        action=_action(),
+        provider_binding=type(
+            "Binding",
+            (),
+            {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+        )(),
+    )
+
+    forged_registration = replace(
+        registration,
+        host_capability_manifest={
+            **registration.host_capability_manifest,
+            "bindings": [],
+        },
+    )
+    try:
+        _validate_variant_provider_binding(
+            registration=forged_registration,
+            action=_action(),
+            provider_binding=type(
+                "Binding",
+                (),
+                {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+            )(),
+        )
+    except CommonModelExperimentError as exc:
+        assert "variant" in str(exc)
+    else:
+        raise AssertionError("variant binding substitution must fail closed")

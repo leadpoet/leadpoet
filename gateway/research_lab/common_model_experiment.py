@@ -128,6 +128,7 @@ class ReviewedProtectedModelActionDispatcher:
         self,
         *,
         spec: RoutingExperimentV2Spec,
+        registrations: Mapping[str, ExactModelRunnerRegistration],
         runner: ReviewedProviderBrokerRoutingRunner,
         claim: Any,
         deadline_supplier: Any,
@@ -148,6 +149,18 @@ class ReviewedProtectedModelActionDispatcher:
                 )
         self._spec = spec
         self._variants = {item.variant_id: item for item in spec.variants}
+        if set(registrations) != set(self._variants):
+            raise CommonModelExperimentError(
+                "Model variant runner registrations are incomplete"
+            )
+        if any(
+            not isinstance(item, ExactModelRunnerRegistration)
+            for item in registrations.values()
+        ):
+            raise CommonModelExperimentError(
+                "Model variant runner registration is invalid"
+            )
+        self._registrations = dict(registrations)
         self._bindings = {item.tool_id: item for item in spec.provider_bindings}
         if len(self._bindings) != len(spec.provider_bindings):
             raise CommonModelExperimentError(
@@ -177,6 +190,11 @@ class ReviewedProtectedModelActionDispatcher:
             raise CommonModelExperimentError(
                 "Model selected an unavailable provider binding"
             )
+        _validate_variant_provider_binding(
+            registration=self._registrations[variant_id],
+            action=action,
+            provider_binding=binding,
+        )
         binding_contract = str(action.get("binding_contract_sha256") or "")
         if binding.execution_contract_hash != "sha256:" + binding_contract:
             raise CommonModelExperimentError(
@@ -238,6 +256,11 @@ class ReviewedProtectedModelActionDispatcher:
             raise CommonModelExperimentError(
                 "protected Model replay identity is unknown"
             )
+        _validate_variant_provider_binding(
+            registration=self._registrations[variant_id],
+            action=action,
+            provider_binding=binding,
+        )
         protected = self._runner.replay_model_action(
             binding=binding,
             unit_ref=unit_ref,
@@ -514,6 +537,48 @@ _PROVIDER_ACTION_TYPES = frozenset(
         "execute_contact_tool",
     }
 )
+
+
+def _validate_variant_provider_binding(
+    *,
+    registration: ExactModelRunnerRegistration,
+    action: Mapping[str, Any],
+    provider_binding: ProviderBindingIdentity,
+) -> None:
+    """Require the active variant to authorize this exact provider tool.
+
+    The global routing catalog is not sufficient: a challenger must not be
+    able to select a host binding that was only admitted for another variant.
+    This check runs before the protected dispatch runner is called.
+    """
+
+    manifest = registration.host_capability_manifest
+    raw_bindings = manifest.get("bindings") if isinstance(manifest, Mapping) else None
+    if not isinstance(raw_bindings, (list, tuple)):
+        raise CommonModelExperimentError(
+            "Model variant host capability bindings are invalid"
+        )
+    action_type = str(action.get("action_type") or "")
+    tool_id = str(action.get("tool_id") or "").strip()
+    requested_hash = str(action.get("binding_contract_sha256") or "")
+    matches = [
+        item
+        for item in raw_bindings
+        if isinstance(item, Mapping)
+        and item.get("action_type") == action_type
+        and str(item.get("tool_id") or "").strip() == tool_id
+    ]
+    if len(matches) != 1 or matches[0].get("available") is not True:
+        raise CommonModelExperimentError(
+            "Model variant did not authorize the selected provider binding"
+        )
+    manifest_hash = str(matches[0].get("binding_contract_sha256") or "")
+    if requested_hash != manifest_hash or (
+        provider_binding.execution_contract_hash != "sha256:" + requested_hash
+    ):
+        raise CommonModelExperimentError(
+            "Model variant provider binding contract differs"
+        )
 
 
 def _completion_from_transition(

@@ -1081,6 +1081,12 @@ def build_exact_model_runner_factory(
         evaluation_adapter=inputs.evaluation_adapter,
         billing_rollup_factory=billing_rollup_factory,
         execution_envelope_factory=execution_envelope_factory,
+        site_production_model_release_identity_sha256=_require_hash(
+            (os.environ if environment is None else environment).get(
+                SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV
+            ),
+            "Site production model release identity",
+        ).removeprefix("sha256:"),
     )
     if factory.name != "exact_model_runner_v3":
         raise RoutingProductCompositionError("reviewed routing factory name is invalid")

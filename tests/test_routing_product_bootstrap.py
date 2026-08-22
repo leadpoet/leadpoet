@@ -67,8 +67,28 @@ def test_startup_uses_fixed_loader_and_ignores_app_state(monkeypatch) -> None:
 def test_release_loader_reads_only_the_fixed_attested_module(monkeypatch) -> None:
     module_name = "gateway.research_lab.routing_release_dependencies"
     module = ModuleType(module_name)
-    sentinel = object()
+    sentinel = ReviewedRoutingBootstrapDependencies(
+        inputs=object(),
+        reviewed_runner_factory=lambda _spec: None,
+        billing_rollup_factory=lambda _spec: lambda _receipts: {},
+        execution_envelope_factory=lambda _spec: None,
+        store_factory=lambda: None,
+    )
     module.REVIEWED_ROUTING_RELEASE_DEPENDENCIES = sentinel
     monkeypatch.setitem(sys.modules, module_name, module)
 
     assert bootstrap.load_reviewed_routing_release_dependencies() is sentinel
+
+
+def test_release_loader_rejects_untyped_bundle(monkeypatch) -> None:
+    module_name = "gateway.research_lab.routing_release_dependencies"
+    module = ModuleType(module_name)
+    module.REVIEWED_ROUTING_RELEASE_DEPENDENCIES = object()
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    try:
+        bootstrap.load_reviewed_routing_release_dependencies()
+    except RoutingProductBootstrapError as exc:
+        assert "typed signed bundle" in str(exc)
+    else:
+        raise AssertionError("untyped release dependencies must fail closed")

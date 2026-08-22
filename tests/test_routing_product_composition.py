@@ -873,6 +873,9 @@ def test_reviewed_product_composition_installs_api_and_one_factory():
     assert set(composition.factory_registry) == {REVIEWED_ROUTING_FACTORY_NAME}
     assert composition.api_service.store_factory() is durable_store
     assert composition.run_factory.name == REVIEWED_ROUTING_FACTORY_NAME
+    assert composition.run_factory.site_production_model_release_identity_sha256 == (
+        SITE_MODEL_RELEASE.removeprefix("sha256:")
+    )
     assert calls == []
 
 

@@ -5388,6 +5388,135 @@ class CodeEditLoopEngine:
                     )
                     return True
 
+                async def _attempt_misplaced_candidate_source_inspection(
+                    raw_response: str,
+                ) -> bool:
+                    nonlocal candidate_source_context_repair_attempted
+                    nonlocal source_bytes_returned
+                    nonlocal source_inspection_context
+                    nonlocal read_paths
+                    nonlocal read_ranges
+
+                    if candidate_source_context_repair_attempted or not source_access_v2:
+                        return False
+                    try:
+                        source_requests = parse_code_edit_source_inspection_response(
+                            raw_response,
+                            max_requests=4,
+                            allowed_operations=("search", "read_file"),
+                        )
+                    except ValueError:
+                        return False
+                    if any(
+                        request.operation not in {"search", "read_file"}
+                        for request in source_requests
+                    ):
+                        return False
+                    candidate_source_context_repair_attempted = True
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_requested",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "draft_misplaced_source_inspection_requested",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "mode": "draft_misplaced_source_inspection",
+                                "source_tree_hash": source_context.source_tree_hash,
+                                "requests": [
+                                    request.to_event_doc() for request in source_requests
+                                ],
+                                "request_hash": sha256_json(
+                                    {
+                                        "requests": [
+                                            request.to_event_doc()
+                                            for request in source_requests
+                                        ]
+                                    }
+                                ),
+                            },
+                        )
+                    )
+                    try:
+                        batch = resolve_source_inspection_requests(
+                            source_context,
+                            source_requests,
+                            already_read_paths=tuple(sorted(read_paths)),
+                            max_files=self.builder.config.code_edit_source_inspection_max_files,
+                            max_file_bytes=self.builder.config.code_edit_source_inspection_file_bytes,
+                            max_total_bytes=max(
+                                0,
+                                self.builder.config.code_edit_source_inspection_total_bytes
+                                - source_bytes_returned,
+                            ),
+                            max_search_matches=self.builder.config.code_edit_source_inspection_search_matches,
+                            source_access_v2=True,
+                            already_read_ranges=read_ranges,
+                            max_ranges_per_path=int(
+                                getattr(
+                                    self.builder.config,
+                                    "code_edit_source_inspection_max_ranges_per_path",
+                                    3,
+                                )
+                            ),
+                        )
+                    except CodeEditBuildError as exc:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="source_inspection_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "draft_misplaced_source_inspection_resolution_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "mode": "draft_misplaced_source_inspection",
+                                    "error": safe_event_error_text(exc),
+                                    "source_tree_hash": source_context.source_tree_hash,
+                                },
+                            )
+                        )
+                        return False
+                    if not batch.model_context.get("results"):
+                        return False
+                    source_bytes_returned += batch.bytes_returned
+                    read_paths = set(batch.read_paths)
+                    read_ranges = dict(batch.read_ranges)
+                    source_inspection_context = _merge_source_inspection_context(
+                        source_inspection_context,
+                        batch.model_context,
+                        total_bytes=source_bytes_returned,
+                        read_paths=read_paths,
+                    )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_resolved",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "draft_misplaced_source_inspection_resolved",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "mode": "draft_misplaced_source_inspection",
+                                **batch.event_doc,
+                            },
+                        )
+                    )
+                    return True
+
                 async def _attempt_candidate_generation_fallback(
                     *,
                     trigger: str,
@@ -5791,6 +5920,7 @@ class CodeEditLoopEngine:
                                     },
                                 )
                             )
+                            await _attempt_misplaced_candidate_source_inspection(raw)
                             fallback_drafts = await _attempt_candidate_generation_fallback(
                                 trigger="candidate_patch_parse_failed",
                                 reason=safe_event_error_text(exc),

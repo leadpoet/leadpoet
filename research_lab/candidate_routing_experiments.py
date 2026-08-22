@@ -29,6 +29,7 @@ from research_lab.routing_experiments import (
     model_hash_to_lab,
     validate_provider_receipt,
     validate_routing_decision_receipt,
+    validate_sourcing_model_artifact_identity,
 )
 
 
@@ -94,11 +95,114 @@ def _nonnegative_int(value: Any, field_name: str) -> int:
     return value
 
 
+def _validate_candidate_artifact_authority(
+    *,
+    spec: RoutingExperimentV2Spec,
+    variant: Any,
+    contract_sha256: str,
+    artifact_authority: Any | None,
+) -> None:
+    """Require one exact signed artifact and its separate candidate contract.
+
+    The shared V2 evaluator owns the full experiment admission path.  This
+    smaller adapter still runs at the sidecar boundary, so it repeats the
+    artifact checks that are required before a candidate receipt can be
+    attached to a shared decision.  The manifest is structural evidence in a
+    fixture; replay and measured Lab runs additionally require the injected
+    cryptographic authority.
+    """
+
+    if variant.artifact.branch != "leadpoet-lab":
+        raise RoutingExperimentError(
+            "candidate_artifact_branch_must_be_leadpoet_lab"
+        )
+    artifact_errors = validate_sourcing_model_artifact_identity(variant.artifact)
+    if artifact_errors:
+        raise RoutingExperimentError(
+            "candidate_artifact_identity_is_invalid:" + ";".join(artifact_errors)
+        )
+    manifest_payload = variant.artifact_authority_manifest
+    if not isinstance(manifest_payload, Mapping):
+        raise RoutingExperimentError("candidate_signed_artifact_manifest_is_missing")
+    try:
+        from research_lab.eval import (
+            PrivateModelArtifactManifest,
+            validate_private_model_artifact_manifest,
+        )
+
+        manifest = PrivateModelArtifactManifest.from_mapping(manifest_payload)
+        manifest_errors = validate_private_model_artifact_manifest(manifest)
+    except Exception as exc:
+        raise RoutingExperimentError(
+            "candidate_signed_artifact_manifest_is_invalid"
+        ) from exc
+    if manifest_errors:
+        raise RoutingExperimentError(
+            "candidate_signed_artifact_manifest_is_invalid:"
+            + ";".join(manifest_errors)
+        )
+    normalized_manifest = manifest.to_dict()
+    for artifact_field, manifest_field in (
+        ("model_artifact_hash", "model_artifact_hash"),
+        ("manifest_hash", "manifest_hash"),
+        ("commit_sha", "git_commit_sha"),
+    ):
+        if str(getattr(variant.artifact, artifact_field)).lower() != str(
+            normalized_manifest.get(manifest_field) or ""
+        ).lower():
+            raise RoutingExperimentError(
+                f"candidate_artifact_manifest_{artifact_field}_differs"
+            )
+    candidate_contract = normalized_manifest.get(
+        "candidate_waterfall_contract_sha256"
+    )
+    expected_contract = _model_hash(
+        candidate_contract,
+        "candidate_waterfall_contract_sha256",
+    )
+    if expected_contract != contract_sha256:
+        raise RoutingExperimentError(
+            "candidate_waterfall_contract_differs_from_signed_artifact"
+        )
+    if artifact_authority is None:
+        if spec.receipt_execution_mode != ReceiptExecutionMode.FIXTURE.value:
+            raise RoutingExperimentError(
+                "candidate_artifact_signature_authority_is_required"
+            )
+        return
+    verifier = getattr(artifact_authority, "verify", None)
+    if not callable(verifier):
+        raise RoutingExperimentError("candidate_artifact_signature_authority_is_invalid")
+    try:
+        outcome = verifier(artifact=variant.artifact, manifest=normalized_manifest)
+    except RoutingExperimentError:
+        raise
+    except Exception as exc:
+        raise RoutingExperimentError(
+            "candidate_artifact_signature_verification_failed"
+        ) from exc
+    if not isinstance(outcome, Mapping) or outcome.get("verified") is not True:
+        raise RoutingExperimentError("candidate_artifact_signature_verification_rejected")
+    for field_name, expected in (
+        ("model_artifact_hash", variant.artifact.model_artifact_hash),
+        ("manifest_hash", variant.artifact.manifest_hash),
+        ("commit_sha", variant.artifact.commit_sha),
+    ):
+        observed = outcome.get(field_name)
+        if field_name == "commit_sha" and observed is None:
+            observed = outcome.get("git_commit_sha")
+        if str(observed or "").lower() != str(expected).lower():
+            raise RoutingExperimentError(
+                f"candidate_artifact_signature_{field_name}_differs"
+            )
+
+
 def adapt_exact_model_candidate_receipt(
     terminal_result: Mapping[str, Any],
     *,
     expected_release_identity_sha256: str,
     expected_binding_contracts_sha256: str,
+    expected_candidate_waterfall_contract_sha256: str,
     authoritative_provider_receipts: Sequence[ProviderReceipt],
 ) -> Mapping[str, Any]:
     """Validate and project the canonical candidate waterfall receipt.
@@ -148,9 +252,13 @@ def adapt_exact_model_candidate_receipt(
     if (
         waterfall.get("schema_version")
         != EXACT_MODEL_CANDIDATE_WATERFALL_VERSION
-        or not _model_hash(
+        or _model_hash(
             waterfall.get("contract_sha256"),
             "candidate_waterfall_contract_sha256",
+        )
+        != _model_hash(
+            expected_candidate_waterfall_contract_sha256,
+            "expected_candidate_waterfall_contract_sha256",
         )
         or sha256_json(waterfall).split(":", 1)[1] != claimed_waterfall_hash
         or waterfall.get("start_request_sha256")
@@ -305,18 +413,28 @@ def adapt_exact_model_candidate_receipt(
         provider_receipt_ref = str(attempt.get("provider_receipt_ref") or "")
         model_outcome = str(attempt.get("outcome") or "")
         provider_outcome = "skipped"
+        authoritative_provider_call_count = 0
+        authoritative_billed_credit_microunits = 0
+        authoritative_latency_ms = 0
         if provider_receipt_ref:
             provider_receipt = providers_by_ref.pop(provider_receipt_ref, None)
             if provider_receipt is None:
                 raise RoutingExperimentError(
                     "exact_model_candidate_provider_receipt_is_missing"
                 )
+            authoritative_provider_call_count = getattr(
+                provider_receipt, "call_count", None
+            )
+            if type(authoritative_provider_call_count) is not int or authoritative_provider_call_count < 1:
+                raise RoutingExperimentError(
+                    "exact_model_provider_receipt_call_count_is_invalid"
+                )
             expected_provider_outcome = _PROVIDER_OUTCOME_BY_MODEL_OUTCOME.get(
                 model_outcome
             )
             if (
                 expected_provider_outcome is None
-                or provider_call_count != 1
+                or provider_call_count != authoritative_provider_call_count
                 or provider_receipt.tool_id != tool_id
                 or provider_receipt.outcome != expected_provider_outcome
                 or provider_receipt.credit_microunits != credit_microunits
@@ -331,6 +449,8 @@ def adapt_exact_model_candidate_receipt(
                 "candidate_completion_sha256",
             )
             provider_outcome = provider_receipt.outcome
+            authoritative_billed_credit_microunits = provider_receipt.credit_microunits
+            authoritative_latency_ms = provider_receipt.latency_ms
         elif (
             model_outcome not in {"not_invoked", "not_attempted"}
             or provider_call_count != 0
@@ -347,8 +467,8 @@ def adapt_exact_model_candidate_receipt(
             ("normalized_candidate_count", normalized_count),
             ("unique_candidate_count", unique_count),
             ("verified_qualified_candidate_count", verified_count),
-            ("provider_call_count", provider_call_count),
-            ("credit_microunits", credit_microunits),
+            ("provider_call_count", authoritative_provider_call_count),
+            ("credit_microunits", authoritative_billed_credit_microunits),
         ):
             aggregate_counts[field_name] += value
         metric = {
@@ -366,9 +486,9 @@ def adapt_exact_model_candidate_receipt(
             "unique_candidate_count": unique_count,
             "verified_qualified_candidate_count": verified_count,
             "company_verification_receipt_sha256s": verification_hashes,
-            "provider_call_count": provider_call_count,
-            "billed_credit_microunits": credit_microunits,
-            "latency_ms": float(latency_ms),
+            "provider_call_count": authoritative_provider_call_count,
+            "billed_credit_microunits": authoritative_billed_credit_microunits,
+            "latency_ms": float(authoritative_latency_ms),
             "candidate_plan_sha256": claimed_route_hash,
             "attempt_sha256": claimed_attempt_hash,
         }
@@ -413,6 +533,20 @@ def _candidate_variant(spec: RoutingExperimentV2Spec, variant_id: str) -> Any:
     variant = matches[0]
     if variant.stage != "candidate_acquisition":
         raise RoutingExperimentError("candidate_variant_stage_must_be_candidate_acquisition")
+    if variant.artifact.branch != "leadpoet-lab":
+        raise RoutingExperimentError(
+            "candidate_artifact_branch_must_be_leadpoet_lab"
+        )
+    baseline_matches = [
+        item for item in spec.variants if item.variant_id == spec.baseline_variant_id
+    ]
+    if len(baseline_matches) != 1:
+        raise RoutingExperimentError("candidate_baseline_variant_must_exist_exactly_once")
+    baseline = baseline_matches[0]
+    if baseline.artifact.branch != "leadpoet-lab":
+        raise RoutingExperimentError("candidate_artifact_branch_must_be_leadpoet_lab")
+    if variant_id != spec.baseline_variant_id and variant.artifact.identity_payload() == baseline.artifact.identity_payload():
+        raise RoutingExperimentError("candidate_variants_must_use_distinct_artifacts")
     return variant
 
 
@@ -421,6 +555,7 @@ def validate_candidate_routing_model_runtime(
     spec: RoutingExperimentV2Spec,
     variant_id: str,
     model_adapter: Any,
+    artifact_authority: Any | None = None,
 ) -> Mapping[str, Any]:
     """Fail closed unless the exact variant Model contract is available."""
 
@@ -493,6 +628,21 @@ def validate_candidate_routing_model_runtime(
             )
     if identity.get("provider_results_can_satisfy_target") is not False:
         raise RoutingExperimentError("model_candidate_routing_stop_contract_is_unsafe")
+    contract_sha256 = _model_hash(
+        identity.get("contract_sha256"),
+        "routing_contract_hash",
+    )
+    baseline = next(
+        item for item in spec.variants if item.variant_id == spec.baseline_variant_id
+    )
+    variants_to_validate = (variant,) if variant is baseline else (baseline, variant)
+    for artifact_variant in variants_to_validate:
+        _validate_candidate_artifact_authority(
+            spec=spec,
+            variant=artifact_variant,
+            contract_sha256=contract_sha256,
+            artifact_authority=artifact_authority,
+        )
     for field_name in (
         "contract_version",
         "attempt_receipt_schema_version",
@@ -640,7 +790,7 @@ class CandidateWaterfallReceipt:
                 raise RoutingExperimentError(
                     "candidate_skipped_attempt_cannot_claim_provider_receipt"
                 )
-        elif not self.provider_receipt_ref or self.provider_call_count != 1:
+        elif not self.provider_receipt_ref or self.provider_call_count < 1:
             raise RoutingExperimentError(
                 "candidate_attempt_requires_one_unique_provider_receipt"
             )
@@ -785,14 +935,14 @@ def candidate_waterfall_receipt_from_model(
         authoritative_billed_credit_microunits = 0
         authoritative_latency_ms = 0
     else:
+        if model_receipt.disposition == "skipped":
+            raise RoutingExperimentError(
+                "model_candidate_skipped_attempt_cannot_claim_provider_receipt"
+            )
         provider_errors = validate_provider_receipt(provider_receipt)
         if provider_errors:
             raise RoutingExperimentError(
                 "candidate_provider_receipt_is_invalid:" + ";".join(provider_errors)
-            )
-        if model_receipt.disposition == "skipped":
-            raise RoutingExperimentError(
-                "model_candidate_skipped_attempt_cannot_claim_provider_receipt"
             )
         if provider_receipt.receipt_ref not in decision_receipt.provider_receipt_refs:
             raise RoutingExperimentError("candidate_provider_receipt_is_not_in_decision")
@@ -828,7 +978,11 @@ def candidate_waterfall_receipt_from_model(
         provider_receipt_ref = provider_receipt.receipt_ref
         execution_mode = provider_receipt.execution_mode
         provider_outcome = provider_receipt.outcome
-        authoritative_provider_call_count = 1
+        authoritative_provider_call_count = getattr(provider_receipt, "call_count", None)
+        if type(authoritative_provider_call_count) is not int or authoritative_provider_call_count < 1:
+            raise RoutingExperimentError(
+                "candidate_provider_receipt_call_count_is_invalid"
+            )
         authoritative_billed_credit_microunits = provider_receipt.credit_microunits
         authoritative_latency_ms = provider_receipt.latency_ms
     if model_receipt.provider_call_count != authoritative_provider_call_count:
@@ -1050,6 +1204,7 @@ def evaluate_candidate_waterfall_metrics(
     evaluation: RoutingExperimentV2Evaluation,
     receipts: Sequence[CandidateWaterfallReceipt],
     target_verified_qualified_count: int,
+    authoritative_provider_receipts: Sequence[ProviderReceipt] = (),
 ) -> tuple[CandidateWaterfallMetric, ...]:
     """Derive candidate yield sidecars from a shared V2 evaluation."""
 
@@ -1065,6 +1220,23 @@ def evaluate_candidate_waterfall_metrics(
     target = _nonnegative_int(target_verified_qualified_count, "target_verified_qualified_count")
     if target < 1:
         raise RoutingExperimentError("candidate_metric_target_must_be_positive")
+    if not isinstance(authoritative_provider_receipts, Sequence) or isinstance(
+        authoritative_provider_receipts, (str, bytes)
+    ):
+        raise RoutingExperimentError("candidate_metrics_provider_receipts_are_invalid")
+    providers_by_ref: dict[str, ProviderReceipt] = {}
+    for provider_receipt in authoritative_provider_receipts:
+        if not isinstance(provider_receipt, ProviderReceipt):
+            raise RoutingExperimentError("candidate_metrics_provider_receipt_is_not_typed")
+        provider_errors = validate_provider_receipt(provider_receipt)
+        if provider_errors:
+            raise RoutingExperimentError(
+                "candidate_metrics_provider_receipt_is_invalid:"
+                + ";".join(provider_errors)
+            )
+        if provider_receipt.receipt_ref in providers_by_ref:
+            raise RoutingExperimentError("candidate_metrics_provider_receipt_is_duplicated")
+        providers_by_ref[provider_receipt.receipt_ref] = provider_receipt
     evaluation_by_variant = {item.variant_id: item for item in evaluation.variants}
     if set(evaluation_by_variant) != {item.variant_id for item in spec.variants}:
         raise RoutingExperimentError("candidate_evaluation_variants_differ_from_experiment")
@@ -1105,6 +1277,28 @@ def evaluate_candidate_waterfall_metrics(
                     "candidate_provider_receipt_sidecar_is_duplicated"
                 )
             provider_receipt_refs.add(receipt.provider_receipt_ref)
+            provider_receipt = providers_by_ref.get(receipt.provider_receipt_ref)
+            if provider_receipt is None:
+                raise RoutingExperimentError(
+                    "candidate_provider_receipt_authority_is_missing"
+                )
+            provider_call_count = getattr(provider_receipt, "call_count", None)
+            if (
+                type(provider_call_count) is not int
+                or provider_call_count < 1
+                or provider_receipt.unit_ref != receipt.unit_ref
+                or provider_receipt.tool_id != receipt.tool_id
+                or provider_receipt.binding_id != receipt.binding_id
+                or provider_receipt.execution_mode != receipt.execution_mode
+                or provider_receipt.outcome != receipt.provider_outcome
+                or receipt.provider_call_count != provider_call_count
+                or receipt.billed_credit_microunits
+                != provider_receipt.credit_microunits
+                or receipt.latency_ms != provider_receipt.latency_ms
+            ):
+                raise RoutingExperimentError(
+                    "candidate_provider_receipt_authority_differs"
+                )
 
     receipt_groups: dict[tuple[str, str], list[CandidateWaterfallReceipt]] = {}
     for receipt in receipts:
@@ -1157,6 +1351,15 @@ def evaluate_candidate_waterfall_metrics(
             raise RoutingExperimentError(
                 "candidate_decision_sidecar_coverage_differs_from_evaluation"
             )
+    evaluation_provider_refs = {
+        provider_ref
+        for variant_evaluation in evaluation_by_variant.values()
+        for provider_ref in variant_evaluation.provider_receipt_refs
+    }
+    if set(providers_by_ref) != evaluation_provider_refs:
+        raise RoutingExperimentError(
+            "candidate_provider_receipt_authority_coverage_differs_from_evaluation"
+        )
 
     all_units = set(spec.input.calibration_unit_refs) | set(spec.input.holdout_unit_refs)
     if any(item.unit_ref not in all_units for item in receipts):

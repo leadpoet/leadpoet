@@ -5652,6 +5652,28 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                               'public.research_lab_candidate_waterfall_metrics'::regclass
                           )
                     ),
+                    'composite_lineage_foreign_key_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'f'
+                          AND pg_catalog.array_length(constraint_meta.conkey, 1) = 2
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                    ),
+                    'content_hash_check_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'c'
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                          AND pg_catalog.pg_get_constraintdef(
+                              constraint_meta.oid
+                          ) LIKE '%research_lab_routing_jsonb_hash_v2%'
+                    ),
                     'append_only_trigger_count', (
                         SELECT pg_catalog.count(*)
                         FROM pg_catalog.pg_trigger trigger_meta
@@ -5683,6 +5705,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "forced_rls": True,
             "relation_count": 2,
             "foreign_key_count": 4,
+            "composite_lineage_foreign_key_count": 2,
+            "content_hash_check_count": 2,
             "append_only_trigger_count": 2,
             "provider_receipt_unique": True,
         }:

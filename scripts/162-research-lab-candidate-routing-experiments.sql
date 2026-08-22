@@ -7,6 +7,22 @@
 
 BEGIN;
 
+-- Bind the sidecars to the exact shared experiment lineage.  The parent
+-- receipt ids are already primary keys, but these composite keys prevent a
+-- caller from combining a receipt id from one experiment with another
+-- experiment hash.
+CREATE UNIQUE INDEX IF NOT EXISTS rl_route_decision_receipt_experiment_uq
+    ON public.research_lab_routing_decision_receipts_v2(
+        receipt_id,
+        experiment_hash
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS rl_route_evaluation_receipt_experiment_uq
+    ON public.research_lab_routing_evaluation_receipts_v2(
+        receipt_id,
+        experiment_hash
+    );
+
 CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     receipt_id                    TEXT PRIMARY KEY CHECK (
         receipt_id ~ '^candidate_waterfall:[0-9a-f]{24}$'
@@ -27,9 +43,14 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     artifact_key                  TEXT NOT NULL CHECK (
         artifact_key ~ '^sha256:[0-9a-f]{64}$'
     ),
-    decision_receipt_id           TEXT NOT NULL
-        REFERENCES public.research_lab_routing_decision_receipts_v2(receipt_id)
-        CHECK (
+    decision_receipt_id           TEXT NOT NULL,
+    FOREIGN KEY (decision_receipt_id, experiment_hash)
+        REFERENCES public.research_lab_routing_decision_receipts_v2(
+            receipt_id,
+            experiment_hash
+        )
+        DEFERRABLE INITIALLY IMMEDIATE,
+    CHECK (
         decision_receipt_id ~ '^routing_decision:[0-9a-f]{16}$'
     ),
     provider_receipt_ref          TEXT NOT NULL DEFAULT '' CHECK (
@@ -121,7 +142,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
             disposition <> 'skipped'
             AND provider_receipt_ref <> ''
             AND provider_outcome <> 'skipped'
-            AND provider_call_count = 1
+            AND provider_call_count >= 1
         )
     ),
     CHECK (receipt_doc = jsonb_build_object(
@@ -162,7 +183,15 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         'verified_qualified_count', verified_qualified_count,
         'published_count', published_count,
         'immutable', TRUE
-    ))
+    )),
+    CHECK (
+        receipt_hash = public.research_lab_routing_jsonb_hash_v2(
+            receipt_doc - ARRAY['receipt_id', 'receipt_hash']
+        )
+    ),
+    CHECK (
+        receipt_id = 'candidate_waterfall:' || pg_catalog.substr(receipt_hash, 8, 24)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
@@ -175,16 +204,21 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
     contract_version                TEXT NOT NULL CHECK (
         contract_version = 'leadpoet.candidate_waterfall_metric_sidecar:v1'
     ),
-    evaluation_receipt_id           TEXT NOT NULL
-        REFERENCES public.research_lab_routing_evaluation_receipts_v2(receipt_id)
-        CHECK (
-        evaluation_receipt_id ~ '^routing_evaluation_v2:[0-9a-f]{16}$'
-    ),
     experiment_id                   TEXT NOT NULL,
     experiment_hash                 TEXT NOT NULL
         REFERENCES public.research_lab_routing_experiments_v2(experiment_hash)
         CHECK (
         experiment_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    evaluation_receipt_id           TEXT NOT NULL,
+    FOREIGN KEY (evaluation_receipt_id, experiment_hash)
+        REFERENCES public.research_lab_routing_evaluation_receipts_v2(
+            receipt_id,
+            experiment_hash
+        )
+        DEFERRABLE INITIALLY IMMEDIATE,
+    CHECK (
+        evaluation_receipt_id ~ '^routing_evaluation_v2:[0-9a-f]{16}$'
     ),
     variant_id                      TEXT NOT NULL,
     split                           TEXT NOT NULL CHECK (
@@ -264,7 +298,15 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_metrics (
         'provider_receipt_refs', metric_doc->'provider_receipt_refs',
         'decision_receipt_refs', metric_doc->'decision_receipt_refs',
         'immutable', TRUE
-    ))
+    )),
+    CHECK (
+        metric_hash = public.research_lab_routing_jsonb_hash_v2(
+            metric_doc - ARRAY['metric_id', 'metric_hash']
+        )
+    ),
+    CHECK (
+        metric_id = 'candidate_metric:' || pg_catalog.substr(metric_hash, 8, 24)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_receipts_evaluation
@@ -278,7 +320,6 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_receipts_evaluat
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_research_lab_candidate_waterfall_provider_receipt
     ON public.research_lab_candidate_waterfall_receipts(
-        experiment_id,
         provider_receipt_ref
     )
     WHERE provider_receipt_ref <> '';

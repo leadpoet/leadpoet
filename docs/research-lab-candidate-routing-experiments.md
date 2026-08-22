@@ -22,7 +22,7 @@ This PR adds five candidate-only parts:
    skipped-decision reason without inventing a provider receipt. Prefix hashes
    prevent sidecars from different valid executions from being mixed. Provider
    call count, billed credits, and latency come from the authoritative provider
-   receipt. A different Model call count or latency fails closed.
+   receipt. A different Model call count, cost, or latency fails closed.
 3. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
    metrics for raw, normalized, unique, verified-qualified, and published
    companies. Cost efficiency is measured in billed provider credits, not a
@@ -32,17 +32,20 @@ This PR adds five candidate-only parts:
    or duplicated outcomes cannot improve the metrics. These metrics are
    sidecars. They do not select or promote a route.
 4. `validate_candidate_routing_model_runtime` uses PR 93's pinned Model
-   adapter to verify the exact artifact identity, catalog hash, policy hash,
-   and runtime-exported candidate waterfall identity. The candidate execution
-   contract is a separate Model contract and is not compared with the general
-   routing-contract hash. A partial, unsafe, or different runtime fails closed
-   before a receipt is accepted.
+   adapter to verify the exact artifact identity, signed artifact manifest,
+   catalog hash, policy hash, and runtime-exported candidate waterfall
+   identity. The candidate execution contract is a separate Model contract
+   and is not compared with the general routing-contract hash. A partial,
+   unsigned, unsafe, or different runtime fails closed before a receipt is
+   accepted; replay and measured Lab runs also require PR 93's cryptographic
+   artifact authority.
 5. `scripts/162-research-lab-candidate-routing-experiments.sql` stores only
    the Model receipt sidecars and candidate metric sidecars. Both tables are
    append-only, service-role-only, and protected by forced row-level security.
-   Foreign keys bind them to PR 93 experiments, decisions, and evaluations. A
-   partial unique index prevents provider-receipt reuse. Each stored JSON
-   document must exactly match its indexed scalar columns.
+   Foreign keys bind them to PR 93 experiments, decisions, and evaluations,
+   including the shared experiment hash. A global partial unique index
+   prevents provider-receipt reuse. Each stored JSON document must exactly
+   match its indexed scalar columns and content hash.
 
 The adapter never compiles a route, calls a provider, selects an unrecorded
 fallback, or writes a second promotion decision. Use PR 93's
@@ -51,8 +54,9 @@ Use `promote_routing_experiment_v2_to_lab` for the immutable Lab reference.
 
 The identity rules are explicit:
 
-- The baseline artifact is the exact Site production-selected `main` release.
-  Challenger artifacts use `leadpoet-lab` until promotion.
+- Both baseline and challenger artifacts are exact signed `leadpoet-lab`
+  artifacts. The baseline is the admitted/current artifact and the challenger
+  must have a distinct exact artifact identity; the Lab never accepts `main`.
 - PR 93 Lab hashes use the `sha256:` prefix.
 - Model route, stop-policy, attempt, and verification hashes are exact
   64-character lowercase SHA-256 values.

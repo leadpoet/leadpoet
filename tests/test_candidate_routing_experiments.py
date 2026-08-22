@@ -42,20 +42,65 @@ def H(char: str) -> str:
     return "sha256:" + char * 64
 
 
-def _artifact(*, branch: str = "leadpoet-lab") -> SourcingModelArtifactIdentity:
+def _artifact(
+    *,
+    branch: str = "leadpoet-lab",
+    artifact_char: str = "1",
+) -> SourcingModelArtifactIdentity:
+    model_artifact_hash = H(artifact_char)
+    commit_sha = artifact_char * 40
+    manifest_payload = {
+        "model_artifact_hash": model_artifact_hash,
+        "git_commit_sha": commit_sha,
+        "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/sourcing-model@sha256:" + "d" * 64,
+        "config_hash": H("d"),
+        "component_registry_version": "registry-v1",
+        "scoring_adapter_version": "scoring-v1",
+        "manifest_uri": "s3://research-lab/model/manifest.json",
+        "signature_ref": "s3://research-lab/model/manifest.sig",
+        "build_id": "",
+        "routing_contract_hash": H("c"),
+        "routing_catalog_hash": H("3"),
+        "routing_policy_hash": H("4"),
+        "feature_schema_hash": H("5"),
+        "verifier_contract_hash": H("6"),
+        "candidate_waterfall_contract_sha256": "c" * 64,
+    }
+    manifest_hash = sha256_json(manifest_payload)
     return SourcingModelArtifactIdentity(
         repository="leadpoet/Sourcing_model",
         branch=branch,
-        commit_sha="1" * 40,
-        artifact_uri="s3://research-lab/model/candidate.tar.gz",
-        model_artifact_hash=H("1"),
-        manifest_hash=H("2"),
+        commit_sha=commit_sha,
+        artifact_uri=f"s3://research-lab/model/candidate-{artifact_char}.tar.gz",
+        model_artifact_hash=model_artifact_hash,
+        manifest_hash=manifest_hash,
         routing_contract_hash=H("c"),
         routing_catalog_hash=H("3"),
         routing_policy_hash=H("4"),
         feature_schema_hash=H("5"),
         verifier_contract_hash=H("6"),
     )
+
+
+def _artifact_manifest(artifact: SourcingModelArtifactIdentity) -> dict[str, object]:
+    return {
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "git_commit_sha": artifact.commit_sha,
+        "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/sourcing-model@sha256:" + "d" * 64,
+        "config_hash": H("d"),
+        "component_registry_version": "registry-v1",
+        "scoring_adapter_version": "scoring-v1",
+        "manifest_uri": "s3://research-lab/model/manifest.json",
+        "manifest_hash": artifact.manifest_hash,
+        "signature_ref": "s3://research-lab/model/manifest.sig",
+        "build_id": "",
+        "routing_contract_hash": artifact.routing_contract_hash,
+        "routing_catalog_hash": artifact.routing_catalog_hash,
+        "routing_policy_hash": artifact.routing_policy_hash,
+        "feature_schema_hash": artifact.feature_schema_hash,
+        "verifier_contract_hash": artifact.verifier_contract_hash,
+        "candidate_waterfall_contract_sha256": "c" * 64,
+    }
 
 
 def _binding() -> ProviderBindingIdentity:
@@ -73,8 +118,8 @@ def _binding() -> ProviderBindingIdentity:
 
 
 def _spec() -> RoutingExperimentV2Spec:
-    champion_artifact = _artifact(branch="main")
-    challenger_artifact = _artifact()
+    champion_artifact = _artifact(artifact_char="1")
+    challenger_artifact = _artifact(artifact_char="2")
     binding = _binding()
     feature_payload = {
         "schema_version": "routing-feature-set:v1",
@@ -96,6 +141,7 @@ def _spec() -> RoutingExperimentV2Spec:
         artifact=champion_artifact,
         routing_payload={"profile_id": "baseline", "tools": [binding.tool_id]},
         binding_ids=(binding.binding_id,),
+        artifact_authority_manifest=_artifact_manifest(champion_artifact),
     )
     candidate = RoutingExperimentV2Variant(
         variant_id="candidate",
@@ -103,6 +149,7 @@ def _spec() -> RoutingExperimentV2Spec:
         artifact=challenger_artifact,
         routing_payload={"profile_id": "candidate", "tools": [binding.tool_id]},
         binding_ids=(binding.binding_id,),
+        artifact_authority_manifest=_artifact_manifest(challenger_artifact),
     )
     return RoutingExperimentV2Spec(
         experiment_id="candidate-waterfall-v2",
@@ -218,7 +265,14 @@ def _adapt_receipt(
     )
 
 
-def _provider_receipt(unit_ref: str = "icp.cal") -> ProviderReceipt:
+def _provider_receipt(
+    unit_ref: str = "icp.cal",
+    *,
+    request_char: str = "f",
+    credit_microunits: int = 25,
+    latency_ms: int = 250,
+    call_count: int = 1,
+) -> ProviderReceipt:
     binding = _binding()
     identity = {
         "binding_id": binding.binding_id,
@@ -226,18 +280,28 @@ def _provider_receipt(unit_ref: str = "icp.cal") -> ProviderReceipt:
         "binding_version": binding.adapter_version,
         "source_lineage_id": binding.source_lineage_id,
         "unit_ref": unit_ref,
-        "request_fingerprint": H("f"),
+        "request_fingerprint": H(request_char),
         "outcome": "verified",
         "evidence_hash": H("0"),
-        "credit_microunits": 25,
-        "latency_ms": 250,
+        "credit_microunits": credit_microunits,
+        "latency_ms": latency_ms,
         "execution_mode": ReceiptExecutionMode.FIXTURE.value,
     }
-    return ProviderReceipt(
-        receipt_ref="provider_receipt:"
-        + sha256_json(identity).split(":", 1)[1][:16],
-        **identity,
-    )
+    try:
+        receipt = ProviderReceipt(
+            receipt_ref="provider_receipt:"
+            + sha256_json({**identity, "call_count": call_count}).split(":", 1)[1][:16],
+            call_count=call_count,
+            **identity,
+        )
+    except TypeError:
+        receipt = ProviderReceipt(
+            receipt_ref="provider_receipt:"
+            + sha256_json(identity).split(":", 1)[1][:16],
+            **identity,
+        )
+        object.__setattr__(receipt, "call_count", call_count)
+    return receipt
 
 
 def _artifact_key(spec: RoutingExperimentV2Spec, variant_id: str) -> str:
@@ -274,9 +338,17 @@ def _decision(
         skipped_tool_reasons=(
             ((provider.tool_id, "runtime_unavailable"),) if skipped else ()
         ),
-        outcome_reasons=() if skipped else ((provider.tool_id, provider.outcome),),
-        provider_receipt_refs=() if skipped else (provider.receipt_ref,),
-        total_credit_microunits=0 if skipped else provider.credit_microunits,
+        outcome_reasons=(
+            ()
+            if skipped
+            else ((provider.tool_id, provider.outcome),)
+        ),
+        provider_receipt_refs=(
+            () if skipped else (provider.receipt_ref,)
+        ),
+        total_credit_microunits=(
+            0 if skipped else provider.credit_microunits
+        ),
         latency_ms=0 if skipped else provider.latency_ms,
         execution_mode=provider.execution_mode,
     )
@@ -348,7 +420,9 @@ def _evaluation(
         baseline_variant_id=spec.baseline_variant_id,
         selected_variant_id="",
         decision_receipt_refs=(receipt.decision_receipt_id,),
-        provider_receipt_refs=(receipt.provider_receipt_ref,),
+        provider_receipt_refs=(
+            (receipt.provider_receipt_ref,) if receipt.provider_receipt_ref else ()
+        ),
         provider_cache_hits=0,
         provider_cache_misses=1,
     )
@@ -408,6 +482,137 @@ def test_exact_model_contract_preflight_fails_closed():
         )
 
 
+def test_candidate_preflight_requires_exact_branch_contract_and_live_signature():
+    spec = _spec()
+    baseline = next(item for item in spec.variants if item.variant_id == "baseline")
+    candidate = next(item for item in spec.variants if item.variant_id == "candidate")
+    main_baseline = replace(
+        baseline,
+        artifact=_artifact(branch="main", artifact_char="1"),
+    )
+    main_spec = replace(
+        spec,
+        variants=(
+            replace(
+                main_baseline,
+                artifact_authority_manifest=_artifact_manifest(main_baseline.artifact),
+            ),
+            candidate,
+        ),
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="artifact_branch_must_be_leadpoet_lab",
+    ):
+        validate_candidate_routing_model_runtime(
+            spec=main_spec,
+            variant_id="baseline",
+            model_adapter=_adapter(),
+        )
+
+    candidate_with_main_baseline = replace(
+        spec,
+        variants=(main_baseline, candidate),
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="artifact_branch_must_be_leadpoet_lab",
+    ):
+        validate_candidate_routing_model_runtime(
+            spec=candidate_with_main_baseline,
+            variant_id="candidate",
+            model_adapter=_adapter(),
+        )
+
+    identical_candidate = replace(
+        candidate,
+        artifact=baseline.artifact,
+        artifact_authority_manifest=baseline.artifact_authority_manifest,
+    )
+    identical_spec = replace(
+        spec,
+        variants=(baseline, identical_candidate),
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="distinct_artifacts",
+    ):
+        validate_candidate_routing_model_runtime(
+            spec=identical_spec,
+            variant_id="candidate",
+            model_adapter=_adapter(),
+        )
+
+    forged_manifest = dict(candidate.artifact_authority_manifest or {})
+    forged_manifest["candidate_waterfall_contract_sha256"] = "9" * 64
+    forged_candidate = replace(
+        candidate,
+        artifact_authority_manifest=forged_manifest,
+    )
+    forged_spec = replace(
+        spec,
+        variants=tuple(
+            forged_candidate if item.variant_id == "candidate" else item
+            for item in spec.variants
+        ),
+    )
+    with pytest.raises(RoutingExperimentError, match="signed_artifact_manifest_is_invalid"):
+        validate_candidate_routing_model_runtime(
+            spec=forged_spec,
+            variant_id="candidate",
+            model_adapter=_adapter(),
+        )
+
+    measured_spec = replace(
+        spec,
+        receipt_execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="signature_authority_is_required",
+    ):
+        validate_candidate_routing_model_runtime(
+            spec=measured_spec,
+            variant_id="candidate",
+            model_adapter=_adapter(),
+        )
+
+    class Authority:
+        def verify(self, *, artifact, manifest):
+            assert manifest["model_artifact_hash"] == artifact.model_artifact_hash
+            return {
+                "verified": True,
+                "model_artifact_hash": artifact.model_artifact_hash,
+                "manifest_hash": artifact.manifest_hash,
+                "commit_sha": artifact.commit_sha,
+            }
+
+    signed_identity = validate_candidate_routing_model_runtime(
+        spec=measured_spec,
+        variant_id="candidate",
+        model_adapter=_adapter(),
+        artifact_authority=Authority(),
+    )
+    assert signed_identity["contract_sha256"] == "c" * 64
+
+    class MismatchedAuthority(Authority):
+        def verify(self, *, artifact, manifest):
+            result = super().verify(artifact=artifact, manifest=manifest)
+            result["commit_sha"] = "0" * 40
+            return result
+
+    with pytest.raises(
+        RoutingExperimentError,
+        match="signature_commit_sha_differs",
+    ):
+        validate_candidate_routing_model_runtime(
+            spec=measured_spec,
+            variant_id="candidate",
+            model_adapter=_adapter(),
+            artifact_authority=MismatchedAuthority(),
+        )
+
+
 def test_model_receipt_adapter_rejects_unlinked_provider_receipt():
     spec = _spec()
     provider = _provider_receipt()
@@ -449,6 +654,90 @@ def test_model_receipt_adapter_rejects_operational_metric_drift(
         )
 
 
+def test_model_receipt_adapter_reconciles_two_authoritative_provider_calls():
+    spec = _spec()
+    provider = _provider_receipt(
+        credit_microunits=55,
+        latency_ms=375,
+        call_count=2,
+    )
+    model_receipt = _model_receipt(
+        provider_call_count=2,
+        estimated_cost_usd=0.0275,
+        latency_seconds=0.375,
+    )
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+        adapter=_adapter(receipt=model_receipt),
+    )
+    assert receipt.provider_receipt_ref == provider.receipt_ref
+    assert receipt.provider_call_count == 2
+    assert receipt.billed_credit_microunits == provider.credit_microunits
+    assert receipt.latency_ms == provider.latency_ms
+
+    evaluation = _evaluation(spec, receipt)
+    metrics = evaluate_candidate_waterfall_metrics(
+        spec=spec,
+        evaluation=evaluation,
+        receipts=(receipt,),
+        target_verified_qualified_count=2,
+        authoritative_provider_receipts=(provider,),
+    )
+    assert metrics[0].provider_call_count == 2
+    assert metrics[0].total_billed_credit_microunits == provider.credit_microunits
+    assert metrics[0].total_latency_ms == provider.latency_ms
+
+
+def test_model_receipt_adapter_rejects_partial_two_call_authority():
+    spec = _spec()
+    provider = _provider_receipt(call_count=2)
+    with pytest.raises(
+        RoutingExperimentError,
+        match="provider_receipt_authority_is_missing",
+    ):
+        receipt = _adapt_receipt(
+            spec=spec,
+            decision=_decision(spec, provider),
+            provider=provider,
+            adapter=_adapter(receipt=_model_receipt(provider_call_count=2)),
+        )
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=_evaluation(spec, receipt),
+            receipts=(receipt,),
+            target_verified_qualified_count=2,
+            authoritative_provider_receipts=(),
+        )
+
+
+def test_model_receipt_adapter_rejects_two_call_count_or_billing_mismatch():
+    spec = _spec()
+    provider = _provider_receipt(call_count=2)
+    with pytest.raises(RoutingExperimentError, match="differs_from_provider_receipt"):
+        _adapt_receipt(
+            spec=spec,
+            decision=_decision(spec, provider),
+            provider=provider,
+            adapter=_adapter(receipt=_model_receipt(provider_call_count=1)),
+        )
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+        adapter=_adapter(receipt=_model_receipt(provider_call_count=2)),
+    )
+    with pytest.raises(RoutingExperimentError, match="authority_differs"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=_evaluation(spec, receipt),
+            receipts=(replace(receipt, billed_credit_microunits=56),),
+            target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
+        )
+
+
 def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
     spec = _spec()
     provider = _provider_receipt()
@@ -486,6 +775,7 @@ def test_model_skipped_receipt_uses_decision_reason_without_provider_receipt():
         evaluation=_evaluation(spec, receipt),
         receipts=(receipt,),
         target_verified_qualified_count=2,
+        authoritative_provider_receipts=(),
     )
     assert metrics[0].waterfall_attempt_count == 1
     assert metrics[0].provider_receipt_refs == ()
@@ -593,6 +883,9 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
         terminal,
         expected_release_identity_sha256=identity["release_identity_sha256"],
         expected_binding_contracts_sha256=manifest["binding_contracts_sha256"],
+        expected_candidate_waterfall_contract_sha256=identity[
+            "candidate_waterfall_contract_sha256"
+        ],
         authoritative_provider_receipts=(provider_receipt,),
     )
     assert adapted["candidate_attempt_metrics"]
@@ -617,6 +910,9 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
             expected_binding_contracts_sha256=manifest[
                 "binding_contracts_sha256"
             ],
+            expected_candidate_waterfall_contract_sha256=identity[
+                "candidate_waterfall_contract_sha256"
+            ],
             authoritative_provider_receipts=(provider_receipt,),
         )
 
@@ -635,6 +931,9 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
             expected_binding_contracts_sha256=manifest[
                 "binding_contracts_sha256"
             ],
+            expected_candidate_waterfall_contract_sha256=identity[
+                "candidate_waterfall_contract_sha256"
+            ],
             authoritative_provider_receipts=(mismatched_accounting_provider,),
         )
 
@@ -646,6 +945,9 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
             ],
             expected_binding_contracts_sha256=manifest[
                 "binding_contracts_sha256"
+            ],
+            expected_candidate_waterfall_contract_sha256=identity[
+                "candidate_waterfall_contract_sha256"
             ],
             authoritative_provider_receipts=(
                 provider_receipt,
@@ -669,6 +971,7 @@ def test_candidate_metrics_are_sidecars_on_shared_evaluation():
         evaluation=_evaluation(spec, receipt),
         receipts=(receipt,),
         target_verified_qualified_count=2,
+        authoritative_provider_receipts=(provider,),
     )
 
     assert [(item.variant_id, item.split) for item in metrics] == [
@@ -702,6 +1005,7 @@ def test_candidate_metrics_reject_duplicate_attempts():
             evaluation=_evaluation(spec, receipt),
             receipts=(receipt, receipt),
             target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
         )
 
 
@@ -726,6 +1030,7 @@ def test_candidate_metrics_reject_duplicate_provider_receipt_sidecars():
             evaluation=_evaluation(spec, receipt),
             receipts=(receipt, duplicate_provider),
             target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
         )
 
 
@@ -743,6 +1048,7 @@ def test_candidate_metrics_reject_stop_target_and_attempt_chain_drift():
             evaluation=_evaluation(spec, receipt),
             receipts=(receipt,),
             target_verified_qualified_count=3,
+            authoritative_provider_receipts=(provider,),
         )
     with pytest.raises(RoutingExperimentError, match="chain_hash_differs"):
         evaluate_candidate_waterfall_metrics(
@@ -750,6 +1056,7 @@ def test_candidate_metrics_reject_stop_target_and_attempt_chain_drift():
             evaluation=_evaluation(spec, receipt),
             receipts=(replace(receipt, attempt_chain_sha256="7" * 64),),
             target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
         )
 
 
@@ -769,6 +1076,7 @@ def test_candidate_metrics_reject_partial_provider_sidecar_coverage():
             evaluation=evaluation,
             receipts=(),
             target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
         )
 
 
@@ -810,6 +1118,36 @@ def test_candidate_metrics_reject_partial_decision_sidecar_coverage():
         )
 
 
+def test_candidate_metrics_require_authoritative_provider_facts():
+    spec = _spec()
+    provider = _provider_receipt()
+    receipt = _adapt_receipt(
+        spec=spec,
+        decision=_decision(spec, provider),
+        provider=provider,
+    )
+    evaluation = _evaluation(spec, receipt)
+    with pytest.raises(RoutingExperimentError, match="authority_is_missing"):
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=evaluation,
+            receipts=(receipt,),
+            target_verified_qualified_count=2,
+        )
+    with pytest.raises(RoutingExperimentError, match="authority_differs"):
+        forged_receipt = replace(
+            receipt,
+            billed_credit_microunits=26,
+        )
+        evaluate_candidate_waterfall_metrics(
+            spec=spec,
+            evaluation=evaluation,
+            receipts=(forged_receipt,),
+            target_verified_qualified_count=2,
+            authoritative_provider_receipts=(provider,),
+        )
+
+
 def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     sql = (
         Path(__file__).parents[1]
@@ -834,8 +1172,15 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "disposition = 'skipped'" in sql
     assert "idx_research_lab_candidate_waterfall_provider_receipt" in sql
     assert sql.count("REFERENCES public.research_lab_routing_experiments_v2") == 2
+    assert "FOREIGN KEY (decision_receipt_id, experiment_hash)" in sql
+    assert "FOREIGN KEY (evaluation_receipt_id, experiment_hash)" in sql
     assert "REFERENCES public.research_lab_routing_decision_receipts_v2" in sql
     assert "REFERENCES public.research_lab_routing_evaluation_receipts_v2" in sql
+    assert "rl_route_decision_receipt_experiment_uq" in sql
+    assert "rl_route_evaluation_receipt_experiment_uq" in sql
+    assert "research_lab_routing_jsonb_hash_v2" in sql
+    assert "receipt_id = 'candidate_waterfall:'" in sql
+    assert "metric_id = 'candidate_metric:'" in sql
     assert "prior_attempt_receipt_sha256" in sql
     assert "attempt_chain_sha256" in sql
     assert sql.count("= jsonb_build_object(") == 2

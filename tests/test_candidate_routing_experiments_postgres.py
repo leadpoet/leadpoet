@@ -275,6 +275,7 @@ def _receipt_row(
         "prior_attempt_receipt_sha256": "",
         "attempt_chain_sha256": "6" * 64,
         "verification_receipt_sha256": "7" * 64,
+        "company_verification_receipt_sha256s": ["7" * 64],
         "step_order": 0,
         "attempt_sequence": attempt_sequence,
         "target_verified_qualified_count": 1,
@@ -290,6 +291,7 @@ def _receipt_row(
         "published_count": 1,
         "immutable": True,
     }
+    row["step_order"] = attempt_sequence
     row["receipt_hash"] = sha256_json(row)
     row["receipt_id"] = "candidate_waterfall:" + str(row["receipt_hash"])[7:31]
     row["receipt_doc"] = {**row}

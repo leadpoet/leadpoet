@@ -1631,6 +1631,96 @@ class SupabaseRoutingExperimentStore:
             },
         )
 
+    def append_candidate_waterfall_receipt(
+        self,
+        *,
+        experiment_hash: str,
+        receipt: Any,
+        claim: RoutingExperimentExecutionClaim,
+    ) -> Mapping[str, Any]:
+        """Append one exact candidate sidecar through the claim-fenced RPC."""
+
+        from research_lab.candidate_routing_experiments import CandidateWaterfallReceipt
+
+        normalized_experiment_hash = _require_hash(experiment_hash, "experiment_hash")
+        if not isinstance(receipt, CandidateWaterfallReceipt):
+            raise RoutingExperimentStoreError("candidate waterfall receipt is invalid")
+        if claim.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate waterfall receipt claim belongs to another experiment"
+            )
+        document = receipt.to_dict()
+        if receipt.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate waterfall receipt experiment differs"
+            )
+        result = self._rpc(
+            "research_lab_candidate_append_waterfall_receipt_v1",
+            {
+                "p_receipt_id": receipt.receipt_id,
+                "p_receipt_hash": receipt.receipt_hash,
+                "p_experiment_hash": normalized_experiment_hash,
+                "p_claim_key": claim.claim_key,
+                "p_claim_generation": claim.claim_generation,
+                "p_receipt_doc": document,
+            },
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("receipt_id") != receipt.receipt_id
+            or result.get("receipt_hash") != receipt.receipt_hash
+            or type(result.get("idempotent")) is not bool
+        ):
+            raise RoutingExperimentStoreError(
+                "candidate waterfall receipt append result is malformed"
+            )
+        return dict(result)
+
+    def append_candidate_waterfall_metric(
+        self,
+        *,
+        experiment_hash: str,
+        metric: Any,
+        claim: RoutingExperimentExecutionClaim,
+    ) -> Mapping[str, Any]:
+        """Append one exact candidate metric through the claim-fenced RPC."""
+
+        from research_lab.candidate_routing_experiments import CandidateWaterfallMetric
+
+        normalized_experiment_hash = _require_hash(experiment_hash, "experiment_hash")
+        if not isinstance(metric, CandidateWaterfallMetric):
+            raise RoutingExperimentStoreError("candidate waterfall metric is invalid")
+        if claim.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate waterfall metric claim belongs to another experiment"
+            )
+        document = metric.to_dict()
+        if metric.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate waterfall metric experiment differs"
+            )
+        result = self._rpc(
+            "research_lab_candidate_append_waterfall_metric_v1",
+            {
+                "p_metric_id": metric.metric_id,
+                "p_metric_hash": metric.metric_hash,
+                "p_experiment_hash": normalized_experiment_hash,
+                "p_claim_key": claim.claim_key,
+                "p_claim_generation": claim.claim_generation,
+                "p_metric_doc": document,
+            },
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("metric_id") != metric.metric_id
+            or result.get("metric_hash") != metric.metric_hash
+            or type(result.get("idempotent")) is not bool
+        ):
+            raise RoutingExperimentStoreError(
+                "candidate waterfall metric append result is malformed"
+            )
+        return dict(result)
+
     def evaluation_row(self, receipt_id: str) -> Mapping[str, Any] | None:
         return self._select_one(
             "research_lab_routing_evaluation_receipts_v2",
@@ -1910,6 +2000,274 @@ class SupabaseRoutingExperimentStore:
             raise RoutingExperimentStoreError(
                 "routing evaluation receipt references are incomplete or non-authoritative"
             )
+        if spec.input.stage == "candidate_acquisition":
+            sidecar_receipts = self._select_rows(
+                "research_lab_candidate_waterfall_receipts",
+                experiment_hash=experiment_hash,
+                order_column="receipt_id",
+            )
+            sidecar_metrics = self._select_rows(
+                "research_lab_candidate_waterfall_metrics",
+                experiment_hash=experiment_hash,
+                order_column="metric_id",
+            )
+            candidate_provider_refs = {
+                str(row.get("provider_receipt_ref") or "")
+                for row in sidecar_receipts
+                if str(row.get("provider_receipt_ref") or "")
+            }
+            expected_candidate_provider_refs = {
+                str(ref)
+                for ref in evaluation.provider_receipt_refs
+                if any(
+                    str(attempt.get("provider_receipt_ref") or "") == str(ref)
+                    and str(attempt.get("tool_id") or "").startswith("candidate.")
+                    for attempt in attempts
+                )
+            }
+            if (
+                not sidecar_receipts
+                or not sidecar_metrics
+                or candidate_provider_refs != expected_candidate_provider_refs
+            ):
+                raise RoutingExperimentStoreError(
+                    "candidate waterfall sidecar coverage is incomplete or non-authoritative"
+                )
+            expected_metric_keys = {
+                (variant.variant_id, split)
+                for variant in spec.variants
+                for split in ("calibration", "holdout")
+            }
+            actual_metric_keys = {
+                (str(row.get("variant_id") or ""), str(row.get("split") or ""))
+                for row in sidecar_metrics
+            }
+            if (
+                len(actual_metric_keys) != len(sidecar_metrics)
+                or actual_metric_keys != expected_metric_keys
+            ):
+                raise RoutingExperimentStoreError(
+                    "candidate waterfall metric coverage is incomplete or non-authoritative"
+                )
+            receipt_by_id: dict[str, Mapping[str, Any]] = {}
+            receipt_groups: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+            target_values: set[int] = set()
+            for row in sidecar_receipts:
+                receipt_id = str(row.get("receipt_id") or "")
+                receipt_doc = row.get("receipt_doc")
+                if not isinstance(receipt_doc, Mapping):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall receipt authority differs"
+                    )
+                verification_hashes = receipt_doc.get(
+                    "company_verification_receipt_sha256s"
+                )
+                if not isinstance(verification_hashes, list):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall verification receipts are incomplete"
+                    )
+                expected_receipt_doc = {
+                    key: row.get(key)
+                    for key in (
+                        "receipt_id", "receipt_hash", "contract_version",
+                        "experiment_id", "experiment_hash", "variant_id",
+                        "artifact_key", "decision_receipt_id",
+                        "provider_receipt_ref", "unit_ref", "binding_id",
+                        "tool_id", "execution_mode", "provider_outcome",
+                        "decision_plan_hash", "decision_route_hash",
+                        "model_contract_sha256", "model_plan_sha256",
+                        "stop_policy_sha256", "attempt_receipt_sha256",
+                        "prior_attempt_receipt_sha256", "attempt_chain_sha256",
+                        "verification_receipt_sha256", "step_order",
+                        "attempt_sequence", "target_verified_qualified_count",
+                        "disposition", "outcome_code", "provider_call_count",
+                        "billed_credit_microunits", "latency_ms", "raw_count",
+                        "normalized_count", "unique_count",
+                        "verified_qualified_count", "published_count", "immutable",
+                    )
+                }
+                expected_receipt_doc[
+                    "company_verification_receipt_sha256s"
+                ] = verification_hashes
+                if (
+                    row.get("experiment_hash") != experiment_hash
+                    or receipt_doc != expected_receipt_doc
+                    or row.get("company_verification_receipt_sha256s")
+                    != verification_hashes
+                    or sha256_json(
+                        {
+                            key: value
+                            for key, value in receipt_doc.items()
+                            if key not in {"receipt_id", "receipt_hash"}
+                        }
+                    )
+                    != row.get("receipt_hash")
+                    or receipt_id != "candidate_waterfall:"
+                    + str(row.get("receipt_hash") or "").split(":", 1)[-1][:24]
+                ):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall receipt authority differs"
+                    )
+                try:
+                    target_values.add(int(row.get("target_verified_qualified_count")))
+                except (TypeError, ValueError) as exc:
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall target is invalid"
+                    ) from exc
+                receipt_by_id[receipt_id] = row
+                receipt_groups.setdefault(
+                    (str(row.get("variant_id") or ""), str(row.get("unit_ref") or "")),
+                    [],
+                ).append(row)
+            if len(target_values) != 1:
+                raise RoutingExperimentStoreError(
+                    "candidate waterfall target is inconsistent"
+                )
+            for group in receipt_groups.values():
+                ordered = sorted(
+                    group,
+                    key=lambda item: (
+                        int(item.get("step_order") or 0),
+                        int(item.get("attempt_sequence") or 0),
+                    ),
+                )
+                prefix_hashes: list[str] = []
+                for expected_index, row in enumerate(ordered):
+                    if (
+                        row.get("step_order") != expected_index
+                        or row.get("attempt_sequence") != expected_index
+                        or row.get("prior_attempt_receipt_sha256")
+                        != (prefix_hashes[-1] if prefix_hashes else "")
+                    ):
+                        raise RoutingExperimentStoreError(
+                            "candidate waterfall attempt sequence is incomplete"
+                        )
+                    prefix_hashes.append(str(row.get("attempt_receipt_sha256") or ""))
+                    if row.get("attempt_chain_sha256") != sha256_json(prefix_hashes).split(":", 1)[1]:
+                        raise RoutingExperimentStoreError(
+                            "candidate waterfall attempt chain is non-authoritative"
+                        )
+            split_units = {
+                "calibration": set(spec.input.calibration_unit_refs),
+                "holdout": set(spec.input.holdout_unit_refs),
+            }
+            evaluation_by_variant = {
+                item.variant_id: item for item in evaluation.variants
+            }
+            for variant_id, variant_evaluation in evaluation_by_variant.items():
+                variant_rows = [
+                    row for row in sidecar_receipts
+                    if row.get("variant_id") == variant_id
+                ]
+                if {
+                    str(row.get("decision_receipt_id") or "") for row in variant_rows
+                } != set(variant_evaluation.decision_receipt_refs):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall decision sidecar coverage is incomplete"
+                    )
+                expected_variant_provider_refs = {
+                    str(attempt.get("provider_receipt_ref") or "")
+                    for attempt in attempts
+                    if attempt.get("variant_id") == variant_id
+                    and str(attempt.get("tool_id") or "").startswith("candidate.")
+                }
+                actual_variant_provider_refs = {
+                    str(row.get("provider_receipt_ref") or "")
+                    for row in variant_rows
+                    if str(row.get("provider_receipt_ref") or "")
+                }
+                if actual_variant_provider_refs != expected_variant_provider_refs:
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall provider sidecar coverage is incomplete"
+                    )
+            for row in sidecar_metrics:
+                metric_doc = row.get("metric_doc")
+                if not isinstance(metric_doc, Mapping):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall metric authority differs"
+                    )
+                expected_metric_doc = {
+                    key: row.get(key)
+                    for key in (
+                        "metric_id", "metric_hash", "contract_version",
+                        "evaluation_receipt_id", "experiment_id", "experiment_hash",
+                        "variant_id", "split", "target_verified_qualified_count",
+                        "unit_count", "fulfilled_unit_count", "waterfall_attempt_count",
+                        "provider_call_count", "total_billed_credit_microunits",
+                        "total_latency_ms", "raw_count", "normalized_count",
+                        "unique_count", "verified_qualified_count", "published_count",
+                        "failed_attempt_count", "missed_attempt_count", "fulfillment_rate",
+                        "verification_rate", "publication_rate",
+                        "verified_qualified_per_credit", "immutable",
+                    )
+                }
+                for field_name in (
+                    "waterfall_receipt_refs",
+                    "provider_receipt_refs",
+                    "decision_receipt_refs",
+                ):
+                    expected_metric_doc[field_name] = metric_doc.get(field_name)
+                if (
+                    metric_doc != expected_metric_doc
+                    or sha256_json(
+                        {
+                            key: value
+                            for key, value in metric_doc.items()
+                            if key not in {"metric_id", "metric_hash"}
+                        }
+                    )
+                    != row.get("metric_hash")
+                    or str(row.get("evaluation_receipt_id") or "")
+                    != evaluation.receipt_id
+                    or row.get("target_verified_qualified_count")
+                    != next(iter(target_values))
+                ):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall metric authority differs"
+                    )
+                variant_id = str(row.get("variant_id") or "")
+                split = str(row.get("split") or "")
+                selected = sorted(
+                    (
+                        receipt
+                        for receipt in sidecar_receipts
+                        if receipt.get("variant_id") == variant_id
+                        and receipt.get("unit_ref") in split_units.get(split, set())
+                    ),
+                    key=lambda item: (
+                        str(item.get("unit_ref") or ""),
+                        int(item.get("step_order") or 0),
+                        int(item.get("attempt_sequence") or 0),
+                    ),
+                )
+                expected_waterfall_refs = [
+                    str(receipt.get("receipt_id") or "") for receipt in selected
+                ]
+                expected_provider_refs = sorted(
+                    {
+                        str(receipt.get("provider_receipt_ref") or "")
+                        for receipt in selected
+                        if str(receipt.get("provider_receipt_ref") or "")
+                    }
+                )
+                expected_decision_refs = sorted(
+                    {
+                        str(receipt.get("decision_receipt_id") or "")
+                        for receipt in selected
+                    }
+                )
+                if (
+                    metric_doc.get("waterfall_receipt_refs") != expected_waterfall_refs
+                    or metric_doc.get("provider_receipt_refs") != expected_provider_refs
+                    or metric_doc.get("decision_receipt_refs") != expected_decision_refs
+                    or any(
+                        ref not in receipt_by_id
+                        for ref in expected_waterfall_refs
+                    )
+                ):
+                    raise RoutingExperimentStoreError(
+                        "candidate waterfall metric receipt coverage is incomplete"
+                    )
         if any(
             row.get("outcome") == ProviderOutcome.ADAPTER_FAILURE.value
             or row.get("billing_state") != "known"
@@ -2077,6 +2435,19 @@ class SupabaseRoutingExperimentStore:
         evaluation: RoutingExperimentV2Evaluation,
         reconciliation: Mapping[str, Any],
     ) -> str:
+        if not isinstance(reconciliation, Mapping):
+            raise RoutingExperimentStoreError(
+                "routing promotion reconciliation is invalid"
+            )
+        if (
+            reconciliation.get("reconciled") is not True
+            or reconciliation.get("experiment_hash") != spec.experiment_hash()
+            or reconciliation.get("evaluation_receipt_id") != evaluation.receipt_id
+            or reconciliation.get("evaluation_hash") != sha256_json(evaluation.to_dict())
+        ):
+            raise RoutingExperimentStoreError(
+                "routing promotion requires an authoritative reconciliation"
+            )
         reference_hash = sha256_json(
             {
                 "contract_version": "leadpoet.routing_experiment_v2_lab_reference:v2",

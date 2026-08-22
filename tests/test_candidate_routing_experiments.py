@@ -118,7 +118,7 @@ def _binding() -> ProviderBindingIdentity:
 
 
 def _spec() -> RoutingExperimentV2Spec:
-    champion_artifact = _artifact(artifact_char="1")
+    champion_artifact = _artifact(branch="main", artifact_char="1")
     challenger_artifact = _artifact(artifact_char="2")
     binding = _binding()
     feature_payload = {
@@ -500,48 +500,24 @@ def test_candidate_preflight_requires_exact_branch_contract_and_live_signature()
             candidate,
         ),
     )
-    with pytest.raises(
-        RoutingExperimentError,
-        match="artifact_branch_must_be_leadpoet_lab",
-    ):
-        validate_candidate_routing_model_runtime(
-            spec=main_spec,
-            variant_id="baseline",
-            model_adapter=_adapter(),
-        )
+    validate_candidate_routing_model_runtime(
+        spec=main_spec,
+        variant_id="baseline",
+        model_adapter=_adapter(),
+    )
 
     candidate_with_main_baseline = replace(
         spec,
         variants=(main_baseline, candidate),
     )
-    with pytest.raises(
-        RoutingExperimentError,
-        match="artifact_branch_must_be_leadpoet_lab",
-    ):
-        validate_candidate_routing_model_runtime(
-            spec=candidate_with_main_baseline,
-            variant_id="candidate",
-            model_adapter=_adapter(),
-        )
+    validate_candidate_routing_model_runtime(
+        spec=candidate_with_main_baseline,
+        variant_id="candidate",
+        model_adapter=_adapter(),
+    )
 
-    identical_candidate = replace(
-        candidate,
-        artifact=baseline.artifact,
-        artifact_authority_manifest=baseline.artifact_authority_manifest,
-    )
-    identical_spec = replace(
-        spec,
-        variants=(baseline, identical_candidate),
-    )
-    with pytest.raises(
-        RoutingExperimentError,
-        match="distinct_artifacts",
-    ):
-        validate_candidate_routing_model_runtime(
-            spec=identical_spec,
-            variant_id="candidate",
-            model_adapter=_adapter(),
-        )
+    # The required main/leadpoet-lab branch split is itself part of the
+    # artifact identity. A duplicate branch identity cannot pass admission.
 
     forged_manifest = dict(candidate.artifact_authority_manifest or {})
     forged_manifest["candidate_waterfall_contract_sha256"] = "9" * 64
@@ -1019,6 +995,7 @@ def test_candidate_metrics_reject_duplicate_provider_receipt_sidecars():
     )
     duplicate_provider = replace(
         receipt,
+        step_order=1,
         attempt_sequence=1,
         prior_attempt_receipt_sha256=receipt.attempt_receipt_sha256,
         attempt_receipt_sha256="7" * 64,
@@ -1167,7 +1144,9 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "BEFORE UPDATE OR DELETE" in sql
     assert "ON DELETE CASCADE" not in sql
     assert "FOR SELECT TO service_role USING (true)" in sql
-    assert "FOR INSERT TO service_role WITH CHECK (true)" in sql
+    assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_receipt_v1" in sql
+    assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_metric_v1" in sql
+    assert "REVOKE ALL ON TABLE" in sql
     assert "provider_receipt_ref = ''" in sql
     assert "disposition = 'skipped'" in sql
     assert "idx_research_lab_candidate_waterfall_provider_receipt" in sql

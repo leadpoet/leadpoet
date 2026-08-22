@@ -391,6 +391,7 @@ class ExactModelUnitResult:
     terminal_result: Mapping[str, Any]
     provider_receipts: tuple[ProviderReceipt, ...]
     replayed_transition_count: int
+    target_verified_qualified_count: int
 
 
 def _sha256(value: Any) -> str:
@@ -805,6 +806,7 @@ class ExactModelExperimentCoordinator:
             terminal_result=dict(state),
             provider_receipts=tuple(receipts),
             replayed_transition_count=replayed,
+            target_verified_qualified_count=target_count,
         )
 
 

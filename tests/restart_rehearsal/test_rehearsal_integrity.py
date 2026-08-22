@@ -5617,6 +5617,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "/harness/postgres_v2_contract_probe.py \\" in run_inside
     assert "/harness/gateway_enclave_service.py \\" in dockerfile
     assert "/harness/tls_connect_proxy_service.py \\" in dockerfile
+    assert "postgresql15-contrib" in dockerfile
     assert "postgresql15-server" in dockerfile
     assert "/harness/postgres_v2_contract_probe.py \\" in dockerfile
     assert (

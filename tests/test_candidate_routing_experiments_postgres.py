@@ -49,10 +49,17 @@ def _experiment_spec(*, variants: tuple[str, ...] = ("baseline", "candidate")) -
             "calibration_unit_refs": ["icp.cal"],
             "holdout_unit_refs": ["icp.hold"],
         },
+        "baseline_variant_id": "baseline",
         "variants": [
             {
                 "variant_id": variant,
                 "binding_ids": ["binding.registry"],
+                "stage": "candidate_acquisition",
+                "artifact": {
+                    "branch": "main" if variant == "baseline" else "leadpoet-lab",
+                    "commit_sha": "m" * 40,
+                    "manifest_hash": "n" * 64,
+                },
             }
             for variant in variants
         ],
@@ -129,6 +136,7 @@ def _insert_authority(
     evaluation_receipt_id: str | None = BASELINE_EVALUATION,
     variant_id: str = "baseline",
     unit_ref: str = "icp.cal",
+    create_provider: bool = True,
 ) -> None:
     decision_doc = _decision_doc(
         decision_receipt_id=decision_receipt_id,
@@ -153,7 +161,7 @@ def _insert_authority(
         f"'{HASH_PREFIX + '3' * 64}','{HASH_PREFIX + '1' * 64}',"
         f"{_json_literal(decision_doc, 'decision')})",
     ]
-    if provider_receipt_ref:
+    if provider_receipt_ref and create_provider:
         statements.append(
             "INSERT INTO public.research_lab_routing_provider_attempts_v2 "
             "(provider_receipt_ref, experiment_hash, binding_id, tool_id, variant_id, unit_ref, "
@@ -442,6 +450,11 @@ def _receipt_row(
     variant_id: str = "baseline",
     unit_ref: str = "icp.cal",
 ) -> dict[str, object]:
+    skipped = not provider_receipt_ref
+    publication_projection_hash = "8" * 64
+    terminal_publication_projection_hash = sha256_json(
+        [publication_projection_hash]
+    ).split(":", 1)[1]
     row: dict[str, object] = {
         "contract_version": "leadpoet.candidate_waterfall_receipt_sidecar:v1",
         "experiment_id": "exp-1",
@@ -454,39 +467,141 @@ def _receipt_row(
         "binding_id": "binding.registry",
         "tool_id": "candidate.registry_feed",
         "execution_mode": "fixture",
-        "provider_outcome": "verified",
+        "provider_outcome": "skipped" if skipped else "verified",
         "decision_plan_hash": HASH_PREFIX + "3" * 64,
         "decision_route_hash": HASH_PREFIX + "1" * 64,
         "model_contract_sha256": "2" * 64,
         "model_plan_sha256": "3" * 64,
         "stop_policy_sha256": "4" * 64,
+        "publication_projection_sha256": publication_projection_hash,
         "attempt_receipt_sha256": ("5" * 63) + str(attempt_sequence),
         "prior_attempt_receipt_sha256": "",
         "attempt_chain_sha256": sha256_json(
             [(("5" * 63) + str(attempt_sequence))]
         ).split(":", 1)[1],
-        "verification_receipt_sha256": sha256_json(["7" * 64]).split(":", 1)[1],
-        "company_verification_receipt_sha256s": ["7" * 64],
+        "verification_receipt_sha256": "" if skipped else sha256_json(["7" * 64]).split(":", 1)[1],
+        "company_verification_receipt_sha256s": [] if skipped else ["7" * 64],
         "step_order": 0,
         "attempt_sequence": attempt_sequence,
         "target_verified_qualified_count": 1,
-        "disposition": "succeeded",
-        "outcome_code": "verified",
-        "provider_call_count": 1,
-        "billed_credit_microunits": 25,
-        "latency_ms": 250,
-        "raw_count": 1,
-        "normalized_count": 1,
-        "unique_count": 1,
-        "verified_qualified_count": 1,
+        "disposition": "skipped" if skipped else "succeeded",
+        "outcome_code": "unavailable" if skipped else "verified",
+        "provider_call_count": 0 if skipped else 1,
+        "billed_credit_microunits": 0 if skipped else 25,
+        "latency_ms": 0 if skipped else 250,
+        "raw_count": 0 if skipped else 1,
+        "normalized_count": 0 if skipped else 1,
+        "unique_count": 0 if skipped else 1,
+        "verified_qualified_count": 0 if skipped else 1,
         "published_count": 0,
         "immutable": True,
     }
     row["step_order"] = attempt_sequence
+    terminal_projection = {
+        "tool_id": row["tool_id"],
+        "outcome": row["provider_outcome"],
+        "disposition": row["disposition"],
+        "reason_code": row["outcome_code"],
+        "provider_receipt_ref": row["provider_receipt_ref"],
+        "provider_outcome": row["provider_outcome"],
+        "raw_candidate_count": row["raw_count"],
+        "normalized_candidate_count": row["normalized_count"],
+        "unique_candidate_count": row["unique_count"],
+        "verified_qualified_candidate_count": row["verified_qualified_count"],
+        "company_verification_receipt_sha256s": row["company_verification_receipt_sha256s"],
+        "verification_receipt_sha256": row["verification_receipt_sha256"],
+        "publication_projection_sha256": publication_projection_hash,
+        "published_count": 0,
+        "provider_call_count": row["provider_call_count"],
+        "billed_credit_microunits": row["billed_credit_microunits"],
+        "latency_ms": row["latency_ms"],
+        "candidate_plan_sha256": row["model_plan_sha256"],
+        "stop_policy_sha256": row["stop_policy_sha256"],
+        "attempt_sha256": row["attempt_receipt_sha256"],
+        "prior_attempt_receipt_sha256": row["prior_attempt_receipt_sha256"],
+        "attempt_chain_sha256": row["attempt_chain_sha256"],
+        "step_order": row["step_order"],
+        "attempt_sequence": row["attempt_sequence"],
+    }
+    terminal_identity = {
+        "experiment_id": row["experiment_id"],
+        "experiment_hash": row["experiment_hash"],
+        "variant_id": row["variant_id"],
+        "unit_ref": row["unit_ref"],
+        "artifact_key": row["artifact_key"],
+        "artifact_branch": "main" if row["variant_id"] == "baseline" else "leadpoet-lab",
+        "artifact_commit_sha": "m" * 40,
+        "artifact_manifest_hash": "n" * 64,
+        "release_identity_sha256": HASH_PREFIX + "6" * 64,
+        "binding_contracts_sha256": HASH_PREFIX + "b" * 64,
+        "candidate_waterfall_contract_sha256": HASH_PREFIX + "a" * 64,
+        "start_request_sha256": "9" * 64,
+        "decision_receipt_id": row["decision_receipt_id"],
+        "target_verified_qualified_count": 1,
+        "disposition": row["disposition"],
+        "stop_policy_sha256": row["stop_policy_sha256"],
+        "verification_receipt_sha256": row["verification_receipt_sha256"],
+        "attempt_chain_sha256": row["attempt_chain_sha256"],
+        "publication_projection_sha256": terminal_publication_projection_hash,
+        "terminal_result_sha256": HASH_PREFIX + "5" * 64,
+        "model_receipt_sha256": "2" * 64,
+        "orchestration_receipt_sha256": "3" * 64,
+        "candidate_waterfall_sha256": "4" * 64,
+        "candidate_plan_sha256": row["model_plan_sha256"],
+        "stop_reason": "completed",
+        "provider_receipt_refs": [row["provider_receipt_ref"]],
+        "verification_receipt_refs": [row["company_verification_receipt_sha256s"]],
+        "attempt_receipt_sha256s": [row["attempt_receipt_sha256"]],
+        "attempt_chain_sha256s": [row["attempt_chain_sha256"]],
+        "attempt_projections": [terminal_projection],
+        "provider_call_count": row["provider_call_count"],
+        "billed_credit_microunits": row["billed_credit_microunits"],
+        "latency_ms": row["latency_ms"],
+        "raw_count": row["raw_count"],
+        "normalized_count": row["normalized_count"],
+        "unique_count": row["unique_count"],
+        "verified_qualified_count": row["verified_qualified_count"],
+        "published_count": 0,
+        "immutable": True,
+        "contract_version": "leadpoet.candidate_model_unit_terminal_authority:v1",
+    }
+    terminal_hash = sha256_json(terminal_identity)
+    terminal_doc = {
+        **terminal_identity,
+        "receipt_id": "candidate_model_terminal:" + terminal_hash[7:31],
+        "receipt_hash": terminal_hash,
+    }
+    row["model_terminal_receipt_id"] = terminal_doc["receipt_id"]
+    row["model_terminal_receipt_hash"] = terminal_doc["receipt_hash"]
     row["receipt_hash"] = sha256_json(row)
     row["receipt_id"] = "candidate_waterfall:" + str(row["receipt_hash"])[7:31]
     row["receipt_doc"] = {**row}
+    row["terminal_doc"] = terminal_doc
     return row
+
+
+def _insert_terminal(psql, row: dict[str, object], *, check: bool = True):
+    terminal = row["terminal_doc"]
+    assert isinstance(terminal, dict)
+    columns = tuple(
+        key
+        for key in terminal
+        if key not in {"immutable", "receipt_id", "receipt_hash"}
+    ) + ("receipt_id", "receipt_hash", "terminal_doc")
+    terminal_row = {**terminal, "terminal_doc": terminal}
+    encoded = json.dumps(terminal_row, separators=(",", ":"))
+    selected = ",".join(columns)
+    result = psql(
+        "INSERT INTO public.research_lab_candidate_model_unit_terminals (%s) "
+        "SELECT %s FROM json_populate_record(NULL::public."
+        "research_lab_candidate_model_unit_terminals, $terminal$%s$terminal$::json) "
+        "ON CONFLICT (receipt_id) DO NOTHING;"
+        % (selected, selected, encoded),
+        check=False,
+    )
+    if check and result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return result
 
 
 def _insert_receipt(
@@ -495,7 +610,9 @@ def _insert_receipt(
     *,
     check: bool = True,
 ):
-    columns = tuple(key for key in row if key != "immutable")
+    if "terminal_doc" in row:
+        _insert_terminal(psql, row, check=False)
+    columns = tuple(key for key in row if key not in {"immutable", "terminal_doc"})
     encoded = json.dumps(row, separators=(",", ":"))
     assert "$candidate$" not in encoded
     selected = ",".join(columns)
@@ -601,50 +718,26 @@ def _rehash_receipt_doc(doc: dict[str, object]) -> dict[str, object]:
 
 
 def _append_receipt_rpc(psql, doc: dict[str, object], *, check: bool = True):
+    terminal_exists = psql(
+        "SELECT EXISTS (SELECT 1 FROM public.research_lab_candidate_model_unit_terminals "
+        f"WHERE receipt_id = '{doc['model_terminal_receipt_id']}');",
+        tuples_only=True,
+    ).stdout.strip()
+    if terminal_exists != "t":
+        row = dict(doc)
+        row["terminal_doc"] = _receipt_row(
+            experiment_hash=str(doc["experiment_hash"]),
+            decision_receipt_id=str(doc["decision_receipt_id"]),
+            provider_receipt_ref=str(doc["provider_receipt_ref"]),
+            variant_id=str(doc["variant_id"]),
+            unit_ref=str(doc["unit_ref"]),
+        )["terminal_doc"]
+        _insert_terminal(psql, row, check=False)
     return psql(
         "SELECT public.research_lab_candidate_append_waterfall_receipt_v1("
         f"'{doc['receipt_id']}','{doc['receipt_hash']}','{doc['experiment_hash']}',"
         f"'{CLAIM_KEY}',1,{_json_literal(doc, 'receipt_rpc')});",
         check=check,
-    )
-
-
-def _bind_model_waterfall_authority(psql, row: dict[str, object]) -> None:
-    attempt = {
-        "attempt_index": row["step_order"],
-        "attempt_sha256": row["attempt_receipt_sha256"],
-        "previous_attempt_sha256": row["prior_attempt_receipt_sha256"],
-        "attempt_chain_sha256": row["attempt_chain_sha256"],
-        "tool_id": row["tool_id"],
-        "raw_candidate_count": row["raw_count"],
-        "normalized_candidate_count": row["normalized_count"],
-        "unique_candidate_count": row["unique_count"],
-        "verified_qualified_candidate_count": row["verified_qualified_count"],
-        "published_count": row["published_count"],
-        "provider_receipt_ref": row["provider_receipt_ref"],
-        "provider_call_count": row["provider_call_count"],
-        "credit_microunits": row["billed_credit_microunits"],
-        "latency_ms": row["latency_ms"],
-        "company_verification_receipt_sha256s": row[
-            "company_verification_receipt_sha256s"
-        ],
-        "verification_receipt_sha256": row["verification_receipt_sha256"],
-    }
-    waterfall = {
-        "schema_version": "candidate-waterfall-receipt:v1",
-        "model_receipt_sha256": "2" * 64,
-        "target_verified_qualified_count": row["target_verified_qualified_count"],
-        "attempts": [attempt],
-    }
-    waterfall["waterfall_sha256"] = sha256_json(waterfall).split(":", 1)[1]
-    terminal_result = {
-        "model_candidate_waterfall": waterfall,
-    }
-    psql(
-        "UPDATE public.research_lab_routing_provider_attempts_v2 SET attempt_doc = "
-        f"jsonb_build_object('provider_receipt', jsonb_build_object('call_count', 1), "
-        f"'terminal_result', {_json_literal(terminal_result, 'model_terminal')}) "
-        f"WHERE provider_receipt_ref = '{row['provider_receipt_ref']}';"
     )
 
 
@@ -737,7 +830,19 @@ def test_migration_162_rejects_forged_hash_duplicate_provider_and_cross_lineage(
     assert forged_result.returncode != 0
     assert "check constraint" in forged_result.stderr.lower()
 
-    duplicate = _receipt_row(attempt_sequence=1)
+    duplicate_decision = "routing_decision:" + "8" * 16
+    _insert_authority(
+        psql,
+        evaluation_receipt_id=None,
+        decision_receipt_id=duplicate_decision,
+        provider_receipt_ref=BASELINE_PROVIDER,
+        unit_ref="icp.hold",
+        create_provider=False,
+    )
+    duplicate = _receipt_row(
+        decision_receipt_id=duplicate_decision,
+        unit_ref="icp.hold",
+    )
     _insert_duplicate_result = _insert_receipt(psql, duplicate, check=False)
     assert _insert_duplicate_result.returncode != 0
     assert "idx_research_lab_candidate_waterfall_provider_receipt" in _insert_duplicate_result.stderr
@@ -835,7 +940,11 @@ def test_migration_162_receipt_rpc_rejects_rehashed_parent_and_projection_drift(
         forged = _rehash_receipt_doc({**base, field_name: forged_value})
         result = _append_receipt_rpc(psql, forged, check=False)
         assert result.returncode != 0, field_name
-        assert "authoritative" in result.stderr.lower() or "check constraint" in result.stderr.lower()
+        assert (
+            "authoritative" in result.stderr.lower()
+            or "terminal" in result.stderr.lower()
+            or "check constraint" in result.stderr.lower()
+        )
 
     reordered = _rehash_receipt_doc(
         {
@@ -846,20 +955,6 @@ def test_migration_162_receipt_rpc_rejects_rehashed_parent_and_projection_drift(
     reordered_result = _append_receipt_rpc(psql, reordered, check=False)
     assert reordered_result.returncode != 0
     assert "projection_not_authoritative" in reordered_result.stderr
-
-    psql(
-        "UPDATE public.research_lab_routing_provider_attempts_v2 "
-        "SET attempt_doc = '{}'::jsonb WHERE provider_receipt_ref = "
-        f"'{BASELINE_PROVIDER}';"
-    )
-    missing_count = _append_receipt_rpc(psql, base, check=False)
-    assert missing_count.returncode != 0
-    assert "provider_not_authoritative" in missing_count.stderr
-    psql(
-        "UPDATE public.research_lab_routing_provider_attempts_v2 SET attempt_doc = "
-        f"{_json_literal({'provider_receipt': {'call_count': 1}}, 'restore_attempt')} "
-        f"WHERE provider_receipt_ref = '{BASELINE_PROVIDER}';"
-    )
 
     first = _append_receipt_rpc(psql, base, check=False)
     assert first.returncode == 0, first.stderr
@@ -940,7 +1035,8 @@ def test_migration_162_skipped_receipt_rpc_requires_zero_provider_authority(
 ):
     psql = postgres162
     _insert_authority(psql, provider_receipt_ref="")
-    base = dict(_receipt_row()["receipt_doc"])
+    _insert_terminal(psql, _receipt_row(provider_receipt_ref=""))
+    base = dict(_receipt_row(provider_receipt_ref="")["receipt_doc"])
     skipped = _rehash_receipt_doc(
         {
             **base,
@@ -970,7 +1066,11 @@ def test_migration_162_skipped_receipt_rpc_requires_zero_provider_authority(
         forged = _rehash_receipt_doc({**skipped, field_name: forged_value})
         result = _append_receipt_rpc(psql, forged, check=False)
         assert result.returncode != 0, field_name
-        assert "authoritative" in result.stderr.lower() or "check constraint" in result.stderr.lower()
+        assert (
+            "authoritative" in result.stderr.lower()
+            or "terminal" in result.stderr.lower()
+            or "check constraint" in result.stderr.lower()
+        )
 
     valid = _append_receipt_rpc(psql, skipped, check=False)
     assert valid.returncode == 0, valid.stderr
@@ -983,7 +1083,7 @@ def test_migration_162_skipped_receipt_rejects_attempted_tool(
     _insert_authority(psql, provider_receipt_ref="", evaluation_receipt_id=None)
     skipped = _rehash_receipt_doc(
         {
-            **_receipt_row(provider_receipt_ref=""),
+            **_receipt_row(provider_receipt_ref="")["receipt_doc"],
             "provider_outcome": "skipped",
             "disposition": "skipped",
             "provider_call_count": 0,
@@ -1031,6 +1131,7 @@ def test_migration_162_recomputes_attempt_chain_and_requires_model_parent(
     psql = postgres162
     _insert_authority(psql)
     valid = _receipt_row()
+    _insert_terminal(psql, valid)
     forged = _rehash_receipt_doc(
         {**valid["receipt_doc"], "attempt_chain_sha256": "9" * 64}
     )
@@ -1052,8 +1153,7 @@ def test_migration_162_recomputes_attempt_chain_and_requires_model_parent(
         check=False,
     )
     assert missing_parent.returncode != 0
-    assert "candidate_model_waterfall_authority_missing" in missing_parent.stderr
-    assert "model_candidate_waterfall" in missing_parent.stderr
+    assert "candidate_model_terminal_coverage_differs" in missing_parent.stderr
 
 
 def test_migration_162_derives_target_and_rejects_empty_split_coverage(
@@ -1125,7 +1225,6 @@ def test_migration_162_promotion_recomputes_stored_metrics_after_privileged_drif
             unit_ref=unit_ref,
         )
         _append_receipt_rpc(psql, dict(row["receipt_doc"]))
-        _bind_model_waterfall_authority(psql, row)
     metric_docs: dict[tuple[str, str], dict[str, object]] = {}
     for variant_id in ("baseline", "candidate"):
         for split in ("calibration", "holdout"):

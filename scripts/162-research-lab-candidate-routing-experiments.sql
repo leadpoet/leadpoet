@@ -23,6 +23,128 @@ CREATE UNIQUE INDEX IF NOT EXISTS rl_route_evaluation_receipt_experiment_uq
         experiment_hash
     );
 
+-- The exact Model finishes only after all provider calls and Model decisions
+-- exist.  Keep its independently validated terminal authority in its own
+-- append-only row; a provider attempt cannot attest a later Model terminal.
+CREATE TABLE IF NOT EXISTS public.research_lab_candidate_model_unit_terminals (
+    receipt_id                    TEXT PRIMARY KEY CHECK (
+        receipt_id ~ '^candidate_model_terminal:[0-9a-f]{24}$'
+    ),
+    receipt_hash                  TEXT NOT NULL UNIQUE CHECK (
+        receipt_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    contract_version              TEXT NOT NULL CHECK (
+        contract_version = 'leadpoet.candidate_model_unit_terminal_authority:v1'
+    ),
+    experiment_id                 TEXT NOT NULL,
+    experiment_hash               TEXT NOT NULL
+        REFERENCES public.research_lab_routing_experiments_v2(experiment_hash)
+        CHECK (experiment_hash ~ '^sha256:[0-9a-f]{64}$'),
+    variant_id                    TEXT NOT NULL,
+    unit_ref                      TEXT NOT NULL,
+    artifact_key                  TEXT NOT NULL CHECK (artifact_key ~ '^sha256:[0-9a-f]{64}$'),
+    artifact_branch               TEXT NOT NULL CHECK (artifact_branch IN ('main', 'leadpoet-lab')),
+    artifact_commit_sha           TEXT NOT NULL,
+    artifact_manifest_hash        TEXT NOT NULL,
+    release_identity_sha256       TEXT NOT NULL CHECK (release_identity_sha256 ~ '^sha256:[0-9a-f]{64}$'),
+    binding_contracts_sha256      TEXT NOT NULL CHECK (binding_contracts_sha256 ~ '^sha256:[0-9a-f]{64}$'),
+    candidate_waterfall_contract_sha256 TEXT NOT NULL CHECK (candidate_waterfall_contract_sha256 ~ '^sha256:[0-9a-f]{64}$'),
+    start_request_sha256           TEXT NOT NULL CHECK (start_request_sha256 ~ '^[0-9a-f]{64}$'),
+    decision_receipt_id           TEXT NOT NULL,
+    FOREIGN KEY (decision_receipt_id, experiment_hash)
+        REFERENCES public.research_lab_routing_decision_receipts_v2(receipt_id, experiment_hash)
+        DEFERRABLE INITIALLY IMMEDIATE,
+    target_verified_qualified_count INTEGER NOT NULL CHECK (target_verified_qualified_count BETWEEN 1 AND 50),
+    disposition                  TEXT NOT NULL CHECK (disposition IN ('succeeded', 'missed', 'failed', 'deferred', 'skipped')),
+    stop_policy_sha256           TEXT NOT NULL CHECK (stop_policy_sha256 ~ '^[0-9a-f]{64}$'),
+    verification_receipt_sha256  TEXT NOT NULL CHECK (verification_receipt_sha256 = '' OR verification_receipt_sha256 ~ '^[0-9a-f]{64}$'),
+    attempt_chain_sha256         TEXT NOT NULL CHECK (attempt_chain_sha256 ~ '^[0-9a-f]{64}$'),
+    publication_projection_sha256 TEXT NOT NULL CHECK (publication_projection_sha256 ~ '^[0-9a-f]{64}$'),
+    terminal_result_sha256        TEXT NOT NULL CHECK (terminal_result_sha256 ~ '^sha256:[0-9a-f]{64}$'),
+    model_receipt_sha256          TEXT NOT NULL CHECK (model_receipt_sha256 ~ '^[0-9a-f]{64}$'),
+    orchestration_receipt_sha256  TEXT NOT NULL CHECK (orchestration_receipt_sha256 ~ '^[0-9a-f]{64}$'),
+    candidate_waterfall_sha256    TEXT NOT NULL CHECK (candidate_waterfall_sha256 ~ '^[0-9a-f]{64}$'),
+    candidate_plan_sha256         TEXT NOT NULL CHECK (candidate_plan_sha256 ~ '^[0-9a-f]{64}$'),
+    stop_reason                   TEXT NOT NULL,
+    provider_receipt_refs         JSONB NOT NULL CHECK (jsonb_typeof(provider_receipt_refs) = 'array'),
+    verification_receipt_refs     JSONB NOT NULL CHECK (jsonb_typeof(verification_receipt_refs) = 'array'),
+    attempt_receipt_sha256s       JSONB NOT NULL CHECK (jsonb_typeof(attempt_receipt_sha256s) = 'array'),
+    attempt_chain_sha256s         JSONB NOT NULL CHECK (jsonb_typeof(attempt_chain_sha256s) = 'array'),
+    attempt_projections            JSONB NOT NULL CHECK (jsonb_typeof(attempt_projections) = 'array'),
+    provider_call_count           INTEGER NOT NULL CHECK (provider_call_count >= 0),
+    billed_credit_microunits      BIGINT NOT NULL CHECK (billed_credit_microunits >= 0),
+    latency_ms                    BIGINT NOT NULL CHECK (latency_ms >= 0),
+    raw_count                     INTEGER NOT NULL CHECK (raw_count >= 0),
+    normalized_count              INTEGER NOT NULL CHECK (normalized_count >= 0),
+    unique_count                  INTEGER NOT NULL CHECK (unique_count >= 0),
+    verified_qualified_count      INTEGER NOT NULL CHECK (verified_qualified_count >= 0),
+    published_count               INTEGER NOT NULL DEFAULT 0 CHECK (published_count = 0),
+    terminal_doc                  JSONB NOT NULL CHECK (
+        jsonb_typeof(terminal_doc) = 'object'
+        AND terminal_doc::TEXT !~* '(sk-or-|sb_secret|service_role|openrouter_api_key|raw_secret|password|authorization:|judge_prompt)'
+    ),
+    created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (experiment_hash, variant_id, unit_ref),
+    UNIQUE (receipt_id, receipt_hash),
+    CHECK (raw_count >= normalized_count),
+    CHECK (normalized_count >= unique_count),
+    CHECK (unique_count >= verified_qualified_count),
+    CHECK (verified_qualified_count >= published_count),
+    CHECK (jsonb_array_length(provider_receipt_refs) = jsonb_array_length(attempt_projections)),
+    CHECK (jsonb_array_length(verification_receipt_refs) = jsonb_array_length(attempt_projections)),
+    CHECK (jsonb_array_length(attempt_receipt_sha256s) = jsonb_array_length(attempt_projections)),
+    CHECK (jsonb_array_length(attempt_chain_sha256s) = jsonb_array_length(attempt_projections)),
+    CHECK (terminal_doc = jsonb_build_object(
+        'experiment_id', experiment_id,
+        'experiment_hash', experiment_hash,
+        'variant_id', variant_id,
+        'unit_ref', unit_ref,
+        'artifact_key', artifact_key,
+        'artifact_branch', artifact_branch,
+        'artifact_commit_sha', artifact_commit_sha,
+        'artifact_manifest_hash', artifact_manifest_hash,
+        'release_identity_sha256', release_identity_sha256,
+        'binding_contracts_sha256', binding_contracts_sha256,
+        'candidate_waterfall_contract_sha256', candidate_waterfall_contract_sha256,
+        'start_request_sha256', start_request_sha256,
+        'decision_receipt_id', decision_receipt_id,
+        'target_verified_qualified_count', target_verified_qualified_count,
+        'disposition', disposition,
+        'stop_policy_sha256', stop_policy_sha256,
+        'verification_receipt_sha256', verification_receipt_sha256,
+        'attempt_chain_sha256', attempt_chain_sha256,
+        'publication_projection_sha256', publication_projection_sha256,
+        'terminal_result_sha256', terminal_result_sha256,
+        'model_receipt_sha256', model_receipt_sha256,
+        'orchestration_receipt_sha256', orchestration_receipt_sha256,
+        'candidate_waterfall_sha256', candidate_waterfall_sha256,
+        'candidate_plan_sha256', candidate_plan_sha256,
+        'stop_reason', stop_reason,
+        'provider_receipt_refs', provider_receipt_refs,
+        'verification_receipt_refs', verification_receipt_refs,
+        'attempt_receipt_sha256s', attempt_receipt_sha256s,
+        'attempt_chain_sha256s', attempt_chain_sha256s,
+        'attempt_projections', attempt_projections,
+        'provider_call_count', provider_call_count,
+        'billed_credit_microunits', billed_credit_microunits,
+        'latency_ms', latency_ms,
+        'raw_count', raw_count,
+        'normalized_count', normalized_count,
+        'unique_count', unique_count,
+        'verified_qualified_count', verified_qualified_count,
+        'published_count', published_count,
+        'immutable', TRUE,
+        'contract_version', contract_version,
+        'receipt_id', receipt_id,
+        'receipt_hash', receipt_hash
+    )),
+    CHECK (receipt_hash = public.research_lab_routing_jsonb_hash_v2(terminal_doc - ARRAY['receipt_id', 'receipt_hash'])),
+    CHECK (receipt_id = 'candidate_model_terminal:' || pg_catalog.substr(receipt_hash, 8, 24))
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_lab_candidate_model_unit_terminals_experiment
+    ON public.research_lab_candidate_model_unit_terminals(experiment_hash, variant_id, unit_ref);
+
 CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
     receipt_id                    TEXT PRIMARY KEY CHECK (
         receipt_id ~ '^candidate_waterfall:[0-9a-f]{24}$'
@@ -52,6 +174,18 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         DEFERRABLE INITIALLY IMMEDIATE,
     CHECK (
         decision_receipt_id ~ '^routing_decision:[0-9a-f]{16}$'
+    ),
+    model_terminal_receipt_id     TEXT NOT NULL CHECK (
+        model_terminal_receipt_id ~ '^candidate_model_terminal:[0-9a-f]{24}$'
+    ),
+    model_terminal_receipt_hash   TEXT NOT NULL CHECK (
+        model_terminal_receipt_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    FOREIGN KEY (model_terminal_receipt_id, model_terminal_receipt_hash)
+        REFERENCES public.research_lab_candidate_model_unit_terminals(receipt_id, receipt_hash)
+        DEFERRABLE INITIALLY IMMEDIATE,
+    publication_projection_sha256 TEXT NOT NULL CHECK (
+        publication_projection_sha256 ~ '^[0-9a-f]{64}$'
     ),
     provider_receipt_ref          TEXT NOT NULL DEFAULT '' CHECK (
         provider_receipt_ref = ''
@@ -185,6 +319,9 @@ CREATE TABLE IF NOT EXISTS public.research_lab_candidate_waterfall_receipts (
         'variant_id', variant_id,
         'artifact_key', artifact_key,
         'decision_receipt_id', decision_receipt_id,
+        'model_terminal_receipt_id', model_terminal_receipt_id,
+        'model_terminal_receipt_hash', model_terminal_receipt_hash,
+        'publication_projection_sha256', publication_projection_sha256,
         'provider_receipt_ref', provider_receipt_ref,
         'unit_ref', unit_ref,
         'binding_id', binding_id,
@@ -387,7 +524,8 @@ DECLARE
 BEGIN
     FOREACH relation_name IN ARRAY ARRAY[
         'research_lab_candidate_waterfall_receipts',
-        'research_lab_candidate_waterfall_metrics'
+        'research_lab_candidate_waterfall_metrics',
+        'research_lab_candidate_model_unit_terminals'
     ] LOOP
         IF NOT EXISTS (
             SELECT 1
@@ -414,18 +552,22 @@ $candidate_waterfall_triggers$;
 
 REVOKE ALL ON TABLE
     public.research_lab_candidate_waterfall_receipts,
-    public.research_lab_candidate_waterfall_metrics
+    public.research_lab_candidate_waterfall_metrics,
+    public.research_lab_candidate_model_unit_terminals
 FROM PUBLIC, anon, authenticated, service_role;
 
 GRANT SELECT ON TABLE
     public.research_lab_candidate_waterfall_receipts,
-    public.research_lab_candidate_waterfall_metrics
+    public.research_lab_candidate_waterfall_metrics,
+    public.research_lab_candidate_model_unit_terminals
 TO service_role;
 
 ALTER TABLE public.research_lab_candidate_waterfall_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.research_lab_candidate_waterfall_receipts FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.research_lab_candidate_waterfall_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.research_lab_candidate_waterfall_metrics FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.research_lab_candidate_model_unit_terminals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.research_lab_candidate_model_unit_terminals FORCE ROW LEVEL SECURITY;
 
 DO $candidate_waterfall_policies$
 DECLARE
@@ -433,7 +575,8 @@ DECLARE
 BEGIN
     FOREACH relation_name IN ARRAY ARRAY[
         'research_lab_candidate_waterfall_receipts',
-        'research_lab_candidate_waterfall_metrics'
+        'research_lab_candidate_waterfall_metrics',
+        'research_lab_candidate_model_unit_terminals'
     ] LOOP
         IF NOT EXISTS (
             SELECT 1 FROM pg_catalog.pg_policies
@@ -612,16 +755,7 @@ BEGIN
                 USING ERRCODE = '23503';
         END IF;
     END IF;
-    IF p_receipt_doc->>'provider_outcome' IS DISTINCT FROM (CASE
-            (p_receipt_doc->>'disposition')
-            WHEN 'succeeded' THEN 'verified'
-            WHEN 'missed' THEN 'source_miss'
-            WHEN 'failed' THEN 'adapter_failure'
-            WHEN 'deferred' THEN 'adapter_failure'
-            WHEN 'skipped' THEN 'skipped'
-            ELSE NULL
-       END)
-       OR (p_receipt_doc->>'published_count')::INTEGER <> 0
+    IF (p_receipt_doc->>'published_count')::INTEGER <> 0
        OR jsonb_array_length(p_receipt_doc->'company_verification_receipt_sha256s')
             <> (p_receipt_doc->>'verified_qualified_count')::INTEGER
        OR EXISTS (
@@ -781,9 +915,26 @@ BEGIN
         RAISE EXCEPTION 'research_lab_candidate_waterfall_decision_not_authoritative'
             USING ERRCODE = '23503';
     END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM public.research_lab_candidate_model_unit_terminals terminal
+         WHERE terminal.receipt_id = p_receipt_doc->>'model_terminal_receipt_id'
+           AND terminal.receipt_hash = p_receipt_doc->>'model_terminal_receipt_hash'
+           AND terminal.experiment_hash = p_experiment_hash
+           AND terminal.variant_id = p_receipt_doc->>'variant_id'
+           AND terminal.unit_ref = p_receipt_doc->>'unit_ref'
+           AND terminal.decision_receipt_id = p_receipt_doc->>'decision_receipt_id'
+           AND terminal.target_verified_qualified_count =
+                (p_receipt_doc->>'target_verified_qualified_count')::INTEGER
+    ) THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_reference_missing'
+            USING ERRCODE = '23503';
+    END IF;
     INSERT INTO public.research_lab_candidate_waterfall_receipts (
         receipt_id, receipt_hash, contract_version, experiment_id,
         experiment_hash, variant_id, artifact_key, decision_receipt_id,
+        model_terminal_receipt_id, model_terminal_receipt_hash,
+        publication_projection_sha256,
         provider_receipt_ref, unit_ref, binding_id, tool_id, execution_mode,
         provider_outcome, decision_plan_hash, decision_route_hash,
         model_contract_sha256, model_plan_sha256, stop_policy_sha256,
@@ -798,7 +949,10 @@ BEGIN
         p_receipt_id, p_receipt_hash, p_receipt_doc->>'contract_version',
         p_receipt_doc->>'experiment_id', p_experiment_hash,
         p_receipt_doc->>'variant_id', p_receipt_doc->>'artifact_key',
-        p_receipt_doc->>'decision_receipt_id', p_receipt_doc->>'provider_receipt_ref',
+        p_receipt_doc->>'decision_receipt_id',
+        p_receipt_doc->>'model_terminal_receipt_id', p_receipt_doc->>'model_terminal_receipt_hash',
+        p_receipt_doc->>'publication_projection_sha256',
+        p_receipt_doc->>'provider_receipt_ref',
         p_receipt_doc->>'unit_ref', p_receipt_doc->>'binding_id',
         p_receipt_doc->>'tool_id', p_receipt_doc->>'execution_mode',
         p_receipt_doc->>'provider_outcome', p_receipt_doc->>'decision_plan_hash',
@@ -817,6 +971,9 @@ BEGIN
         (p_receipt_doc->>'unique_count')::INTEGER,
         (p_receipt_doc->>'verified_qualified_count')::INTEGER,
         (p_receipt_doc->>'published_count')::INTEGER, p_receipt_doc
+    );
+    PERFORM public.research_lab_candidate_assert_model_unit_terminal_v1(
+        p_experiment_hash, p_receipt_doc->>'variant_id', p_receipt_doc->>'unit_ref'
     );
     RETURN pg_catalog.jsonb_build_object(
         'receipt_id', p_receipt_id, 'receipt_hash', p_receipt_hash,
@@ -1197,11 +1354,392 @@ GRANT EXECUTE ON FUNCTION public.research_lab_candidate_metric_projection_v1(
     TEXT, TEXT, TEXT, TEXT, INTEGER
 ) TO service_role;
 
--- The shared provider attempt is the only independently attested parent that
--- can carry the Model's exact candidate counts.  The current PR93 provider
--- terminal contract does not yet expose this object, so promotion must stop
--- until it does.  Candidate sidecars are never accepted as their own source
--- of raw, normalized, unique, verified, attempt, cost, or latency truth.
+-- Append the exact Model terminal after run_unit and its decisions complete.
+-- This RPC is claim-fenced and idempotent, but a conflicting replay is never
+-- accepted.  The durable projection contains only bounded hashes, refs,
+-- counts, and provider measurements.
+-- Validate only the unit being appended.  Whole-experiment coverage is
+-- checked after the final terminal and again by sidecar append/promotion;
+-- validating a partial run as complete would reject the first unit.
+CREATE OR REPLACE FUNCTION public.research_lab_candidate_assert_model_unit_terminal_v1(
+    p_experiment_hash TEXT,
+    p_variant_id TEXT,
+    p_unit_ref TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $candidate_model_unit_authority_v1$
+DECLARE
+    terminal RECORD;
+    experiment_doc JSONB;
+    decision RECORD;
+    projection JSONB;
+    index_no INTEGER;
+    provider RECORD;
+    provider_ref TEXT;
+    verification_refs JSONB;
+    attempt_hashes JSONB := '[]'::JSONB;
+    total_calls INTEGER := 0;
+    total_cost BIGINT := 0;
+    total_latency BIGINT := 0;
+    total_raw INTEGER := 0;
+    total_normalized INTEGER := 0;
+    total_unique INTEGER := 0;
+    total_verified INTEGER := 0;
+    verification_flat JSONB := '[]'::JSONB;
+    publication_hashes JSONB := '[]'::JSONB;
+BEGIN
+    SELECT * INTO terminal
+      FROM public.research_lab_candidate_model_unit_terminals
+     WHERE experiment_hash = p_experiment_hash
+       AND variant_id = p_variant_id
+       AND unit_ref = p_unit_ref;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_missing'
+            USING ERRCODE = '23503';
+    END IF;
+    SELECT spec_doc INTO experiment_doc
+      FROM public.research_lab_routing_experiments_v2
+     WHERE experiment_hash = p_experiment_hash;
+    IF NOT FOUND
+       OR experiment_doc #>> '{input,stage}' IS DISTINCT FROM 'candidate_acquisition'
+       OR (experiment_doc #>> '{input,target_verified_qualified_count}')::INTEGER
+            IS DISTINCT FROM terminal.target_verified_qualified_count
+       OR NOT EXISTS (
+            SELECT 1
+              FROM pg_catalog.jsonb_array_elements(experiment_doc->'variants') item(value)
+             WHERE item.value->>'variant_id' = terminal.variant_id
+               AND item.value->>'stage' = 'candidate_acquisition'
+               AND item.value->'artifact'->>'commit_sha' = terminal.artifact_commit_sha
+               AND item.value->'artifact'->>'manifest_hash' = terminal.artifact_manifest_hash
+               AND item.value->'artifact'->>'branch' = terminal.artifact_branch
+               AND ((terminal.variant_id = experiment_doc->>'baseline_variant_id'
+                     AND terminal.artifact_branch = 'main')
+                    OR (terminal.variant_id <> experiment_doc->>'baseline_variant_id'
+                        AND terminal.artifact_branch = 'leadpoet-lab'))
+       )
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_spec_mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT * INTO decision
+      FROM public.research_lab_routing_decision_receipts_v2
+     WHERE receipt_id = terminal.decision_receipt_id
+       AND experiment_hash = p_experiment_hash;
+    IF NOT FOUND
+       OR decision.variant_id IS DISTINCT FROM terminal.variant_id
+       OR decision.unit_ref IS DISTINCT FROM terminal.unit_ref
+       OR decision.decision_doc->>'stage' IS DISTINCT FROM 'candidate_acquisition'
+       OR decision.decision_doc->>'artifact_key' IS DISTINCT FROM terminal.artifact_key
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_decision_mismatch'
+            USING ERRCODE = '23503';
+    END IF;
+    FOR projection, index_no IN
+        SELECT item.value, item.ordinality::INTEGER - 1
+          FROM pg_catalog.jsonb_array_elements(terminal.attempt_projections)
+               WITH ORDINALITY item(value, ordinality)
+         ORDER BY item.ordinality
+    LOOP
+        provider_ref := terminal.provider_receipt_refs->>index_no;
+        verification_refs := terminal.verification_receipt_refs->index_no;
+        IF projection->>'step_order' IS DISTINCT FROM index_no::TEXT
+           OR projection->>'attempt_sequence' IS DISTINCT FROM index_no::TEXT
+           OR projection->>'attempt_sha256' IS DISTINCT FROM terminal.attempt_receipt_sha256s->>index_no
+           OR projection->>'provider_receipt_ref' IS DISTINCT FROM provider_ref
+           OR projection->'company_verification_receipt_sha256s' IS DISTINCT FROM verification_refs
+           OR projection->>'prior_attempt_receipt_sha256' IS DISTINCT FROM (CASE
+                WHEN index_no = 0 THEN ''
+                ELSE terminal.attempt_receipt_sha256s->>(index_no - 1)
+              END)
+           OR projection->>'attempt_chain_sha256' IS DISTINCT FROM terminal.attempt_chain_sha256s->>index_no
+           OR projection->>'publication_projection_sha256' IS NULL
+           OR projection->>'stop_policy_sha256' IS DISTINCT FROM terminal.stop_policy_sha256
+           OR (projection->>'published_count')::INTEGER <> 0
+           OR pg_catalog.jsonb_typeof(verification_refs) IS DISTINCT FROM 'array'
+           OR pg_catalog.jsonb_array_length(verification_refs)
+                IS DISTINCT FROM (projection->>'verified_qualified_candidate_count')::INTEGER
+        THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_terminal_projection_mismatch'
+                USING ERRCODE = '23514';
+        END IF;
+        verification_flat := verification_flat || verification_refs;
+        publication_hashes := publication_hashes || pg_catalog.jsonb_build_array(
+            projection->>'publication_projection_sha256'
+        );
+        IF provider_ref = '' THEN
+            IF projection->>'disposition' IS DISTINCT FROM 'skipped'
+               OR projection->>'provider_outcome' IS DISTINCT FROM 'skipped'
+               OR (projection->>'provider_call_count')::INTEGER <> 0
+               OR (projection->>'billed_credit_microunits')::BIGINT <> 0
+               OR (projection->>'latency_ms')::BIGINT <> 0
+               OR decision.decision_doc->'attempted_tool_ids'
+                    @> pg_catalog.jsonb_build_array(projection->>'tool_id')
+               OR NOT EXISTS (
+                    SELECT 1
+                      FROM pg_catalog.jsonb_array_elements(
+                          decision.decision_doc->'skipped_tool_reasons'
+                      ) reason(value)
+                     WHERE reason.value->>0 = projection->>'tool_id'
+               )
+            THEN
+                RAISE EXCEPTION 'research_lab_candidate_model_terminal_skipped_mismatch'
+                    USING ERRCODE = '23503';
+            END IF;
+        ELSE
+            SELECT * INTO provider
+              FROM public.research_lab_routing_provider_attempts_v2 attempt
+             WHERE attempt.experiment_hash = p_experiment_hash
+               AND attempt.provider_receipt_ref = provider_ref;
+            IF NOT FOUND
+               OR provider.variant_id IS DISTINCT FROM terminal.variant_id
+               OR provider.unit_ref IS DISTINCT FROM terminal.unit_ref
+               OR provider.tool_id IS DISTINCT FROM projection->>'tool_id'
+               OR provider.outcome IS DISTINCT FROM projection->>'provider_outcome'
+               OR provider.authoritative_billed_credit_microunits
+                    IS DISTINCT FROM (projection->>'billed_credit_microunits')::BIGINT
+               OR provider.latency_ms IS DISTINCT FROM (projection->>'latency_ms')::BIGINT
+               OR (provider.attempt_doc #>> '{provider_receipt,call_count}')::INTEGER
+                    IS DISTINCT FROM (projection->>'provider_call_count')::INTEGER
+               OR NOT (decision.decision_doc->'provider_receipt_refs'
+                    @> pg_catalog.jsonb_build_array(provider_ref))
+            THEN
+                RAISE EXCEPTION 'research_lab_candidate_model_terminal_provider_mismatch'
+                    USING ERRCODE = '23503';
+            END IF;
+        END IF;
+        attempt_hashes := attempt_hashes || pg_catalog.jsonb_build_array(
+            terminal.attempt_receipt_sha256s->>index_no
+        );
+        IF terminal.attempt_chain_sha256s->>index_no IS DISTINCT FROM
+            pg_catalog.substr(public.research_lab_routing_jsonb_hash_v2(attempt_hashes), 8)
+        THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_terminal_chain_mismatch'
+                USING ERRCODE = '23514';
+        END IF;
+        total_calls := total_calls + (projection->>'provider_call_count')::INTEGER;
+        total_cost := total_cost + (projection->>'billed_credit_microunits')::BIGINT;
+        total_latency := total_latency + (projection->>'latency_ms')::BIGINT;
+        total_raw := total_raw + (projection->>'raw_candidate_count')::INTEGER;
+        total_normalized := total_normalized + (projection->>'normalized_candidate_count')::INTEGER;
+        total_unique := total_unique + (projection->>'unique_candidate_count')::INTEGER;
+        total_verified := total_verified + (projection->>'verified_qualified_candidate_count')::INTEGER;
+    END LOOP;
+    IF terminal.provider_call_count IS DISTINCT FROM total_calls
+       OR terminal.billed_credit_microunits IS DISTINCT FROM total_cost
+       OR terminal.latency_ms IS DISTINCT FROM total_latency
+       OR terminal.raw_count IS DISTINCT FROM total_raw
+       OR terminal.normalized_count IS DISTINCT FROM total_normalized
+       OR terminal.unique_count IS DISTINCT FROM total_unique
+       OR terminal.verified_qualified_count IS DISTINCT FROM total_verified
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_totals_mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+    IF terminal.verification_receipt_sha256 IS DISTINCT FROM (CASE
+           WHEN pg_catalog.jsonb_array_length(verification_flat) = 0 THEN ''
+           ELSE pg_catalog.substr(
+               public.research_lab_routing_jsonb_hash_v2(verification_flat), 8
+           )
+       END)
+       OR terminal.attempt_chain_sha256 IS DISTINCT FROM
+           terminal.attempt_chain_sha256s->>(pg_catalog.jsonb_array_length(terminal.attempt_chain_sha256s) - 1)
+       OR terminal.publication_projection_sha256 IS DISTINCT FROM
+           pg_catalog.substr(public.research_lab_routing_jsonb_hash_v2(publication_hashes), 8)
+       OR terminal.disposition IS DISTINCT FROM (
+           terminal.attempt_projections->(pg_catalog.jsonb_array_length(terminal.attempt_projections) - 1)->>'disposition'
+       )
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_canonical_projection_mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM public.research_lab_candidate_waterfall_receipts sidecar
+          JOIN public.research_lab_candidate_model_unit_terminals terminal_row
+            ON terminal_row.receipt_id = sidecar.model_terminal_receipt_id
+           AND terminal_row.receipt_hash = sidecar.model_terminal_receipt_hash
+          LEFT JOIN LATERAL (
+              SELECT item.value AS value
+                FROM pg_catalog.jsonb_array_elements(terminal_row.attempt_projections)
+                     WITH ORDINALITY item(value, ordinality)
+               WHERE item.ordinality - 1 = sidecar.step_order
+          ) projection ON TRUE
+         WHERE sidecar.experiment_hash = p_experiment_hash
+           AND sidecar.variant_id = p_variant_id
+           AND sidecar.unit_ref = p_unit_ref
+           AND (
+               sidecar.experiment_id IS DISTINCT FROM terminal_row.experiment_id
+               OR sidecar.artifact_key IS DISTINCT FROM terminal_row.artifact_key
+               OR sidecar.decision_receipt_id IS DISTINCT FROM terminal_row.decision_receipt_id
+               OR sidecar.target_verified_qualified_count IS DISTINCT FROM terminal_row.target_verified_qualified_count
+               OR projection.value IS NULL
+               OR sidecar.tool_id IS DISTINCT FROM projection.value->>'tool_id'
+               OR sidecar.provider_receipt_ref IS DISTINCT FROM coalesce(terminal_row.provider_receipt_refs->>sidecar.step_order, '')
+               OR sidecar.provider_outcome IS DISTINCT FROM projection.value->>'provider_outcome'
+               OR sidecar.model_plan_sha256 IS DISTINCT FROM projection.value->>'candidate_plan_sha256'
+               OR sidecar.stop_policy_sha256 IS DISTINCT FROM projection.value->>'stop_policy_sha256'
+               OR sidecar.attempt_receipt_sha256 IS DISTINCT FROM projection.value->>'attempt_sha256'
+               OR sidecar.prior_attempt_receipt_sha256 IS DISTINCT FROM projection.value->>'prior_attempt_receipt_sha256'
+               OR sidecar.attempt_chain_sha256 IS DISTINCT FROM projection.value->>'attempt_chain_sha256'
+               OR sidecar.verification_receipt_sha256 IS DISTINCT FROM projection.value->>'verification_receipt_sha256'
+               OR sidecar.company_verification_receipt_sha256s IS DISTINCT FROM projection.value->'company_verification_receipt_sha256s'
+               OR sidecar.publication_projection_sha256 IS DISTINCT FROM projection.value->>'publication_projection_sha256'
+               OR sidecar.step_order IS DISTINCT FROM (projection.value->>'step_order')::INTEGER
+               OR sidecar.attempt_sequence IS DISTINCT FROM (projection.value->>'attempt_sequence')::INTEGER
+               OR sidecar.disposition IS DISTINCT FROM projection.value->>'disposition'
+               OR sidecar.outcome_code IS DISTINCT FROM projection.value->>'reason_code'
+               OR sidecar.provider_call_count IS DISTINCT FROM (projection.value->>'provider_call_count')::INTEGER
+               OR sidecar.billed_credit_microunits IS DISTINCT FROM (projection.value->>'billed_credit_microunits')::BIGINT
+               OR sidecar.latency_ms IS DISTINCT FROM (projection.value->>'latency_ms')::BIGINT
+               OR sidecar.raw_count IS DISTINCT FROM (projection.value->>'raw_candidate_count')::INTEGER
+               OR sidecar.normalized_count IS DISTINCT FROM (projection.value->>'normalized_candidate_count')::INTEGER
+               OR sidecar.unique_count IS DISTINCT FROM (projection.value->>'unique_candidate_count')::INTEGER
+               OR sidecar.verified_qualified_count IS DISTINCT FROM (projection.value->>'verified_qualified_candidate_count')::INTEGER
+               OR sidecar.published_count IS DISTINCT FROM (projection.value->>'published_count')::INTEGER
+           )
+    ) THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_sidecar_mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$candidate_model_unit_authority_v1$;
+
+REVOKE ALL ON FUNCTION public.research_lab_candidate_assert_model_unit_terminal_v1(
+    TEXT, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.research_lab_candidate_assert_model_unit_terminal_v1(
+    TEXT, TEXT, TEXT
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_model_unit_terminal_v1(
+    p_receipt_id TEXT,
+    p_receipt_hash TEXT,
+    p_experiment_hash TEXT,
+    p_claim_key TEXT,
+    p_claim_generation BIGINT,
+    p_terminal_doc JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $candidate_model_terminal_append_v1$
+DECLARE
+    existing public.research_lab_candidate_model_unit_terminals%ROWTYPE;
+BEGIN
+    IF p_receipt_id !~ '^candidate_model_terminal:[0-9a-f]{24}$'
+       OR p_receipt_hash !~ '^sha256:[0-9a-f]{64}$'
+       OR p_experiment_hash !~ '^sha256:[0-9a-f]{64}$'
+       OR p_claim_key !~ '^sha256:[0-9a-f]{64}$'
+       OR p_claim_generation IS NULL OR p_claim_generation < 1
+       OR pg_catalog.jsonb_typeof(p_terminal_doc) IS DISTINCT FROM 'object'
+       OR p_terminal_doc->>'receipt_id' IS DISTINCT FROM p_receipt_id
+       OR p_terminal_doc->>'receipt_hash' IS DISTINCT FROM p_receipt_hash
+       OR p_terminal_doc->>'experiment_hash' IS DISTINCT FROM p_experiment_hash
+       OR p_receipt_hash IS DISTINCT FROM public.research_lab_routing_jsonb_hash_v2(
+            p_terminal_doc - ARRAY['receipt_id', 'receipt_hash']
+          )
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_unit_terminal_invalid'
+            USING ERRCODE = '22023';
+    END IF;
+    PERFORM public.research_lab_routing_reject_secret_doc_v2(
+        p_terminal_doc, 'candidate Model unit terminal v1'
+    );
+    PERFORM public.research_lab_routing_assert_claim_v3(
+        p_experiment_hash, p_claim_key, p_claim_generation
+    );
+    SELECT * INTO existing
+      FROM public.research_lab_candidate_model_unit_terminals
+     WHERE receipt_id = p_receipt_id;
+    IF FOUND THEN
+        IF existing.receipt_hash IS DISTINCT FROM p_receipt_hash
+           OR existing.experiment_hash IS DISTINCT FROM p_experiment_hash
+           OR existing.terminal_doc IS DISTINCT FROM p_terminal_doc
+        THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_unit_terminal_replay_conflict'
+                USING ERRCODE = '23505';
+        END IF;
+        PERFORM public.research_lab_candidate_assert_model_unit_terminal_v1(
+            p_experiment_hash, p_terminal_doc->>'variant_id', p_terminal_doc->>'unit_ref'
+        );
+        RETURN pg_catalog.jsonb_build_object(
+            'receipt_id', p_receipt_id, 'receipt_hash', p_receipt_hash,
+            'idempotent', TRUE
+        );
+    END IF;
+    INSERT INTO public.research_lab_candidate_model_unit_terminals (
+        receipt_id, receipt_hash, contract_version, experiment_id,
+        experiment_hash, variant_id, unit_ref, artifact_key, artifact_branch,
+        artifact_commit_sha, artifact_manifest_hash, release_identity_sha256,
+        binding_contracts_sha256, candidate_waterfall_contract_sha256,
+        start_request_sha256, decision_receipt_id, target_verified_qualified_count,
+        disposition, stop_policy_sha256, verification_receipt_sha256,
+        attempt_chain_sha256, publication_projection_sha256,
+        terminal_result_sha256, model_receipt_sha256,
+        orchestration_receipt_sha256, candidate_waterfall_sha256,
+        candidate_plan_sha256, stop_reason, provider_receipt_refs,
+        verification_receipt_refs, attempt_receipt_sha256s,
+        attempt_chain_sha256s, attempt_projections, provider_call_count,
+        billed_credit_microunits, latency_ms, raw_count, normalized_count,
+        unique_count, verified_qualified_count, published_count, terminal_doc
+    ) VALUES (
+        p_receipt_id, p_receipt_hash, p_terminal_doc->>'contract_version',
+        p_terminal_doc->>'experiment_id', p_experiment_hash,
+        p_terminal_doc->>'variant_id', p_terminal_doc->>'unit_ref',
+        p_terminal_doc->>'artifact_key', p_terminal_doc->>'artifact_branch',
+        p_terminal_doc->>'artifact_commit_sha', p_terminal_doc->>'artifact_manifest_hash',
+        p_terminal_doc->>'release_identity_sha256', p_terminal_doc->>'binding_contracts_sha256',
+        p_terminal_doc->>'candidate_waterfall_contract_sha256',
+        p_terminal_doc->>'start_request_sha256',
+        p_terminal_doc->>'decision_receipt_id',
+        (p_terminal_doc->>'target_verified_qualified_count')::INTEGER,
+        p_terminal_doc->>'disposition', p_terminal_doc->>'stop_policy_sha256',
+        p_terminal_doc->>'verification_receipt_sha256',
+        p_terminal_doc->>'attempt_chain_sha256',
+        p_terminal_doc->>'publication_projection_sha256',
+        p_terminal_doc->>'terminal_result_sha256', p_terminal_doc->>'model_receipt_sha256',
+        p_terminal_doc->>'orchestration_receipt_sha256', p_terminal_doc->>'candidate_waterfall_sha256',
+        p_terminal_doc->>'candidate_plan_sha256', p_terminal_doc->>'stop_reason',
+        p_terminal_doc->'provider_receipt_refs', p_terminal_doc->'verification_receipt_refs',
+        p_terminal_doc->'attempt_receipt_sha256s', p_terminal_doc->'attempt_chain_sha256s',
+        p_terminal_doc->'attempt_projections',
+        (p_terminal_doc->>'provider_call_count')::INTEGER,
+        (p_terminal_doc->>'billed_credit_microunits')::BIGINT,
+        (p_terminal_doc->>'latency_ms')::BIGINT,
+        (p_terminal_doc->>'raw_count')::INTEGER,
+        (p_terminal_doc->>'normalized_count')::INTEGER,
+        (p_terminal_doc->>'unique_count')::INTEGER,
+        (p_terminal_doc->>'verified_qualified_count')::INTEGER,
+        (p_terminal_doc->>'published_count')::INTEGER,
+        p_terminal_doc
+    );
+    PERFORM public.research_lab_candidate_assert_model_unit_terminal_v1(
+        p_experiment_hash, p_terminal_doc->>'variant_id', p_terminal_doc->>'unit_ref'
+    );
+    RETURN pg_catalog.jsonb_build_object(
+        'receipt_id', p_receipt_id, 'receipt_hash', p_receipt_hash,
+        'idempotent', FALSE
+    );
+END;
+$candidate_model_terminal_append_v1$;
+
+REVOKE ALL ON FUNCTION public.research_lab_candidate_append_model_unit_terminal_v1(
+    TEXT, TEXT, TEXT, TEXT, BIGINT, JSONB
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.research_lab_candidate_append_model_unit_terminal_v1(
+    TEXT, TEXT, TEXT, TEXT, BIGINT, JSONB
+) TO service_role;
+
+-- Validate the independent terminal, provider attempts, skipped decisions,
+-- ordered verification cardinality, and complete attempt/prior/chain data.
+-- Sidecars are checked against this same durable record by both append and
+-- promotion.  No provider attempt terminal_result is treated as Model truth.
 CREATE OR REPLACE FUNCTION public.research_lab_candidate_assert_model_waterfall_authority_v1(
     p_experiment_hash TEXT
 )
@@ -1212,100 +1750,287 @@ SECURITY INVOKER
 SET search_path = pg_catalog, public
 AS $candidate_model_authority_v1$
 DECLARE
-    receipt RECORD;
-    attempt RECORD;
-    waterfall JSONB;
-    model_attempt JSONB;
+    terminal RECORD;
+    decision RECORD;
+    variant JSONB;
+    projection JSONB;
+    provider RECORD;
+    index_no INTEGER;
+    provider_ref TEXT;
+    verification_refs JSONB;
+    expected_chain TEXT;
+    attempt_hashes JSONB := '[]'::JSONB;
+    total_calls INTEGER;
+    total_cost BIGINT;
+    total_latency BIGINT;
+    total_raw INTEGER;
+    total_normalized INTEGER;
+    total_unique INTEGER;
+    total_verified INTEGER;
+    verification_flat JSONB;
+    publication_hashes JSONB;
 BEGIN
-    FOR receipt IN
-        SELECT *
-          FROM public.research_lab_candidate_waterfall_receipts
-         WHERE experiment_hash = p_experiment_hash
-         ORDER BY variant_id, unit_ref, step_order, attempt_sequence
-    LOOP
-        IF receipt.provider_receipt_ref = '' THEN
-            RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_missing'
-                USING ERRCODE = '23503',
-                      DETAIL = 'PR93 must persist an exact Model terminal/waterfall receipt for skipped attempts in decision_doc.model_candidate_waterfall';
-        END IF;
-        SELECT provider_attempt.*
-          INTO attempt
-          FROM public.research_lab_routing_provider_attempts_v2 provider_attempt
-         WHERE provider_attempt.experiment_hash = p_experiment_hash
-           AND provider_attempt.provider_receipt_ref = receipt.provider_receipt_ref;
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_missing'
-                USING ERRCODE = '23503',
-                      DETAIL = 'provider_attempt.attempt_doc.terminal_result.model_candidate_waterfall is required';
-        END IF;
-        waterfall := attempt.attempt_doc #> '{terminal_result,model_candidate_waterfall}';
-        IF pg_catalog.jsonb_typeof(waterfall) IS DISTINCT FROM 'object'
-           OR waterfall->>'schema_version' IS DISTINCT FROM 'candidate-waterfall-receipt:v1'
-           OR waterfall->>'model_receipt_sha256' !~ '^[0-9a-f]{64}$'
-           OR waterfall->>'waterfall_sha256' !~ '^[0-9a-f]{64}$'
-           OR pg_catalog.jsonb_typeof(waterfall->'attempts') IS DISTINCT FROM 'array'
-           OR (waterfall->>'target_verified_qualified_count')::BIGINT
-                IS DISTINCT FROM receipt.target_verified_qualified_count
-        THEN
-            RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_missing'
-                USING ERRCODE = '23503',
-                      DETAIL = 'provider_attempt.attempt_doc.terminal_result.model_candidate_waterfall must be the signed exact Model contract';
-        END IF;
-        IF pg_catalog.substr(public.research_lab_routing_jsonb_hash_v2(
-                waterfall - 'waterfall_sha256'
-            ), 8) IS DISTINCT FROM waterfall->>'waterfall_sha256'
-        THEN
-            RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_invalid'
-                USING ERRCODE = '23514';
-        END IF;
-        SELECT candidate_attempt.value
-          INTO model_attempt
-          FROM pg_catalog.jsonb_array_elements(waterfall->'attempts') candidate_attempt(value)
-         WHERE candidate_attempt.value->>'attempt_sha256'
-                    = receipt.attempt_receipt_sha256
-           AND (candidate_attempt.value->>'attempt_index')::INTEGER
-                    = receipt.step_order;
-        IF NOT FOUND
-           OR model_attempt->>'previous_attempt_sha256'
-                IS DISTINCT FROM receipt.prior_attempt_receipt_sha256
-           OR model_attempt->>'attempt_chain_sha256'
-                IS DISTINCT FROM receipt.attempt_chain_sha256
-           OR model_attempt->>'tool_id' IS DISTINCT FROM receipt.tool_id
-           OR (model_attempt->>'raw_candidate_count')::INTEGER
-                IS DISTINCT FROM receipt.raw_count
-           OR (model_attempt->>'normalized_candidate_count')::INTEGER
-                IS DISTINCT FROM receipt.normalized_count
-           OR (model_attempt->>'unique_candidate_count')::INTEGER
-                IS DISTINCT FROM receipt.unique_count
-           OR (model_attempt->>'verified_qualified_candidate_count')::INTEGER
-                IS DISTINCT FROM receipt.verified_qualified_count
-           OR (model_attempt->>'published_count')::INTEGER
-                IS DISTINCT FROM receipt.published_count
-           OR (model_attempt->>'provider_receipt_ref')
-                IS DISTINCT FROM receipt.provider_receipt_ref
-           OR (model_attempt->>'provider_call_count')::INTEGER
-                IS DISTINCT FROM receipt.provider_call_count
-           OR (model_attempt->>'credit_microunits')::BIGINT
-                IS DISTINCT FROM receipt.billed_credit_microunits
-           OR (model_attempt->>'latency_ms')::BIGINT
-                IS DISTINCT FROM receipt.latency_ms
-           OR model_attempt->'company_verification_receipt_sha256s'
-                IS DISTINCT FROM receipt.company_verification_receipt_sha256s
-           OR model_attempt->>'verification_receipt_sha256'
-                IS DISTINCT FROM receipt.verification_receipt_sha256
-        THEN
-            RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_mismatch'
-                USING ERRCODE = '23514';
-        END IF;
-    END LOOP;
     IF NOT EXISTS (
-        SELECT 1
-          FROM public.research_lab_candidate_waterfall_receipts
+        SELECT 1 FROM public.research_lab_candidate_model_unit_terminals
          WHERE experiment_hash = p_experiment_hash
     ) THEN
         RAISE EXCEPTION 'research_lab_candidate_model_waterfall_authority_missing'
             USING ERRCODE = '23503',
-                  DETAIL = 'at least one exact Model candidate waterfall receipt is required';
+                  DETAIL = 'one exact Model terminal authority is required for every candidate unit';
+    END IF;
+    IF EXISTS (
+        WITH expected AS (
+            SELECT variant.value->>'variant_id' AS variant_id,
+                   unit.value AS unit_ref
+              FROM public.research_lab_routing_experiments_v2 experiment
+              CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+                  experiment.spec_doc->'variants'
+              ) variant(value)
+              CROSS JOIN LATERAL pg_catalog.jsonb_array_elements_text(
+                  (experiment.spec_doc #> '{input,calibration_unit_refs}')
+                  || (experiment.spec_doc #> '{input,holdout_unit_refs}')
+              ) unit(value)
+             WHERE experiment.experiment_hash = p_experiment_hash
+               AND variant.value->>'stage' = 'candidate_acquisition'
+        )
+        SELECT expected.variant_id, expected.unit_ref
+          FROM expected
+          LEFT JOIN public.research_lab_candidate_model_unit_terminals terminal_row
+            ON terminal_row.experiment_hash = p_experiment_hash
+           AND terminal_row.variant_id = expected.variant_id
+           AND terminal_row.unit_ref = expected.unit_ref
+         WHERE terminal_row.receipt_id IS NULL
+    ) OR EXISTS (
+        SELECT 1
+          FROM public.research_lab_candidate_model_unit_terminals terminal_row
+         WHERE terminal_row.experiment_hash = p_experiment_hash
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM public.research_lab_routing_experiments_v2 experiment
+                 CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+                     experiment.spec_doc->'variants'
+                 ) variant(value)
+                 CROSS JOIN LATERAL pg_catalog.jsonb_array_elements_text(
+                     (experiment.spec_doc #> '{input,calibration_unit_refs}')
+                     || (experiment.spec_doc #> '{input,holdout_unit_refs}')
+                 ) unit(value)
+                WHERE experiment.experiment_hash = p_experiment_hash
+                  AND variant.value->>'stage' = 'candidate_acquisition'
+                  AND variant.value->>'variant_id' = terminal_row.variant_id
+                  AND unit.value = terminal_row.unit_ref
+           )
+    ) THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_coverage_differs'
+            USING ERRCODE = '23503',
+                  DETAIL = 'one exact Model terminal authority is required for each signed candidate variant and unit';
+    END IF;
+    FOR terminal IN
+        SELECT *
+          FROM public.research_lab_candidate_model_unit_terminals
+         WHERE experiment_hash = p_experiment_hash
+         ORDER BY variant_id, unit_ref
+    LOOP
+        PERFORM public.research_lab_candidate_assert_model_unit_terminal_v1(
+            p_experiment_hash, terminal.variant_id, terminal.unit_ref
+        );
+        SELECT experiment.spec_doc INTO variant
+          FROM public.research_lab_routing_experiments_v2 experiment
+         WHERE experiment.experiment_hash = p_experiment_hash;
+        IF variant IS NULL
+           OR variant #>> '{input,stage}' IS DISTINCT FROM 'candidate_acquisition'
+           OR (variant #>> '{input,target_verified_qualified_count}')::INTEGER
+                IS DISTINCT FROM terminal.target_verified_qualified_count
+           OR NOT EXISTS (
+                SELECT 1 FROM pg_catalog.jsonb_array_elements(variant->'variants') item(value)
+                 WHERE item.value->>'variant_id' = terminal.variant_id
+                   AND item.value->>'stage' = 'candidate_acquisition'
+                   AND item.value->'artifact'->>'branch' = terminal.artifact_branch
+                   AND item.value->'artifact'->>'commit_sha' = terminal.artifact_commit_sha
+                   AND item.value->'artifact'->>'manifest_hash' = terminal.artifact_manifest_hash
+                   AND ((terminal.variant_id = variant->>'baseline_variant_id' AND terminal.artifact_branch = 'main')
+                     OR (terminal.variant_id <> variant->>'baseline_variant_id' AND terminal.artifact_branch = 'leadpoet-lab'))
+           )
+        THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_terminal_artifact_or_target_mismatch'
+                USING ERRCODE = '23514';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1
+              FROM public.research_lab_routing_decision_receipts_v2 parent
+             WHERE parent.receipt_id = terminal.decision_receipt_id
+               AND parent.experiment_hash = p_experiment_hash
+               AND parent.variant_id = terminal.variant_id
+               AND parent.unit_ref = terminal.unit_ref
+               AND parent.decision_doc->>'stage' = 'candidate_acquisition'
+               AND parent.decision_doc->>'artifact_key' = terminal.artifact_key
+               AND parent.decision_doc->>'experiment_id' = terminal.experiment_id
+        ) THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_terminal_decision_mismatch'
+                USING ERRCODE = '23503';
+        END IF;
+        attempt_hashes := '[]'::JSONB;
+        total_calls := 0; total_cost := 0; total_latency := 0;
+        total_raw := 0; total_normalized := 0; total_unique := 0; total_verified := 0;
+        FOR projection, index_no IN
+            SELECT item.value, item.ordinality::INTEGER - 1
+            FROM pg_catalog.jsonb_array_elements(terminal.attempt_projections)
+                   WITH ORDINALITY item(value, ordinality)
+            ORDER BY item.ordinality
+        LOOP
+            provider_ref := terminal.provider_receipt_refs->>index_no;
+            verification_refs := terminal.verification_receipt_refs->index_no;
+            IF pg_catalog.jsonb_typeof(projection) IS DISTINCT FROM 'object'
+               OR (projection->>'step_order')::INTEGER IS DISTINCT FROM index_no
+               OR (projection->>'attempt_sequence')::INTEGER IS DISTINCT FROM index_no
+               OR projection->>'attempt_sha256' IS DISTINCT FROM terminal.attempt_receipt_sha256s->>index_no
+               OR verification_refs IS NULL
+               OR pg_catalog.jsonb_typeof(verification_refs) IS DISTINCT FROM 'array'
+               OR pg_catalog.jsonb_array_length(verification_refs)
+                    IS DISTINCT FROM (projection->>'verified_qualified_candidate_count')::INTEGER
+               OR (projection->>'published_count')::INTEGER <> 0
+               OR EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements_text(verification_refs) value
+                           WHERE value.value !~ '^[0-9a-f]{64}$')
+               OR (
+                   pg_catalog.jsonb_array_length(verification_refs) > 0
+                   AND pg_catalog.substr(public.research_lab_routing_jsonb_hash_v2(verification_refs), 8)
+                       IS DISTINCT FROM projection->>'verification_receipt_sha256'
+               )
+               OR (
+                   pg_catalog.jsonb_array_length(verification_refs) = 0
+                   AND coalesce(projection->>'verification_receipt_sha256', '') <> ''
+               )
+            THEN
+                RAISE EXCEPTION 'research_lab_candidate_model_terminal_verification_or_attempt_mismatch'
+                    USING ERRCODE = '23514';
+            END IF;
+            IF provider_ref = '' THEN
+                IF projection->>'disposition' IS DISTINCT FROM 'skipped'
+                   OR projection->>'provider_outcome' IS DISTINCT FROM 'skipped'
+                   OR coalesce((projection->>'provider_call_count')::INTEGER, -1) <> 0
+                   OR coalesce((projection->>'billed_credit_microunits')::BIGINT, -1) <> 0
+                   OR coalesce((projection->>'latency_ms')::BIGINT, -1) <> 0
+                   OR EXISTS (
+                        SELECT 1 FROM public.research_lab_routing_decision_receipts_v2 parent
+                         WHERE parent.receipt_id = terminal.decision_receipt_id
+                           AND parent.experiment_hash = p_experiment_hash
+                           AND (parent.decision_doc->'attempted_tool_ids') @> jsonb_build_array(projection->>'tool_id')
+                   )
+                   OR NOT EXISTS (
+                        SELECT 1 FROM public.research_lab_routing_decision_receipts_v2 parent
+                         CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(parent.decision_doc->'skipped_tool_reasons') reason(value)
+                         WHERE parent.receipt_id = terminal.decision_receipt_id
+                           AND parent.experiment_hash = p_experiment_hash
+                           AND reason.value->>0 = projection->>'tool_id'
+                   )
+                THEN
+                    RAISE EXCEPTION 'research_lab_candidate_model_terminal_skipped_mismatch'
+                        USING ERRCODE = '23503';
+                END IF;
+            ELSE
+                SELECT * INTO provider
+                  FROM public.research_lab_routing_provider_attempts_v2 attempt
+                 WHERE attempt.experiment_hash = p_experiment_hash
+                   AND attempt.provider_receipt_ref = provider_ref;
+                IF NOT FOUND
+                   OR provider.variant_id IS DISTINCT FROM terminal.variant_id
+                   OR provider.unit_ref IS DISTINCT FROM terminal.unit_ref
+                   OR provider.tool_id IS DISTINCT FROM projection->>'tool_id'
+                   OR provider.outcome IS DISTINCT FROM projection->>'provider_outcome'
+                   OR provider.billing_state IS DISTINCT FROM 'known'
+                   OR provider.authoritative_billed_credit_microunits IS DISTINCT FROM (projection->>'billed_credit_microunits')::BIGINT
+                   OR provider.latency_ms IS DISTINCT FROM (projection->>'latency_ms')::BIGINT
+                   OR coalesce(provider.attempt_doc #>> '{provider_receipt,call_count}', '') !~ '^[1-9][0-9]*$'
+                   OR (provider.attempt_doc #>> '{provider_receipt,call_count}')::INTEGER IS DISTINCT FROM (projection->>'provider_call_count')::INTEGER
+                   OR NOT EXISTS (
+                        SELECT 1 FROM public.research_lab_routing_decision_receipts_v2 parent
+                         WHERE parent.receipt_id = terminal.decision_receipt_id
+                           AND parent.experiment_hash = p_experiment_hash
+                           AND (parent.decision_doc->'provider_receipt_refs') @> jsonb_build_array(provider_ref)
+                           AND (parent.decision_doc->'attempted_tool_ids') @> jsonb_build_array(projection->>'tool_id')
+                   )
+                THEN
+                    RAISE EXCEPTION 'research_lab_candidate_model_terminal_provider_mismatch'
+                        USING ERRCODE = '23503';
+                END IF;
+            END IF;
+            attempt_hashes := attempt_hashes || jsonb_build_array(terminal.attempt_receipt_sha256s->>index_no);
+            expected_chain := pg_catalog.substr(public.research_lab_routing_jsonb_hash_v2(attempt_hashes), 8);
+            IF terminal.attempt_chain_sha256s->>index_no IS DISTINCT FROM expected_chain THEN
+                RAISE EXCEPTION 'research_lab_candidate_model_terminal_chain_mismatch'
+                    USING ERRCODE = '23514';
+            END IF;
+            total_calls := total_calls + (projection->>'provider_call_count')::INTEGER;
+            total_cost := total_cost + (projection->>'billed_credit_microunits')::BIGINT;
+            total_latency := total_latency + (projection->>'latency_ms')::BIGINT;
+            total_raw := total_raw + (projection->>'raw_candidate_count')::INTEGER;
+            total_normalized := total_normalized + (projection->>'normalized_candidate_count')::INTEGER;
+            total_unique := total_unique + (projection->>'unique_candidate_count')::INTEGER;
+            total_verified := total_verified + (projection->>'verified_qualified_candidate_count')::INTEGER;
+        END LOOP;
+        IF terminal.provider_call_count IS DISTINCT FROM total_calls
+           OR terminal.billed_credit_microunits IS DISTINCT FROM total_cost
+           OR terminal.latency_ms IS DISTINCT FROM total_latency
+           OR terminal.raw_count IS DISTINCT FROM total_raw
+           OR terminal.normalized_count IS DISTINCT FROM total_normalized
+           OR terminal.unique_count IS DISTINCT FROM total_unique
+           OR terminal.verified_qualified_count IS DISTINCT FROM total_verified
+        THEN
+            RAISE EXCEPTION 'research_lab_candidate_model_terminal_totals_mismatch'
+                USING ERRCODE = '23514';
+        END IF;
+    END LOOP;
+    IF EXISTS (
+        SELECT 1
+          FROM public.research_lab_routing_provider_attempts_v2 attempt
+          LEFT JOIN public.research_lab_candidate_model_unit_terminals terminal_row
+            ON terminal_row.experiment_hash = attempt.experiment_hash
+           AND terminal_row.provider_receipt_refs @> jsonb_build_array(attempt.provider_receipt_ref)
+         WHERE attempt.experiment_hash = p_experiment_hash
+           AND attempt.tool_id LIKE 'candidate.%'
+           AND terminal_row.receipt_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_provider_coverage_missing'
+            USING ERRCODE = '23503';
+    END IF;
+    -- If sidecars already exist, every field must match the durable terminal
+    -- projection. This is the same check used by append and promotion.
+    IF EXISTS (
+        SELECT 1
+          FROM public.research_lab_candidate_waterfall_receipts sidecar
+          JOIN public.research_lab_candidate_model_unit_terminals terminal_row
+            ON terminal_row.receipt_id = sidecar.model_terminal_receipt_id
+           AND terminal_row.receipt_hash = sidecar.model_terminal_receipt_hash
+          LEFT JOIN LATERAL (
+              SELECT item.value AS value
+                FROM pg_catalog.jsonb_array_elements(terminal_row.attempt_projections)
+                     WITH ORDINALITY item(value, ordinality)
+               WHERE item.ordinality - 1 = sidecar.step_order
+          ) projection ON TRUE
+          WHERE sidecar.experiment_hash = p_experiment_hash
+           AND (
+               sidecar.variant_id IS DISTINCT FROM terminal_row.variant_id
+               OR sidecar.unit_ref IS DISTINCT FROM terminal_row.unit_ref
+               OR sidecar.decision_receipt_id IS DISTINCT FROM terminal_row.decision_receipt_id
+               OR sidecar.target_verified_qualified_count IS DISTINCT FROM terminal_row.target_verified_qualified_count
+               OR projection.value IS NULL
+               OR sidecar.tool_id IS DISTINCT FROM projection.value->>'tool_id'
+               OR sidecar.provider_receipt_ref IS DISTINCT FROM coalesce(terminal_row.provider_receipt_refs->>sidecar.step_order, '')
+               OR sidecar.raw_count IS DISTINCT FROM (projection.value->>'raw_candidate_count')::INTEGER
+               OR sidecar.normalized_count IS DISTINCT FROM (projection.value->>'normalized_candidate_count')::INTEGER
+               OR sidecar.unique_count IS DISTINCT FROM (projection.value->>'unique_candidate_count')::INTEGER
+               OR sidecar.verified_qualified_count IS DISTINCT FROM (projection.value->>'verified_qualified_candidate_count')::INTEGER
+               OR sidecar.provider_call_count IS DISTINCT FROM (projection.value->>'provider_call_count')::INTEGER
+               OR sidecar.billed_credit_microunits IS DISTINCT FROM (projection.value->>'billed_credit_microunits')::BIGINT
+               OR sidecar.latency_ms IS DISTINCT FROM (projection.value->>'latency_ms')::BIGINT
+               OR sidecar.published_count <> 0
+               OR sidecar.company_verification_receipt_sha256s IS DISTINCT FROM projection.value->'company_verification_receipt_sha256s'
+               OR sidecar.publication_projection_sha256 IS DISTINCT FROM projection.value->>'publication_projection_sha256'
+               OR sidecar.attempt_receipt_sha256 IS DISTINCT FROM terminal_row.attempt_receipt_sha256s->>sidecar.step_order
+               OR sidecar.attempt_chain_sha256 IS DISTINCT FROM terminal_row.attempt_chain_sha256s->>sidecar.step_order
+           )
+    ) THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_sidecar_mismatch'
+            USING ERRCODE = '23514';
     END IF;
 END;
 $candidate_model_authority_v1$;

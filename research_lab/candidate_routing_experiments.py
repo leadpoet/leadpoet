@@ -47,6 +47,9 @@ EXACT_MODEL_CANDIDATE_WATERFALL_VERSION = "candidate-waterfall-receipt:v1"
 EXACT_MODEL_CANDIDATE_ATTEMPT_VERSION = (
     "candidate-waterfall-attempt:v1"
 )
+CANDIDATE_MODEL_UNIT_TERMINAL_VERSION = (
+    "leadpoet.candidate_model_unit_terminal_authority:v1"
+)
 
 _LAB_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MODEL_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -57,37 +60,24 @@ _PROVIDER_RECEIPT_RE = re.compile(r"^provider_receipt:[0-9a-f]{16}$")
 _EVALUATION_RECEIPT_RE = re.compile(r"^routing_evaluation_v2:[0-9a-f]{16}$")
 _WATERFALL_RECEIPT_RE = re.compile(r"^candidate_waterfall:[0-9a-f]{24}$")
 _DISPOSITIONS = frozenset({"succeeded", "missed", "failed", "deferred", "skipped"})
-_PROVIDER_OUTCOME_BY_MODEL_OUTCOME = {
-    "succeeded": ProviderOutcome.VERIFIED.value,
-    "empty": ProviderOutcome.SOURCE_MISS.value,
-    "unavailable": ProviderOutcome.ADAPTER_FAILURE.value,
-    "timeout": ProviderOutcome.ADAPTER_FAILURE.value,
-    "failed": ProviderOutcome.ADAPTER_FAILURE.value,
-    "deferred": ProviderOutcome.ADAPTER_FAILURE.value,
-}
-_PROVIDER_OUTCOME_BY_DISPOSITION = {
-    "succeeded": ProviderOutcome.VERIFIED.value,
-    "missed": ProviderOutcome.SOURCE_MISS.value,
-    "failed": ProviderOutcome.ADAPTER_FAILURE.value,
-    "deferred": ProviderOutcome.ADAPTER_FAILURE.value,
-    "skipped": "skipped",
-}
-_MODEL_DISPOSITION_BY_OUTCOME = {
-    "succeeded": "succeeded",
-    "empty": "missed",
-    "not_invoked": "skipped",
-    "not_attempted": "skipped",
-    "failed": "failed",
-    "unavailable": "failed",
-    "timeout": "failed",
-    "deferred": "deferred",
-}
 
 
 def _ordered_verification_receipt_sha256(values: Sequence[str]) -> str:
     """Hash the complete verification reference list in its original order."""
 
     return sha256_json(list(values)).split(":", 1)[1] if values else ""
+
+
+def _require_model_terminal_field(
+    document: Mapping[str, Any], field_name: str, context: str
+) -> Any:
+    """Require a Model-owned field; never infer it in the consumer."""
+
+    if field_name not in document or document[field_name] is None:
+        raise RoutingExperimentError(
+            f"exact_model_canonical_{context}_{field_name}_is_missing"
+        )
+    return document[field_name]
 
 
 def _safe_ref(value: Any, field_name: str) -> str:
@@ -276,6 +266,19 @@ def adapt_exact_model_candidate_receipt(
         waterfall.pop("waterfall_sha256", None),
         "candidate_waterfall_hash",
     )
+    for required_field in (
+        "target_verified_qualified_count",
+        "disposition",
+        "stop_policy_sha256",
+        "verification_receipt_sha256",
+        "attempt_chain_sha256",
+        "published_count",
+        "publication_projection_sha256",
+        "attempts",
+        "stop_reason",
+        "start_request_sha256",
+    ):
+        _require_model_terminal_field(waterfall, required_field, "waterfall")
     if (
         waterfall.get("schema_version")
         != EXACT_MODEL_CANDIDATE_WATERFALL_VERSION
@@ -343,11 +346,44 @@ def adapt_exact_model_candidate_receipt(
     if not isinstance(raw_attempts, list):
         raise RoutingExperimentError("exact_model_candidate_attempts_are_invalid")
     target_verified_qualified_count = _nonnegative_int(
-        waterfall.get("target_verified_qualified_count"),
+        _require_model_terminal_field(
+            waterfall, "target_verified_qualified_count", "waterfall"
+        ),
         "target_verified_qualified_count",
     )
     if target_verified_qualified_count < 1:
         raise RoutingExperimentError("exact_model_candidate_target_is_invalid")
+    waterfall_disposition = _safe_ref(
+        _require_model_terminal_field(waterfall, "disposition", "waterfall"),
+        "waterfall_disposition",
+    )
+    if waterfall_disposition not in _DISPOSITIONS:
+        raise RoutingExperimentError("exact_model_canonical_waterfall_disposition_is_invalid")
+    waterfall_stop_policy_sha256 = _model_hash(
+        _require_model_terminal_field(waterfall, "stop_policy_sha256", "waterfall"),
+        "waterfall_stop_policy_sha256",
+    )
+    waterfall_verification_receipt_sha256 = _model_hash(
+        _require_model_terminal_field(
+            waterfall, "verification_receipt_sha256", "waterfall"
+        ),
+        "waterfall_verification_receipt_sha256",
+        optional=True,
+    )
+    waterfall_attempt_chain_sha256 = _model_hash(
+        _require_model_terminal_field(waterfall, "attempt_chain_sha256", "waterfall"),
+        "waterfall_attempt_chain_sha256",
+    )
+    waterfall_published_count = _nonnegative_int(
+        _require_model_terminal_field(waterfall, "published_count", "waterfall"),
+        "published_count",
+    )
+    waterfall_publication_projection_sha256 = _model_hash(
+        _require_model_terminal_field(
+            waterfall, "publication_projection_sha256", "waterfall"
+        ),
+        "waterfall_publication_projection_sha256",
+    )
     if not isinstance(authoritative_provider_receipts, Sequence) or isinstance(
         authoritative_provider_receipts, (str, bytes)
     ):
@@ -367,6 +403,9 @@ def adapt_exact_model_candidate_receipt(
         providers_by_ref[provider_receipt.receipt_ref] = provider_receipt
     metrics: list[Mapping[str, Any]] = []
     previous_attempt_sha256 = "0" * 64
+    attempt_hashes: list[str] = []
+    verification_hashes_in_order: list[str] = []
+    publication_projection_hashes: list[str] = []
     aggregate_counts = {
         "raw_candidate_count": 0,
         "normalized_candidate_count": 0,
@@ -393,6 +432,28 @@ def adapt_exact_model_candidate_receipt(
         ):
             raise RoutingExperimentError("exact_model_candidate_attempt_identity_differs")
         previous_attempt_sha256 = claimed_attempt_hash
+        step_order = _nonnegative_int(
+            _require_model_terminal_field(attempt, "step_order", "attempt"),
+            "candidate_step_order",
+        )
+        attempt_sequence = _nonnegative_int(
+            _require_model_terminal_field(attempt, "attempt_sequence", "attempt"),
+            "candidate_attempt_sequence",
+        )
+        if step_order != attempt_index or attempt_sequence != attempt_index:
+            raise RoutingExperimentError(
+                "exact_model_candidate_attempt_sequence_is_not_contiguous"
+            )
+        attempt_hashes.append(claimed_attempt_hash)
+        explicit_attempt_chain_sha256 = _model_hash(
+            _require_model_terminal_field(attempt, "attempt_chain_sha256", "attempt"),
+            "candidate_attempt_chain_sha256",
+        )
+        expected_attempt_chain_sha256 = _attempt_chain_sha256(attempt_hashes)
+        if explicit_attempt_chain_sha256 != expected_attempt_chain_sha256:
+            raise RoutingExperimentError(
+                "exact_model_candidate_attempt_chain_differs"
+            )
         tool_id = str(attempt.get("tool_id") or "")
         raw_count = _nonnegative_int(
             attempt.get("raw_candidate_count"),
@@ -435,21 +496,12 @@ def adapt_exact_model_candidate_receipt(
         )
         latency_ms = attempt.get("latency_ms")
         stop_policy_sha256 = _model_hash(
-            attempt.get("stop_policy_sha256")
-            or waterfall.get("stop_policy_sha256"),
+            _require_model_terminal_field(attempt, "stop_policy_sha256", "attempt"),
             "candidate_stop_policy_sha256",
         )
-        step_order = _nonnegative_int(
-            attempt.get("step_order", attempt_index),
-            "candidate_step_order",
-        )
-        attempt_sequence = _nonnegative_int(
-            attempt.get("attempt_sequence", attempt_index),
-            "candidate_attempt_sequence",
-        )
-        if step_order != attempt_index or attempt_sequence != attempt_index:
+        if stop_policy_sha256 != waterfall_stop_policy_sha256:
             raise RoutingExperimentError(
-                "exact_model_candidate_attempt_sequence_is_not_contiguous"
+                "exact_model_candidate_attempt_stop_policy_differs_from_waterfall"
             )
         if (
             not _CANDIDATE_TOOL_RE.fullmatch(tool_id)
@@ -462,13 +514,23 @@ def adapt_exact_model_candidate_receipt(
             raise RoutingExperimentError("exact_model_candidate_attempt_differs")
         provider_receipt_ref = str(attempt.get("provider_receipt_ref") or "")
         model_outcome = str(attempt.get("outcome") or "")
-        model_disposition = attempt.get("disposition")
-        expected_disposition = _MODEL_DISPOSITION_BY_OUTCOME.get(model_outcome)
-        if model_disposition is not None and model_disposition != expected_disposition:
+        model_disposition = _safe_ref(
+            _require_model_terminal_field(attempt, "disposition", "attempt"),
+            "attempt_disposition",
+        )
+        if model_disposition not in _DISPOSITIONS:
             raise RoutingExperimentError(
-                "exact_model_candidate_disposition_differs_from_outcome"
+                "exact_model_canonical_attempt_disposition_is_invalid"
             )
-        provider_outcome = "skipped"
+        provider_outcome = _safe_ref(
+            _require_model_terminal_field(attempt, "provider_outcome", "attempt"),
+            "provider_outcome",
+        )
+        if provider_outcome not in {
+            *(item.value for item in ProviderOutcome),
+            "skipped",
+        }:
+            raise RoutingExperimentError("exact_model_canonical_provider_outcome_is_invalid")
         authoritative_provider_call_count = 0
         authoritative_billed_credit_microunits = 0
         authoritative_latency_ms = 0
@@ -485,14 +547,12 @@ def adapt_exact_model_candidate_receipt(
                 raise RoutingExperimentError(
                     "exact_model_provider_receipt_call_count_is_invalid"
                 )
-            expected_provider_outcome = _PROVIDER_OUTCOME_BY_MODEL_OUTCOME.get(
-                model_outcome
-            )
             if (
-                expected_provider_outcome is None
+                provider_outcome == "skipped"
+                or model_disposition == "skipped"
                 or provider_call_count != authoritative_provider_call_count
                 or provider_receipt.tool_id != tool_id
-                or provider_receipt.outcome != expected_provider_outcome
+                or provider_receipt.outcome != provider_outcome
                 or provider_receipt.credit_microunits != credit_microunits
                 or provider_receipt.latency_ms != latency_ms
             ):
@@ -504,11 +564,12 @@ def adapt_exact_model_candidate_receipt(
                 attempt.get("completion_sha256"),
                 "candidate_completion_sha256",
             )
-            provider_outcome = provider_receipt.outcome
             authoritative_billed_credit_microunits = provider_receipt.credit_microunits
             authoritative_latency_ms = provider_receipt.latency_ms
         elif (
-            model_outcome not in {"not_invoked", "not_attempted"}
+            provider_outcome != "skipped"
+            or model_disposition != "skipped"
+            or model_outcome not in {"not_invoked", "not_attempted"}
             or provider_call_count != 0
             or credit_microunits != 0
             or latency_ms != 0
@@ -527,22 +588,36 @@ def adapt_exact_model_candidate_receipt(
             ("credit_microunits", authoritative_billed_credit_microunits),
         ):
             aggregate_counts[field_name] += value
-        raw_published_count = attempt.get("published_count")
-        if raw_published_count is None:
-            raise RoutingExperimentError(
-                "exact_model_candidate_publication_attribution_is_missing"
-            )
         published_count = _nonnegative_int(
-            raw_published_count,
+            _require_model_terminal_field(attempt, "published_count", "attempt"),
             "published_count",
         )
         if published_count > verified_count:
             raise RoutingExperimentError(
                 "exact_model_candidate_published_count_exceeds_verified_count"
             )
-        verification_receipt_sha256 = _ordered_verification_receipt_sha256(
+        verification_receipt_sha256 = _model_hash(
+            _require_model_terminal_field(
+                attempt, "verification_receipt_sha256", "attempt"
+            ),
+            "candidate_verification_receipt_sha256",
+            optional=True,
+        )
+        expected_verification_receipt_sha256 = _ordered_verification_receipt_sha256(
             verification_hashes
         )
+        if verification_receipt_sha256 != expected_verification_receipt_sha256:
+            raise RoutingExperimentError(
+                "exact_model_candidate_verification_receipt_differs"
+            )
+        publication_projection_sha256 = _model_hash(
+            _require_model_terminal_field(
+                attempt, "publication_projection_sha256", "attempt"
+            ),
+            "candidate_publication_projection_sha256",
+        )
+        verification_hashes_in_order.extend(verification_hashes)
+        publication_projection_hashes.append(publication_projection_sha256)
         metric = {
             "schema_version": EXACT_MODEL_CANDIDATE_METRIC_VERSION,
             "tool_id": tool_id,
@@ -560,12 +635,15 @@ def adapt_exact_model_candidate_receipt(
             "verified_qualified_candidate_count": verified_count,
             "company_verification_receipt_sha256s": verification_hashes,
             "verification_receipt_sha256": verification_receipt_sha256,
+            "publication_projection_sha256": publication_projection_sha256,
             "published_count": published_count,
             "provider_call_count": authoritative_provider_call_count,
             "billed_credit_microunits": authoritative_billed_credit_microunits,
             "latency_ms": float(authoritative_latency_ms),
             "candidate_plan_sha256": claimed_route_hash,
             "attempt_sha256": claimed_attempt_hash,
+            "prior_attempt_receipt_sha256": attempt.get("previous_attempt_sha256"),
+            "attempt_chain_sha256": explicit_attempt_chain_sha256,
             "stop_policy_sha256": stop_policy_sha256,
             "step_order": step_order,
             "attempt_sequence": attempt_sequence,
@@ -582,19 +660,35 @@ def adapt_exact_model_candidate_receipt(
         raise RoutingExperimentError(
             "exact_model_provider_receipt_coverage_differs_from_waterfall"
         )
+    expected_waterfall_verification_receipt_sha256 = _ordered_verification_receipt_sha256(
+        verification_hashes_in_order
+    )
+    if waterfall_verification_receipt_sha256 != expected_waterfall_verification_receipt_sha256:
+        raise RoutingExperimentError(
+            "exact_model_candidate_waterfall_verification_receipt_differs"
+        )
+    expected_waterfall_attempt_chain_sha256 = _attempt_chain_sha256(attempt_hashes)
+    if waterfall_attempt_chain_sha256 != expected_waterfall_attempt_chain_sha256:
+        raise RoutingExperimentError(
+            "exact_model_candidate_waterfall_attempt_chain_differs"
+        )
+    expected_publication_projection_sha256 = sha256_json(
+        publication_projection_hashes
+    ).split(":", 1)[1]
+    if waterfall_publication_projection_sha256 != expected_publication_projection_sha256:
+        raise RoutingExperimentError(
+            "exact_model_candidate_waterfall_publication_projection_differs"
+        )
+    if waterfall_disposition != metrics[-1].get("disposition"):
+        raise RoutingExperimentError(
+            "exact_model_candidate_waterfall_disposition_differs"
+        )
     if any(
         waterfall.get(field_name) != value
         for field_name, value in aggregate_counts.items()
         if field_name != "published_count"
     ):
         raise RoutingExperimentError("exact_model_candidate_waterfall_totals_differ")
-    waterfall_published_count = waterfall.get("published_count")
-    if waterfall_published_count is None:
-        raise RoutingExperimentError(
-            "exact_model_candidate_publication_attribution_is_missing"
-        )
-    if type(waterfall_published_count) is not int or waterfall_published_count < 0:
-        raise RoutingExperimentError("exact_model_candidate_published_count_is_invalid")
     if waterfall_published_count != sum(
         int(metric.get("published_count") or 0) for metric in metrics
     ):
@@ -611,12 +705,22 @@ def adapt_exact_model_candidate_receipt(
         "model_receipt_sha256": claimed_receipt_hash,
         "orchestration_receipt_sha256": claimed_orchestration_hash,
         "candidate_waterfall_sha256": claimed_waterfall_hash,
+        "start_request_sha256": _model_hash(
+            _require_model_terminal_field(receipt, "start_request_sha256", "receipt"),
+            "start_request_sha256",
+        ),
         "candidate_route": dict(route),
         "candidate_stop_reason": _safe_ref(
             waterfall.get("stop_reason"),
             "stop_reason",
         ),
         "candidate_target_verified_qualified_count": target_verified_qualified_count,
+        "candidate_disposition": waterfall_disposition,
+        "candidate_stop_policy_sha256": waterfall_stop_policy_sha256,
+        "candidate_verification_receipt_sha256": waterfall_verification_receipt_sha256,
+        "candidate_attempt_chain_sha256": waterfall_attempt_chain_sha256,
+        "candidate_published_count": waterfall_published_count,
+        "candidate_publication_projection_sha256": waterfall_publication_projection_sha256,
         "candidate_attempt_metrics": tuple(metrics),
     }
 
@@ -631,6 +735,7 @@ def candidate_waterfall_receipts_from_exact_model(
     expected_binding_contracts_sha256: str,
     expected_candidate_waterfall_contract_sha256: str,
     authoritative_provider_receipts: Sequence[ProviderReceipt],
+    model_terminal_receipt: CandidateModelUnitTerminalReceipt | None = None,
 ) -> tuple[CandidateWaterfallReceipt, ...]:
     """Project one exact Model terminal into durable candidate sidecars.
 
@@ -652,6 +757,15 @@ def candidate_waterfall_receipts_from_exact_model(
         or decision_receipt.stage != "candidate_acquisition"
     ):
         raise RoutingExperimentError("candidate_decision_receipt_lineage_differs")
+    if not isinstance(model_terminal_receipt, CandidateModelUnitTerminalReceipt):
+        raise RoutingExperimentError("candidate_model_terminal_receipt_is_required")
+    if (
+        model_terminal_receipt.experiment_hash != spec.experiment_hash()
+        or model_terminal_receipt.variant_id != variant_id
+        or model_terminal_receipt.unit_ref != decision_receipt.unit_ref
+        or model_terminal_receipt.decision_receipt_id != decision_receipt.receipt_id
+    ):
+        raise RoutingExperimentError("candidate_model_terminal_receipt_lineage_differs")
     adapted = adapt_exact_model_candidate_receipt(
         terminal_result,
         expected_release_identity_sha256=expected_release_identity_sha256,
@@ -694,7 +808,6 @@ def candidate_waterfall_receipts_from_exact_model(
     previous_attempt_hash = ""
     attempt_hashes: list[str] = []
     receipts: list[CandidateWaterfallReceipt] = []
-    disposition_by_outcome = _MODEL_DISPOSITION_BY_OUTCOME
     for metric in metrics:
         if not isinstance(metric, Mapping):
             raise RoutingExperimentError("candidate_exact_model_attempt_metric_is_invalid")
@@ -741,8 +854,20 @@ def candidate_waterfall_receipts_from_exact_model(
         ):
             raise RoutingExperimentError("candidate_attempt_sequence_is_not_contiguous")
         attempt_hashes.append(attempt_hash)
-        prior_hash = previous_attempt_hash
+        prior_hash = _model_hash(
+            metric.get("prior_attempt_receipt_sha256"),
+            "prior_attempt_receipt_sha256",
+            optional=True,
+        )
+        if prior_hash != previous_attempt_hash:
+            raise RoutingExperimentError("candidate_attempt_prior_receipt_differs")
         previous_attempt_hash = attempt_hash
+        explicit_attempt_chain = _model_hash(
+            metric.get("attempt_chain_sha256"),
+            "attempt_chain_sha256",
+        )
+        if explicit_attempt_chain != _attempt_chain_sha256(attempt_hashes):
+            raise RoutingExperimentError("candidate_attempt_chain_differs")
         raw_verification_hashes = metric.get("company_verification_receipt_sha256s")
         if not isinstance(raw_verification_hashes, tuple):
             raise RoutingExperimentError("candidate_attempt_verification_receipts_are_invalid")
@@ -764,9 +889,16 @@ def candidate_waterfall_receipts_from_exact_model(
             "verification_receipt_sha256",
             optional=True,
         )
-        model_outcome = str(metric.get("outcome") or "")
         model_disposition = str(metric.get("disposition") or "")
-        provider_outcome = str(metric.get("provider_outcome") or "skipped")
+        provider_outcome = _safe_ref(
+            _require_model_terminal_field(metric, "provider_outcome", "attempt metric"),
+            "provider_outcome",
+        )
+        if provider_outcome not in {
+            *(item.value for item in ProviderOutcome),
+            "skipped",
+        }:
+            raise RoutingExperimentError("candidate_attempt_provider_outcome_is_invalid")
         if provider is None:
             if provider_outcome != "skipped":
                 raise RoutingExperimentError(
@@ -776,19 +908,11 @@ def candidate_waterfall_receipts_from_exact_model(
             raise RoutingExperimentError(
                 "candidate_attempt_provider_outcome_differs"
             )
-        disposition = disposition_by_outcome.get(model_outcome)
-        if model_disposition:
-            if model_disposition not in _DISPOSITIONS:
-                raise RoutingExperimentError(
-                    "candidate_attempt_model_disposition_is_invalid"
-                )
-            if model_disposition != disposition:
-                raise RoutingExperimentError(
-                    "candidate_attempt_model_disposition_differs"
-                )
-        if disposition is None or (disposition == "skipped") != (provider is None):
+        if model_disposition not in _DISPOSITIONS:
+            raise RoutingExperimentError("candidate_attempt_model_disposition_is_invalid")
+        if (model_disposition == "skipped") != (provider is None):
             raise RoutingExperimentError("candidate_attempt_disposition_differs")
-        if disposition == "skipped" and tool_id in decision_receipt.attempted_tool_ids:
+        if model_disposition == "skipped" and tool_id in decision_receipt.attempted_tool_ids:
             raise RoutingExperimentError(
                 "candidate_attempt_skipped_tool_was_attempted"
             )
@@ -820,7 +944,7 @@ def candidate_waterfall_receipts_from_exact_model(
                 ),
                 attempt_receipt_sha256=attempt_hash,
                 prior_attempt_receipt_sha256=prior_hash,
-                attempt_chain_sha256=_attempt_chain_sha256(attempt_hashes),
+                attempt_chain_sha256=explicit_attempt_chain,
                 verification_receipt_sha256=verification_hash,
                 company_verification_receipt_sha256s=raw_verification_hashes,
                 target_verified_qualified_count=int(
@@ -828,7 +952,7 @@ def candidate_waterfall_receipts_from_exact_model(
                 ),
                 step_order=int(metric.get("step_order")),
                 attempt_sequence=int(metric.get("attempt_sequence")),
-                disposition=disposition,
+                disposition=model_disposition,
                 outcome_code=str(metric.get("reason_code") or ""),
                 provider_call_count=provider_call_count,
                 billed_credit_microunits=billed_credit,
@@ -839,7 +963,15 @@ def candidate_waterfall_receipts_from_exact_model(
                 verified_qualified_count=int(
                     metric.get("verified_qualified_candidate_count")
                 ),
-                published_count=int(metric.get("published_count") or 0),
+                published_count=_nonnegative_int(
+                    metric.get("published_count"), "published_count"
+                ),
+                model_terminal_receipt_id=model_terminal_receipt.receipt_id,
+                model_terminal_receipt_hash=model_terminal_receipt.receipt_hash,
+                publication_projection_sha256=_model_hash(
+                    metric.get("publication_projection_sha256"),
+                    "publication_projection_sha256",
+                ),
             )
         )
     return tuple(receipts)
@@ -999,6 +1131,375 @@ def _attempt_chain_sha256(attempt_hashes: Sequence[str]) -> str:
     return sha256_json(list(attempt_hashes)).split(":", 1)[1]
 
 
+def _safe_terminal_attempt(metric: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only bounded hashes, ids, counts, and provider measurements."""
+
+    fields = (
+        "tool_id",
+        "outcome",
+        "disposition",
+        "reason_code",
+        "provider_receipt_ref",
+        "provider_outcome",
+        "raw_candidate_count",
+        "normalized_candidate_count",
+        "unique_candidate_count",
+        "verified_qualified_candidate_count",
+        "company_verification_receipt_sha256s",
+        "verification_receipt_sha256",
+        "publication_projection_sha256",
+        "published_count",
+        "provider_call_count",
+        "billed_credit_microunits",
+        "latency_ms",
+        "candidate_plan_sha256",
+        "stop_policy_sha256",
+        "attempt_sha256",
+        "prior_attempt_receipt_sha256",
+        "attempt_chain_sha256",
+        "step_order",
+        "attempt_sequence",
+    )
+    projection = {field: metric.get(field) for field in fields}
+    projection["company_verification_receipt_sha256s"] = list(
+        metric.get("company_verification_receipt_sha256s") or ()
+    )
+    return projection
+
+
+@dataclass(frozen=True)
+class CandidateModelUnitTerminalReceipt:
+    """Safe, immutable authority for one exact Model candidate unit terminal."""
+
+    experiment_id: str
+    experiment_hash: str
+    variant_id: str
+    unit_ref: str
+    artifact_key: str
+    artifact_branch: str
+    artifact_commit_sha: str
+    artifact_manifest_hash: str
+    release_identity_sha256: str
+    binding_contracts_sha256: str
+    candidate_waterfall_contract_sha256: str
+    start_request_sha256: str
+    decision_receipt_id: str
+    target_verified_qualified_count: int
+    disposition: str
+    stop_policy_sha256: str
+    verification_receipt_sha256: str
+    attempt_chain_sha256: str
+    publication_projection_sha256: str
+    terminal_result_sha256: str
+    model_receipt_sha256: str
+    orchestration_receipt_sha256: str
+    candidate_waterfall_sha256: str
+    candidate_plan_sha256: str
+    stop_reason: str
+    provider_receipt_refs: tuple[str, ...]
+    verification_receipt_refs: tuple[tuple[str, ...], ...]
+    attempt_receipt_sha256s: tuple[str, ...]
+    attempt_chain_sha256s: tuple[str, ...]
+    attempt_projections: tuple[Mapping[str, Any], ...]
+    provider_call_count: int
+    billed_credit_microunits: int
+    latency_ms: int
+    raw_count: int
+    normalized_count: int
+    unique_count: int
+    verified_qualified_count: int
+    published_count: int
+    immutable: bool = True
+    contract_version: str = CANDIDATE_MODEL_UNIT_TERMINAL_VERSION
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "experiment_id",
+            "variant_id",
+            "unit_ref",
+            "artifact_branch",
+            "artifact_commit_sha",
+            "artifact_manifest_hash",
+            "decision_receipt_id",
+            "stop_reason",
+            "disposition",
+        ):
+            _safe_ref(getattr(self, field_name), field_name)
+        if self.artifact_branch not in {"main", "leadpoet-lab"}:
+            raise RoutingExperimentError("candidate_terminal_artifact_branch_is_invalid")
+        if not _DECISION_RECEIPT_RE.fullmatch(self.decision_receipt_id):
+            raise RoutingExperimentError("candidate_terminal_decision_receipt_id_is_invalid")
+        for field_name in (
+            "experiment_hash",
+            "artifact_key",
+            "artifact_manifest_hash",
+            "release_identity_sha256",
+            "binding_contracts_sha256",
+            "candidate_waterfall_contract_sha256",
+            "start_request_sha256",
+            "terminal_result_sha256",
+        ):
+            _lab_hash(getattr(self, field_name), field_name)
+        for field_name in (
+            "model_receipt_sha256",
+            "orchestration_receipt_sha256",
+            "candidate_waterfall_sha256",
+            "candidate_plan_sha256",
+            "stop_policy_sha256",
+            "attempt_chain_sha256",
+            "publication_projection_sha256",
+        ):
+            _model_hash(getattr(self, field_name), field_name)
+        if self.disposition not in _DISPOSITIONS:
+            raise RoutingExperimentError("candidate_terminal_disposition_is_invalid")
+        _model_hash(
+            self.verification_receipt_sha256,
+            "verification_receipt_sha256",
+            optional=True,
+        )
+        if type(self.target_verified_qualified_count) is not int or not 1 <= self.target_verified_qualified_count <= 50:
+            raise RoutingExperimentError("candidate_terminal_target_is_invalid")
+        for field_name in (
+            "provider_call_count",
+            "billed_credit_microunits",
+            "latency_ms",
+            "raw_count",
+            "normalized_count",
+            "unique_count",
+            "verified_qualified_count",
+            "published_count",
+        ):
+            _nonnegative_int(getattr(self, field_name), field_name)
+        if self.published_count != 0:
+            raise RoutingExperimentError("candidate_terminal_publication_authority_missing")
+        if self.immutable is not True or self.contract_version != CANDIDATE_MODEL_UNIT_TERMINAL_VERSION:
+            raise RoutingExperimentError("candidate_terminal_contract_is_invalid")
+        if not self.attempt_projections or len(self.attempt_projections) != len(self.attempt_receipt_sha256s):
+            raise RoutingExperimentError("candidate_terminal_attempt_projection_coverage_differs")
+        if len(self.verification_receipt_refs) != len(self.attempt_projections):
+            raise RoutingExperimentError("candidate_terminal_verification_coverage_differs")
+        if len(self.provider_receipt_refs) != len(self.attempt_projections):
+            raise RoutingExperimentError("candidate_terminal_provider_coverage_differs")
+        for value in self.provider_receipt_refs:
+            if value and not _PROVIDER_RECEIPT_RE.fullmatch(value):
+                raise RoutingExperimentError("candidate_terminal_provider_receipt_ref_is_invalid")
+        for refs in self.verification_receipt_refs:
+            for value in refs:
+                _model_hash(value, "candidate_terminal_verification_receipt_ref")
+        for value in self.attempt_receipt_sha256s:
+            _model_hash(value, "candidate_terminal_attempt_receipt")
+        for value in self.attempt_chain_sha256s:
+            _model_hash(value, "candidate_terminal_attempt_chain")
+        if len(self.attempt_chain_sha256s) != len(self.attempt_receipt_sha256s):
+            raise RoutingExperimentError("candidate_terminal_chain_coverage_differs")
+        projection_verification_refs: list[str] = []
+        projection_publication_hashes: list[str] = []
+        projection_published_counts: list[int] = []
+        for index, projection in enumerate(self.attempt_projections):
+            if not isinstance(projection, Mapping):
+                raise RoutingExperimentError("candidate_terminal_attempt_projection_is_invalid")
+            if projection.get("attempt_sha256") != self.attempt_receipt_sha256s[index]:
+                raise RoutingExperimentError("candidate_terminal_attempt_hash_differs")
+            if projection.get("attempt_chain_sha256") != self.attempt_chain_sha256s[index]:
+                raise RoutingExperimentError("candidate_terminal_attempt_chain_differs")
+            if projection.get("step_order") != index or projection.get("attempt_sequence") != index:
+                raise RoutingExperimentError("candidate_terminal_attempt_sequence_differs")
+            provider_outcome = projection.get("provider_outcome")
+            if provider_outcome not in {
+                *(item.value for item in ProviderOutcome),
+                "skipped",
+            }:
+                raise RoutingExperimentError(
+                    "candidate_terminal_provider_outcome_is_invalid"
+                )
+            provider_ref = self.provider_receipt_refs[index]
+            if (not provider_ref) != (provider_outcome == "skipped"):
+                raise RoutingExperimentError(
+                    "candidate_terminal_provider_outcome_lineage_differs"
+                )
+            projection_published_count = _nonnegative_int(
+                projection.get("published_count"),
+                "published_count",
+            )
+            if projection_published_count != 0:
+                raise RoutingExperimentError(
+                    "candidate_terminal_publication_authority_missing"
+                )
+            projection_published_counts.append(projection_published_count)
+            projection_verification_refs.extend(
+                str(value)
+                for value in projection.get("company_verification_receipt_sha256s") or ()
+            )
+            publication_hash = projection.get("publication_projection_sha256")
+            if not isinstance(publication_hash, str):
+                raise RoutingExperimentError("candidate_terminal_publication_projection_is_missing")
+            _model_hash(publication_hash, "candidate_terminal_publication_projection")
+            projection_publication_hashes.append(publication_hash)
+        if self.verification_receipt_sha256 != _ordered_verification_receipt_sha256(
+            projection_verification_refs
+        ):
+            raise RoutingExperimentError("candidate_terminal_verification_receipt_differs")
+        if self.attempt_chain_sha256 != self.attempt_chain_sha256s[-1]:
+            raise RoutingExperimentError("candidate_terminal_chain_terminal_differs")
+        if self.publication_projection_sha256 != sha256_json(
+            projection_publication_hashes
+        ).split(":", 1)[1]:
+            raise RoutingExperimentError("candidate_terminal_publication_projection_differs")
+        if self.published_count != sum(projection_published_counts):
+            raise RoutingExperimentError("candidate_terminal_published_count_differs")
+        if not (
+            self.raw_count
+            >= self.normalized_count
+            >= self.unique_count
+            >= self.verified_qualified_count
+            >= self.published_count
+        ):
+            raise RoutingExperimentError("candidate_terminal_counts_are_not_monotonic")
+
+    def identity_payload(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["provider_receipt_refs"] = list(self.provider_receipt_refs)
+        payload["verification_receipt_refs"] = [list(item) for item in self.verification_receipt_refs]
+        payload["attempt_receipt_sha256s"] = list(self.attempt_receipt_sha256s)
+        payload["attempt_chain_sha256s"] = list(self.attempt_chain_sha256s)
+        payload["attempt_projections"] = [dict(item) for item in self.attempt_projections]
+        return payload
+
+    @property
+    def receipt_hash(self) -> str:
+        return sha256_json(self.identity_payload())
+
+    @property
+    def receipt_id(self) -> str:
+        return "candidate_model_terminal:" + self.receipt_hash.split(":", 1)[1][:24]
+
+    def to_dict(self) -> dict[str, Any]:
+        identity = self.identity_payload()
+        return {
+            **identity,
+            "receipt_id": self.receipt_id,
+            "receipt_hash": self.receipt_hash,
+        }
+
+
+def candidate_model_unit_terminal_from_exact_model(
+    *,
+    spec: RoutingExperimentV2Spec,
+    variant_id: str,
+    decision_receipt: RoutingDecisionReceiptV2,
+    terminal_result: Mapping[str, Any],
+    expected_release_identity_sha256: str,
+    expected_binding_contracts_sha256: str,
+    expected_candidate_waterfall_contract_sha256: str,
+    authoritative_provider_receipts: Sequence[ProviderReceipt],
+) -> CandidateModelUnitTerminalReceipt:
+    """Build the safe durable terminal authority before sidecar projection."""
+
+    adapted = adapt_exact_model_candidate_receipt(
+        terminal_result,
+        expected_release_identity_sha256=expected_release_identity_sha256,
+        expected_binding_contracts_sha256=expected_binding_contracts_sha256,
+        expected_candidate_waterfall_contract_sha256=expected_candidate_waterfall_contract_sha256,
+        authoritative_provider_receipts=authoritative_provider_receipts,
+    )
+    metrics = adapted["candidate_attempt_metrics"]
+    if not isinstance(metrics, tuple) or not metrics:
+        raise RoutingExperimentError("candidate_terminal_attempts_are_missing")
+    if int(adapted["candidate_target_verified_qualified_count"]) != spec.input.target_verified_qualified_count:
+        raise RoutingExperimentError("candidate_terminal_target_differs_from_spec")
+    variant = _candidate_variant(spec, variant_id)
+    if decision_receipt.unit_ref not in set(spec.input.calibration_unit_refs) | set(spec.input.holdout_unit_refs):
+        raise RoutingExperimentError("candidate_terminal_unit_is_not_in_spec")
+    if decision_receipt.artifact_key != sha256_json(
+        {
+            "model_artifact_hash": variant.artifact.model_artifact_hash,
+            "manifest_hash": variant.artifact.manifest_hash,
+            "commit_sha": variant.artifact.commit_sha,
+        }
+    ):
+        raise RoutingExperimentError("candidate_terminal_artifact_key_differs")
+    provider_refs = tuple(str(metric.get("provider_receipt_ref") or "") for metric in metrics)
+    verification_refs = tuple(
+        tuple(str(value) for value in metric.get("company_verification_receipt_sha256s") or ())
+        for metric in metrics
+    )
+    attempt_hashes = tuple(
+        _model_hash(metric["attempt_sha256"], "candidate_terminal_attempt")
+        for metric in metrics
+    )
+    chain_hashes = tuple(
+        _model_hash(metric["attempt_chain_sha256"], "candidate_terminal_attempt_chain")
+        for metric in metrics
+    )
+    terminal = CandidateModelUnitTerminalReceipt(
+        experiment_id=spec.experiment_id,
+        experiment_hash=spec.experiment_hash(),
+        variant_id=variant_id,
+        unit_ref=decision_receipt.unit_ref,
+        artifact_key=decision_receipt.artifact_key,
+        artifact_branch=variant.artifact.branch,
+        artifact_commit_sha=variant.artifact.commit_sha,
+        artifact_manifest_hash=variant.artifact.manifest_hash,
+        release_identity_sha256=_lab_hash(
+            expected_release_identity_sha256
+            if str(expected_release_identity_sha256).startswith("sha256:")
+            else "sha256:" + str(expected_release_identity_sha256),
+            "release_identity_sha256",
+        ),
+        binding_contracts_sha256=_lab_hash(
+            expected_binding_contracts_sha256
+            if str(expected_binding_contracts_sha256).startswith("sha256:")
+            else "sha256:" + str(expected_binding_contracts_sha256),
+            "binding_contracts_sha256",
+        ),
+        candidate_waterfall_contract_sha256=_lab_hash(
+            expected_candidate_waterfall_contract_sha256
+            if str(expected_candidate_waterfall_contract_sha256).startswith("sha256:")
+            else "sha256:" + str(expected_candidate_waterfall_contract_sha256),
+            "candidate_waterfall_contract_sha256",
+        ),
+        start_request_sha256=str(adapted["start_request_sha256"]),
+        decision_receipt_id=decision_receipt.receipt_id,
+        target_verified_qualified_count=int(adapted["candidate_target_verified_qualified_count"]),
+        disposition=str(adapted["candidate_disposition"]),
+        stop_policy_sha256=_model_hash(
+            adapted["candidate_stop_policy_sha256"],
+            "candidate_stop_policy_sha256",
+        ),
+        verification_receipt_sha256=str(
+            adapted["candidate_verification_receipt_sha256"]
+        ),
+        attempt_chain_sha256=_model_hash(
+            adapted["candidate_attempt_chain_sha256"],
+            "candidate_attempt_chain_sha256",
+        ),
+        publication_projection_sha256=_model_hash(
+            adapted["candidate_publication_projection_sha256"],
+            "candidate_publication_projection_sha256",
+        ),
+        terminal_result_sha256=sha256_json(dict(terminal_result)),
+        model_receipt_sha256=str(adapted["model_receipt_sha256"]),
+        orchestration_receipt_sha256=str(adapted["orchestration_receipt_sha256"]),
+        candidate_waterfall_sha256=str(adapted["candidate_waterfall_sha256"]),
+        candidate_plan_sha256=_model_hash(metrics[0]["candidate_plan_sha256"], "candidate_plan_sha256"),
+        stop_reason=str(adapted["candidate_stop_reason"]),
+        provider_receipt_refs=provider_refs,
+        verification_receipt_refs=verification_refs,
+        attempt_receipt_sha256s=attempt_hashes,
+        attempt_chain_sha256s=chain_hashes,
+        attempt_projections=tuple(_safe_terminal_attempt(metric) for metric in metrics),
+        provider_call_count=sum(int(metric["provider_call_count"]) for metric in metrics),
+        billed_credit_microunits=sum(int(metric["billed_credit_microunits"]) for metric in metrics),
+        latency_ms=sum(int(float(metric["latency_ms"])) for metric in metrics),
+        raw_count=sum(int(metric["raw_candidate_count"]) for metric in metrics),
+        normalized_count=sum(int(metric["normalized_candidate_count"]) for metric in metrics),
+        unique_count=sum(int(metric["unique_candidate_count"]) for metric in metrics),
+        verified_qualified_count=sum(int(metric["verified_qualified_candidate_count"]) for metric in metrics),
+        published_count=int(adapted["candidate_published_count"]),
+    )
+    return terminal
+
+
 @dataclass(frozen=True)
 class CandidateWaterfallReceipt:
     """Redacted candidate counts attached to shared routing receipts."""
@@ -1035,7 +1536,10 @@ class CandidateWaterfallReceipt:
     normalized_count: int
     unique_count: int
     verified_qualified_count: int
-    published_count: int = 0
+    published_count: int
+    model_terminal_receipt_id: str
+    model_terminal_receipt_hash: str
+    publication_projection_sha256: str
     company_verification_receipt_sha256s: tuple[str, ...] = ()
     immutable: bool = True
     contract_version: str = CANDIDATE_WATERFALL_RECEIPT_VERSION
@@ -1056,6 +1560,19 @@ class CandidateWaterfallReceipt:
             raise RoutingExperimentError("candidate_tool_id_must_use_candidate_namespace")
         if not _DECISION_RECEIPT_RE.fullmatch(self.decision_receipt_id):
             raise RoutingExperimentError("candidate_decision_receipt_id_is_invalid")
+        if not re.fullmatch(
+            r"candidate_model_terminal:[0-9a-f]{24}",
+            self.model_terminal_receipt_id,
+        ):
+            raise RoutingExperimentError("candidate_model_terminal_receipt_id_is_invalid")
+        _lab_hash(
+            self.model_terminal_receipt_hash,
+            "model_terminal_receipt_hash",
+        )
+        _model_hash(
+            self.publication_projection_sha256,
+            "publication_projection_sha256",
+        )
         if self.provider_receipt_ref and not _PROVIDER_RECEIPT_RE.fullmatch(
             self.provider_receipt_ref
         ):
@@ -1146,14 +1663,8 @@ class CandidateWaterfallReceipt:
             raise RoutingExperimentError(
                 "candidate_attempt_requires_one_unique_provider_receipt"
             )
-        expected_provider_outcome = _PROVIDER_OUTCOME_BY_DISPOSITION.get(
-            self.disposition
-        )
-        if (
-            expected_provider_outcome is None
-            or self.provider_outcome != expected_provider_outcome
-        ):
-            raise RoutingExperimentError("candidate_disposition_provider_outcome_differs")
+        elif self.provider_outcome == "skipped":
+            raise RoutingExperimentError("candidate_attempt_provider_outcome_is_skipped")
         if self.target_verified_qualified_count < 1:
             raise RoutingExperimentError("candidate_receipt_target_must_be_positive")
         if not (
@@ -1182,6 +1693,16 @@ class CandidateWaterfallReceipt:
             )
         if self.contract_version != CANDIDATE_WATERFALL_RECEIPT_VERSION:
             raise RoutingExperimentError("candidate_waterfall_receipt_version_is_invalid")
+        if not re.fullmatch(
+            r"^candidate_model_terminal:[0-9a-f]{24}$",
+            self.model_terminal_receipt_id,
+        ):
+            raise RoutingExperimentError("candidate_model_terminal_receipt_id_is_invalid")
+        _lab_hash(self.model_terminal_receipt_hash, "model_terminal_receipt_hash")
+        _model_hash(
+            self.publication_projection_sha256,
+            "publication_projection_sha256",
+        )
 
     def identity_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -1216,7 +1737,10 @@ def candidate_waterfall_receipt_from_model(
     stop_policy_payload: Mapping[str, Any],
     receipt_payloads: Sequence[Mapping[str, Any]],
     model_adapter: Any,
-    published_count: int = 0,
+    published_count: int,
+    model_terminal_receipt_id: str,
+    model_terminal_receipt_hash: str,
+    publication_projection_sha256: str,
 ) -> CandidateWaterfallReceipt:
     """Parse one exact Model receipt prefix and bind it to PR 93 receipts."""
 
@@ -1268,11 +1792,25 @@ def candidate_waterfall_receipt_from_model(
     if not isinstance(evaluated, Mapping) or set(evaluated) != {"progress", "decision"}:
         raise RoutingExperimentError("model_candidate_attempt_evaluation_is_invalid")
     for expected_index, attempt in enumerate(model_receipts):
-        if attempt.step_order != expected_index or attempt.attempt != expected_index:
+        if (
+            attempt.step_order != expected_index
+            or getattr(attempt, "attempt_sequence", None) != expected_index
+        ):
             raise RoutingExperimentError(
                 "model_candidate_attempt_sequence_is_not_contiguous"
             )
     model_receipt = model_receipts[-1]
+    raw_provider_outcome = getattr(model_receipt, "provider_outcome", None)
+    if raw_provider_outcome is None:
+        raise RoutingExperimentError(
+            "model_candidate_provider_outcome_is_missing"
+        )
+    model_provider_outcome = _safe_ref(raw_provider_outcome, "provider_outcome")
+    if model_provider_outcome not in {
+        *(item.value for item in ProviderOutcome),
+        "skipped",
+    }:
+        raise RoutingExperimentError("model_candidate_provider_outcome_is_invalid")
     model_plan_hash = model_adapter.plan_hash(plan)
     if model_receipt.plan_sha256 != model_plan_hash or model_hash_to_lab(
         model_plan_hash,
@@ -1292,7 +1830,10 @@ def candidate_waterfall_receipt_from_model(
         if item.binding_id in set(variant.binding_ids)
     ]
     if provider_receipt is None:
-        if model_receipt.disposition != "skipped":
+        if (
+            model_receipt.disposition != "skipped"
+            or model_provider_outcome != "skipped"
+        ):
             raise RoutingExperimentError(
                 "model_candidate_attempt_without_provider_receipt_must_be_skipped"
             )
@@ -1362,13 +1903,10 @@ def candidate_waterfall_receipt_from_model(
             )
         provider_receipt_ref = provider_receipt.receipt_ref
         execution_mode = provider_receipt.execution_mode
-        provider_outcome = provider_receipt.outcome
-        expected_provider_outcome = _PROVIDER_OUTCOME_BY_DISPOSITION.get(
-            model_receipt.disposition
-        )
-        if expected_provider_outcome != provider_outcome:
+        provider_outcome = model_provider_outcome
+        if model_receipt.disposition == "skipped" or provider_outcome != provider_receipt.outcome:
             raise RoutingExperimentError(
-                "model_candidate_disposition_differs_from_provider_outcome"
+                "model_candidate_provider_outcome_differs_from_provider_receipt"
             )
         authoritative_provider_call_count = getattr(
             provider_receipt, "call_count", None
@@ -1407,12 +1945,49 @@ def candidate_waterfall_receipt_from_model(
         raise RoutingExperimentError(
             "model_candidate_latency_differs_from_provider_receipt"
         )
+    model_published = _nonnegative_int(
+        getattr(model_receipt, "published_count", -1),
+        "published_count",
+    )
     published = _nonnegative_int(published_count, "published_count")
+    if published != model_published:
+        raise RoutingExperimentError("candidate_publication_count_differs_from_model")
     if published != 0:
         raise RoutingExperimentError("candidate_publication_authority_is_missing")
     if published > model_receipt.verified_qualified_count:
         raise RoutingExperimentError("candidate_published_count_exceeds_verified_count")
     attempt_hashes = tuple(item.sha256() for item in model_receipts)
+    explicit_attempt_chain = _model_hash(
+        getattr(model_receipt, "attempt_chain_sha256", ""),
+        "attempt_chain_sha256",
+    )
+    if explicit_attempt_chain != _attempt_chain_sha256(attempt_hashes):
+        raise RoutingExperimentError("candidate_attempt_chain_differs")
+    explicit_verification = _model_hash(
+        getattr(model_receipt, "verification_receipt_sha256", ""),
+        "verification_receipt_sha256",
+        optional=True,
+    )
+    if explicit_verification != _ordered_verification_receipt_sha256(
+        verification_hashes
+    ):
+        raise RoutingExperimentError("candidate_attempt_verification_receipt_order_differs")
+    explicit_publication_projection = _model_hash(
+        getattr(model_receipt, "publication_projection_sha256", ""),
+        "publication_projection_sha256",
+    )
+    explicit_prior = _model_hash(
+        getattr(model_receipt, "prior_attempt_receipt_sha256", ""),
+        "prior_attempt_receipt_sha256",
+        optional=True,
+    )
+    expected_prior = attempt_hashes[-2] if len(attempt_hashes) > 1 else ""
+    if explicit_prior != expected_prior:
+        raise RoutingExperimentError("candidate_attempt_prior_receipt_differs")
+    explicit_target = _nonnegative_int(
+        getattr(model_receipt, "target_verified_qualified_count", -1),
+        "target_verified_qualified_count",
+    )
     return CandidateWaterfallReceipt(
         experiment_id=spec.experiment_id,
         experiment_hash=spec.experiment_hash(),
@@ -1431,16 +2006,12 @@ def candidate_waterfall_receipt_from_model(
         model_plan_sha256=model_receipt.plan_sha256,
         stop_policy_sha256=model_receipt.stop_policy_sha256,
         attempt_receipt_sha256=model_receipt.sha256(),
-        prior_attempt_receipt_sha256=(
-            attempt_hashes[-2] if len(attempt_hashes) > 1 else ""
-        ),
-        attempt_chain_sha256=_attempt_chain_sha256(attempt_hashes),
-        verification_receipt_sha256=_ordered_verification_receipt_sha256(
-            verification_hashes
-        ),
-        target_verified_qualified_count=stop_policy.target_verified_qualified_count,
+        prior_attempt_receipt_sha256=explicit_prior,
+        attempt_chain_sha256=explicit_attempt_chain,
+        verification_receipt_sha256=explicit_verification,
+        target_verified_qualified_count=explicit_target,
         step_order=model_receipt.step_order,
-        attempt_sequence=model_receipt.attempt,
+        attempt_sequence=model_receipt.attempt_sequence,
         disposition=model_receipt.disposition,
         outcome_code=model_receipt.outcome_code,
         provider_call_count=authoritative_provider_call_count,
@@ -1452,6 +2023,9 @@ def candidate_waterfall_receipt_from_model(
         verified_qualified_count=model_receipt.verified_qualified_count,
         published_count=published,
         company_verification_receipt_sha256s=verification_hashes,
+        model_terminal_receipt_id=model_terminal_receipt_id,
+        model_terminal_receipt_hash=model_terminal_receipt_hash,
+        publication_projection_sha256=explicit_publication_projection,
     )
 
 
@@ -1895,8 +2469,10 @@ __all__ = [
     "EXACT_MODEL_RUNNER_RECEIPT_VERSION",
     "CandidateWaterfallMetric",
     "CandidateWaterfallReceipt",
+    "CandidateModelUnitTerminalReceipt",
     "adapt_exact_model_candidate_receipt",
     "candidate_waterfall_receipts_from_exact_model",
+    "candidate_model_unit_terminal_from_exact_model",
     "candidate_waterfall_receipt_from_model",
     "evaluate_candidate_waterfall_metrics",
     "validate_candidate_routing_model_runtime",

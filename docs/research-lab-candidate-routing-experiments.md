@@ -1,71 +1,107 @@
 # Candidate waterfall experiment sidecars
 
-This change is stacked on PR 93. PR 93 is the only owner of routing
-experiments, variants, provider bindings, credit budgets, provider receipts,
-route decision receipts, evaluation gates, and Lab promotion references.
-Company sourcing and intent experiments therefore use one lifecycle and one
-set of safety rules.
+PR 96 adds candidate waterfall evidence to the shared PR 93 routing
+experiment lifecycle. PR 93 remains the owner of experiment specs, signed
+variants, provider receipts, decisions, evaluations, budgets, and promotion.
+This change does not create a second route or promotion lifecycle.
 
-This PR adds five candidate-only parts:
+## Artifact and target authority
 
-1. `adapt_exact_model_candidate_receipt` accepts the terminal exact-runner
-   result. It verifies the signed, model-owned candidate waterfall and every
-   attempt in its hash chain. Each invoked attempt must name one independently
-   persisted Lab provider receipt. Tool ID, provider outcome, call count,
-   billed credit microunits, latency, and receipt coverage must agree exactly.
-   A missing, extra, reused, or inconsistent provider receipt fails closed.
-2. `candidate_waterfall_receipt_from_model` remains the typed adapter for the
-   existing serialized candidate-waterfall contract. It gives the exact plan,
-   stop policy, and full receipt prefix to the `Sourcing_model` evaluator. It
-   attaches the current attempted step to the existing V2 provider and
-   decision receipts. It attaches a skipped step to the existing
-   skipped-decision reason without inventing a provider receipt. Prefix hashes
-   prevent sidecars from different valid executions from being mixed. Provider
-   call count, billed credits, and latency come from the authoritative provider
-   receipt. A different Model call count, cost, or latency fails closed.
-3. `evaluate_candidate_waterfall_metrics` derives calibration and holdout
-   metrics for raw, normalized, unique, verified-qualified, and published
-   companies. Cost efficiency is measured in billed provider credits, not a
-   Model USD estimate. It requires complete sidecar coverage for every provider
-   and decision receipt in the shared evaluation. It rejects a reused provider
-   receipt, a different compiled target, or a broken attempt chain, so omitted
-   or duplicated outcomes cannot improve the metrics. These metrics are
-   sidecars. They do not select or promote a route.
-4. `validate_candidate_routing_model_runtime` uses PR 93's pinned Model
-   adapter to verify the exact artifact identity, signed artifact manifest,
-   catalog hash, policy hash, and runtime-exported candidate waterfall
-   identity. The candidate execution contract is a separate Model contract
-   and is not compared with the general routing-contract hash. A partial,
-   unsigned, unsafe, or different runtime fails closed before a receipt is
-   accepted; replay and measured Lab runs also require PR 93's cryptographic
-   artifact authority.
-5. `scripts/162-research-lab-candidate-routing-experiments.sql` stores only
-   the Model receipt sidecars and candidate metric sidecars. Both tables are
-   append-only, service-role-only, and protected by forced row-level security.
-   Foreign keys bind them to PR 93 experiments, decisions, and evaluations,
-   including the shared experiment hash. A global partial unique index
-   prevents provider-receipt reuse. Each stored JSON document must exactly
-   match its indexed scalar columns and content hash.
+Every candidate experiment has two signed artifacts: the baseline uses the
+reviewed `main` artifact, and the challenger uses the distinct reviewed
+`leadpoet-lab` artifact. A baseline `leadpoet-lab` artifact or a challenger
+`main` artifact is rejected. The artifact key, branch, commit, manifest,
+release identity, binding contract, and candidate-waterfall contract must
+match the stored experiment spec and decision.
 
-The adapter never compiles a route, calls a provider, selects an unrecorded
-fallback, or writes a second promotion decision. Use PR 93's
-`evaluate_routing_experiment_v2` for provider execution and route evaluation.
-Use `promote_routing_experiment_v2_to_lab` for the immutable Lab reference.
+The exact target is supplied by the signed experiment input and the signed
+Model unit input. The worker requires those two pre-dispatch values to match
+before SQL or provider work. After the unit completes, the Model terminal must
+also emit the explicit `target_verified_qualified_count`; it must match the
+signed target before the terminal or any sidecar is persisted. The consumer
+never derives the target from counts, a stop policy, a provider receipt, or a
+decision.
 
-The identity rules are explicit:
+## Independent Model unit-terminal authority
 
-- Both baseline and challenger artifacts are exact signed `leadpoet-lab`
-  artifacts. The baseline is the admitted/current artifact and the challenger
-  must have a distinct exact artifact identity; the Lab never accepts `main`.
-- PR 93 Lab hashes use the `sha256:` prefix.
-- Model route, stop-policy, attempt, and verification hashes are exact
-  64-character lowercase SHA-256 values.
-- The receipt adapter converts the Model plan hash only for comparison with
-  the shared decision receipt. It preserves the original Model hash in the
-  candidate sidecar.
-- Provider payloads, credentials, raw ICP text, scraped text, and secrets are
-  not stored.
+The Model completes only after all provider calls and decisions for a unit.
+Therefore a provider-attempt row cannot contain the final Model waterfall.
+After each exact `run_unit` completes and its decision exists, the worker
+appends one claim-fenced row to
+`research_lab_candidate_model_unit_terminals`. It appends this row before any
+candidate waterfall sidecar. The row is immutable, forced-RLS protected, and
+has one unique `(experiment_hash, variant_id, unit_ref)` identity.
 
-This PR does not activate a production route, change a model pointer, or add
-a production provider binding. Observe, replay, shadow, canary, and production
-activation remain separate reviewed steps.
+The terminal row is a safe projection only. It contains hashes, IDs, ordered
+provider and verification references, redacted counts, call/cost/latency
+measurements, artifact identity, decision identity, and chain data. It never
+stores provider, company, contact, raw response, credential, or prompt
+payloads. It includes the terminal, Model receipt, orchestration, waterfall,
+start-request, and candidate-plan hashes.
+
+The signed Model waterfall and each signed attempt must explicitly provide:
+
+- `target_verified_qualified_count`, `disposition`, explicit
+  `provider_outcome`, `stop_policy_sha256`,
+  `step_order`, `attempt_sequence`, `previous_attempt_sha256`,
+  `verification_receipt_sha256`, `attempt_chain_sha256`, and
+  `published_count`;
+- top-level `published_count`, `verification_receipt_sha256`,
+  `attempt_chain_sha256`, and `publication_projection_sha256`; and
+- per-attempt `publication_projection_sha256`.
+
+The adapter only recomputes these hashes to compare them with the explicit
+Model values. It does not default sequence, map outcome to disposition,
+compute the authoritative verification bundle or chain, or synthesize a
+published count. A missing canonical field fails closed.
+
+The current protected Sourcing_model artifact is not compatible with this
+receipt: its `target_count` is not a lossless
+`target_verified_qualified_count`, and it does not emit the explicit
+`provider_outcome`, `disposition`, `step_order`, `attempt_sequence`,
+`stop_policy_sha256`, verification receipt, attempt-chain, prior-attempt,
+per-attempt/top-level publication, or publication-projection fields (its
+attempt fields are only `attempt_index` and `previous_attempt_sha256`).
+Activation of this PR is therefore blocked until the upstream artifact
+contract emits them. Synthetic fixtures are labelled as synthetic and are not
+activation evidence.
+
+## Skips, verification, and chains
+
+A skipped provider has no provider receipt, zero calls, zero cost, zero
+latency, zero candidate counts, and an explicit skipped decision reason. A
+terminal or sidecar that claims a provider receipt for a skipped tool is
+rejected. An attempted provider must have exactly one matching durable
+provider receipt, and an extra or missing receipt is rejected.
+
+The ordered verification reference list must have exactly one reference per
+verified-qualified candidate. Its explicit Model bundle hash must match the
+ordered list. Duplicate, missing, or reordered references fail closed.
+
+The ordered attempt list starts at zero. Each attempt carries its explicit
+prior hash and chain hash. SQL independently recomputes each prefix only to
+compare with the stored Model chain values. Missing, extra, reordered, or
+tampered attempts fail closed. Totals and `published_count = 0` are checked
+against every terminal projection.
+
+## Append and promotion parity
+
+Terminal append validates the appended unit against its signed spec, decision,
+provider attempts, skipped reasons, references, counts, and explicit hashes.
+Sidecar append validates every sidecar field against that durable terminal and
+uses the same unit authority check. Promotion runs the whole-experiment
+authority check: exact terminal coverage for every signed variant and
+calibration/holdout unit, no extra terminal or provider attempt, complete
+chains, and exact sidecar parity. Idempotent replay accepts the same document;
+conflicting replay is rejected.
+
+Provider attempts remain valid across recovery when their immutable attempt
+key, parent experiment, provider receipt, authorization chain, and original
+claim generation validate. A later worker claim generation may append the
+terminal or sidecar after restart; requiring the old provider attempt to use
+the new claim would reject valid recovery. The current append claim still
+fences every new PR 96 write, and the immutable provider attempt proof is
+revalidated before use.
+
+This PR remains disabled and does not activate a model, route, provider, or
+production release. Promotion and activation remain separate reviewed gates.

@@ -1677,6 +1677,51 @@ class SupabaseRoutingExperimentStore:
             )
         return dict(result)
 
+    def append_candidate_model_unit_terminal(
+        self,
+        *,
+        experiment_hash: str,
+        receipt: Any,
+        claim: RoutingExperimentExecutionClaim,
+    ) -> Mapping[str, Any]:
+        """Append one exact Model unit-terminal authority before sidecars."""
+
+        from research_lab.candidate_routing_experiments import CandidateModelUnitTerminalReceipt
+
+        normalized_experiment_hash = _require_hash(experiment_hash, "experiment_hash")
+        if not isinstance(receipt, CandidateModelUnitTerminalReceipt):
+            raise RoutingExperimentStoreError("candidate Model unit terminal is invalid")
+        if claim.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate Model unit terminal claim belongs to another experiment"
+            )
+        if receipt.experiment_hash != normalized_experiment_hash:
+            raise RoutingExperimentStoreError(
+                "candidate Model unit terminal experiment differs"
+            )
+        document = receipt.to_dict()
+        result = self._rpc(
+            "research_lab_candidate_append_model_unit_terminal_v1",
+            {
+                "p_receipt_id": receipt.receipt_id,
+                "p_receipt_hash": receipt.receipt_hash,
+                "p_experiment_hash": normalized_experiment_hash,
+                "p_claim_key": claim.claim_key,
+                "p_claim_generation": claim.claim_generation,
+                "p_terminal_doc": document,
+            },
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("receipt_id") != receipt.receipt_id
+            or result.get("receipt_hash") != receipt.receipt_hash
+            or type(result.get("idempotent")) is not bool
+        ):
+            raise RoutingExperimentStoreError(
+                "candidate Model unit terminal append result is malformed"
+            )
+        return dict(result)
+
     def append_candidate_waterfall_metric(
         self,
         *,
@@ -2073,6 +2118,8 @@ class SupabaseRoutingExperimentStore:
                         "receipt_id", "receipt_hash", "contract_version",
                         "experiment_id", "experiment_hash", "variant_id",
                         "artifact_key", "decision_receipt_id",
+                        "model_terminal_receipt_id", "model_terminal_receipt_hash",
+                        "publication_projection_sha256",
                         "provider_receipt_ref", "unit_ref", "binding_id",
                         "tool_id", "execution_mode", "provider_outcome",
                         "decision_plan_hash", "decision_route_hash",

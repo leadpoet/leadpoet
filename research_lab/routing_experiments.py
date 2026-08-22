@@ -3692,6 +3692,10 @@ class RoutingExperimentV2Input:
     # Measured runs resolve raw provider inputs from an immutable signed
     # dataset. Keep this after the existing positional fields for compatibility.
     unit_input_set_hash: str = ""
+    # Candidate acquisition runs use one signed stop target for every unit.
+    # Intent runs do not have a candidate-yield target and retain the zero
+    # compatibility value.
+    target_verified_qualified_count: int = 0
 
     def __post_init__(self) -> None:
         _v2_safe_stage(self.stage)
@@ -3711,6 +3715,11 @@ class RoutingExperimentV2Input:
             raise RoutingExperimentError("v2_intent_signal_type_is_required")
         if self.stage == "candidate_acquisition" and str(self.signal_type or "").strip():
             raise RoutingExperimentError("v2_candidate_signal_type_must_be_empty")
+        if self.stage == "candidate_acquisition":
+            if type(self.target_verified_qualified_count) is not int or not 1 <= self.target_verified_qualified_count <= 50:
+                raise RoutingExperimentError("v2_candidate_target_verified_qualified_count_is_invalid")
+        elif self.target_verified_qualified_count != 0:
+            raise RoutingExperimentError("v2_non_candidate_target_verified_qualified_count_must_be_zero")
         _ensure_no_secret_material(self.to_dict(), field_name="v2_routing_input")
 
     def to_dict(self) -> dict[str, Any]:
@@ -3725,6 +3734,8 @@ class RoutingExperimentV2Input:
         }
         if self.unit_input_set_hash:
             result["unit_input_set_hash"] = self.unit_input_set_hash
+        if self.stage == "candidate_acquisition":
+            result["target_verified_qualified_count"] = self.target_verified_qualified_count
         return result
 
 
@@ -3851,6 +3862,9 @@ class RoutingExperimentV2Spec:
                 holdout_unit_refs=tuple(input_data.get("holdout_unit_refs") or ()),
                 gold_label_set_hash=str(input_data.get("gold_label_set_hash") or ""),
                 unit_input_set_hash=str(input_data.get("unit_input_set_hash") or ""),
+                target_verified_qualified_count=int(
+                    input_data.get("target_verified_qualified_count") or 0
+                ),
             )
         )
         variants: list[RoutingExperimentV2Variant] = []

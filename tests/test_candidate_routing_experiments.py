@@ -134,6 +134,7 @@ def _spec() -> RoutingExperimentV2Spec:
         gold_label_set_hash=sha256_json(
             {"labels": [("icp.cal", True), ("icp.hold", True)]}
         ),
+        target_verified_qualified_count=2,
     )
     baseline = RoutingExperimentV2Variant(
         variant_id="baseline",
@@ -180,6 +181,7 @@ def _model_receipt(**overrides: object) -> SimpleNamespace:
         "attempt": 0,
         "tool_id": "candidate.registry_feed",
         "disposition": "succeeded",
+        "provider_outcome": "verified",
         "outcome_code": "verified_candidates",
         "provider_call_count": 1,
         "estimated_cost_usd": 0.0125,
@@ -192,6 +194,14 @@ def _model_receipt(**overrides: object) -> SimpleNamespace:
         "verification_receipt_sha256": sha256_json(
             ["e" * 64, "f" * 64]
         ).split(":", 1)[1],
+        # Synthetic canonical fields: these stand in for the protected model
+        # terminal contract and are never produced by the consumer.
+        "attempt_sequence": 0,
+        "prior_attempt_receipt_sha256": "",
+        "attempt_chain_sha256": sha256_json(["d" * 64]).split(":", 1)[1],
+        "target_verified_qualified_count": 2,
+        "published_count": 0,
+        "publication_projection_sha256": "a" * 64,
         "sha256": lambda: "d" * 64,
     }
     values.update(overrides)
@@ -206,6 +216,24 @@ def _adapter(
     artifact_errors: tuple[str, ...] = (),
 ):
     attempt = receipt or _model_receipt()
+    # Keep the synthetic adapter fixture explicit. Production code must fail
+    # closed when these protected Model-owned fields are absent.
+    if receipt is not None:
+        values = vars(attempt).copy()
+        values.setdefault("attempt_sequence", getattr(attempt, "attempt", 0))
+        values.setdefault("prior_attempt_receipt_sha256", "")
+        attempt_hash = (
+            attempt.sha256() if callable(getattr(attempt, "sha256", None)) else "d" * 64
+        )
+        values.setdefault("attempt_chain_sha256", sha256_json([attempt_hash]).split(":", 1)[1])
+        values.setdefault("target_verified_qualified_count", target)
+        values.setdefault("published_count", 0)
+        values.setdefault("publication_projection_sha256", "a" * 64)
+        if getattr(attempt, "disposition", "") == "skipped":
+            values["provider_outcome"] = "skipped"
+        else:
+            values.setdefault("provider_outcome", "verified")
+        attempt = SimpleNamespace(**values)
     identity = {
         "contract_version": "candidate-waterfall-execution:v1",
         "stop_policy_schema_version": "candidate-stop-policy:v1",
@@ -265,6 +293,9 @@ def _adapt_receipt(
         receipt_payloads=({},),
         model_adapter=adapter or _adapter(),
         published_count=published_count,
+        model_terminal_receipt_id="candidate_model_terminal:" + "e" * 24,
+        model_terminal_receipt_hash=H("e"),
+        publication_projection_sha256="a" * 64,
     )
 
 
@@ -823,8 +854,8 @@ def test_candidate_receipt_binds_ordered_verification_hash_and_disposition():
             receipt,
             company_verification_receipt_sha256s=("f" * 64,),
         )
-    with pytest.raises(RoutingExperimentError, match="disposition_provider_outcome"):
-        replace(receipt, provider_outcome="source_miss")
+    with pytest.raises(RoutingExperimentError, match="provider_outcome_is_skipped"):
+        replace(receipt, provider_outcome="skipped")
     skipped = _adapt_receipt(
         spec=spec,
         decision=_decision(spec, provider, skipped=True),
@@ -948,6 +979,28 @@ def test_exact_sourcing_model_candidate_receipt_contract_is_compatible(request):
         return current, provider_receipt
 
     terminal, provider_receipt = run_exact()
+
+    # The current protected model receipt is intentionally not accepted by
+    # this PR96 consumer until the upstream artifact emits the canonical
+    # terminal fields. This is an upstream activation blocker, not a fixture
+    # fallback.
+    current_model_shaped = copy.deepcopy(terminal)
+    current_model_shaped["model_receipt"]["candidate_waterfall"].pop(
+        "target_verified_qualified_count", None
+    )
+    with pytest.raises(
+        RoutingExperimentError,
+        match="canonical_waterfall_target_verified_qualified_count_is_missing",
+    ):
+        adapt_exact_model_candidate_receipt(
+            current_model_shaped,
+            expected_release_identity_sha256=identity["release_identity_sha256"],
+            expected_binding_contracts_sha256=manifest["binding_contracts_sha256"],
+            expected_candidate_waterfall_contract_sha256=identity[
+                "candidate_waterfall_contract_sha256"
+            ],
+            authoritative_provider_receipts=(provider_receipt,),
+        )
 
     adapted = adapt_exact_model_candidate_receipt(
         terminal,
@@ -1234,7 +1287,7 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
         "research_lab_candidate_routing_decisions",
     ):
         assert duplicate not in sql
-    assert sql.count("FORCE ROW LEVEL SECURITY") == 2
+    assert sql.count("FORCE ROW LEVEL SECURITY") == 3
     assert "BEFORE UPDATE OR DELETE" in sql
     assert "ON DELETE CASCADE" not in sql
     assert "FOR SELECT TO service_role USING (true)" in sql
@@ -1246,7 +1299,7 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "provider_receipt_ref = ''" in sql
     assert "disposition = 'skipped'" in sql
     assert "idx_research_lab_candidate_waterfall_provider_receipt" in sql
-    assert sql.count("REFERENCES public.research_lab_routing_experiments_v2") == 2
+    assert sql.count("REFERENCES public.research_lab_routing_experiments_v2") == 3
     assert "FOREIGN KEY (decision_receipt_id, experiment_hash)" in sql
     assert "FOREIGN KEY (evaluation_receipt_id, experiment_hash)" in sql
     assert "REFERENCES public.research_lab_routing_decision_receipts_v2" in sql
@@ -1258,7 +1311,7 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "metric_id = 'candidate_metric:'" in sql
     assert "prior_attempt_receipt_sha256" in sql
     assert "attempt_chain_sha256" in sql
-    assert sql.count("= jsonb_build_object(") == 2
+    assert sql.count("= jsonb_build_object(") == 3
     assert "provider_outcome IN (" in sql
     assert "authoritative_billed_credit_microunits" in sql
     assert "{provider_receipt,call_count}" in sql

@@ -167,6 +167,16 @@
       "symbol": "execute_autoresearch_v2"
     },
     {
+      "ast_sha256": "sha256:6b48bc4249f86c7d6a37fadc30178f9dff947a040dd67f181ae45df4c55b3328",
+      "path": "gateway/research_lab/attested_routing_release_authorities.py",
+      "symbol": "AttestedRoutingTeeJobRpc"
+    },
+    {
+      "ast_sha256": "sha256:990702b17f84213c40d39e94dba9c643b7a5a731285f6383fe1af4faaec93208",
+      "path": "gateway/research_lab/attested_routing_release_authorities.py",
+      "symbol": "load_reviewed_routing_release_authority_sources"
+    },
+    {
       "ast_sha256": "sha256:e7ca9b6363ea77cc6241b70fb5693c9991e72b502a5ee75a68b675b9a933c164",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_compact_parent_graphs_for_transport"
@@ -1377,7 +1387,7 @@
       "symbol": "_admission_bundle"
     },
     {
-      "ast_sha256": "sha256:8489cfbae0564d6b6fb310d716fc96195884e22fe5b50fd64c9b73a48dca8db8",
+      "ast_sha256": "sha256:c6fc66774931350786d3005327c1c7fcb57bd29e931b723dc25d7715cc11b7e9",
       "path": "gateway/research_lab/routing_experiment_reconciliation.py",
       "symbol": "_attempts"
     },
@@ -1412,7 +1422,7 @@
       "symbol": "_lineage"
     },
     {
-      "ast_sha256": "sha256:78356bfca12be6d2982c393509ec079d8063561e82bb227514f9b53c11114fc8",
+      "ast_sha256": "sha256:e8956a942797bff6262b0b3aa48902e22b40228e23739a5bf4f633ddf204bc64",
       "path": "gateway/research_lab/routing_experiment_reconciliation.py",
       "symbol": "_provider_receipt"
     },
@@ -1592,7 +1602,7 @@
       "symbol": "ROUTING_UNIT_DATASET_SCHEMA"
     },
     {
-      "ast_sha256": "sha256:c796768927473808a51f313c41f4e3703da38a1fb07b76ac28b32aaaaca0066e",
+      "ast_sha256": "sha256:b761f63ce65261ef0df1e4de149df84872a69064a2d3fd15d937aa1783cd754b",
       "path": "gateway/research_lab/routing_provider_bindings.py",
       "symbol": "ReviewedDeeplineActionCompiler"
     },
@@ -1757,7 +1767,7 @@
       "symbol": "build_routing_model_completion_contract_v1"
     },
     {
-      "ast_sha256": "sha256:48b9e33e325c053a525d9df86d10823d5eb0159a2a4b8bd2057a67cb051e2aad",
+      "ast_sha256": "sha256:32d7ae343e310a595cf37c1a98239858dc5ea6369d1ffa604e85ec3011f49542",
       "path": "gateway/research_lab/routing_provider_terminal_protected.py",
       "symbol": "execute_protected_routing_provider_terminal_v2"
     },
@@ -1790,6 +1800,51 @@
       "ast_sha256": "sha256:b01612c432b841a0e6ada45b623e293088e663c6c9f85cc99b0dba6b844ca956",
       "path": "gateway/research_lab/routing_provider_terminal_protected.py",
       "symbol": "validate_routing_model_completion_contract_v1"
+    },
+    {
+      "ast_sha256": "sha256:e654c79cdf562df73930ff417f136a2b33a2b17cb949f4b0a6d75c1bd5b271c7",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "RELEASE_AUTHORITY_PROVIDER_MODULE"
+    },
+    {
+      "ast_sha256": "sha256:5b7b6a8e0ba89f03693f6e9239e5c254b0a23d71ee067f5459f728d01ef08a8e",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "RELEASE_MODULE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:b906b7eaa48c0dc773f3a6ab4b5619e145c7e4ad9192906666838e781e330258",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "RELEASE_SOURCE_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:72503bdfe4168cf224971e372206295ac06794c95e5aa46f75bba23883f81650",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "ReviewedRoutingReleaseAuthoritySources"
+    },
+    {
+      "ast_sha256": "sha256:c1424672f976e1363e660525fd4c923854ade73a0daf8ec25e7bfccc62fbbaf0",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "RoutingReleaseDependencyError"
+    },
+    {
+      "ast_sha256": "sha256:00e0e7b85863f3cb7d4aa86b1f111dbaefb4082dbc0d1e3b6c89cb124d489f09",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "_load_signed_gold_labels"
+    },
+    {
+      "ast_sha256": "sha256:c27925b2b0e1ae73b631763f62d932dcb2f19d4c0de5fccaa7fe3c0445543047",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "_verify_protected_workflow_manifest"
+    },
+    {
+      "ast_sha256": "sha256:18a3b93747fa3fba185e0f68f2d895510e9f23312acba99cd72cf11a00616540",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "build_reviewed_routing_release_dependencies"
+    },
+    {
+      "ast_sha256": "sha256:6a68ba34d465f9ed4ddcb6af12461a2dd2297e2ac1f1577216dbc68e120bce93",
+      "path": "gateway/research_lab/routing_release_builder.py",
+      "symbol": "render_generated_release_module"
     },
     {
       "ast_sha256": "sha256:f056ac4b3da93813f2ce18fefc89e5ae4da5cd42056c62d771c6027d7361e504",
@@ -3877,7 +3932,7 @@
       "symbol": "PROVIDER_TRANSPORT_HEALTH_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:b14c769ad09cc23760665cfb72495946408168f886efa958954651042cb8ab75",
+      "ast_sha256": "sha256:5cc4384ef22d98765e75293a881dcd0534b8dad0e18ab4237f7cef052f7fac54",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -6907,7 +6962,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1e340160a8d9e8c9c3b22de57a90f2a539d7c7569b9537afe4060dccf880fa26",
-  "protected_source_commit": "cb7750e0849272df9e76fb42c81d759d4d84f195",
+  "manifest_hash": "sha256:8db793cd93196964a6e164e741aaab560561b3cf508da0e3d090c69a8864e9ff",
+  "protected_source_commit": "30ed12ad3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

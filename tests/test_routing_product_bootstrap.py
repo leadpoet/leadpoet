@@ -3,12 +3,29 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 import gateway.research_lab.routing_product_bootstrap as bootstrap
 from gateway.research_lab.routing_product_bootstrap import (
     RoutingProductBootstrapError,
     ReviewedRoutingBootstrapDependencies,
     install_reviewed_routing_product_at_startup,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_fixed_release_module_cache():
+    """Keep fixed-module loader tests independent of import side effects."""
+
+    module_name = "gateway.research_lab.routing_release_dependencies"
+    package = sys.modules.get("gateway.research_lab")
+    sys.modules.pop(module_name, None)
+    if package is not None:
+        package.__dict__.pop("routing_release_dependencies", None)
+    yield
+    sys.modules.pop(module_name, None)
+    if package is not None:
+        package.__dict__.pop("routing_release_dependencies", None)
 
 
 def test_missing_release_dependencies_fail_closed_before_store_or_queue() -> None:

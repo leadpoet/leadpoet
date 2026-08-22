@@ -5172,6 +5172,221 @@ class CodeEditLoopEngine:
                 # siblings or consume multiple node identities.
                 draft_parse_limit = 1
                 candidate_generation_attempt_count = 0
+                candidate_source_context_repair_attempted = False
+
+                async def _attempt_candidate_source_context_repair(
+                    *,
+                    failure_class: str,
+                    missing_references: Sequence[str],
+                ) -> bool:
+                    nonlocal candidate_source_context_repair_attempted
+                    nonlocal source_bytes_returned
+                    nonlocal source_inspection_context
+                    nonlocal read_paths
+                    nonlocal read_ranges
+
+                    if (
+                        candidate_source_context_repair_attempted
+                        or failure_class != "insufficient_source_context"
+                        or not source_access_v2
+                    ):
+                        return False
+                    candidate_source_context_repair_attempted = True
+                    requested_references = unresolved_references_from_context(
+                        explicit=missing_references
+                    )
+                    normalized_references: list[str] = []
+                    missing_reference_count = 0
+                    invalid_reference_count = 0
+                    ambiguous_reference_count = 0
+                    for requested_reference in requested_references:
+                        reference_binding = bind_source_references_exact(
+                            index_doc=source_context.planner_index(),
+                            source_root=source_context.source_root,
+                            editable_files=source_context.editable_files,
+                            references=(requested_reference,),
+                        )
+                        missing_reference_count += len(
+                            reference_binding.missing_references
+                        )
+                        invalid_reference_count += len(
+                            reference_binding.invalid_references
+                        )
+                        ambiguous_reference_count += len(
+                            reference_binding.ambiguous_references
+                        )
+                        if reference_binding.valid:
+                            normalized_references.extend(
+                                reference
+                                for reference in reference_binding.normalized_references
+                                if reference not in normalized_references
+                            )
+                    if (
+                        not requested_references
+                        or not normalized_references
+                        or invalid_reference_count
+                        or ambiguous_reference_count
+                    ):
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="source_inspection_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "draft_missing_reference_binding_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "mode": "draft_missing_reference_repair",
+                                    "requested_reference_count": len(requested_references),
+                                    "resolvable_reference_count": len(
+                                        normalized_references
+                                    ),
+                                    "missing_reference_count": missing_reference_count,
+                                    "invalid_reference_count": invalid_reference_count,
+                                    "ambiguous_reference_count": ambiguous_reference_count,
+                                    "source_tree_hash": source_context.source_tree_hash,
+                                },
+                            )
+                        )
+                        return False
+                    planned_reads, unplannable = plan_read_requests(
+                        source_root=source_context.source_root,
+                        index_doc=source_context.planner_index(),
+                        normalized_references=normalized_references,
+                    )
+                    if not planned_reads or unplannable:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="source_inspection_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "draft_missing_reference_read_plan_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "mode": "draft_missing_reference_repair",
+                                    "requested_reference_count": len(requested_references),
+                                    "planned_read_count": len(planned_reads),
+                                    "unplannable_reference_count": len(unplannable),
+                                    "source_tree_hash": source_context.source_tree_hash,
+                                },
+                            )
+                        )
+                        return False
+                    source_requests = [
+                        CodeEditSourceInspectionRequest(
+                            operation="read_file",
+                            path=request.path,
+                            start_line=request.start_line,
+                            max_lines=request.max_lines,
+                            rationale=f"draft_missing_reference:{request.reason}",
+                        )
+                        for request in planned_reads
+                    ]
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_requested",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "draft_missing_reference_inspection_requested",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "mode": "draft_missing_reference_repair",
+                                "source_tree_hash": source_context.source_tree_hash,
+                                "requests": [request.to_event_doc() for request in source_requests],
+                                "request_hash": sha256_json(
+                                    {"requests": [request.to_event_doc() for request in source_requests]}
+                                ),
+                            },
+                        )
+                    )
+                    try:
+                        batch = resolve_source_inspection_requests(
+                            source_context,
+                            source_requests,
+                            already_read_paths=tuple(sorted(read_paths)),
+                            max_files=self.builder.config.code_edit_source_inspection_max_files,
+                            max_file_bytes=self.builder.config.code_edit_source_inspection_file_bytes,
+                            max_total_bytes=max(
+                                0,
+                                self.builder.config.code_edit_source_inspection_total_bytes
+                                - source_bytes_returned,
+                            ),
+                            max_search_matches=self.builder.config.code_edit_source_inspection_search_matches,
+                            source_access_v2=True,
+                            already_read_ranges=read_ranges,
+                            max_ranges_per_path=int(
+                                getattr(
+                                    self.builder.config,
+                                    "code_edit_source_inspection_max_ranges_per_path",
+                                    3,
+                                )
+                            ),
+                        )
+                    except CodeEditBuildError as exc:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="source_inspection_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "draft_missing_reference_resolution_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "mode": "draft_missing_reference_repair",
+                                    "error": safe_event_error_text(exc),
+                                    "source_tree_hash": source_context.source_tree_hash,
+                                },
+                            )
+                        )
+                        return False
+                    if batch.bytes_returned <= 0:
+                        return False
+                    source_bytes_returned += batch.bytes_returned
+                    read_paths = set(batch.read_paths)
+                    read_ranges = dict(batch.read_ranges)
+                    source_inspection_context = _merge_source_inspection_context(
+                        source_inspection_context,
+                        batch.model_context,
+                        total_bytes=source_bytes_returned,
+                        read_paths=read_paths,
+                    )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_resolved",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "draft_missing_reference_inspection_resolved",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "mode": "draft_missing_reference_repair",
+                                **batch.event_doc,
+                            },
+                        )
+                    )
+                    return True
 
                 async def _attempt_candidate_generation_fallback(
                     *,
@@ -5548,6 +5763,11 @@ class CodeEditLoopEngine:
                                     },
                                 )
                             )
+                            if no_viable is not None:
+                                await _attempt_candidate_source_context_repair(
+                                    failure_class=no_viable.failure_class,
+                                    missing_references=no_viable.missing_references,
+                                )
                             fallback_drafts = await _attempt_candidate_generation_fallback(
                                 trigger="no_viable_patch",
                                 reason=no_viable_reason,

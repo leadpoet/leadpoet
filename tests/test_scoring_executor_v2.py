@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import asdict
 import httpx
 import pytest
+import time
 
 from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
-from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.execution_job_manager_v2 import (
+    JOB_SCHEMA_VERSION,
+    PARENT_RECEIPT_GRAPHS_FIELD,
+    ExecutionContextV2,
+    ExecutionJobManagerV2,
+)
 from gateway.tee.scoring_executor import (
     OP_BENCHMARK_ICP_SCORE,
     OP_QUALIFICATION_COMPANY_SCORES,
@@ -20,9 +27,28 @@ from gateway.tee.scoring_executor_v2 import (
     OP_PROVIDER_PREFLIGHT_V2,
     OP_RUN_MODEL_SANDBOX_V2,
     OP_SOURCE_ADD_LEG2_JUDGE_V2,
+    OP_ATTEST_ROUTING_EXPERIMENT_V2,
+    OP_ATTEST_ROUTING_PROVIDER_CALL_V2,
+    OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2,
+    OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2,
     PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
     SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION,
     ScoringExecutorV2,
+)
+from gateway.research_lab.routing_execution_authorization import (
+    ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2,
+    RoutingProviderCallAuthorizationV2,
+    execute_routing_provider_call_authorization_v2,
+    routing_provider_dispatch_job_id_v2,
+)
+from gateway.research_lab.routing_provider_terminal_protected import (
+    build_routing_budget_reservation_v3,
+)
+from research_lab.routing_experiments import ProviderBindingIdentity
+from gateway.research_lab.routing_experiment_attestation import (
+    ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2,
+    build_routing_experiment_attestation_input_v2,
+    routing_experiment_attestation_receipt_output_v2,
 )
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
 from gateway.tee.provider_client_v2 import ProviderClientV2Error
@@ -33,10 +59,17 @@ from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
+    EMPTY_ARTIFACT_ROOT,
+    EMPTY_HOST_OPERATION_ROOT,
+    EMPTY_TRANSPORT_ROOT,
+    build_boot_identity_body,
+    build_receipt_graph,
     build_transport_attempt,
     canonical_json,
+    create_boot_identity,
     sha256_bytes,
     sha256_json,
+    transport_root,
 )
 from research_lab.eval import build_local_private_artifact_manifest
 from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
@@ -50,6 +83,8 @@ from tests.v2_epoch_test_utils import epoch_test_environment
 from tests.test_sourcing_model_semantic_compatibility_v1 import (
     _install_future_tree,
 )
+from tests.test_routing_provider_terminal_protected import _call_fixture
+from tests.routing_experiment_authority_fixture import authority_fixture
 
 
 HASH = "sha256:" + "a" * 64
@@ -1528,3 +1563,833 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(
     assert len(sandbox.hybrid_calls) == len(dev_items)
     assert hybrid_cohort_hash in hybrid_measured.artifact_hashes
     assert overlay_hash in hybrid_measured.artifact_hashes
+
+
+@pytest.mark.asyncio
+async def test_routing_experiment_attestation_operation_is_isolated_from_provider_execution(monkeypatch):
+    fixture = authority_fixture()
+    payload = build_routing_experiment_attestation_input_v2(
+        spec_doc=fixture["spec"].to_dict(),
+        evaluation_doc=fixture["evaluation"].to_dict(),
+        gold_label_authority=fixture["labels"],
+        artifact_lineage=fixture["lineage"],
+        execution_envelope=fixture["execution_envelope"],
+        decision_receipts=fixture["decisions"],
+        provider_attempts=fixture["attempts"],
+        budget_events=fixture["budgets"],
+    )
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr("gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network)
+    provider_calls = []
+    executor = ScoringExecutorV2(
+        provider_execute=lambda request: provider_calls.append(request) or {},
+        retry_policy_hashes={},
+    )
+    try:
+        result = await executor(
+            OP_ATTEST_ROUTING_EXPERIMENT_V2,
+            payload,
+            ExecutionContextV2(
+                job_id="routing-attestation-1",
+                purpose=ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2,
+                epoch_id=24000,
+            ),
+        )
+    finally:
+        executor.close()
+    assert result.output == routing_experiment_attestation_receipt_output_v2(payload)
+    assert result.artifact_hashes == ()
+    assert provider_calls == []
+
+
+@pytest.mark.asyncio
+async def test_routing_experiment_attestation_operation_rejects_provider_credentials(monkeypatch):
+    fixture = authority_fixture()
+    payload = build_routing_experiment_attestation_input_v2(
+        spec_doc=fixture["spec"].to_dict(),
+        evaluation_doc=fixture["evaluation"].to_dict(),
+        gold_label_authority=fixture["labels"],
+        artifact_lineage=fixture["lineage"],
+        execution_envelope=fixture["execution_envelope"],
+        decision_receipts=fixture["decisions"],
+        provider_attempts=fixture["attempts"],
+        budget_events=fixture["budgets"],
+    )
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr("gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network)
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: {}, retry_policy_hashes={}
+    )
+    try:
+        with pytest.raises(ValueError, match="must not use provider credentials"):
+            await executor(
+                OP_ATTEST_ROUTING_EXPERIMENT_V2,
+                {
+                    **payload,
+                    "_v2_provider_credential_ref_hashes": {"deepline": HASH},
+                },
+                ExecutionContextV2(
+                    job_id="routing-attestation-2",
+                    purpose=ROUTING_EXPERIMENT_ATTESTATION_PURPOSE_V2,
+                    epoch_id=24000,
+                    provider_credential_ref_hashes={"deepline": HASH},
+                ),
+            )
+    finally:
+        executor.close()
+
+
+@pytest.mark.asyncio
+async def test_routing_provider_call_authorization_is_exact_and_has_no_provider_access(monkeypatch):
+    from gateway.research_lab.routing_execution_authorization import (
+        build_routing_provider_authorization_request_v2,
+    )
+    from tests.test_routing_provider_authorization_context import _context
+
+    authority = _context()
+    payload = build_routing_provider_authorization_request_v2(
+        authorization=authority["grant"],
+        artifact_lineage=authority["lineage"],
+        model_binding_observation=authority["observation"],
+        execution_envelope=authority["envelope"],
+        admission_bundle=authority["admission"],
+        prepared_call=authority["prepared"],
+        protected_release_receipt=authority["protected_receipt"],
+    )
+
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr("gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network)
+    provider_calls = []
+    executor = ScoringExecutorV2(
+        provider_execute=lambda request: provider_calls.append(request) or {},
+        retry_policy_hashes={},
+        routing_artifact_lineage=authority["lineage"],
+        routing_binding_catalog=authority["catalog"],
+        routing_unit_dataset=authority["unit_dataset"],
+    )
+    parent_receipts = (
+        authority["observation"].signed_receipt,
+        authority["protected_receipt"],
+    )
+    try:
+        result = await executor(
+            OP_ATTEST_ROUTING_PROVIDER_CALL_V2,
+            payload,
+            ExecutionContextV2(
+                job_id="routing-authorization-job",
+                purpose=ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2,
+                epoch_id=24000,
+                parent_receipt_hashes=tuple(
+                    receipt["receipt_hash"] for receipt in parent_receipts
+                ),
+                external_receipt_graphs=[
+                    {"receipts": [dict(receipt) for receipt in parent_receipts]}
+                ],
+            ),
+        )
+    finally:
+        executor.close()
+    assert result.output == execute_routing_provider_call_authorization_v2(
+        authority["grant"].to_dict(),
+        authorization_job_id="routing-authorization-job",
+    )
+    assert result.artifact_hashes == ()
+    assert provider_calls == []
+
+
+@pytest.mark.asyncio
+async def test_protected_routing_terminal_executor_uses_reviewed_catalog_and_receipt_output():
+    from gateway.research_lab.routing_provider_terminal_protected import (
+        ROUTING_PROVIDER_TERMINAL_RESULT_SCHEMA_V2,
+    )
+
+    compiler, prepared, request, proof, result, record, boot, body, _key, auth_boot = _call_fixture(
+        {"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}}
+    )
+    prepared_payload = asdict(prepared)
+    prepared_payload["binding"] = prepared.binding.to_dict()
+    payload = {
+        "schema_version": "leadpoet.routing_provider_terminal_request.v2",
+        "authorization_proof": proof,
+        "prepared_call": prepared_payload,
+        "broker_request": request,
+        "broker_result": result,
+        "provider_record": record,
+        "raw_response_body_b64": base64.b64encode(body).decode(),
+    }
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider transport must not run"),
+        retry_policy_hashes={"deepline": prepared.retry_policy_hash},
+        routing_binding_catalog=compiler.binding_catalog,
+        routing_unit_dataset=compiler.unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: boot,
+    )
+    context = ExecutionContextV2(
+        job_id=proof["authorization_result"]["authorization_job_id"],
+        purpose="research_lab.routing_provider_evidence.v2",
+        epoch_id=1,
+        parent_receipt_hashes=(proof["authorization_receipt"]["receipt_hash"],),
+    )
+    try:
+        output = await executor(OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2, payload, context)
+    finally:
+        executor.close()
+    assert output.output["schema_version"] == ROUTING_PROVIDER_TERMINAL_RESULT_SCHEMA_V2
+    assert output.receipt_output == output.output
+    assert output.output["projection"]["outcome"] == "source_miss"
+
+
+def _protected_dispatch_fixture():
+    """Return a complete dispatch payload with the exact V3 budget document."""
+
+    compiler, prepared, request, proof, result, record, boot, body, _key, auth_boot = _call_fixture(
+        {"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}}
+    )
+    prepared_payload = asdict(prepared)
+    prepared_payload["binding"] = prepared.binding.to_dict()
+    authorization = RoutingProviderCallAuthorizationV2.from_mapping(
+        proof["authorization"]
+    )
+    reservation = build_routing_budget_reservation_v3(
+        authorization=authorization,
+        prepared_call=prepared,
+        lease_seconds=5,
+    )
+    payload = {
+        "schema_version": "leadpoet.routing_provider_dispatch_request.v2",
+        "authorization_proof": proof,
+        "prepared_call": prepared_payload,
+        "broker_request": request,
+        "budget_reservation": reservation,
+    }
+    context = ExecutionContextV2(
+        job_id=request["job_id"],
+        purpose="research_lab.routing_provider_evidence.v2",
+        epoch_id=1,
+        parent_receipt_hashes=(proof["authorization_receipt"]["receipt_hash"],),
+        external_receipt_graphs=[{"receipts": [proof["authorization_receipt"]]}],
+    )
+    return {
+        "compiler": compiler,
+        "prepared": prepared,
+        "request": request,
+        "proof": proof,
+        "result": result,
+        "record": record,
+        "boot": boot,
+        "auth_boot": auth_boot,
+        "payload": payload,
+        "context": context,
+        "reservation": reservation,
+    }
+
+
+def _protected_budget_transport_result(
+    request, reservation, *, document=None, http_status=200
+):
+    if document is None:
+        document = {
+            "schema_version": "leadpoet.research_lab.routing_budget_reservation_result.v3",
+            "reserved": True,
+            "idempotent": False,
+            "reservation_id": reservation["reservation_id"],
+            "event_key": reservation["event_key"],
+            "experiment_hash": reservation["experiment_hash"],
+            "binding_id": reservation["binding_id"],
+            "claim_key": reservation["claim_key"],
+            "claim_generation": reservation["claim_generation"],
+            "credit_microunits": reservation["credit_microunits"],
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+        }
+    response_body = canonical_json(document).encode()
+    request_body = base64.b64decode(request["body_b64"], validate=True)
+    attempt = build_transport_attempt(
+        request_id="b" * 32,
+        logical_operation_id=request["logical_operation_id"],
+        job_id=request["job_id"],
+        purpose=request["purpose"],
+        provider_id=request["provider_id"],
+        attempt_number=request["attempt_number"],
+        method=request["method"],
+        destination_host="supabase.example.com",
+        destination_port=443,
+        path_hash=HASH,
+        nonsecret_headers_hash=HASH,
+        body_hash=sha256_bytes(request_body),
+        credential_ref_hash=HASH,
+        retry_policy_hash=request["retry_policy_hash"],
+        timeout_ms=request["timeout_ms"],
+        started_at="2026-08-19T12:00:00Z",
+        terminal_status="authenticated_response",
+        http_status=http_status,
+        response_hash=sha256_bytes(response_body),
+        request_artifact_hash=HASH,
+        response_artifact_hash=HASH,
+        tls_peer_chain_hash=HASH,
+        tls_protocol="TLSv1.3",
+        failure_code=None,
+        completed_at="2026-08-19T12:00:01Z",
+    )
+    return {
+        "terminal_status": "authenticated_response",
+        "http_status": http_status,
+        "headers": {},
+        "body_b64": base64.b64encode(response_body).decode(),
+        "transport_attempt": attempt,
+    }
+
+
+@pytest.mark.asyncio
+async def test_protected_routing_dispatch_calls_coordinator_only_after_authority(
+    monkeypatch,
+):
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr(
+        "gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network
+    )
+    compiler, prepared, request, proof, result, record, boot, body, _key, _auth_boot = _call_fixture(
+        {"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}}
+    )
+    prepared_payload = asdict(prepared)
+    prepared_payload["binding"] = prepared.binding.to_dict()
+    authorization = RoutingProviderCallAuthorizationV2.from_mapping(
+        proof["authorization"]
+    )
+    budget_reservation = build_routing_budget_reservation_v3(
+        authorization=authorization,
+        prepared_call=prepared,
+        lease_seconds=5,
+    )
+    payload = {
+        "schema_version": "leadpoet.routing_provider_dispatch_request.v2",
+        "authorization_proof": proof,
+        "prepared_call": prepared_payload,
+        "broker_request": request,
+        "budget_reservation": budget_reservation,
+    }
+    provider_calls = []
+
+    def budget_result(compiled_request):
+        response_document = {
+            "schema_version": "leadpoet.research_lab.routing_budget_reservation_result.v3",
+            "reserved": True,
+            "idempotent": False,
+            "reservation_id": budget_reservation["reservation_id"],
+            "event_key": budget_reservation["event_key"],
+            "experiment_hash": budget_reservation["experiment_hash"],
+            "binding_id": budget_reservation["binding_id"],
+            "claim_key": budget_reservation["claim_key"],
+            "claim_generation": budget_reservation["claim_generation"],
+            "credit_microunits": budget_reservation["credit_microunits"],
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        response_body = canonical_json(response_document).encode()
+        attempt = build_transport_attempt(
+            request_id="b" * 32,
+            logical_operation_id=compiled_request["logical_operation_id"],
+            job_id=compiled_request["job_id"],
+            purpose=compiled_request["purpose"],
+            provider_id=compiled_request["provider_id"],
+            attempt_number=compiled_request["attempt_number"],
+            method=compiled_request["method"],
+            destination_host="supabase.example.com",
+            destination_port=443,
+            path_hash=HASH,
+            nonsecret_headers_hash=HASH,
+            body_hash=sha256_bytes(
+                base64.b64decode(compiled_request["body_b64"], validate=True)
+            ),
+            credential_ref_hash=HASH,
+            retry_policy_hash=compiled_request["retry_policy_hash"],
+            timeout_ms=compiled_request["timeout_ms"],
+            started_at="2026-08-19T12:00:00Z",
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=sha256_bytes(response_body),
+            request_artifact_hash=HASH,
+            response_artifact_hash=HASH,
+            tls_peer_chain_hash=HASH,
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at="2026-08-19T12:00:01Z",
+        )
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "headers": {},
+            "body_b64": base64.b64encode(response_body).decode(),
+            "transport_attempt": attempt,
+        }
+
+    def provider_execute(compiled_request):
+        provider_calls.append(dict(compiled_request))
+        if compiled_request["provider_id"] == "supabase":
+            return budget_result(compiled_request)
+        return {**result, "routing_provider_record": record}
+
+    executor = ScoringExecutorV2(
+        provider_execute=provider_execute,
+        retry_policy_hashes={"deepline": prepared.retry_policy_hash, "supabase": HASH},
+        routing_binding_catalog=compiler.binding_catalog,
+        routing_unit_dataset=compiler.unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: boot,
+    )
+    context = ExecutionContextV2(
+        job_id=request["job_id"],
+        purpose="research_lab.routing_provider_evidence.v2",
+        epoch_id=1,
+        parent_receipt_hashes=(proof["authorization_receipt"]["receipt_hash"],),
+        external_receipt_graphs=[{"receipts": [proof["authorization_receipt"]]}],
+    )
+    try:
+        output = await executor(
+            OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2, payload, context
+        )
+        forged = dict(payload)
+        forged["broker_request"] = {**request, "url": request["url"] + "?forged=1"}
+        with pytest.raises(ValueError, match="authorization"):
+            await executor(
+                OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2, forged, context
+            )
+    finally:
+        executor.close()
+    assert len(provider_calls) == 2
+    assert [call["provider_id"] for call in provider_calls] == [
+        "supabase",
+        "deepline",
+    ]
+    assert output.output["projection"]["outcome"] == "source_miss"
+    assert output.receipt_output == output.output
+    assert "routing_provider_record" not in output.output
+    assert "body_b64" not in output.output
+    assert len(output.transport_attempts) == 2
+    assert output.transport_attempts[0]["provider_id"] == "supabase"
+    assert output.transport_attempts[1]["provider_id"] == "deepline"
+    budget_proof = output.output["budget_reservation"]
+    assert set(budget_proof) == {
+        "schema_version",
+        "reservation_id",
+        "event_key",
+        "experiment_hash",
+        "binding_id",
+        "claim_key",
+        "claim_generation",
+        "credit_microunits",
+        "lease_expires_at",
+        "response_hash",
+        "transport_attempt_hash",
+    }
+    assert "body_b64" not in budget_proof
+    assert "credential_ref" not in budget_proof
+    assert "supabase.example.com" not in repr(budget_proof)
+
+
+@pytest.mark.asyncio
+async def test_protected_routing_dispatch_rejects_missing_or_tampered_budget_before_provider(
+    monkeypatch,
+):
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr(
+        "gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network
+    )
+    fixture = _protected_dispatch_fixture()
+    provider_calls = []
+    executor = ScoringExecutorV2(
+        provider_execute=lambda request: provider_calls.append(request),
+        retry_policy_hashes={"deepline": fixture["prepared"].retry_policy_hash, "supabase": HASH},
+        routing_binding_catalog=fixture["compiler"].binding_catalog,
+        routing_unit_dataset=fixture["compiler"].unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: fixture["boot"],
+    )
+    try:
+        missing = dict(fixture["payload"])
+        del missing["budget_reservation"]
+        with pytest.raises(ValueError, match="payload is invalid"):
+            await executor(
+                OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2,
+                missing,
+                fixture["context"],
+            )
+
+        tampered = dict(fixture["payload"])
+        tampered["budget_reservation"] = {
+            **fixture["reservation"],
+            "credit_microunits": fixture["reservation"]["credit_microunits"] + 1,
+        }
+        with pytest.raises(ValueError, match="authorization"):
+            await executor(
+                OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2,
+                tampered,
+                fixture["context"],
+            )
+    finally:
+        executor.close()
+    assert provider_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["transport", "malformed", "identity"])
+async def test_protected_routing_dispatch_reservation_failure_never_calls_paid_provider(
+    monkeypatch, failure
+):
+    class _Network:
+        def install(self):
+            return None
+
+        def restore(self):
+            return None
+
+    monkeypatch.setattr(
+        "gateway.tee.scoring_executor_v2.SecureQualificationNetworkV2", _Network
+    )
+    fixture = _protected_dispatch_fixture()
+    provider_calls = []
+
+    def provider_execute(request):
+        provider_calls.append(dict(request))
+        if request["provider_id"] != "supabase":
+            pytest.fail("paid provider was called after failed reservation")
+        if failure == "transport":
+            return _transport_failure_result(request, request_id="c" * 32)
+        if failure == "malformed":
+            return _protected_budget_transport_result(
+                request, fixture["reservation"], document={}
+            )
+        document = {
+            "schema_version": "leadpoet.research_lab.routing_budget_reservation_result.v3",
+            "reserved": True,
+            "idempotent": False,
+            "reservation_id": "routing-reservation:forged",
+            "event_key": fixture["reservation"]["event_key"],
+            "experiment_hash": fixture["reservation"]["experiment_hash"],
+            "binding_id": fixture["reservation"]["binding_id"],
+            "claim_key": fixture["reservation"]["claim_key"],
+            "claim_generation": fixture["reservation"]["claim_generation"],
+            "credit_microunits": fixture["reservation"]["credit_microunits"],
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        return _protected_budget_transport_result(
+            request, fixture["reservation"], document=document
+        )
+
+    executor = ScoringExecutorV2(
+        provider_execute=provider_execute,
+        retry_policy_hashes={"deepline": fixture["prepared"].retry_policy_hash, "supabase": HASH},
+        routing_binding_catalog=fixture["compiler"].binding_catalog,
+        routing_unit_dataset=fixture["compiler"].unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: fixture["boot"],
+    )
+    try:
+        with pytest.raises(ValueError, match="budget reservation"):
+            await executor(
+                OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2,
+                fixture["payload"],
+                fixture["context"],
+            )
+    finally:
+        executor.close()
+    assert [request["provider_id"] for request in provider_calls] == ["supabase"]
+
+
+def test_protected_routing_dispatch_job_manager_commits_budget_and_paid_attempts():
+    """The dispatch receipt keeps the auth parent separate and commits both calls."""
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    fixture = _protected_dispatch_fixture()
+    prepared = fixture["prepared"]
+    proof = fixture["proof"]
+    payload_document = {
+        **fixture["payload"],
+        PARENT_RECEIPT_GRAPHS_FIELD: [
+            build_receipt_graph(
+                root_receipt_hash=proof["authorization_receipt"]["receipt_hash"],
+                boot_identities=[fixture["auth_boot"]],
+                receipts=[proof["authorization_receipt"]],
+                transport_attempts=[],
+            )
+        ],
+    }
+    payload = canonical_json(payload_document).encode()
+    key = Ed25519PrivateKey.generate()
+    pubkey = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ).hex()
+    manager_boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_scoring",
+            physical_role="gateway_scoring",
+            commit_sha="c" * 40,
+            pcr0="d" * 96,
+            build_manifest_hash=HASH,
+            dependency_lock_hash=HASH,
+            config_hash=HASH,
+            boot_nonce="e" * 32,
+            signing_pubkey=pubkey,
+            transport_pubkey="f" * 64,
+            transport_certificate_hash=HASH,
+            attestation_user_data_hash=HASH,
+            issued_at="2026-08-19T12:00:00Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"manager-attestation").decode(),
+    )
+    calls = []
+
+    def provider_execute(request):
+        calls.append(dict(request))
+        if request["provider_id"] == "supabase":
+            return _protected_budget_transport_result(
+                request, fixture["reservation"]
+            )
+        return {
+            **fixture["result"],
+            "routing_provider_record": fixture["record"],
+        }
+
+    executor = ScoringExecutorV2(
+        provider_execute=provider_execute,
+        retry_policy_hashes={"deepline": prepared.retry_policy_hash, "supabase": HASH},
+        routing_binding_catalog=fixture["compiler"].binding_catalog,
+        routing_unit_dataset=fixture["compiler"].unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: fixture["boot"],
+    )
+    manager = ExecutionJobManagerV2(
+        boot_identity_supplier=lambda: manager_boot,
+        sign_digest=key.sign,
+        operations={
+            OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2: {
+                "research_lab.routing_provider_evidence.v2"
+            }
+        },
+        executor=executor,
+        worker_count=1,
+    )
+    job_id = routing_provider_dispatch_job_id_v2(proof)
+    manifest = {
+        "schema_version": JOB_SCHEMA_VERSION,
+        "job_id": job_id,
+        "operation": OP_PROTECTED_ROUTING_PROVIDER_DISPATCH_V2,
+        "purpose": "research_lab.routing_provider_evidence.v2",
+        "epoch_id": 1,
+        "sequence": 1,
+        "payload_sha256": sha256_bytes(payload),
+        "payload_size_bytes": len(payload),
+        "parent_receipt_hashes": [proof["authorization_receipt"]["receipt_hash"]],
+        "input_artifact_hashes": [],
+        "provider_credential_profile": "default",
+        "provider_credential_ref_hashes": {},
+    }
+    try:
+        manager.submit(manifest)
+        manager.put_chunk(
+            job_id=job_id,
+            offset=0,
+            data_b64=base64.b64encode(payload).decode(),
+            chunk_sha256=sha256_bytes(payload),
+        )
+        manager.seal(job_id)
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            status = manager.status(job_id)
+            if status["state"] in {"succeeded", "failed"}:
+                break
+            time.sleep(0.01)
+        assert status["state"] == "succeeded"
+        receipt = manager.receipt(job_id)
+        attempts = manager.transport_attempts(job_id)
+        assert [item["provider_id"] for item in calls] == ["supabase", "deepline"]
+        assert [item["provider_id"] for item in attempts] == ["supabase", "deepline"]
+        assert all(item["job_id"] == job_id for item in attempts)
+        assert all(
+            item["purpose"] == "research_lab.routing_provider_evidence.v2"
+            or item["purpose"] == "research_lab.routing_budget_reservation.v3"
+            for item in attempts
+        )
+        assert receipt["job_id"] == job_id
+        assert receipt["parent_receipt_hashes"] == [
+            proof["authorization_receipt"]["receipt_hash"]
+        ]
+        assert receipt["transport_root"] == transport_root(attempts)
+        assert receipt["transport_root"] != EMPTY_TRANSPORT_ROOT
+    finally:
+        executor.close()
+
+
+@pytest.mark.asyncio
+async def test_protected_routing_terminal_executor_fails_closed_without_reviewed_catalog():
+    compiler, prepared, request, proof, result, record, boot, body, _key, _auth_boot = _call_fixture(
+        {"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}}
+    )
+    prepared_payload = asdict(prepared)
+    prepared_payload["binding"] = prepared.binding.to_dict()
+    payload = {
+        "schema_version": "leadpoet.routing_provider_terminal_request.v2",
+        "authorization_proof": proof,
+        "prepared_call": prepared_payload,
+        "broker_request": request,
+        "broker_result": result,
+        "provider_record": record,
+        "raw_response_body_b64": base64.b64encode(body).decode(),
+    }
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider transport must not run"),
+        retry_policy_hashes={"deepline": prepared.retry_policy_hash},
+    )
+    try:
+        with pytest.raises(ValueError, match="authorities are unavailable"):
+            await executor(
+                OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2,
+                payload,
+                ExecutionContextV2(
+                    job_id=proof["authorization_result"]["authorization_job_id"],
+                    purpose="research_lab.routing_provider_evidence.v2",
+                    epoch_id=1,
+                    parent_receipt_hashes=(proof["authorization_receipt"]["receipt_hash"],),
+                ),
+            )
+    finally:
+        executor.close()
+
+
+def test_protected_routing_terminal_job_manager_uses_standard_receipt_roots():
+    """The manager, not the terminal normalizer, signs the final receipt."""
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    compiler, prepared, request, proof, result, record, boot, body, _key, auth_boot = _call_fixture(
+        {"result": {"data": {"jobs": []}}, "billing": {"credits_charged": 0}}
+    )
+    prepared_payload = asdict(prepared)
+    prepared_payload["binding"] = prepared.binding.to_dict()
+    payload_document = {
+        "schema_version": "leadpoet.routing_provider_terminal_request.v2",
+        "authorization_proof": proof,
+        "prepared_call": prepared_payload,
+        "broker_request": request,
+        "broker_result": result,
+        "provider_record": record,
+        "raw_response_body_b64": base64.b64encode(body).decode(),
+        PARENT_RECEIPT_GRAPHS_FIELD: [
+            build_receipt_graph(
+                root_receipt_hash=proof["authorization_receipt"]["receipt_hash"],
+                boot_identities=[auth_boot],
+                receipts=[proof["authorization_receipt"]],
+                transport_attempts=[],
+            )
+        ],
+    }
+    payload = canonical_json(payload_document).encode()
+    key = Ed25519PrivateKey.generate()
+    pubkey = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ).hex()
+    manager_boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_scoring",
+            physical_role="gateway_scoring",
+            commit_sha="c" * 40,
+            pcr0="d" * 96,
+            build_manifest_hash=HASH,
+            dependency_lock_hash=HASH,
+            config_hash=HASH,
+            boot_nonce="e" * 32,
+            signing_pubkey=pubkey,
+            transport_pubkey="f" * 64,
+            transport_certificate_hash=HASH,
+            attestation_user_data_hash=HASH,
+            issued_at="2026-08-19T12:00:00Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"manager-attestation").decode(),
+    )
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider transport must not run"),
+        retry_policy_hashes={"deepline": prepared.retry_policy_hash},
+        routing_binding_catalog=compiler.binding_catalog,
+        routing_unit_dataset=compiler.unit_dataset,
+        routing_coordinator_boot_identity_supplier=lambda: boot,
+    )
+    manager = ExecutionJobManagerV2(
+        boot_identity_supplier=lambda: manager_boot,
+        sign_digest=key.sign,
+        operations={
+            OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2: {
+                "research_lab.routing_provider_evidence.v2"
+            }
+        },
+        executor=executor,
+        worker_count=1,
+    )
+    job_id = proof["authorization_result"]["authorization_job_id"]
+    manifest = {
+        "schema_version": JOB_SCHEMA_VERSION,
+        "job_id": job_id,
+        "operation": OP_PROTECTED_ROUTING_PROVIDER_TERMINAL_V2,
+        "purpose": "research_lab.routing_provider_evidence.v2",
+        "epoch_id": 1,
+        "sequence": 1,
+        "payload_sha256": sha256_bytes(payload),
+        "payload_size_bytes": len(payload),
+        "parent_receipt_hashes": [proof["authorization_receipt"]["receipt_hash"]],
+        "input_artifact_hashes": [],
+        "provider_credential_profile": "default",
+        "provider_credential_ref_hashes": {},
+    }
+    try:
+        manager.submit(manifest)
+        manager.put_chunk(
+            job_id=job_id,
+            offset=0,
+            data_b64=base64.b64encode(payload).decode(),
+            chunk_sha256=sha256_bytes(payload),
+        )
+        manager.seal(job_id)
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            status = manager.status(job_id)
+            if status["state"] in {"succeeded", "failed"}:
+                break
+            time.sleep(0.01)
+        assert status["state"] == "succeeded"
+        receipt = manager.receipt(job_id)
+        assert receipt["input_root"] == sha256_bytes(payload)
+        output_bytes = base64.b64decode(
+            manager.result_chunk(job_id=job_id)["data_b64"]
+        )
+        assert receipt["output_root"] == sha256_bytes(output_bytes)
+        assert receipt["parent_receipt_hashes"] == [
+            proof["authorization_receipt"]["receipt_hash"]
+        ]
+    finally:
+        executor.close()

@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 import re
 import stat
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from gateway.tee.normalize_attested_runtime import normalized_file_mode
@@ -351,7 +351,12 @@ def _parents(module_name: str) -> Iterable[str]:
         yield ".".join(parts[:index])
 
 
-def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str, ...]:
+def discover_modules(
+    index: Dict[str, Path],
+    roots: Sequence[str],
+    *,
+    candidate_import_resolver: Callable[[Path, str], Set[str]] = _candidate_imports,
+) -> Tuple[str, ...]:
     roots = tuple(dict.fromkeys(roots))
     missing_roots = [module for module in roots if module not in index]
     if missing_roots:
@@ -370,7 +375,7 @@ def discover_modules(index: Dict[str, Path], roots: Sequence[str]) -> Tuple[str,
         for parent in _parents(module):
             if parent in index and parent not in discovered:
                 pending.append(parent)
-        for candidate in _candidate_imports(path, module):
+        for candidate in candidate_import_resolver(path, module):
             if candidate in index and candidate not in discovered:
                 pending.append(candidate)
                 continue
@@ -442,8 +447,31 @@ def _measured_data_files(
 
 def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     index = build_module_index(gateway_root=gateway_root, source_root=source_root)
+
+    # The role closures overlap heavily. Keep parsing caches local to this
+    # manifest build so repeated role discovery is cheap without allowing a
+    # long-lived process to reuse results after source files change.
+    candidate_import_cache: Dict[Tuple[Path, str], Set[str]] = {}
+
+    def cached_candidate_imports(path: Path, module_name: str) -> Set[str]:
+        key = (path, module_name)
+        if key not in candidate_import_cache:
+            candidate_import_cache[key] = _candidate_imports(path, module_name)
+        return candidate_import_cache[key]
+
+    environment_name_cache: Dict[Path, Set[str]] = {}
+
+    def cached_environment_names(path: Path) -> Set[str]:
+        if path not in environment_name_cache:
+            environment_name_cache[path] = _literal_environment_names(path)
+        return environment_name_cache[path]
+
     role_modules = {
-        role: discover_modules(index, roots)
+        role: discover_modules(
+            index,
+            roots,
+            candidate_import_resolver=cached_candidate_imports,
+        )
         for role, roots in sorted(ROLE_ENTRYPOINT_MODULES.items())
     }
     modules = tuple(sorted({module for values in role_modules.values() for module in values}))
@@ -456,7 +484,7 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     files_by_module: Dict[str, dict] = {}
     for module in modules:
         path = index[module]
-        environment_variables.update(_literal_environment_names(path))
+        environment_variables.update(cached_environment_names(path))
         staged_path = _staged_relative_path(
             path,
             gateway_root=gateway_root,
@@ -480,7 +508,7 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
             {
                 name
                 for module in discovered
-                for name in _literal_environment_names(index[module])
+                for name in cached_environment_names(index[module])
             }
         )
         role_body = {

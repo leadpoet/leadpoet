@@ -1181,8 +1181,14 @@ def test_adapter_dependency_abi_drift_is_quarantined(
 
 def _observe_future_runtime_dependencies(
     root: Path,
-    policy: dict,
+    compatibility_receipt: dict,
+    *,
+    execution_job_id: str,
 ) -> dict:
+    observation_plan = model_sandbox_v2._runtime_probe_observation_plan_v1(
+        compatibility_receipt,
+        execution_job_id=execution_job_id,
+    )
     completed = subprocess.run(
         [
             sys.executable,
@@ -1195,12 +1201,7 @@ def _observe_future_runtime_dependencies(
         ],
         input=json.dumps(
             {
-                "observation_plan": {
-                    "schema_version": (
-                        "leadpoet.consumer-runtime-observation-plan.v1"
-                    ),
-                    "runtime_invariants": policy["runtime_invariants"],
-                }
+                "observation_plan": observation_plan,
             }
         ),
         text=True,
@@ -1222,17 +1223,21 @@ def _observe_future_runtime_dependencies(
         "qualification_outcome_protocol",
     }
     assert observed["runtime_observation"]["qualification_outcome_protocol"] is None
-    return observed
+    return {**observed, "observation_plan": observation_plan}
 
 
 def test_adapter_dependency_runtime_protocols_match_consumer_expectations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy, _policy_hash = _install_future_tree(tmp_path, monkeypatch)
+    _install_future_tree(tmp_path, monkeypatch)
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
-    observed = _observe_future_runtime_dependencies(tmp_path, policy)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
 
     probe = model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
         observed["runtime_observation"],
@@ -1243,6 +1248,7 @@ def test_adapter_dependency_runtime_protocols_match_consumer_expectations(
         expected_image_digest=manifest["image_digest"],
         expected_module_name="research_lab_adapter",
         expected_callable_name="adapter_metadata",
+        observation_plan=observed["observation_plan"],
     )
 
     assert probe["invariants"]["adapter_dependencies"] == {
@@ -1267,7 +1273,7 @@ def test_adapter_dependency_runtime_protocol_drift_is_quarantined(
     original: str,
     replacement: str,
 ) -> None:
-    policy, _policy_hash = _install_future_tree(tmp_path, monkeypatch)
+    _install_future_tree(tmp_path, monkeypatch)
     path = tmp_path / relative
     path.write_text(
         path.read_text(encoding="utf-8").replace(original, replacement),
@@ -1275,7 +1281,11 @@ def test_adapter_dependency_runtime_protocol_drift_is_quarantined(
     )
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
-    observed = _observe_future_runtime_dependencies(tmp_path, policy)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
 
     with pytest.raises(
         model_sandbox_v2.ModelSandboxV2Error,
@@ -1290,6 +1300,7 @@ def test_adapter_dependency_runtime_protocol_drift_is_quarantined(
             expected_image_digest=manifest["image_digest"],
             expected_module_name="research_lab_adapter",
             expected_callable_name="adapter_metadata",
+            observation_plan=observed["observation_plan"],
         )
 
 
@@ -1297,7 +1308,7 @@ def test_adapter_dependency_bodies_and_unrelated_helpers_remain_additive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy, _policy_hash = _install_future_tree(tmp_path, monkeypatch)
+    _install_future_tree(tmp_path, monkeypatch)
     mutations = {
         "sourcing_model/discovery.py": (
             "    return str(source)",
@@ -1327,7 +1338,11 @@ def test_adapter_dependency_bodies_and_unrelated_helpers_remain_additive(
     manifest = _manifest(tmp_path)
     receipt = _admit(tmp_path, manifest)
     assert receipt["admission_mode"] == "semantic_v1"
-    observed = _observe_future_runtime_dependencies(tmp_path, policy)
+    observed = _observe_future_runtime_dependencies(
+        tmp_path,
+        receipt,
+        execution_job_id="scoring-v2:run-model-sandbox-v2:" + "1" * 32,
+    )
     model_sandbox_v2._build_consumer_runtime_probe_from_observation_v1(
         observed["runtime_observation"],
         compatibility_receipt=receipt,
@@ -1337,6 +1352,7 @@ def test_adapter_dependency_bodies_and_unrelated_helpers_remain_additive(
         expected_image_digest=manifest["image_digest"],
         expected_module_name="research_lab_adapter",
         expected_callable_name="adapter_metadata",
+        observation_plan=observed["observation_plan"],
     )
 
 
@@ -2304,6 +2320,7 @@ def test_unprofiled_semantic_receipt_cannot_be_relabelled_legacy(
 
 def test_runtime_metadata_is_cross_bound_to_admitted_source() -> None:
     ready = _ready_adapter_metadata()
+    ready.pop("qualification_outcome_protocol", None)
     ready["scoring_adapter_version"] = "qualification-company-scorer:v1"
     ready["company_fit_decision"] = {
         "contract_id": "company-fit-decision:v1",
@@ -2345,11 +2362,12 @@ def test_runtime_metadata_is_cross_bound_to_admitted_source() -> None:
     ]
     expanded = deepcopy(ready)
     expanded["runtime_capabilities"].append("shell")
-    assert validate_sourcing_adapter_metadata(
-        expanded,
-        expected_semantic_bindings=bindings,
-        require_company_fit_contract=True,
-    ) == expanded
+    with pytest.raises(PrivateModelRuntimeError, match="capability set differs"):
+        validate_sourcing_adapter_metadata(
+            expanded,
+            expected_semantic_bindings=bindings,
+            require_company_fit_contract=True,
+        )
     missing_required = deepcopy(ready)
     missing_required["runtime_capabilities"].remove("resolve_host")
     with pytest.raises(PrivateModelRuntimeError, match="missing a Lab requirement"):

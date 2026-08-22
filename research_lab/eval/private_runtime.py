@@ -2107,6 +2107,10 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model runtime capability set is missing a Lab requirement"
         )
+    if not versioned_qualification and capabilities != required_capabilities:
+        raise PrivateModelRuntimeError(
+            "private model runtime capability set differs from the admitted contract"
+        )
     if not str(document.get("resilience_policy_version") or "").startswith(
         "sourcing-model-resilience:"
     ):

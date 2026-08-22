@@ -1296,6 +1296,102 @@ def test_stage_receipts_form_a_measured_chain_before_root_receipt():
     assert stage["parent_receipt_hashes"] == []
 
 
+def test_routing_authorization_manager_accepts_and_preserves_semantic_parent_order(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        job_manager_v2,
+        "validate_receipt_graphs",
+        lambda *args, **kwargs: None,
+    )
+    parents = [HASH_B, HASH]
+    observed = []
+
+    def _executor(_operation, payload, context):
+        observed.append((payload, context.parent_receipt_hashes))
+        return {"accepted": True}
+
+    manager, _ = _manager(
+        _executor,
+        operations={
+            "attest_routing_provider_call_v2": {
+                "research_lab.routing_provider_evidence.v2"
+            }
+        },
+    )
+    payload = json.dumps(
+        {
+            "input": 3,
+            "parent_receipt_hashes": parents,
+            PARENT_RECEIPT_GRAPHS_FIELD: [
+                {
+                    "root_receipt_hash": HASH_B,
+                    "receipts": [{"receipt_hash": HASH_B}],
+                },
+                {
+                    "root_receipt_hash": HASH,
+                    "receipts": [{"receipt_hash": HASH}],
+                },
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    manifest = _manifest(
+        payload,
+        operation="attest_routing_provider_call_v2",
+        purpose="research_lab.routing_provider_evidence.v2",
+        parent_receipt_hashes=parents,
+    )
+
+    assert _run(manager, payload, manifest)["state"] == "succeeded"
+    assert observed == [
+        (
+            {"input": 3},
+            tuple(parents),
+        )
+    ]
+    assert manager.receipt("score-job-1")["parent_receipt_hashes"] == parents
+
+
+@pytest.mark.parametrize(
+    "payload_parents, manifest_parents",
+    [
+        (None, [HASH_B, HASH]),
+        ([HASH, HASH_B], [HASH_B, HASH]),
+        ([HASH_B, HASH], [HASH, HASH_B]),
+    ],
+)
+def test_routing_authorization_manager_rejects_missing_or_substituted_parent_order_before_executor(
+    payload_parents,
+    manifest_parents,
+):
+    executed = []
+    manager, _ = _manager(
+        lambda *_args: executed.append(True) or {"accepted": True},
+        operations={
+            "attest_routing_provider_call_v2": {
+                "research_lab.routing_provider_evidence.v2"
+            }
+        },
+    )
+    payload_doc = {"input": 3}
+    if payload_parents is not None:
+        payload_doc["parent_receipt_hashes"] = payload_parents
+    payload = json.dumps(
+        payload_doc, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    manifest = _manifest(
+        payload,
+        operation="attest_routing_provider_call_v2",
+        purpose="research_lab.routing_provider_evidence.v2",
+        parent_receipt_hashes=manifest_parents,
+    )
+
+    assert _run(manager, payload, manifest)["state"] == "failed"
+    assert executed == []
+
+
 def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():
     nested_key = Ed25519PrivateKey.generate()
     nested_pubkey = nested_key.public_key().public_bytes(

@@ -2697,6 +2697,7 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     result = _broker(transport).execute(_request())
     assert result == {
         "terminal_status": "transport_failure",
+        "call_count": 1,
         "failure_code": "proxy_failure",
         "failure_stage": "provider_transport",
         "failure_error_type": "RuntimeError",
@@ -3147,6 +3148,47 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
                 body_b64=base64.b64encode(b"").decode("ascii"),
             )
         )
+
+
+def test_routing_budget_sidecar_is_the_only_authless_routing_supabase_call():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    job_id = "routing-dispatch:" + "a" * 32
+    request = _request(
+        logical_operation_id=(
+            f"{job_id}:routing-budget-reservation:" + "b" * 32
+        ),
+        job_id=job_id,
+        purpose="research_lab.routing_provider_evidence.v2",
+        provider_id="supabase",
+        method="POST",
+        url=(
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
+            "research_lab_routing_reserve_budget_v3"
+        ),
+        headers={
+            "accept": "application/json",
+            "content-type": "application/json",
+        },
+        body_b64=base64.b64encode(b'{"p_event_key":"safe"}').decode("ascii"),
+        timeout_ms=5_000,
+    )
+    result = broker.execute(request)
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["headers"]["Authorization"] == (
+        "Bearer supabase-service-role-secret"
+    )
+
+    for changed in (
+        {**request, "url": request["url"].replace("reserve_budget_v3", "promote_v3")},
+        {**request, "method": "GET"},
+        {**request, "logical_operation_id": "routing-budget-reservation:forged"},
+    ):
+        rejected_transport = FakeTransport()
+        with pytest.raises(ProviderBrokerV2Error, match="authorization"):
+            _broker(rejected_transport).execute(changed)
+        assert rejected_transport.calls == []
 
 
 def test_kms_unwrapped_slots_are_provisioned_individually_and_immutably():

@@ -81,12 +81,13 @@ _REQUEST_FIELDS = {
     "timeout_ms",
     "retry_policy_hash",
 }
-_OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
+_OPTIONAL_REQUEST_FIELDS = {"dynamic_route", "routing_authorization"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
 _FAIL_CLOSED_REQUEST_SCHEMA_VERSION = (
     "leadpoet.provider_semantics_fail_closed_request.v2"
 )
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
+_ROUTING_PROVIDER_PURPOSE = "research_lab.routing_provider_evidence.v2"
 _OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
 _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
 _OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
@@ -546,7 +547,14 @@ class ProviderSemanticsAuthorityV2:
                 day=day,
                 cache_recording_enabled=False,
             )
-        bypass_cache = normalized["purpose"] == _PROVIDER_PREFLIGHT_PURPOSE
+        # A measured routing experiment must settle the exact dispatched call.
+        # Reusing a cache row would make the signed billing projection describe
+        # an earlier request, while a caller could still reserve fresh credit.
+        # Keep the ordinary provider cache unchanged for every other purpose.
+        bypass_cache = normalized["purpose"] in {
+            _PROVIDER_PREFLIGHT_PURPOSE,
+            _ROUTING_PROVIDER_PURPOSE,
+        }
         cache_key = (
             (day, fingerprint, normalized["job_id"])
             if bypass_cache
@@ -1247,7 +1255,7 @@ class ProviderSemanticsAuthorityV2:
         if cost_event is not None:
             response_headers.update(self._cost_headers(cost_event))
             evidence_artifacts.add(str(cost_event["event_hash"]))
-        return {
+        response = {
             **result,
             "headers": response_headers,
             "evidence": evidence,
@@ -1256,6 +1264,49 @@ class ProviderSemanticsAuthorityV2:
             ],
             "evidence_artifact_hashes": sorted(evidence_artifacts),
         }
+        if (
+            normalized["purpose"] == _ROUTING_PROVIDER_PURPOSE
+            and result.get("terminal_status") == "authenticated_response"
+        ):
+            # This record is the coordinator-authenticated bridge between the
+            # TLS transport terminal and the protected scoring normalizer.  It
+            # contains commitments only.  The scoring enclave verifies its
+            # signature against the coordinator identity authenticated on the
+            # protected peer channel; a host-supplied identity is never used.
+            boot = dict(self._boot_identity_supplier())
+            attempt = result.get("transport_attempt")
+            if not isinstance(attempt, Mapping):
+                raise ProviderSemanticsV2Error(
+                    "routing provider transport attempt is unavailable"
+                )
+            record = create_signed_provider_evidence_record(
+                body={
+                    "coordinator_boot_identity_hash": boot.get(
+                        "boot_identity_hash"
+                    ),
+                    "request_hash": attempt.get("request_hash"),
+                    "request_fingerprint": fingerprint,
+                    "evidence": "live_unrecorded",
+                    "status": int(result["http_status"]),
+                    "body_hash": sha256_bytes(body),
+                    "encrypted_request_artifact_id": str(
+                        result.get("encrypted_request_artifact_id") or ""
+                    ),
+                    "encrypted_response_artifact_id": str(
+                        result.get("encrypted_artifact_id") or ""
+                    ),
+                    "transport_attempt_hash": attempt.get("attempt_hash"),
+                    "source_record_hash": "",
+                    "issued_at": self._clock(),
+                },
+                coordinator_pubkey=str(boot.get("signing_pubkey") or ""),
+                sign_digest=self._sign_digest,
+            )
+            response["routing_provider_record"] = record
+            response["evidence_artifact_hashes"] = sorted(
+                {*response["evidence_artifact_hashes"], record["record_hash"]}
+            )
+        return response
 
     def _cache_hit(
         self,
@@ -1595,13 +1646,40 @@ class ProviderSemanticsAuthorityV2:
         request_fields = (
             frozenset(request) if isinstance(request, Mapping) else frozenset()
         )
-        if request_fields not in {
-            frozenset(_REQUEST_FIELDS),
-            frozenset(_REQUEST_FIELDS | _OPTIONAL_REQUEST_FIELDS),
-        }:
+        if (
+            not isinstance(request, Mapping)
+            or not frozenset(_REQUEST_FIELDS).issubset(request_fields)
+            or not request_fields.issubset(
+                frozenset(_REQUEST_FIELDS | _OPTIONAL_REQUEST_FIELDS)
+            )
+        ):
             raise ProviderSemanticsV2Error("provider semantics request fields are invalid")
         if request.get("schema_version") != PROVIDER_BROKER_SCHEMA_VERSION:
             raise ProviderSemanticsV2Error("provider semantics schema is invalid")
+        routing_purpose = request.get("purpose") == _ROUTING_PROVIDER_PURPOSE
+        routing_budget_reservation = (
+            routing_purpose
+            and request.get("provider_id") == "supabase"
+            and request.get("method") == "POST"
+            and urlsplit(str(request.get("url") or "")).path
+            == "/rest/v1/rpc/research_lab_routing_reserve_budget_v3"
+            and str(request.get("logical_operation_id") or "").startswith(
+                f"{str(request.get('job_id') or '')}:"
+                "routing-budget-reservation:"
+            )
+            and "routing_authorization" not in request
+        )
+        if (
+            routing_purpose != ("routing_authorization" in request)
+            and not routing_budget_reservation
+        ):
+            raise ProviderSemanticsV2Error(
+                "provider semantics routing authorization scope is invalid"
+            )
+        if routing_purpose and "dynamic_route" in request:
+            raise ProviderSemanticsV2Error(
+                "provider semantics routing call cannot use a dynamic route"
+            )
         headers = request.get("headers")
         if not isinstance(headers, Mapping):
             raise ProviderSemanticsV2Error("provider semantics headers are invalid")

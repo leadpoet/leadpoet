@@ -30,6 +30,7 @@ import json
 import sys
 import os
 import errno
+import re
 import threading
 import time
 import hashlib
@@ -179,6 +180,9 @@ v2_inter_enclave_client = None
 v2_inter_enclave_client_lock = Lock()
 v2_scoring_job_manager = None
 v2_scoring_job_manager_lock = Lock()
+v2_routing_authority_bundle = None
+v2_routing_authority_bundle_lock = Lock()
+v2_routing_authority_pinned_public_keys = None
 v2_autoresearch_job_manager = None
 v2_autoresearch_job_manager_lock = Lock()
 v2_coordinator_job_manager = None
@@ -1579,6 +1583,12 @@ def _v2_supabase_origin(configuration: Dict[str, Any]) -> str:
 
 
 def get_v2_provider_broker():
+    """Build the coordinator broker with the stable routing verifier.
+
+    Routing grants are verified from their complete signed proof.  The
+    singleton can therefore be initialized by any coordinator path and
+    remains restart-safe for later Lab requests.
+    """
     global v2_provider_broker
     with v2_provider_broker_lock:
         if v2_provider_broker is not None:
@@ -1604,7 +1614,6 @@ def get_v2_provider_broker():
             provider_registry_hash,
             provider_routes_for_execution_config,
         )
-
         execution_config = configuration["research_lab_execution_config"]
         routes = provider_routes_for_execution_config(execution_config)
         if configuration.get("provider_registry_hash") != provider_registry_hash(
@@ -1941,6 +1950,30 @@ def _gateway_ancestry_manager_kwargs(runtime: Any) -> Dict[str, Any]:
     }
 
 
+def configure_v2_scoring_routing_authority_bundle(
+    *,
+    bundle: Mapping[str, Any],
+    pinned_public_keys: Mapping[str, str],
+) -> None:
+    """Install a host-supplied offline routing bundle before scoring starts.
+
+    The bundle is verified locally when the scoring manager is built.  This
+    setter is intentionally process-local: no URI, KMS client, or caller
+    supplied verification boolean enters the enclave composition path.
+    """
+
+    global v2_routing_authority_bundle, v2_routing_authority_pinned_public_keys
+    if not isinstance(bundle, Mapping) or not isinstance(pinned_public_keys, Mapping):
+        raise ValueError("routing authority bundle and key pins must be mappings")
+    with v2_routing_authority_bundle_lock:
+        if v2_scoring_job_manager is not None:
+            raise RuntimeError("routing authority bundle must be configured before scoring starts")
+        v2_routing_authority_bundle = deepcopy(dict(bundle))
+        v2_routing_authority_pinned_public_keys = {
+            str(key): str(value) for key, value in pinned_public_keys.items()
+        }
+
+
 def get_v2_scoring_job_manager():
     global v2_scoring_job_manager
     with v2_scoring_job_manager_lock:
@@ -1989,6 +2022,50 @@ def get_v2_scoring_job_manager():
             cgroup_parent=cgroup_parent,
         )
         model_sandbox.self_test()
+        routing_enabled_value = str(
+            os.getenv("RESEARCH_LAB_ROUTING_EXPERIMENT_ENABLED", "false")
+        ).strip().lower()
+        if routing_enabled_value not in {
+            "0",
+            "1",
+            "false",
+            "true",
+            "no",
+            "yes",
+            "off",
+            "on",
+        }:
+            raise RuntimeError(
+                "routing experiment enabled flag is invalid"
+            )
+        routing_enabled = routing_enabled_value in {"1", "true", "yes", "on"}
+        routing_artifact_lineage = None
+        routing_binding_catalog = None
+        routing_unit_dataset = None
+        if routing_enabled:
+            from gateway.research_lab.routing_authority_bundle import (
+                RoutingAuthorityBundleError,
+                load_verified_routing_authority_bundle,
+            )
+            with v2_routing_authority_bundle_lock:
+                authority_bundle = v2_routing_authority_bundle
+                authority_pins = v2_routing_authority_pinned_public_keys
+            if authority_bundle is None or authority_pins is None:
+                raise RuntimeError(
+                    "routing experiments require an offline signed authority bundle"
+                )
+            try:
+                verified_bundle = load_verified_routing_authority_bundle(
+                    authority_bundle,
+                    pinned_public_keys=authority_pins,
+                )
+            except RoutingAuthorityBundleError as exc:
+                raise RuntimeError(
+                    "routing authority bundle failed local verification"
+                ) from exc
+            routing_artifact_lineage = verified_bundle.artifact_lineage
+            routing_binding_catalog = verified_bundle.binding_catalog
+            routing_unit_dataset = verified_bundle.unit_dataset
         executor = ScoringExecutorV2(
             provider_execute=execute_v2_provider_request,
             retry_policy_hashes=retry_hashes,
@@ -1996,6 +2073,14 @@ def get_v2_scoring_job_manager():
             execution_config=configuration["research_lab_execution_config"],
             model_sandbox=model_sandbox,
             artifact_seal=seal_v2_inter_enclave_artifact,
+            routing_artifact_lineage=routing_artifact_lineage,
+            routing_binding_catalog=routing_binding_catalog,
+            routing_unit_dataset=routing_unit_dataset,
+            routing_coordinator_boot_identity_supplier=lambda: (
+                get_v2_peer_registry().peer("gateway_coordinator")[
+                    "boot_identity"
+                ]
+            ),
         )
         v2_scoring_job_manager = ExecutionJobManagerV2(
             boot_identity_supplier=runtime.boot_identity,
@@ -2499,6 +2584,95 @@ def handle_inter_enclave_rpc(
             "gateway_autoresearch",
         }:
             raise ValueError("provider caller role is not authorized")
+        # A routing authorization receipt is meaningful only when its signer
+        # is the exact scoring enclave authenticated by this TLS connection.
+        # The peer document comes from AttestedPeerRegistry; request fields
+        # must never be used as the signer identity.  Ordinary model/provider
+        # calls keep their existing semantics path and do not require this
+        # routing-only trust context.
+        from gateway.tee.provider_broker_v2 import (
+            trusted_routing_peer_boot_identity,
+            validate_routing_authorization_proof_v2,
+        )
+
+        routing_purpose = (
+            isinstance(params, Mapping)
+            and params.get("purpose")
+            == "research_lab.routing_provider_evidence.v2"
+        )
+        routing_budget_reservation = False
+        if (
+            routing_purpose
+            and isinstance(params, Mapping)
+            and params.get("provider_id") == "supabase"
+            and params.get("method") == "POST"
+        ):
+            expected_budget_url = (
+                _v2_supabase_origin(
+                    get_v2_runtime_identity().runtime_configuration()[
+                        "configuration"
+                    ]
+                ).rstrip("/")
+                + "/rest/v1/rpc/research_lab_routing_reserve_budget_v3"
+            )
+            expected_fields = {
+                "schema_version",
+                "logical_operation_id",
+                "job_id",
+                "purpose",
+                "provider_id",
+                "attempt_number",
+                "method",
+                "url",
+                "headers",
+                "body_b64",
+                "timeout_ms",
+                "retry_policy_hash",
+            }
+            logical_operation_id = str(
+                params.get("logical_operation_id") or ""
+            )
+            routing_budget_reservation = (
+                set(params) == expected_fields
+                and params.get("provider_id") == "supabase"
+                and params.get("method") == "POST"
+                and params.get("url") == expected_budget_url
+                and params.get("attempt_number") == 0
+                and params.get("timeout_ms") == 5_000
+                and params.get("headers")
+                == {
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                }
+                and logical_operation_id.startswith(
+                    f"{str(params.get('job_id') or '')}:"
+                    "routing-budget-reservation:"
+                )
+                and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}",
+                    logical_operation_id,
+                )
+                is not None
+            )
+        if routing_purpose:
+            if peer["physical_role"] != "gateway_scoring":
+                raise ValueError(
+                    "routing provider execution requires a scoring peer"
+                )
+            if routing_budget_reservation:
+                # This fixed service-role sidecar can only reserve the exact
+                # V3 routing budget row. The protected scoring operation
+                # constructs its body, and the SQL authority validates the
+                # active queue claim, binding, credit cap, and event identity.
+                return get_v2_provider_semantics_authority().execute(params)
+            trusted_boot = peer.get("boot_identity")
+            with trusted_routing_peer_boot_identity(trusted_boot):
+                validate_routing_authorization_proof_v2(
+                    params.get("routing_authorization"),
+                    params,
+                    trusted_peer_boot_identity=trusted_boot,
+                )
+                return get_v2_provider_semantics_authority().execute(params)
         return get_v2_provider_semantics_authority().execute(params)
     if method == "provider_probe_resolve":
         if active_enclave_role() != "gateway_coordinator":

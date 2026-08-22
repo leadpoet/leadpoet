@@ -49,7 +49,10 @@ from gateway.tee.protected_workflows import (
     load_manifest,
     verify_manifest,
 )
-from research_lab.model_runner_protocol import ExactModelRunnerRegistry
+from research_lab.model_runner_protocol import (
+    ExactModelRunnerRegistration,
+    ExactModelRunnerRegistry,
+)
 from research_lab.routing_experiments import RoutingExperimentArtifactAuthority
 
 
@@ -84,7 +87,6 @@ class ReviewedRoutingReleaseAuthoritySources:
     model_binding_observation: VerifiedRoutingModelBindingRequirements
     protected_release_receipt: Mapping[str, Any]
     artifact_authority: RoutingExperimentArtifactAuthority
-    model_runner_registry: ExactModelRunnerRegistry
     model_verifier: ReviewedModelVerificationAuthority
     evaluation_adapter: ExactModelEvaluationAdapter
     scoring_job_rpc: Any
@@ -97,6 +99,12 @@ class ReviewedRoutingReleaseAuthoritySources:
     execution_envelope_factory: Callable[[Any], RoutingExperimentExecutionEnvelopeV2]
     store_factory: Callable[[], Any]
     protected_workflow_manifest_hash: str
+    model_runner_registry: ExactModelRunnerRegistry | None = None
+    # The registry is rebuilt from these exact, release-published registrations
+    # when supplied.  Keeping the legacy field during the transition lets old
+    # unit fixtures fail closed on the dual-artifact count without making a
+    # caller-provided registry an authority for the new release path.
+    model_runner_registrations: tuple[ExactModelRunnerRegistration, ...] | None = None
 
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -194,7 +202,24 @@ def build_reviewed_routing_release_dependencies(
         raise RoutingReleaseDependencyError(
             "routing release model binding observation is unavailable"
         )
-    if not isinstance(sources.model_runner_registry, ExactModelRunnerRegistry):
+    if sources.model_runner_registrations is not None:
+        registrations = tuple(sources.model_runner_registrations)
+        if len(registrations) != 2:
+            raise RoutingReleaseDependencyError(
+                "routing release requires exactly two model runner registrations"
+            )
+        try:
+            model_runner_registry = ExactModelRunnerRegistry(registrations)
+        except Exception as exc:  # noqa: BLE001 - exact registration boundary
+            raise RoutingReleaseDependencyError(
+                "routing release exact model runner registrations are invalid"
+            ) from exc
+    elif isinstance(sources.model_runner_registry, ExactModelRunnerRegistry):
+        # Legacy fixtures are retained only as an explicit compatibility seam;
+        # the signed dual-artifact release path below still rejects one-lineage
+        # bundles and therefore cannot activate through this fallback.
+        model_runner_registry = sources.model_runner_registry
+    else:
         raise RoutingReleaseDependencyError(
             "routing release exact model runner registry is unavailable"
         )
@@ -250,6 +275,23 @@ def build_reviewed_routing_release_dependencies(
         raise RoutingReleaseDependencyError(
             "routing release signed authority bundle is invalid"
         ) from exc
+    if len(authority_bundle.artifact_lineages) != 2:
+        raise RoutingReleaseDependencyError(
+            "routing release requires two distinct signed leadpoet-lab artifacts"
+        )
+    if sources.model_runner_registrations is not None:
+        expected_artifacts = {
+            sha256_json(lineage.sourcing_model_identity().to_dict())
+            for lineage in authority_bundle.artifact_lineages
+        }
+        actual_artifacts = {
+            sha256_json(dict(registration.artifact_identity))
+            for registration in sources.model_runner_registrations
+        }
+        if actual_artifacts != expected_artifacts:
+            raise RoutingReleaseDependencyError(
+                "routing release model runner registrations differ from signed artifacts"
+            )
     gold_labels = _load_signed_gold_labels(
         sources,
         unit_dataset=authority_bundle.unit_dataset,
@@ -263,7 +305,7 @@ def build_reviewed_routing_release_dependencies(
         model_binding_observation=sources.model_binding_observation,
         protected_release_receipt=dict(sources.protected_release_receipt),
         artifact_authority=sources.artifact_authority,
-        model_runner_registry=sources.model_runner_registry,
+        model_runner_registry=model_runner_registry,
         model_verifier=sources.model_verifier,
         evaluation_adapter=sources.evaluation_adapter,
         scoring_job_rpc=sources.scoring_job_rpc,
@@ -273,6 +315,7 @@ def build_reviewed_routing_release_dependencies(
             if type(sources.dispatch_job_rpc) is RoutingProviderDispatchTeeRpc
             else RoutingProviderDispatchTeeRpc(sources.dispatch_job_rpc)
         ),
+        artifact_lineages=authority_bundle.artifact_lineages,
     )
     try:
         validate_reviewed_release_inputs(inputs, environment=environment)

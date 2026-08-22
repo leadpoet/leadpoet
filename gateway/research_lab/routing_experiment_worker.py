@@ -413,6 +413,7 @@ class ExactModelRoutingRunFactory:
     ]
     site_production_model_release_identity_sha256: str | None = None
     durable_authority_identity: str | None = None
+    artifact_lineages: tuple[Any, ...] = ()
     name: str = REVIEWED_ROUTING_FACTORY_NAME
 
     def validate_readiness(self) -> None:
@@ -513,6 +514,32 @@ class ExactModelRoutingRunFactory:
                 "reviewed protected provider runner is invalid"
             )
         runner.validate_composition()
+        if self.artifact_lineages:
+            lineage_by_artifact = {
+                sha256_json(lineage.sourcing_model_identity().to_dict()): lineage
+                for lineage in self.artifact_lineages
+            }
+            variant_lineages = {}
+            for variant in spec.variants:
+                lineage = lineage_by_artifact.get(
+                    sha256_json(variant.artifact.to_dict())
+                )
+                if lineage is None:
+                    raise RoutingExperimentWorkerError(
+                        "reviewed routing variant artifact is not signed in the release bundle"
+                    )
+                variant_lineages[variant.variant_id] = lineage
+            validate_lineages = getattr(runner, "validate_artifact_lineages", None)
+            if not callable(validate_lineages):
+                raise RoutingExperimentWorkerError(
+                    "reviewed routing runner lacks variant lineage binding"
+                )
+            try:
+                validate_lineages(variant_lineages)
+            except Exception as exc:  # noqa: BLE001 - protected lineage boundary
+                raise RoutingExperimentWorkerError(
+                    "reviewed routing runner variant lineage binding failed"
+                ) from exc
         if self.durable_authority_identity is not None and getattr(
             runner, "durable_authority_identity", None
         ) != self.durable_authority_identity:

@@ -725,6 +725,7 @@ class ReviewedRoutingReleaseInputs:
     scoring_job_rpc: RoutingTeeJobRpc
     call_authorization_job_rpc: RoutingTeeJobRpc
     dispatch_job_rpc: RoutingProviderDispatchTeeRpc
+    artifact_lineages: tuple[VerifiedRoutingArtifactLineage, ...] = ()
 
 
 def _require_rpc(value: Any, name: str) -> RoutingTeeJobRpc:
@@ -828,6 +829,27 @@ def validate_reviewed_release_inputs(
         raise RoutingProductCompositionError(
             "routing authority bundle artifact lineage differs"
         )
+    if inputs.artifact_lineages:
+        if len(inputs.artifact_lineages) != 2:
+            raise RoutingProductCompositionError(
+                "routing release must contain exactly two artifact lineages"
+            )
+        if any(
+            type(lineage) is not VerifiedRoutingArtifactLineage
+            or lineage.branch != "leadpoet-lab"
+            for lineage in inputs.artifact_lineages
+        ):
+            raise RoutingProductCompositionError(
+                "routing release artifact lineages must be signed leadpoet-lab artifacts"
+            )
+        if len({lineage.identity_hash() for lineage in inputs.artifact_lineages}) != 2:
+            raise RoutingProductCompositionError(
+                "routing release artifact lineages are duplicated"
+            )
+        if tuple(inputs.artifact_lineages) != tuple(bundle.artifact_lineages):
+            raise RoutingProductCompositionError(
+                "routing release artifact lineage set differs from signed bundle"
+            )
     if (
         bundle.binding_catalog != inputs.binding_catalog
         or bundle.binding_catalog.manifest_hash != binding_catalog_hash
@@ -1081,6 +1103,7 @@ def build_exact_model_runner_factory(
         evaluation_adapter=inputs.evaluation_adapter,
         billing_rollup_factory=billing_rollup_factory,
         execution_envelope_factory=execution_envelope_factory,
+        artifact_lineages=inputs.artifact_lineages,
         site_production_model_release_identity_sha256=_require_hash(
             (os.environ if environment is None else environment).get(
                 SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV

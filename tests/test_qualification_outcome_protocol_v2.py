@@ -740,6 +740,77 @@ def test_declared_outcome_entrypoint_missing_second_argument_cannot_fallback(
         )
 
 
+def test_candidate_build_gate_admits_protocol_v2_after_manifest_exists(
+    tmp_path,
+) -> None:
+    from gateway.research_lab import code_build
+
+    root = tmp_path / "candidate"
+    source_hash, manifest = _write_protocol_tree(
+        root,
+        harmless_revision="candidate-build-v2",
+    )
+
+    assert code_build._sourcing_contract_prebuild_gate(root) is None
+    admitted = code_build._sourcing_contract_gate(
+        root,
+        manifest=manifest,
+        force_enforce=True,
+    )
+
+    assert admitted is not None
+    admitted_hash, receipt = admitted
+    assert admitted_hash == source_hash
+    assert receipt["admission_mode"] == "qualification_protocol_v2"
+    assert receipt["source_tree_hash"] == source_hash
+
+
+def test_protocol_v2_manifest_builder_defers_trust_until_exact_admission(
+    tmp_path,
+) -> None:
+    from research_lab.eval import build_local_private_artifact_manifest
+
+    root = tmp_path / "candidate-manifest"
+    _source_hash, _fixture_manifest = _write_protocol_tree(
+        root,
+        harmless_revision="candidate-manifest-v2",
+    )
+    contract_path = root / "sourcing_model" / "consumer_contract.json"
+    parity_path = root / "sourcing_model" / "consumer_parity_fixtures.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "contract_id": "model-contract:v-next",
+                "canonical_path": "sourcing_model/consumer_contract.json",
+                "parity_fixture_path": (
+                    "sourcing_model/consumer_parity_fixtures.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    parity_path.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    source_hash = compute_compatibility_source_tree_hash_v1(root)
+    manifest = build_local_private_artifact_manifest(
+        source_path=root,
+        git_commit_sha="a" * 40,
+        image_digest="registry.invalid/model@sha256:" + "b" * 64,
+        manifest_uri="s3://private/model.json",
+        signature_ref="s3://private/model.sig.b64",
+        component_registry_version="sourcing-model-components:v2",
+        scoring_adapter_version="qualification-company-scorer:v1",
+    )
+
+    assert manifest["model_artifact_hash"] == source_hash
+    receipt = source_tree_compatibility_admission(
+        root,
+        manifest=manifest,
+        source_tree_hash=source_hash,
+    )
+    assert receipt["admission_mode"] == "qualification_protocol_v2"
+    assert receipt["manifest_hash"] == manifest["manifest_hash"]
+
+
 @pytest.mark.parametrize(
     "declaration",
     [

@@ -1628,12 +1628,19 @@ def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
         and isinstance(node.func, ast.Name)
         and node.func.id == "_sourcing_contract_gate"
     )
-    assert len(source_gate_lines) == 2
+    prebuild_gate_line = next(
+        node.lineno
+        for node in ast.walk(build_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_sourcing_contract_prebuild_gate"
+    )
+    assert len(source_gate_lines) == 1
     assert (
-        source_gate_lines[0]
+        prebuild_gate_line
         < call_lines["_run_shell"]
-        < source_gate_lines[1]
         < call_lines["_run_private_build_under_docker_operation_lock"]
+        < source_gate_lines[0]
         < call_lines["_verify_built_candidate_artifact"]
     )
     assert call_lines["_verify_built_candidate_artifact"] < call_lines[

@@ -420,6 +420,7 @@ PROTECTED_SYMBOLS = {
         "_terminate_shell_process_group",
         "_run_shell",
         "_run_private_build_under_docker_operation_lock",
+        "_sourcing_contract_prebuild_gate",
         "_sourcing_contract_gate",
         "validate_private_code_edit_diff_artifact",
         "_verify_built_candidate_artifact",

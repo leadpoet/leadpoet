@@ -1344,7 +1344,7 @@ def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatc
     def _boom(*args, **kwargs):
         raise RuntimeError("contract file unreadable")
 
-    monkeypatch.setattr(cb, "source_tree_compatibility_admission_v1", _boom)
+    monkeypatch.setattr(cb, "source_tree_compatibility_admission", _boom)
     with pytest.raises(cb.CodeEditPrivateTestError, match="failed internally"):
         cb._sourcing_contract_gate(tmp_path)
 

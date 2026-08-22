@@ -502,7 +502,7 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:1fafd91a27249c1a09fc1c476bbaadfdc754c8f75a3836dc7fb59a605ac8213e",
+      "ast_sha256": "sha256:132b151ef6c5627ad6bebe6f914640c3264063b5f8b1f5373eaa11cd5faecddd",
       "path": "gateway/research_lab/code_build.py",
       "symbol": "CodeEditCandidateBuilder._build_under_deadline"
     },
@@ -6967,7 +6967,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:0be9ac2db42e69be44be54b9cebbcab4af27c138eec1ad8c0f8309633b42a560",
-  "protected_source_commit": "10dc3299e6f93cb16a23a4ec5f76a0d39a64d6da",
+  "manifest_hash": "sha256:bed23f934aade1647d71128847519716e9aeda9ed8c739f3fbe9612ec74d8321",
+  "protected_source_commit": "685c9a89197af487afd45bec5a75d73b0422a6ad",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

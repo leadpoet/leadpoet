@@ -443,6 +443,8 @@ SYSTEM_BINARY_DIRS = tuple(
     for value in ("/usr/local/sbin", "/usr/sbin", "/sbin", "/usr/bin", "/bin")
 )
 ALLOCATION_MIGRATION_PREREQUISITES_SQL = """
+CREATE SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 CREATE SCHEMA auth;
 CREATE FUNCTION auth.role()
 RETURNS TEXT

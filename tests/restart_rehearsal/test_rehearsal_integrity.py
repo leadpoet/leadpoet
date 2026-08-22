@@ -1931,6 +1931,11 @@ def test_credit_resume_rehearsal_uses_final_production_queue_guard() -> None:
     positions = [applied.index(name) for name in ordered]
 
     assert positions == sorted(positions)
+    assert "CREATE SCHEMA extensions;" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    assert (
+        "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;"
+        in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    )
     assert "miner_hotkey TEXT NOT NULL" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
     assert (
         "CREATE TABLE public.research_loop_run_queue_events"

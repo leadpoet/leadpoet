@@ -15,7 +15,6 @@ import base64
 import json
 import os
 from pathlib import Path
-import re
 import threading
 from typing import Any, Mapping
 
@@ -57,18 +56,11 @@ from gateway.research_lab.routing_product_composition import (
 from gateway.research_lab.routing_provider_bindings import (
     ReviewedDeeplineActionCompiler,
 )
-from gateway.tee.protected_workflows import DEFAULT_MANIFEST, load_manifest
 from gateway.utils.tee_client import TEEClient
-from leadpoet_canonical.attested_v2 import validate_signed_execution_receipt
-from research_lab.eval import (
-    DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
-    DockerPrivateModelRunner,
-    DockerPrivateModelSpec,
-)
+from research_lab.eval import DockerPrivateModelRunner, DockerPrivateModelSpec
 from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
 from research_lab.model_runner_protocol import (
     ExactModelRunnerRegistration,
-    ExactModelRunnerRegistry,
     ResearchLabModelRunnerProtocol,
 )
 from research_lab.routing_experiments import ProviderReceiptStore
@@ -77,12 +69,7 @@ from research_lab.canonical import sha256_json
 
 _BUNDLE_PATH_ENV = "RESEARCH_LAB_ROUTING_AUTHORITY_BUNDLE_PATH"
 _BUNDLE_KEYS_PATH_ENV = "RESEARCH_LAB_ROUTING_AUTHORITY_KEYS_PATH"
-_GOLD_LABEL_PATH_ENV = "RESEARCH_LAB_ROUTING_GOLD_LABEL_DOCUMENT_PATH"
-_MODEL_OBSERVATION_PATH_ENV = "RESEARCH_LAB_ROUTING_MODEL_OBSERVATION_PATH"
-_PROTECTED_RECEIPT_PATH_ENV = "RESEARCH_LAB_ROUTING_PROTECTED_RECEIPT_PATH"
-_TEE_CID_ENV = "RESEARCH_LAB_ROUTING_TEE_CID"
 _MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ARTIFACT_VARIANT_BRANCHES = {
     "baseline": "main",
     "challenger": "leadpoet-lab",
@@ -673,11 +660,6 @@ def load_reviewed_routing_release_authority_sources() -> ReviewedRoutingReleaseA
 
     bundle = _release_document(_BUNDLE_PATH_ENV, "authority bundle")
     keys = _pinned_keys()
-    gold = _release_document(_GOLD_LABEL_PATH_ENV, "gold-label")
-    observation = _release_document(_MODEL_OBSERVATION_PATH_ENV, "model observation")
-    protected_receipt = _release_document(
-        _PROTECTED_RECEIPT_PATH_ENV, "protected release"
-    )
     try:
         authority_bundle = load_verified_routing_authority_bundle(
             bundle, pinned_public_keys=keys
@@ -700,187 +682,10 @@ def load_reviewed_routing_release_authority_sources() -> ReviewedRoutingReleaseA
             "routing release baseline and challenger artifact branches are invalid"
         )
     _require_upstream_model_operations()
-    try:
-        model_observation = VerifiedRoutingModelBindingRequirements.from_attested(
-            observation["result"], observation["receipt"]
-        )
-    except Exception as exc:  # noqa: BLE001 - signed observation is fail closed
-        raise RoutingReleaseDependencyError(
-            "routing release model binding observation is invalid"
-        ) from exc
-    if model_observation.artifact_lineage_hash != lineages[0].identity_hash():
-        raise RoutingReleaseDependencyError(
-            "routing release model binding observation artifact differs"
-        )
-    try:
-        validate_signed_execution_receipt(protected_receipt)
-    except Exception as exc:  # noqa: BLE001 - protected identity is fail closed
-        raise RoutingReleaseDependencyError(
-            "routing release protected receipt is invalid"
-        ) from exc
-    gold_key_id = str(
-        os.environ.get(_GOLD_LABEL_KEY_ENV)
-        or DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID
-    ).strip()
-    if not gold_key_id:
-        raise RoutingReleaseDependencyError(
-            "routing release gold-label signing key is unavailable"
-        )
-    unit_refs = tuple(sorted(authority_bundle.unit_dataset.units))
-    gold_labels = _load_signed_gold_labels(
-        document=gold, key_id=gold_key_id, unit_refs=unit_refs
-    )
-    try:
-        cid = int(str(os.environ.get(_TEE_CID_ENV) or ""))
-    except (TypeError, ValueError) as exc:
-        raise RoutingReleaseDependencyError("routing release TEE CID is invalid") from exc
-    if cid < 1:
-        raise RoutingReleaseDependencyError("routing release TEE CID is invalid")
-    tee_rpc = AttestedRoutingTeeJobRpc(TEEClient(cid=cid))
-    registrations = _artifact_registrations(
-        lineages=lineages,
-        bundle=bundle,
-        binding_catalog=authority_bundle.binding_catalog,
-    )
-    try:
-        runner_registry = ExactModelRunnerRegistry(registrations)
-    except Exception as exc:  # noqa: BLE001 - exact registration is fail closed
-        raise RoutingReleaseDependencyError(
-            "routing release exact model runner registry is invalid"
-        ) from exc
-    site_release = str(
-        os.environ.get(
-            "RESEARCH_LAB_SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_SHA256"
-        )
-        or ""
-    ).strip().lower()
-    if not _SHA256_RE.fullmatch(site_release):
-        raise RoutingReleaseDependencyError(
-            "routing release Site model release identity is invalid"
-        )
-    if registrations[0].protocol.release_identity.get("release_identity_sha256") != site_release.removeprefix(
-        "sha256:"
-    ):
-        raise RoutingReleaseDependencyError(
-            "routing release baseline differs from the Site model release"
-        )
     raise RoutingReleaseDependencyError(
-        "routing release Lab verifier bridge, evaluation adapter, and runner factory are not published"
+        "routing release model-owned verifier and evaluator exports are not published"
     )
 
-    def store_factory() -> SupabaseRoutingExperimentStore:
-        try:
-            from gateway.db.client import get_write_client
-
-            return SupabaseRoutingExperimentStore(get_write_client())
-        except Exception as exc:  # noqa: BLE001 - store construction is fail closed
-            raise RoutingReleaseDependencyError(
-                "routing release Supabase store is unavailable"
-            ) from exc
-
-    def execution_envelope_factory(spec: Any) -> Any:
-        try:
-            return build_routing_execution_envelope_v2(
-                spec=spec,
-                artifact_lineage=lineages[0],
-                binding_catalog=authority_bundle.binding_catalog,
-                unit_dataset=authority_bundle.unit_dataset,
-                gold_labels=gold_labels,
-                model_binding_observation=model_observation,
-            )
-        except Exception as exc:  # noqa: BLE001 - envelope is fail closed
-            raise RoutingReleaseDependencyError(
-                "routing release execution envelope construction failed"
-            ) from exc
-
-    def protected_authorities_factory() -> Any:
-        try:
-            inputs = ReviewedRoutingReleaseInputs(
-                artifact_lineage=lineages[0],
-                binding_catalog=authority_bundle.binding_catalog,
-                unit_dataset=authority_bundle.unit_dataset,
-                authority_bundle=authority_bundle,
-                gold_labels=gold_labels,
-                model_binding_observation=model_observation,
-                protected_release_receipt=dict(protected_receipt),
-                artifact_authority=_BundleArtifactAuthority(
-                    lineages=lineages, bundle=bundle
-                ),
-                model_runner_registry=runner_registry,
-                model_verifier=model_verifier,
-                evaluation_adapter=evaluation_adapter,
-                scoring_job_rpc=tee_rpc,
-                call_authorization_job_rpc=tee_rpc,
-                dispatch_job_rpc=RoutingProviderDispatchTeeRpc(tee_rpc),
-                artifact_lineages=lineages,
-            )
-            return build_attested_protected_authorities(
-                inputs, environment=os.environ
-            )
-        except RoutingReleaseDependencyError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - TEE authority is fail closed
-            raise RoutingReleaseDependencyError(
-                "routing release protected TEE authorities are unavailable"
-            ) from exc
-
-    inputs = ReviewedRoutingReleaseInputs(
-        artifact_lineage=lineages[0],
-        binding_catalog=authority_bundle.binding_catalog,
-        unit_dataset=authority_bundle.unit_dataset,
-        authority_bundle=authority_bundle,
-        gold_labels=gold_labels,
-        model_binding_observation=model_observation,
-        protected_release_receipt=dict(protected_receipt),
-        artifact_authority=_BundleArtifactAuthority(
-            lineages=lineages, bundle=bundle
-        ),
-        model_runner_registry=runner_registry,
-        model_verifier=model_verifier,
-        evaluation_adapter=evaluation_adapter,
-        scoring_job_rpc=tee_rpc,
-        call_authorization_job_rpc=tee_rpc,
-        dispatch_job_rpc=RoutingProviderDispatchTeeRpc(tee_rpc),
-        artifact_lineages=lineages,
-    )
-    reviewed_runner_factory = _ReviewedRunnerFactory(
-        inputs=inputs,
-        model_observation=model_observation,
-        protected_release_receipt=protected_receipt,
-        store_factory=store_factory,
-        execution_envelope_factory=execution_envelope_factory,
-        protected_authorities_factory=protected_authorities_factory,
-    )
-    manifest = load_manifest(DEFAULT_MANIFEST)
-    manifest_hash = str(manifest.get("manifest_hash") or "")
-    if not _SHA256_RE.fullmatch(manifest_hash):
-        raise RoutingReleaseDependencyError(
-            "routing release protected workflow manifest is invalid"
-        )
-    return ReviewedRoutingReleaseAuthoritySources(
-        authority_bundle_document=bundle,
-        authority_bundle_pinned_public_keys=keys,
-        gold_label_document=gold,
-        gold_label_key_id=gold_key_id,
-        gold_label_verifier=_verify_gold_label,
-        expected_label_set_hash=gold_labels.label_set_hash,
-        expected_unit_refs=unit_refs,
-        model_binding_observation=model_observation,
-        protected_release_receipt=dict(protected_receipt),
-        artifact_authority=inputs.artifact_authority,
-        model_verifier=model_verifier,
-        evaluation_adapter=evaluation_adapter,
-        scoring_job_rpc=tee_rpc,
-        call_authorization_job_rpc=tee_rpc,
-        dispatch_job_rpc=RoutingProviderDispatchTeeRpc(tee_rpc),
-        reviewed_runner_factory=reviewed_runner_factory,
-        billing_rollup_factory=_build_billing_rollup_factory(),
-        execution_envelope_factory=execution_envelope_factory,
-        store_factory=store_factory,
-        protected_workflow_manifest_hash=manifest_hash,
-        model_runner_registry=runner_registry,
-        model_runner_registrations=registrations,
-    )
 
 
 __all__ = [

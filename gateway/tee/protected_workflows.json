@@ -172,7 +172,7 @@
       "symbol": "AttestedRoutingTeeJobRpc"
     },
     {
-      "ast_sha256": "sha256:e322be2680875e73dd10190cd6e9e928eff50cd45118b7b2f078b83d0c47e747",
+      "ast_sha256": "sha256:9f07b05cc6d9b9c64cc47df7a78c2fefa92978e2c22fed9346a80030c2014ff3",
       "path": "gateway/research_lab/attested_routing_release_authorities.py",
       "symbol": "load_reviewed_routing_release_authority_sources"
     },
@@ -6962,7 +6962,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:44337b3c8df4cb2f386ddae95609458a8a74152023654812dd5f1bc58b8a759e",
+  "manifest_hash": "sha256:07403fd309fb8e3a93def6a3cbe38fac2f4c21896698f2fcd50ddae9f0138e52",
   "protected_source_commit": "30ed12ad3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

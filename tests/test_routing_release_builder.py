@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -288,6 +289,32 @@ def test_release_startup_fails_closed_without_upstream_model_operations():
         match="build_host_capability_manifest.*evaluate_model_verifier_action",
     ):
         release_authorities._require_upstream_model_operations()
+
+
+def test_authority_loader_stops_before_any_local_model_fallback(monkeypatch, tmp_path):
+    import gateway.research_lab.attested_routing_release_authorities as release_authorities
+
+    bundle, pins = _dual_bundle()
+    bundle_path = tmp_path / "authority-bundle.json"
+    keys_path = tmp_path / "authority-keys.json"
+    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+    keys_path.write_text(json.dumps(pins), encoding="utf-8")
+    monkeypatch.setenv(release_authorities._BUNDLE_PATH_ENV, str(bundle_path))
+    monkeypatch.setenv(release_authorities._BUNDLE_KEYS_PATH_ENV, str(keys_path))
+
+    monkeypatch.setattr(
+        release_authorities,
+        "_artifact_registrations",
+        lambda **_kwargs: pytest.fail("local runner registration fallback was used"),
+    )
+    with pytest.raises(
+        RoutingReleaseDependencyError,
+        match="build_host_capability_manifest.*evaluate_model_verifier_action",
+    ):
+        release_authorities.load_reviewed_routing_release_authority_sources()
+
+    assert "model_verifier" not in vars(release_authorities)
+    assert "evaluation_adapter" not in vars(release_authorities)
 
 
 def test_oci_registration_requires_signed_model_release_identity():

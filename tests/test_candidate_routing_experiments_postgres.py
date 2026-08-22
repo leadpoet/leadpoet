@@ -232,8 +232,6 @@ def postgres162():
                 "--auth=trust",
                 "--no-locale",
                 "--encoding=UTF8",
-                "--set=shared_memory_type=mmap",
-                "--set=dynamic_shared_memory_type=mmap",
             ],
             check=True,
             capture_output=True,
@@ -956,6 +954,24 @@ def test_migration_162_receipt_rpc_rejects_rehashed_parent_and_projection_drift(
     assert reordered_result.returncode != 0
     assert "projection_not_authoritative" in reordered_result.stderr
 
+    duplicate_verification_refs = ["7" * 64, "7" * 64]
+    duplicated = _rehash_receipt_doc(
+        {
+            **base,
+            "raw_count": 2,
+            "normalized_count": 2,
+            "unique_count": 2,
+            "verified_qualified_count": 2,
+            "company_verification_receipt_sha256s": duplicate_verification_refs,
+            "verification_receipt_sha256": sha256_json(
+                duplicate_verification_refs
+            ).split(":", 1)[1],
+        }
+    )
+    duplicated_result = _append_receipt_rpc(psql, duplicated, check=False)
+    assert duplicated_result.returncode != 0
+    assert "projection_not_authoritative" in duplicated_result.stderr
+
     first = _append_receipt_rpc(psql, base, check=False)
     assert first.returncode == 0, first.stderr
     replay = _append_receipt_rpc(psql, base, check=False)
@@ -1123,6 +1139,99 @@ def test_migration_162_receipt_requires_exact_verification_reference_cardinality
     result = _append_receipt_rpc(psql, invalid, check=False)
     assert result.returncode != 0
     assert "projection_not_authoritative" in result.stderr
+
+
+def test_migration_162_terminal_rejects_reused_verification_across_attempts(
+    postgres162,
+):
+    psql = postgres162
+    second_provider = "provider_receipt:" + "d" * 16
+    _insert_authority(psql, evaluation_receipt_id=None)
+    psql(
+        "UPDATE public.research_lab_routing_decision_receipts_v2 "
+        "SET decision_doc = jsonb_set(decision_doc, '{provider_receipt_refs}', "
+        f"'[\"{BASELINE_PROVIDER}\",\"{second_provider}\"]'::jsonb) "
+        f"WHERE receipt_id = '{BASELINE_DECISION}';"
+        "INSERT INTO public.research_lab_routing_provider_attempts_v2 "
+        "(provider_receipt_ref, experiment_hash, binding_id, tool_id, "
+        "variant_id, unit_ref, outcome, billing_state, "
+        "authoritative_billed_credit_microunits, latency_ms, execution_mode, "
+        "attempt_doc) VALUES "
+        f"('{second_provider}','{EXPERIMENT_1}','binding.registry',"
+        "'candidate.registry_feed','baseline','icp.cal','verified','known',"
+        "25,250,'fixture','{\"provider_receipt\":{\"call_count\":1}}'::jsonb);"
+    )
+
+    terminal = dict(_receipt_row()["terminal_doc"])
+    first_projection = dict(terminal["attempt_projections"][0])
+    second_attempt = "6" * 64
+    second_chain = sha256_json(
+        [terminal["attempt_receipt_sha256s"][0], second_attempt]
+    ).split(":", 1)[1]
+    second_publication = "a" * 64
+    second_projection = {
+        **first_projection,
+        "provider_receipt_ref": second_provider,
+        "attempt_sha256": second_attempt,
+        "prior_attempt_receipt_sha256": terminal[
+            "attempt_receipt_sha256s"
+        ][0],
+        "attempt_chain_sha256": second_chain,
+        "publication_projection_sha256": second_publication,
+        "step_order": 1,
+        "attempt_sequence": 1,
+    }
+    verification_ref = terminal["verification_receipt_refs"][0]
+    terminal_identity = {
+        **{
+            key: value
+            for key, value in terminal.items()
+            if key not in {"receipt_id", "receipt_hash"}
+        },
+        "provider_receipt_refs": [BASELINE_PROVIDER, second_provider],
+        "verification_receipt_refs": [verification_ref, verification_ref],
+        "attempt_receipt_sha256s": [
+            terminal["attempt_receipt_sha256s"][0],
+            second_attempt,
+        ],
+        "attempt_chain_sha256s": [
+            terminal["attempt_chain_sha256s"][0],
+            second_chain,
+        ],
+        "attempt_projections": [first_projection, second_projection],
+        "verification_receipt_sha256": sha256_json(
+            [verification_ref[0], verification_ref[0]]
+        ).split(":", 1)[1],
+        "attempt_chain_sha256": second_chain,
+        "publication_projection_sha256": sha256_json(
+            [
+                first_projection["publication_projection_sha256"],
+                second_publication,
+            ]
+        ).split(":", 1)[1],
+        "provider_call_count": 2,
+        "billed_credit_microunits": 50,
+        "latency_ms": 500,
+        "raw_count": 2,
+        "normalized_count": 2,
+        "unique_count": 2,
+        "verified_qualified_count": 2,
+    }
+    terminal_hash = sha256_json(terminal_identity)
+    terminal_doc = {
+        **terminal_identity,
+        "receipt_id": "candidate_model_terminal:" + terminal_hash[7:31],
+        "receipt_hash": terminal_hash,
+    }
+    _insert_terminal(psql, {"terminal_doc": terminal_doc})
+
+    result = psql(
+        "SELECT public.research_lab_candidate_assert_model_unit_terminal_v1("
+        f"'{EXPERIMENT_1}','baseline','icp.cal');",
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "verification_receipt_duplicated" in result.stderr
 
 
 def test_migration_162_recomputes_attempt_chain_and_requires_model_parent(

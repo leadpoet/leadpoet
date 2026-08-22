@@ -595,6 +595,7 @@ def _migration_schema_contract(
         "research_lab_allocation_settlement_frontiers_v2",
         "research_lab_allocation_settlement_frontier_activation_v2",
         "research_lab_compact_weight_authorities_v2",
+        "research_lab_candidate_model_unit_terminals",
         "research_lab_candidate_waterfall_receipts",
         "research_lab_candidate_waterfall_metrics",
     }
@@ -626,6 +627,9 @@ def _migration_schema_contract(
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
+        "research_lab_candidate_append_model_unit_terminal_v1",
+        "research_lab_candidate_append_waterfall_receipt_v1",
+        "research_lab_candidate_append_waterfall_metric_v1",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(

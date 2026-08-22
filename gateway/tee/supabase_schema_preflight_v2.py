@@ -643,6 +643,21 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
     ),
     (
         "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_model_unit_terminals",
+        (
+            "receipt_id",
+            "receipt_hash",
+            "experiment_hash",
+            "variant_id",
+            "unit_ref",
+            "decision_receipt_id",
+            "start_request_sha256",
+            "attempt_projections",
+            "terminal_doc",
+        ),
+    ),
+    (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
         "research_lab_candidate_waterfall_receipts",
         (
             "receipt_id",
@@ -972,6 +987,18 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/161-research-lab-exact-model-transitions.sql",
         "research_lab_routing_exact_model_transition_contract_v1",
+    ),
+    (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_append_model_unit_terminal_v1",
+    ),
+    (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_append_waterfall_receipt_v1",
+    ),
+    (
+        "scripts/162-research-lab-candidate-routing-experiments.sql",
+        "research_lab_candidate_append_waterfall_metric_v1",
     ),
     (
         "scripts/157-research-lab-routing-experiment-authority.sql",

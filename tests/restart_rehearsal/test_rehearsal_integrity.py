@@ -1155,6 +1155,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
             "research_lab_compact_weight_authorities_v2",
+            "research_lab_candidate_model_unit_terminals",
             "research_lab_candidate_waterfall_receipts",
             "research_lab_candidate_waterfall_metrics",
         }
@@ -1210,6 +1211,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
+            "research_lab_candidate_append_model_unit_terminal_v1",
+            "research_lab_candidate_append_waterfall_receipt_v1",
+            "research_lab_candidate_append_waterfall_metric_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
@@ -1419,6 +1423,18 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["authority_hash"],
             },
+            "research_lab_candidate_model_unit_terminals": {
+                "kind": "r",
+                "columns": ["receipt_id", "experiment_hash"],
+            },
+            "research_lab_candidate_waterfall_receipts": {
+                "kind": "r",
+                "columns": ["receipt_id", "experiment_hash"],
+            },
+            "research_lab_candidate_waterfall_metrics": {
+                "kind": "r",
+                "columns": ["metric_id", "experiment_hash"],
+            },
             "research_lab_autoresearch_trees": {
                 "kind": "r",
                 "columns": ["tree_id", "run_id"],
@@ -1487,6 +1503,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
+            "research_lab_candidate_append_model_unit_terminal_v1",
+            "research_lab_candidate_append_waterfall_receipt_v1",
+            "research_lab_candidate_append_waterfall_metric_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (

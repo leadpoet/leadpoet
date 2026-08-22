@@ -473,6 +473,9 @@ def _spec(stage: str = "intent_evidence", *, with_source_add: bool = False, two_
         sha256_json({"labels": sorted(labels.items())}),
         "HIRING" if stage == "intent_evidence" else "",
         unit_input_set_hash=H("d"),
+        target_verified_qualified_count=(
+            1 if stage == "candidate_acquisition" else 0
+        ),
     )
     spec = RoutingExperimentV2Spec(
         experiment_id=f"v2-{stage}", input=inp, variants=(baseline, candidate), baseline_variant_id="baseline",

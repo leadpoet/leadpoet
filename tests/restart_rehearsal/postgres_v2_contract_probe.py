@@ -5627,6 +5627,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                           ON namespace_meta.oid = relation_meta.relnamespace
                         WHERE namespace_meta.nspname = 'public'
                           AND relation_meta.relname IN (
+                              'research_lab_candidate_model_unit_terminals',
                               'research_lab_candidate_waterfall_receipts',
                               'research_lab_candidate_waterfall_metrics'
                           )
@@ -5639,6 +5640,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                         WHERE namespace_meta.nspname = 'public'
                           AND relation_meta.relkind = 'r'
                           AND relation_meta.relname IN (
+                              'research_lab_candidate_model_unit_terminals',
                               'research_lab_candidate_waterfall_receipts',
                               'research_lab_candidate_waterfall_metrics'
                           )
@@ -5648,6 +5650,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                         FROM pg_catalog.pg_constraint constraint_meta
                         WHERE constraint_meta.contype = 'f'
                           AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
                               'public.research_lab_candidate_waterfall_receipts'::regclass,
                               'public.research_lab_candidate_waterfall_metrics'::regclass
                           )
@@ -5658,6 +5661,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                         WHERE constraint_meta.contype = 'f'
                           AND pg_catalog.array_length(constraint_meta.conkey, 1) = 2
                           AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
                               'public.research_lab_candidate_waterfall_receipts'::regclass,
                               'public.research_lab_candidate_waterfall_metrics'::regclass
                           )
@@ -5667,6 +5671,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                         FROM pg_catalog.pg_constraint constraint_meta
                         WHERE constraint_meta.contype = 'c'
                           AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
                               'public.research_lab_candidate_waterfall_receipts'::regclass,
                               'public.research_lab_candidate_waterfall_metrics'::regclass
                           )
@@ -5679,6 +5684,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                         FROM pg_catalog.pg_trigger trigger_meta
                         WHERE NOT trigger_meta.tgisinternal
                           AND trigger_meta.tgrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
                               'public.research_lab_candidate_waterfall_receipts'::regclass,
                               'public.research_lab_candidate_waterfall_metrics'::regclass
                           )
@@ -5703,11 +5709,11 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         if candidate_sidecar_contract != {
             "forced_rls": True,
-            "relation_count": 2,
-            "foreign_key_count": 4,
-            "composite_lineage_foreign_key_count": 2,
-            "content_hash_check_count": 2,
-            "append_only_trigger_count": 2,
+            "relation_count": 3,
+            "foreign_key_count": 7,
+            "composite_lineage_foreign_key_count": 4,
+            "content_hash_check_count": 3,
+            "append_only_trigger_count": 3,
             "provider_receipt_unique": True,
         }:
             raise PostgresContractProbeError(

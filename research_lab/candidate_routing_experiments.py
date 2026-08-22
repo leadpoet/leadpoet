@@ -610,6 +610,13 @@ def adapt_exact_model_candidate_receipt(
             raise RoutingExperimentError(
                 "exact_model_candidate_verification_receipt_differs"
             )
+        if (
+            len(set(verification_hashes)) != len(verification_hashes)
+            or set(verification_hashes).intersection(verification_hashes_in_order)
+        ):
+            raise RoutingExperimentError(
+                "exact_model_candidate_verification_receipt_is_duplicated"
+            )
         publication_projection_sha256 = _model_hash(
             _require_model_terminal_field(
                 attempt, "publication_projection_sha256", "attempt"
@@ -1236,11 +1243,11 @@ class CandidateModelUnitTerminalReceipt:
             "release_identity_sha256",
             "binding_contracts_sha256",
             "candidate_waterfall_contract_sha256",
-            "start_request_sha256",
             "terminal_result_sha256",
         ):
             _lab_hash(getattr(self, field_name), field_name)
         for field_name in (
+            "start_request_sha256",
             "model_receipt_sha256",
             "orchestration_receipt_sha256",
             "candidate_waterfall_sha256",
@@ -1286,6 +1293,15 @@ class CandidateModelUnitTerminalReceipt:
         for refs in self.verification_receipt_refs:
             for value in refs:
                 _model_hash(value, "candidate_terminal_verification_receipt_ref")
+        flattened_verification_refs = tuple(
+            value for refs in self.verification_receipt_refs for value in refs
+        )
+        if len(set(flattened_verification_refs)) != len(
+            flattened_verification_refs
+        ):
+            raise RoutingExperimentError(
+                "candidate_terminal_verification_receipt_is_duplicated"
+            )
         for value in self.attempt_receipt_sha256s:
             _model_hash(value, "candidate_terminal_attempt_receipt")
         for value in self.attempt_chain_sha256s:
@@ -1330,6 +1346,16 @@ class CandidateModelUnitTerminalReceipt:
                 str(value)
                 for value in projection.get("company_verification_receipt_sha256s") or ()
             )
+            if tuple(
+                str(value)
+                for value in projection.get(
+                    "company_verification_receipt_sha256s"
+                )
+                or ()
+            ) != self.verification_receipt_refs[index]:
+                raise RoutingExperimentError(
+                    "candidate_terminal_verification_projection_differs"
+                )
             publication_hash = projection.get("publication_projection_sha256")
             if not isinstance(publication_hash, str):
                 raise RoutingExperimentError("candidate_terminal_publication_projection_is_missing")
@@ -1621,6 +1647,12 @@ class CandidateWaterfallReceipt:
             )
         for value in self.company_verification_receipt_sha256s:
             _model_hash(value, "company_verification_receipt_sha256")
+        if len(set(self.company_verification_receipt_sha256s)) != len(
+            self.company_verification_receipt_sha256s
+        ):
+            raise RoutingExperimentError(
+                "candidate_company_verification_receipt_hashes_are_duplicated"
+            )
         expected_verification_receipt = _ordered_verification_receipt_sha256(
             self.company_verification_receipt_sha256s
         )
@@ -2312,6 +2344,15 @@ def evaluate_candidate_waterfall_metrics(
             group,
             key=lambda item: (item.step_order, item.attempt_sequence),
         )
+        verification_refs = [
+            value
+            for receipt in ordered
+            for value in receipt.company_verification_receipt_sha256s
+        ]
+        if len(set(verification_refs)) != len(verification_refs):
+            raise RoutingExperimentError(
+                "candidate_verification_receipt_sidecar_is_duplicated"
+            )
         prefix_hashes: list[str] = []
         for expected_index, receipt in enumerate(ordered):
             if (

@@ -37,11 +37,133 @@ from gateway.research_lab.routing_experiment_worker import (
     _RoutingClaimHeartbeat,
     main,
 )
+from research_lab.routing_experiments import (
+    RoutingDecisionReceiptV2,
+    RoutingExperimentV2Evaluation,
+    RoutingExperimentV2VariantEvaluation,
+    finalize_routing_decision_receipt_v2,
+)
 from tests.routing_experiment_authority_fixture import authority_fixture
 
 
 def _hash(char: str) -> str:
     return "sha256:" + char * 64
+
+
+@dataclass(frozen=True)
+class _SyntheticMetrics:
+    """Minimal synthetic metric document for worker-boundary tests."""
+
+    def to_dict(self):
+        return {"synthetic": True}
+
+
+def _synthetic_intent_decision(
+    *,
+    experiment_id: str = "intent-experiment",
+    variant_id: str = "baseline",
+    artifact_key: str | None = None,
+    stage: str = "intent_evidence",
+    unit_ref: str = "unit-1",
+    provider_receipt_refs: tuple[str, ...] = (),
+) -> RoutingDecisionReceiptV2:
+    tool_ids = tuple(
+        f"intent.synthetic.{index}"
+        for index, _receipt_ref in enumerate(provider_receipt_refs)
+    )
+    return finalize_routing_decision_receipt_v2(
+        RoutingDecisionReceiptV2(
+            receipt_id="routing_decision:pending",
+            experiment_id=experiment_id,
+            variant_id=variant_id,
+            artifact_key=artifact_key or _hash("c"),
+            stage=stage,
+            unit_ref=unit_ref,
+            plan_hash=_hash("d"),
+            route_hash=_hash("e"),
+            considered_tool_ids=tool_ids,
+            attempted_tool_ids=tool_ids,
+            skipped_tool_reasons=(),
+            outcome_reasons=tuple(
+                (tool_id, "verified") for tool_id in tool_ids
+            ),
+            provider_receipt_refs=provider_receipt_refs,
+            total_credit_microunits=0,
+            latency_ms=0,
+            execution_mode="fixture",
+        )
+    )
+
+
+def _synthetic_intent_evaluation(
+    *,
+    decision: RoutingDecisionReceiptV2,
+    provider_receipt_refs: tuple[str, ...] = (),
+    artifact_key: str | None = None,
+    passed: bool = True,
+) -> RoutingExperimentV2Evaluation:
+    variant = RoutingExperimentV2VariantEvaluation(
+        variant_id="baseline",
+        artifact_key=artifact_key or _hash("c"),
+        stage="intent_evidence",
+        calibration=_SyntheticMetrics(),
+        holdout=_SyntheticMetrics(),
+        passed_precision_gate=passed,
+        passed_recall_gate=passed,
+        passed_cost_gate=passed,
+        passed_efficiency_gate=passed,
+        passed=passed,
+        decision_receipt_refs=(decision.receipt_id,),
+        provider_receipt_refs=provider_receipt_refs,
+    )
+    draft = RoutingExperimentV2Evaluation(
+        receipt_id="routing_evaluation_v2:pending",
+        experiment_id="intent-experiment",
+        experiment_hash=_hash("a"),
+        variants=(variant,),
+        baseline_variant_id="baseline",
+        selected_variant_id="baseline" if passed else "",
+        decision_receipt_refs=(decision.receipt_id,),
+        provider_receipt_refs=provider_receipt_refs,
+        provider_cache_hits=0,
+        provider_cache_misses=0,
+    )
+    return replace(
+        draft,
+        receipt_id=(
+            "routing_evaluation_v2:"
+            + worker_module.sha256_json(draft.to_dict()).split(":", 1)[1][:16]
+        ),
+    )
+
+
+def _synthetic_intent_spec():
+    variant = SimpleNamespace(
+        variant_id="baseline",
+        stage="intent_evidence",
+        artifact=SimpleNamespace(to_dict=lambda: {"artifact": "exact"}),
+    )
+    return SimpleNamespace(
+        experiment_id="intent-experiment",
+        baseline_variant_id="baseline",
+        allow_live_credit_spend=False,
+        input=SimpleNamespace(
+            stage="intent_evidence",
+            calibration_unit_refs=("unit-1",),
+            holdout_unit_refs=(),
+        ),
+        variants=(variant,),
+        experiment_hash=lambda: _hash("a"),
+    )
+
+
+def _refinalize_decision(
+    receipt: RoutingDecisionReceiptV2,
+    **changes,
+) -> RoutingDecisionReceiptV2:
+    return finalize_routing_decision_receipt_v2(
+        replace(receipt, receipt_id="routing_decision:pending", **changes)
+    )
 
 
 @dataclass(frozen=True)
@@ -219,6 +341,371 @@ def test_exact_model_worker_passes_variant_registrations_to_dispatcher(monkeypat
         worker._run_exact_model(spec=_Spec(), inputs=inputs, lease=service.lease)
 
     assert observed["registrations"] is registrations
+
+
+def test_exact_intent_run_never_enters_candidate_terminal_path(monkeypatch):
+    class _Heartbeat:
+        deadline_monotonic = time.monotonic() + 60
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def ensure_held(self):
+            pass
+
+    class _ExactStore(_Store):
+        def __init__(self):
+            super().__init__()
+            self.decisions = []
+            self.evaluations = []
+
+        def append_decision(self, **values):
+            self.decisions.append(values)
+
+        def append_evaluation(self, **values):
+            self.evaluations.append(values)
+
+    class _Coordinator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_unit(self, **_kwargs):
+            return SimpleNamespace(provider_receipts=(), terminal_result={})
+
+    class _EvaluationAdapter:
+        def build_decision_receipts(self, **_kwargs):
+            return (_synthetic_intent_decision(),)
+
+        def build_evaluation(self, **kwargs):
+            decision = _synthetic_intent_decision()
+            return _synthetic_intent_evaluation(decision=decision)
+
+    def _candidate_path_must_not_run(**_kwargs):
+        raise AssertionError("intent execution entered candidate-only sidecars")
+
+    monkeypatch.setattr(worker_module, "_RoutingClaimHeartbeat", _Heartbeat)
+    monkeypatch.setattr(
+        worker_module,
+        "ReviewedProtectedModelActionDispatcher",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "FencedModelTransitionRepository",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(worker_module, "ExactModelExperimentCoordinator", _Coordinator)
+    monkeypatch.setattr(
+        worker_module,
+        "routing_experiment_v2_artifact_key",
+        lambda _variant: _hash("c"),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "candidate_model_unit_terminal_from_exact_model",
+        _candidate_path_must_not_run,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "candidate_waterfall_receipts_from_exact_model",
+        _candidate_path_must_not_run,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "evaluate_candidate_waterfall_metrics",
+        _candidate_path_must_not_run,
+    )
+
+    service = _Service()
+    service.store = _ExactStore()
+    worker = RoutingExperimentWorker(service=service, worker_ref="worker-1")
+    variant = SimpleNamespace(
+        variant_id="baseline",
+        stage="intent_evidence",
+        artifact=SimpleNamespace(to_dict=lambda: {"artifact": "exact"}),
+    )
+    spec = SimpleNamespace(
+        experiment_id="intent-experiment",
+        baseline_variant_id="baseline",
+        allow_live_credit_spend=False,
+        input=SimpleNamespace(
+            stage="intent_evidence",
+            calibration_unit_refs=("unit-1",),
+            holdout_unit_refs=(),
+        ),
+        variants=(variant,),
+        experiment_hash=lambda: _hash("a"),
+    )
+    inputs = SimpleNamespace(
+        execution_envelope=None,
+        registry_registrations={"baseline": object()},
+        reviewed_runner=object(),
+        verifier=object(),
+        registry=SimpleNamespace(resolve=lambda _identity: object()),
+        unit_dataset=SimpleNamespace(
+            resolve=lambda _unit_ref: (
+                {
+                    "model_input": {"kind": "normalized_icp"},
+                    "execution_mode": "intent_refresh",
+                    "target_count": 1,
+                    "evaluated_on": "2026-08-22",
+                },
+                _hash("f"),
+            )
+        ),
+        evaluation_adapter=_EvaluationAdapter(),
+        gold_labels={},
+        authoritative_billing_rollup=None,
+    )
+
+    result = worker._run_exact_model(
+        spec=spec,
+        inputs=inputs,
+        lease=service.lease,
+    )
+
+    assert result is not None
+    assert len(service.store.decisions) == 1
+    assert len(service.store.evaluations) == 1
+    assert [item["event_type"] for item in service.store.events] == [
+        "run_started",
+        "run_completed",
+    ]
+    assert service.store.closed[0]["close_reason"] == "completed"
+
+
+def test_exact_decision_set_fails_closed_before_persistence(monkeypatch):
+    spec = _synthetic_intent_spec()
+    monkeypatch.setattr(
+        worker_module,
+        "routing_experiment_v2_artifact_key",
+        lambda _variant: _hash("c"),
+    )
+    empty_unit_results = {
+        "baseline": {"unit-1": SimpleNamespace(provider_receipts=())}
+    }
+    valid = _synthetic_intent_decision()
+
+    indexed = worker_module._index_exact_model_decision_receipts(
+        spec=spec,
+        decisions=(valid,),
+        unit_results=empty_unit_results,
+    )
+    assert indexed == {("baseline", "unit-1"): (valid,)}
+
+    invalid_sets = (
+        ((), "coverage"),
+        ((valid, valid), "duplicated"),
+        (
+            (
+                _refinalize_decision(
+                    valid,
+                    stage="candidate_acquisition",
+                ),
+            ),
+            "lineage",
+        ),
+        (
+            (
+                _refinalize_decision(
+                    valid,
+                    artifact_key=_hash("f"),
+                ),
+            ),
+            "lineage",
+        ),
+        (
+            (
+                _refinalize_decision(
+                    valid,
+                    experiment_id="another-experiment",
+                ),
+            ),
+            "lineage",
+        ),
+    )
+    for decisions, message in invalid_sets:
+        with pytest.raises(RoutingExperimentWorkerError, match=message):
+            worker_module._index_exact_model_decision_receipts(
+                spec=spec,
+                decisions=decisions,
+                unit_results=empty_unit_results,
+            )
+
+    missing_provider_decision = _synthetic_intent_decision(
+        provider_receipt_refs=("provider_receipt:" + "a" * 16,)
+    )
+    with pytest.raises(RoutingExperimentWorkerError, match="provider receipt"):
+        worker_module._index_exact_model_decision_receipts(
+            spec=spec,
+            decisions=(missing_provider_decision,),
+            unit_results=empty_unit_results,
+        )
+
+
+def test_exact_evaluation_is_bound_to_validated_receipts(monkeypatch):
+    spec = _synthetic_intent_spec()
+    monkeypatch.setattr(
+        worker_module,
+        "routing_experiment_v2_artifact_key",
+        lambda _variant: _hash("c"),
+    )
+    unit_results = {
+        "baseline": {"unit-1": SimpleNamespace(provider_receipts=())}
+    }
+    decision = _synthetic_intent_decision()
+    decisions_by_unit = {("baseline", "unit-1"): (decision,)}
+    evaluation = _synthetic_intent_evaluation(decision=decision)
+
+    worker_module._validate_exact_model_evaluation(
+        spec=spec,
+        evaluation=evaluation,
+        decisions_by_unit=decisions_by_unit,
+        unit_results=unit_results,
+    )
+
+    wrong_artifact = replace(
+        evaluation,
+        variants=(
+            replace(evaluation.variants[0], artifact_key=_hash("f")),
+        ),
+    )
+    missing_decisions = replace(
+        evaluation,
+        variants=(
+            replace(evaluation.variants[0], decision_receipt_refs=()),
+        ),
+        decision_receipt_refs=(),
+    )
+    selected_failure = replace(
+        evaluation,
+        variants=(replace(evaluation.variants[0], passed=False),),
+    )
+    wrong_identity = replace(
+        evaluation,
+        receipt_id="routing_evaluation_v2:" + "f" * 16,
+    )
+    for forged, message in (
+        (wrong_artifact, "lineage"),
+        (missing_decisions, "lineage"),
+        (selected_failure, "selection"),
+        (wrong_identity, "identity"),
+    ):
+        with pytest.raises(RoutingExperimentWorkerError, match=message):
+            worker_module._validate_exact_model_evaluation(
+                spec=spec,
+                evaluation=forged,
+                decisions_by_unit=decisions_by_unit,
+                unit_results=unit_results,
+            )
+
+
+def test_exact_evaluation_allows_content_addressed_receipt_reuse(monkeypatch):
+    variants = (
+        SimpleNamespace(
+            variant_id="baseline",
+            stage="intent_evidence",
+            artifact=SimpleNamespace(to_dict=lambda: {"artifact": "baseline"}),
+        ),
+        SimpleNamespace(
+            variant_id="challenger",
+            stage="intent_evidence",
+            artifact=SimpleNamespace(to_dict=lambda: {"artifact": "challenger"}),
+        ),
+    )
+    spec = SimpleNamespace(
+        experiment_id="intent-experiment",
+        baseline_variant_id="baseline",
+        allow_live_credit_spend=False,
+        input=SimpleNamespace(
+            stage="intent_evidence",
+            calibration_unit_refs=("unit-1",),
+            holdout_unit_refs=(),
+        ),
+        variants=variants,
+        experiment_hash=lambda: _hash("a"),
+    )
+    artifact_keys = {"baseline": _hash("c"), "challenger": _hash("f")}
+    monkeypatch.setattr(
+        worker_module,
+        "routing_experiment_v2_artifact_key",
+        lambda variant: artifact_keys[variant.variant_id],
+    )
+    shared_provider_ref = "provider_receipt:" + "a" * 16
+    decisions = (
+        _synthetic_intent_decision(
+            variant_id="baseline",
+            artifact_key=artifact_keys["baseline"],
+            provider_receipt_refs=(shared_provider_ref,),
+        ),
+        _synthetic_intent_decision(
+            variant_id="challenger",
+            artifact_key=artifact_keys["challenger"],
+            provider_receipt_refs=(shared_provider_ref,),
+        ),
+    )
+    provider_receipt = SimpleNamespace(receipt_ref=shared_provider_ref)
+    unit_results = {
+        variant.variant_id: {
+            "unit-1": SimpleNamespace(provider_receipts=(provider_receipt,))
+        }
+        for variant in variants
+    }
+    decisions_by_unit = {
+        (decision.variant_id, decision.unit_ref): (decision,)
+        for decision in decisions
+    }
+    variant_evaluations = tuple(
+        RoutingExperimentV2VariantEvaluation(
+            variant_id=decision.variant_id,
+            artifact_key=artifact_keys[decision.variant_id],
+            stage="intent_evidence",
+            calibration=_SyntheticMetrics(),
+            holdout=_SyntheticMetrics(),
+            passed_precision_gate=True,
+            passed_recall_gate=True,
+            passed_cost_gate=True,
+            passed_efficiency_gate=True,
+            passed=True,
+            decision_receipt_refs=(decision.receipt_id,),
+            provider_receipt_refs=(shared_provider_ref,),
+        )
+        for decision in decisions
+    )
+    draft = RoutingExperimentV2Evaluation(
+        receipt_id="routing_evaluation_v2:pending",
+        experiment_id=spec.experiment_id,
+        experiment_hash=spec.experiment_hash(),
+        variants=variant_evaluations,
+        baseline_variant_id=spec.baseline_variant_id,
+        selected_variant_id="baseline",
+        decision_receipt_refs=tuple(
+            sorted(decision.receipt_id for decision in decisions)
+        ),
+        provider_receipt_refs=(shared_provider_ref,),
+        provider_cache_hits=1,
+        provider_cache_misses=1,
+    )
+    evaluation = replace(
+        draft,
+        receipt_id=(
+            "routing_evaluation_v2:"
+            + worker_module.sha256_json(draft.to_dict()).split(":", 1)[1][:16]
+        ),
+    )
+
+    worker_module._validate_exact_model_evaluation(
+        spec=spec,
+        evaluation=evaluation,
+        decisions_by_unit=decisions_by_unit,
+        unit_results=unit_results,
+    )
 
 
 def test_claim_heartbeat_uses_sql_expiry_after_a_delayed_renewal():

@@ -49,11 +49,15 @@ from research_lab.model_runner_protocol import (
 )
 from research_lab.routing_experiments import (
     ProviderReceiptStore,
+    ROUTING_EXPERIMENT_V2_CONTRACT_VERSION,
     RoutingDecisionReceiptV2,
     RoutingExperimentArtifactAuthority,
     RoutingExperimentV2Adapter,
     RoutingExperimentV2Evaluation,
     RoutingExperimentV2Spec,
+    RoutingExperimentV2VariantEvaluation,
+    routing_experiment_v2_artifact_key,
+    validate_routing_decision_receipt,
 )
 from research_lab.canonical import sha256_json
 from research_lab.candidate_routing_experiments import (
@@ -329,6 +333,225 @@ class ExactModelEvaluationAdapter(Protocol):
         unit_results: Mapping[str, Mapping[str, ExactModelUnitResult]],
         authoritative_billing_rollup: Callable[..., Mapping[str, Any]],
     ) -> RoutingExperimentV2Evaluation: ...
+
+
+def _index_exact_model_decision_receipts(
+    *,
+    spec: RoutingExperimentV2Spec,
+    decisions: tuple[RoutingDecisionReceiptV2, ...],
+    unit_results: Mapping[str, Mapping[str, ExactModelUnitResult]],
+) -> dict[tuple[str, str], tuple[RoutingDecisionReceiptV2, ...]]:
+    """Validate the complete exact-Model decision set before any SQL write."""
+
+    variants = {variant.variant_id: variant for variant in spec.variants}
+    ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(
+        spec.input.holdout_unit_refs
+    )
+    expected_keys = {
+        (variant_id, unit_ref)
+        for variant_id in variants
+        for unit_ref in ordered_units
+    }
+    indexed: dict[
+        tuple[str, str], tuple[RoutingDecisionReceiptV2, ...]
+    ] = {}
+    seen_receipt_ids: set[str] = set()
+    for receipt in decisions:
+        if not isinstance(receipt, RoutingDecisionReceiptV2):
+            raise RoutingExperimentWorkerError(
+                "canonical Model decision receipt is invalid"
+            )
+        receipt_errors = validate_routing_decision_receipt(receipt)
+        variant = variants.get(receipt.variant_id)
+        key = (receipt.variant_id, receipt.unit_ref)
+        if receipt_errors:
+            raise RoutingExperimentWorkerError(
+                "canonical Model decision receipt is invalid"
+            )
+        if (
+            variant is None
+            or key not in expected_keys
+            or receipt.experiment_id != spec.experiment_id
+            or receipt.stage != spec.input.stage
+            or receipt.stage != variant.stage
+            or receipt.artifact_key
+            != routing_experiment_v2_artifact_key(variant)
+        ):
+            raise RoutingExperimentWorkerError(
+                "canonical Model decision receipt lineage differs"
+            )
+        if receipt.receipt_id in seen_receipt_ids:
+            raise RoutingExperimentWorkerError(
+                "canonical Model decision receipt is duplicated"
+            )
+        seen_receipt_ids.add(receipt.receipt_id)
+        indexed[key] = (*indexed.get(key, ()), receipt)
+    if set(indexed) != expected_keys:
+        raise RoutingExperimentWorkerError(
+            "canonical Model decision receipt coverage differs"
+        )
+    if spec.input.stage == "candidate_acquisition" and any(
+        len(receipts) != 1 for receipts in indexed.values()
+    ):
+        raise RoutingExperimentWorkerError(
+            "exact Model candidate decision coverage is invalid"
+        )
+    for key, receipts in indexed.items():
+        variant_id, unit_ref = key
+        expected_provider_refs = tuple(
+            receipt.receipt_ref
+            for receipt in unit_results[variant_id][unit_ref].provider_receipts
+        )
+        observed_provider_refs = tuple(
+            provider_ref
+            for receipt in receipts
+            for provider_ref in receipt.provider_receipt_refs
+        )
+        if observed_provider_refs != expected_provider_refs:
+            raise RoutingExperimentWorkerError(
+                "canonical Model decision provider receipt coverage differs"
+            )
+    return indexed
+
+
+def _validate_exact_model_evaluation(
+    *,
+    spec: RoutingExperimentV2Spec,
+    evaluation: RoutingExperimentV2Evaluation,
+    decisions_by_unit: Mapping[
+        tuple[str, str], tuple[RoutingDecisionReceiptV2, ...]
+    ],
+    unit_results: Mapping[str, Mapping[str, ExactModelUnitResult]],
+) -> None:
+    """Bind one adapter evaluation to the exact decisions and provider runs."""
+
+    if not isinstance(evaluation, RoutingExperimentV2Evaluation):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation is invalid"
+        )
+    variants = {variant.variant_id: variant for variant in spec.variants}
+    observed_variant_ids = tuple(
+        item.variant_id
+        for item in evaluation.variants
+        if isinstance(item, RoutingExperimentV2VariantEvaluation)
+    )
+    expected_variant_ids = tuple(variants)
+    if (
+        len(observed_variant_ids) != len(evaluation.variants)
+        or observed_variant_ids != expected_variant_ids
+        or evaluation.experiment_id != spec.experiment_id
+        or evaluation.experiment_hash != spec.experiment_hash()
+        or evaluation.baseline_variant_id != spec.baseline_variant_id
+        or evaluation.immutable is not True
+        or evaluation.contract_version
+        != ROUTING_EXPERIMENT_V2_CONTRACT_VERSION
+        or evaluation.live_credit_spend != spec.allow_live_credit_spend
+    ):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation lineage differs"
+        )
+    all_decision_refs: list[str] = []
+    all_provider_refs: list[str] = []
+    ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(
+        spec.input.holdout_unit_refs
+    )
+    for item in evaluation.variants:
+        variant = variants[item.variant_id]
+        expected_decision_refs = tuple(
+            sorted(
+                receipt.receipt_id
+                for unit_ref in ordered_units
+                for receipt in decisions_by_unit[(item.variant_id, unit_ref)]
+            )
+        )
+        expected_provider_refs = tuple(
+            sorted(
+                {
+                    receipt.receipt_ref
+                    for unit_ref in ordered_units
+                    for receipt in unit_results[item.variant_id][
+                        unit_ref
+                    ].provider_receipts
+                }
+            )
+        )
+        if (
+            item.artifact_key
+            != routing_experiment_v2_artifact_key(variant)
+            or item.stage != spec.input.stage
+            or item.stage != variant.stage
+            or item.decision_receipt_refs != expected_decision_refs
+            or item.provider_receipt_refs != expected_provider_refs
+        ):
+            raise RoutingExperimentWorkerError(
+                "canonical Model evaluation receipt lineage differs"
+            )
+        all_decision_refs.extend(expected_decision_refs)
+        all_provider_refs.extend(expected_provider_refs)
+    expected_all_decisions = tuple(sorted(set(all_decision_refs)))
+    expected_all_providers = tuple(sorted(set(all_provider_refs)))
+    if (
+        evaluation.decision_receipt_refs != expected_all_decisions
+        or evaluation.provider_receipt_refs != expected_all_providers
+    ):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation receipt coverage differs"
+        )
+    selected = evaluation.selected_variant_id
+    selected_evaluation = next(
+        (item for item in evaluation.variants if item.variant_id == selected),
+        None,
+    )
+    if selected and (
+        selected_evaluation is None or selected_evaluation.passed is not True
+    ):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation selection differs"
+        )
+    if (
+        type(evaluation.provider_cache_hits) is not int
+        or evaluation.provider_cache_hits < 0
+        or type(evaluation.provider_cache_misses) is not int
+        or evaluation.provider_cache_misses < 0
+        or evaluation.provider_cache_hits
+        + evaluation.provider_cache_misses
+        != sum(
+            len(result.provider_receipts)
+            for per_variant in unit_results.values()
+            for result in per_variant.values()
+        )
+    ):
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation cache counts are invalid"
+        )
+    if evaluation.live_credit_spend:
+        if (
+            not evaluation.billing_rollup_id
+            or not evaluation.billing_rollup_hash
+            or type(evaluation.billing_rollup_total_credit_microunits) is not int
+            or evaluation.billing_rollup_total_credit_microunits < 0
+        ):
+            raise RoutingExperimentWorkerError(
+                "canonical Model evaluation billing authority is invalid"
+            )
+    elif (
+        evaluation.billing_rollup_id
+        or evaluation.billing_rollup_hash
+        or evaluation.billing_rollup_total_credit_microunits != 0
+    ):
+        raise RoutingExperimentWorkerError(
+            "canonical Model fixture evaluation has billing authority"
+        )
+    identity = evaluation.to_dict()
+    identity["receipt_id"] = "routing_evaluation_v2:pending"
+    expected_receipt_id = (
+        "routing_evaluation_v2:"
+        + sha256_json(identity).split(":", 1)[1][:16]
+    )
+    if evaluation.receipt_id != expected_receipt_id:
+        raise RoutingExperimentWorkerError(
+            "canonical Model evaluation receipt identity differs"
+        )
 
 
 @dataclass(frozen=True)
@@ -914,19 +1137,57 @@ class RoutingExperimentWorker:
                 raise RoutingExperimentWorkerError(
                     "canonical Model decision receipts are invalid"
                 )
-            decisions_by_unit: dict[tuple[str, str], tuple[RoutingDecisionReceiptV2, ...]] = {}
+            decisions_by_unit = _index_exact_model_decision_receipts(
+                spec=spec,
+                decisions=decisions,
+                unit_results=unit_results,
+            )
             for receipt in decisions:
-                if not isinstance(receipt, RoutingDecisionReceiptV2):
-                    raise RoutingExperimentWorkerError(
-                        "canonical Model decision receipt is invalid"
-                    )
                 self.service.store.append_decision(
                     experiment_hash=spec.experiment_hash(),
                     receipt=receipt,
                     claim=claim,
                 )
-                key = (receipt.variant_id, receipt.unit_ref)
-                decisions_by_unit[key] = (*decisions_by_unit.get(key, ()), receipt)
+
+            if spec.input.stage != "candidate_acquisition":
+                evaluation = inputs.evaluation_adapter.build_evaluation(
+                    spec=spec,
+                    gold_labels=inputs.gold_labels,
+                    unit_results=unit_results,
+                    authoritative_billing_rollup=(
+                        inputs.authoritative_billing_rollup
+                    ),
+                )
+                if not isinstance(evaluation, RoutingExperimentV2Evaluation):
+                    raise RoutingExperimentWorkerError(
+                        "canonical Model evaluation is invalid"
+                    )
+                _validate_exact_model_evaluation(
+                    spec=spec,
+                    evaluation=evaluation,
+                    decisions_by_unit=decisions_by_unit,
+                    unit_results=unit_results,
+                )
+                self.service.store.append_evaluation(
+                    spec=spec,
+                    evaluation=evaluation,
+                    claim=claim,
+                )
+                self._append_execution_event(
+                    spec=spec,
+                    claim=claim,
+                    event_type="run_completed",
+                    event_doc={
+                        "evaluation_receipt_id": evaluation.receipt_id,
+                        "selected_variant_id": (
+                            evaluation.selected_variant_id or "unselected"
+                        ),
+                        "runner_contract": "pr274_model_runner",
+                    },
+                )
+                heartbeat.ensure_held()
+                self._close_claim(spec=spec, claim=claim, reason="completed")
+                return evaluation
 
             candidate_receipts: list[CandidateWaterfallReceipt] = []
             candidate_terminals: dict[tuple[str, str], CandidateModelUnitTerminalReceipt] = {}
@@ -1056,6 +1317,12 @@ class RoutingExperimentWorker:
                 raise RoutingExperimentWorkerError(
                     "canonical Model evaluation is invalid"
                 )
+            _validate_exact_model_evaluation(
+                spec=spec,
+                evaluation=evaluation,
+                decisions_by_unit=decisions_by_unit,
+                unit_results=unit_results,
+            )
             candidate_metrics = evaluate_candidate_waterfall_metrics(
                 spec=spec,
                 evaluation=evaluation,

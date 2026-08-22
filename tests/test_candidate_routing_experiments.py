@@ -12,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.tee import supabase_schema_preflight_v2
 from research_lab.canonical import sha256_json
 from research_lab.candidate_routing_experiments import (
+    CandidateModelUnitTerminalReceipt,
     CandidateWaterfallReceipt,
     adapt_exact_model_candidate_receipt,
     candidate_waterfall_receipt_from_model,
@@ -40,6 +42,69 @@ from research_lab.routing_experiments import (
 
 def H(char: str) -> str:
     return "sha256:" + char * 64
+
+
+def _synthetic_candidate_terminal() -> CandidateModelUnitTerminalReceipt:
+    """Synthetic-only terminal used to test the Lab receipt boundary."""
+
+    verification_ref = "e" * 64
+    attempt_ref = "8" * 64
+    attempt_chain = sha256_json([attempt_ref]).split(":", 1)[1]
+    publication_ref = "9" * 64
+    projection = {
+        "attempt_sha256": attempt_ref,
+        "attempt_chain_sha256": attempt_chain,
+        "step_order": 0,
+        "attempt_sequence": 0,
+        "provider_outcome": "verified",
+        "published_count": 0,
+        "company_verification_receipt_sha256s": [verification_ref],
+        "publication_projection_sha256": publication_ref,
+    }
+    return CandidateModelUnitTerminalReceipt(
+        experiment_id="synthetic-candidate-terminal",
+        experiment_hash=H("a"),
+        variant_id="baseline",
+        unit_ref="synthetic-unit",
+        artifact_key=H("b"),
+        artifact_branch="main",
+        artifact_commit_sha="1" * 40,
+        artifact_manifest_hash=H("c"),
+        release_identity_sha256=H("d"),
+        binding_contracts_sha256=H("e"),
+        candidate_waterfall_contract_sha256=H("f"),
+        start_request_sha256="7" * 64,
+        decision_receipt_id="routing_decision:" + "a" * 16,
+        target_verified_qualified_count=1,
+        disposition="succeeded",
+        stop_policy_sha256="1" * 64,
+        verification_receipt_sha256=sha256_json(
+            [verification_ref]
+        ).split(":", 1)[1],
+        attempt_chain_sha256=attempt_chain,
+        publication_projection_sha256=sha256_json(
+            [publication_ref]
+        ).split(":", 1)[1],
+        terminal_result_sha256=H("2"),
+        model_receipt_sha256="3" * 64,
+        orchestration_receipt_sha256="4" * 64,
+        candidate_waterfall_sha256="5" * 64,
+        candidate_plan_sha256="6" * 64,
+        stop_reason="target_met",
+        provider_receipt_refs=("provider_receipt:" + "b" * 16,),
+        verification_receipt_refs=((verification_ref,),),
+        attempt_receipt_sha256s=(attempt_ref,),
+        attempt_chain_sha256s=(attempt_chain,),
+        attempt_projections=(projection,),
+        provider_call_count=1,
+        billed_credit_microunits=1,
+        latency_ms=1,
+        raw_count=1,
+        normalized_count=1,
+        unique_count=1,
+        verified_qualified_count=1,
+        published_count=0,
+    )
 
 
 def _artifact(
@@ -882,6 +947,51 @@ def test_candidate_receipt_binds_ordered_verification_hash_and_disposition():
         replace(skipped, billed_credit_microunits=1)
 
 
+def test_candidate_terminal_preserves_raw_model_start_request_hash():
+    terminal = _synthetic_candidate_terminal()
+
+    assert terminal.start_request_sha256 == "7" * 64
+    assert terminal.to_dict()["start_request_sha256"] == "7" * 64
+
+
+def test_candidate_terminal_rejects_reused_verification_proof_across_attempts():
+    terminal = _synthetic_candidate_terminal()
+    first_projection = dict(terminal.attempt_projections[0])
+    second_attempt = "9" * 64
+    second_chain = sha256_json(
+        [terminal.attempt_receipt_sha256s[0], second_attempt]
+    ).split(":", 1)[1]
+    second_projection = {
+        **first_projection,
+        "attempt_sha256": second_attempt,
+        "attempt_chain_sha256": second_chain,
+        "step_order": 1,
+        "attempt_sequence": 1,
+    }
+
+    with pytest.raises(RoutingExperimentError, match="duplicated"):
+        replace(
+            terminal,
+            provider_receipt_refs=(
+                terminal.provider_receipt_refs[0],
+                "provider_receipt:" + "c" * 16,
+            ),
+            verification_receipt_refs=(
+                terminal.verification_receipt_refs[0],
+                terminal.verification_receipt_refs[0],
+            ),
+            attempt_receipt_sha256s=(
+                terminal.attempt_receipt_sha256s[0],
+                second_attempt,
+            ),
+            attempt_chain_sha256s=(
+                terminal.attempt_chain_sha256s[0],
+                second_chain,
+            ),
+            attempt_projections=(first_projection, second_projection),
+        )
+
+
 @pytest.mark.skipif(
     not os.environ.get("SOURCING_MODEL_CHECKOUT"),
     reason="requires an exact Sourcing_model checkout",
@@ -1280,6 +1390,7 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     ).read_text()
     assert "research_lab_candidate_waterfall_receipts" in sql
     assert "research_lab_candidate_waterfall_metrics" in sql
+    assert "research_lab_candidate_model_unit_terminals" in sql
     for duplicate in (
         "research_lab_candidate_routing_experiments",
         "research_lab_candidate_routing_arms",
@@ -1293,6 +1404,8 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "FOR SELECT TO service_role USING (true)" in sql
     assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_receipt_v1" in sql
     assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_waterfall_metric_v1" in sql
+    assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_append_model_unit_terminal_v1" in sql
+    assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_assert_model_unit_terminal_v1" in sql
     assert "CREATE OR REPLACE FUNCTION public.research_lab_candidate_metric_projection_v1" in sql
     assert "SECURITY INVOKER" in sql
     assert "REVOKE ALL ON TABLE" in sql
@@ -1318,8 +1431,42 @@ def test_postgres_persistence_is_append_only_and_has_no_parallel_lifecycle():
     assert "CHECK (published_count = 0)" in sql
     assert "CHECK (publication_rate = 0)" in sql
     assert "research_lab_candidate_promotion_metric_not_authoritative" in sql
+    assert "research_lab_candidate_model_terminal_verification_receipt_duplicated" in sql
     assert sql.count("jsonb_typeof(metric_doc->") == 3
     assert "auth.role()" not in sql
     assert "DROP TABLE" not in sql
     assert "DROP TRIGGER" not in sql
     assert "DROP POLICY" not in sql
+
+
+def test_candidate_terminal_and_append_rpcs_are_restart_gated():
+    relation_contract = {
+        relation: (migration, set(columns))
+        for migration, relation, columns in (
+            supabase_schema_preflight_v2.REQUIRED_SUPABASE_V2_SCHEMA
+        )
+    }
+    terminal_migration, terminal_columns = relation_contract[
+        "research_lab_candidate_model_unit_terminals"
+    ]
+    assert terminal_migration == (
+        "scripts/162-research-lab-candidate-routing-experiments.sql"
+    )
+    assert {
+        "receipt_id",
+        "receipt_hash",
+        "experiment_hash",
+        "decision_receipt_id",
+        "start_request_sha256",
+        "terminal_doc",
+    } <= terminal_columns
+    rpc_contract = set(supabase_schema_preflight_v2.REQUIRED_SUPABASE_V2_RPCS)
+    for function_name in (
+        "research_lab_candidate_append_model_unit_terminal_v1",
+        "research_lab_candidate_append_waterfall_receipt_v1",
+        "research_lab_candidate_append_waterfall_metric_v1",
+    ):
+        assert (
+            "scripts/162-research-lab-candidate-routing-experiments.sql",
+            function_name,
+        ) in rpc_contract

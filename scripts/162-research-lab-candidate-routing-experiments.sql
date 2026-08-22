@@ -765,6 +765,17 @@ BEGIN
               ) verification(value)
              WHERE verification.value !~ '^[0-9a-f]{64}$'
        )
+       OR (
+            SELECT pg_catalog.count(*)
+              FROM pg_catalog.jsonb_array_elements_text(
+                  p_receipt_doc->'company_verification_receipt_sha256s'
+              ) verification(value)
+          ) <> (
+            SELECT pg_catalog.count(DISTINCT verification.value)
+              FROM pg_catalog.jsonb_array_elements_text(
+                  p_receipt_doc->'company_verification_receipt_sha256s'
+              ) verification(value)
+          )
        OR p_receipt_doc->>'verification_receipt_sha256' IS DISTINCT FROM (CASE
             WHEN pg_catalog.jsonb_array_length(
                 p_receipt_doc->'company_verification_receipt_sha256s'
@@ -1528,6 +1539,18 @@ BEGIN
         total_unique := total_unique + (projection->>'unique_candidate_count')::INTEGER;
         total_verified := total_verified + (projection->>'verified_qualified_candidate_count')::INTEGER;
     END LOOP;
+    IF (
+        SELECT pg_catalog.count(*)
+          FROM pg_catalog.jsonb_array_elements_text(verification_flat)
+       ) <> (
+        SELECT pg_catalog.count(DISTINCT verification.value)
+          FROM pg_catalog.jsonb_array_elements_text(verification_flat)
+               verification(value)
+       )
+    THEN
+        RAISE EXCEPTION 'research_lab_candidate_model_terminal_verification_receipt_duplicated'
+            USING ERRCODE = '23514';
+    END IF;
     IF terminal.provider_call_count IS DISTINCT FROM total_calls
        OR terminal.billed_credit_microunits IS DISTINCT FROM total_cost
        OR terminal.latency_ms IS DISTINCT FROM total_latency

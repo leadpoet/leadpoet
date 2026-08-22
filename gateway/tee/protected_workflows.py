@@ -173,6 +173,17 @@ PROTECTED_SYMBOLS = {
         "VerifiedRoutingAuthorityBundle",
         "load_verified_routing_authority_bundle",
     ),
+    "gateway/research_lab/routing_release_builder.py": (
+        "RELEASE_SOURCE_SCHEMA_VERSION",
+        "RELEASE_MODULE_SCHEMA_VERSION",
+        "RELEASE_AUTHORITY_PROVIDER_MODULE",
+        "RoutingReleaseDependencyError",
+        "ReviewedRoutingReleaseAuthoritySources",
+        "_verify_protected_workflow_manifest",
+        "_load_signed_gold_labels",
+        "build_reviewed_routing_release_dependencies",
+        "render_generated_release_module",
+    ),
     "gateway/research_lab/routing_execution_authorization.py": (
         "ROUTING_PROVIDER_AUTHORIZATION_OPERATION_V2",
         "ROUTING_PROVIDER_AUTHORIZATION_PURPOSE_V2",

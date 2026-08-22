@@ -3553,6 +3553,10 @@ class ProviderBrokerV2:
             response_payload = {
                 "terminal_status": "authenticated_response",
                 "http_status": int(response["http_status"]),
+                # One response record represents one physical provider
+                # transport.  Composite callers must provide their own
+                # signed aggregate count; the Lab must not infer it.
+                "call_count": 1,
                 "headers": _nonsecret_headers(response.get("headers", {})),
                 "body_b64": base64.b64encode(response_body).decode("ascii"),
                 "encrypted_request_artifact_id": request_artifact_id,
@@ -3572,6 +3576,7 @@ class ProviderBrokerV2:
             }
             response_payload = {
                 "terminal_status": "transport_failure",
+                "call_count": 1,
                 "failure_code": terminal_kwargs["failure_code"],
                 "failure_stage": failure_stage,
                 "failure_error_type": _safe_error_type(exc),

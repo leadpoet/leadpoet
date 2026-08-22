@@ -91,9 +91,7 @@ class ResearchLabModelRunnerProtocol:
             continuation=continuation,
             completion=completion,
         )
-        if not isinstance(result, Mapping):
-            raise ModelRunnerHostError("artifact continuation is invalid")
-        return result
+        return self._validate_state(result, "artifact continuation")
 
     @property
     def release_identity(self) -> Mapping[str, Any]:
@@ -118,7 +116,11 @@ class ResearchLabModelRunnerProtocol:
         )
         if not isinstance(result, Mapping):
             raise ModelRunnerHostError("artifact start request is invalid")
-        return result
+        if not isinstance(result.get("host_capability_manifest"), Mapping):
+            raise ModelRunnerHostError(
+                "artifact start request has no host capability manifest"
+            )
+        return dict(result)
 
     def preflight(
         self,
@@ -131,7 +133,7 @@ class ResearchLabModelRunnerProtocol:
         )
         if not isinstance(receipt, Mapping):
             raise ModelRunnerHostError("artifact preflight is invalid")
-        return receipt
+        return dict(receipt)
 
     def validate_result(
         self,
@@ -144,9 +146,7 @@ class ResearchLabModelRunnerProtocol:
             start_request=start_request,
             expected_release_identity=self._release_identity,
         )
-        if not isinstance(result, Mapping):
-            raise ModelRunnerHostError("artifact result preflight is invalid")
-        return result
+        return self._validate_state(result, "artifact result preflight")
 
     def build_completion(
         self,
@@ -168,6 +168,43 @@ class ResearchLabModelRunnerProtocol:
         if not isinstance(completion, Mapping):
             raise ModelRunnerHostError("artifact completion is invalid")
         return completion
+
+    @staticmethod
+    def _validate_state(
+        value: Mapping[str, Any], label: str
+    ) -> Mapping[str, Any]:
+        """Validate only the transport envelope, never model semantics."""
+
+        if not isinstance(value, Mapping):
+            raise ModelRunnerHostError(f"{label} is invalid")
+        status = str(value.get("status") or "")
+        if status == "action_required":
+            action = value.get("action")
+            continuation = value.get("continuation")
+            if not isinstance(action, Mapping) or not isinstance(
+                continuation, Mapping
+            ):
+                raise ModelRunnerHostError(f"{label} action state is invalid")
+            action_type = str(action.get("action_type") or "")
+            tool_id = str(action.get("tool_id") or "").strip()
+            binding_hash = str(action.get("binding_contract_sha256") or "")
+            idempotency_key = str(action.get("idempotency_key") or "")
+            if not action_type or not tool_id or not re.fullmatch(
+                r"[0-9a-f]{64}", binding_hash
+            ) or not re.fullmatch(r"[0-9a-f]{64}", idempotency_key):
+                raise ModelRunnerHostError(f"{label} action identity is invalid")
+        elif status == "completed":
+            if not isinstance(value.get("result"), Mapping) or not isinstance(
+                value.get("model_receipt"), Mapping
+            ) or not isinstance(value.get("continuation"), Mapping):
+                raise ModelRunnerHostError(f"{label} terminal result is invalid")
+            if value.get("action") not in (None, {}):
+                raise ModelRunnerHostError(
+                    f"{label} completed action must be empty"
+                )
+        else:
+            raise ModelRunnerHostError(f"{label} status is invalid")
+        return dict(value)
 
 
 _SHA256_RE = re.compile(r"(?:sha256:)?[0-9a-f]{64}")

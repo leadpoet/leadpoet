@@ -1070,6 +1070,7 @@ _ROUTING_DISPATCH_PROJECTION_FIELDS = frozenset(
         "evidence_hash",
         "credit_microunits",
         "latency_ms",
+        "call_count",
         "billing_state",
         "binding_id",
         "provider_id",
@@ -1760,6 +1761,7 @@ class ProviderBrokerRoutingRunner:
             "evidence_hash",
             "credit_microunits",
             "latency_ms",
+            "call_count",
             "billing_state",
             "binding_id",
             "provider_id",
@@ -1776,7 +1778,15 @@ class ProviderBrokerRoutingRunner:
             raise RoutingExperimentRuntimeError("routing broker billing state is invalid")
         credit = result.get("credit_microunits")
         latency = result.get("latency_ms")
-        if type(credit) is not int or credit < 0 or type(latency) is not int or latency < 0:
+        call_count = result.get("call_count")
+        if (
+            type(credit) is not int
+            or credit < 0
+            or type(latency) is not int
+            or latency < 0
+            or type(call_count) is not int
+            or not 1 <= call_count <= 10_000
+        ):
             raise RoutingExperimentRuntimeError("routing broker cost or latency is invalid")
         if (
             result.get("binding_id") != binding.binding_id
@@ -1802,6 +1812,7 @@ class ProviderBrokerRoutingRunner:
             "evidence_hash": result.get("evidence_hash"),
             "credit_microunits": credit,
             "latency_ms": latency,
+            "call_count": call_count,
             "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
         }
         return ProviderReceipt(
@@ -1829,6 +1840,7 @@ class ReviewedProviderBrokerRoutingRunner:
         model_binding_requirements: VerifiedRoutingModelBindingRequirements,
         authorization_authority: AttestedScoringV2RoutingProviderCallAuthority,
         dispatch_authority: AttestedScoringV2RoutingProviderDispatchAuthority,
+        artifact_lineages: Mapping[str, VerifiedRoutingArtifactLineage] | None = None,
         execution_envelope: RoutingExperimentExecutionEnvelopeV2 | None = None,
         admission_bundle: RoutingAdmissionBundleV2 | None = None,
         protected_release_receipt: Mapping[str, Any] | None = None,
@@ -1841,6 +1853,17 @@ class ReviewedProviderBrokerRoutingRunner:
         self.config = config
         self.store = store
         self.artifact_lineage = artifact_lineage
+        self.artifact_lineages = {
+            str(variant_id): lineage
+            for variant_id, lineage in (artifact_lineages or {}).items()
+        }
+        if self.artifact_lineages and any(
+            type(lineage) is not VerifiedRoutingArtifactLineage
+            for lineage in self.artifact_lineages.values()
+        ):
+            raise RoutingExperimentRuntimeError(
+                "routing provider artifact lineage map is invalid"
+            )
         self.compiler = compiler
         self.model_binding_requirements = model_binding_requirements
         if not isinstance(
@@ -1872,6 +1895,48 @@ class ReviewedProviderBrokerRoutingRunner:
             dict(item) for item in dispatch_parent_receipt_graphs
         )
         self._execution = execution
+
+    def validate_artifact_lineages(
+        self,
+        expected: Mapping[str, VerifiedRoutingArtifactLineage],
+    ) -> None:
+        """Bind every model variant to its own signed artifact lineage."""
+
+        if not isinstance(expected, Mapping) or not expected:
+            raise RoutingExperimentRuntimeError(
+                "routing provider artifact lineages are unavailable"
+            )
+        if not self.artifact_lineages:
+            raise RoutingExperimentRuntimeError(
+                "routing provider variant artifact lineages are unavailable"
+            )
+        if set(self.artifact_lineages) != set(expected):
+            raise RoutingExperimentRuntimeError(
+                "routing provider variant artifact lineage set differs"
+            )
+        for variant_id, lineage in expected.items():
+            if type(lineage) is not VerifiedRoutingArtifactLineage:
+                raise RoutingExperimentRuntimeError(
+                    "routing provider expected artifact lineage is invalid"
+                )
+            if self.artifact_lineages[variant_id].to_dict() != lineage.to_dict():
+                raise RoutingExperimentRuntimeError(
+                    "routing provider variant artifact lineage differs"
+                )
+
+    def _lineage_for_variant(
+        self, variant_id: str
+    ) -> VerifiedRoutingArtifactLineage:
+        if self.artifact_lineages:
+            lineage = self.artifact_lineages.get(str(variant_id))
+            if lineage is None:
+                raise RoutingExperimentRuntimeError(
+                    "routing provider variant artifact lineage is unavailable"
+                )
+            return lineage
+        # Compatibility for pre-dual-artifact callers. The reviewed V3
+        # factory rejects this path before a live claim is taken.
+        return self.artifact_lineage
 
     def validate_composition(self) -> None:
         """Assert that a factory returned a fully constructed live runner."""
@@ -1937,6 +2002,7 @@ class ReviewedProviderBrokerRoutingRunner:
             config=self.config,
             store=self.store,
             artifact_lineage=self.artifact_lineage,
+            artifact_lineages=self.artifact_lineages,
             compiler=self.compiler,
             model_binding_requirements=self.model_binding_requirements,
             authorization_authority=self.authorization_authority,
@@ -2036,6 +2102,7 @@ class ReviewedProviderBrokerRoutingRunner:
             raise RoutingExperimentRuntimeError(
                 "routing provider protected release identity differs"
             )
+        artifact_lineage = self._lineage_for_variant(authorization.variant_id)
         deadline = (
             execution.deadline_supplier()
             if execution.deadline_supplier is not None
@@ -2048,7 +2115,7 @@ class ReviewedProviderBrokerRoutingRunner:
             )
         requirement_hash = self.model_binding_requirements.resolve(
             binding=binding,
-            artifact_lineage_hash=self.artifact_lineage.identity_hash(),
+            artifact_lineage_hash=artifact_lineage.identity_hash(),
         )
         prepared = self.compiler.prepare(
             binding=binding,
@@ -2074,18 +2141,18 @@ class ReviewedProviderBrokerRoutingRunner:
             protected_boot_identity_hash=admission.protected_boot_identity_hash,
             variant_id=authorization.variant_id,
             stage=authorization.stage,
-            artifact_lineage_hash=self.artifact_lineage.identity_hash(),
-            pointer_document_hash=self.artifact_lineage.pointer_document_hash,
-            model_artifact_hash=self.artifact_lineage.model_artifact_hash,
-            manifest_hash=self.artifact_lineage.manifest_hash,
-            image_digest=self.artifact_lineage.image_digest,
-            commit_sha=self.artifact_lineage.commit_sha,
-            build_id=self.artifact_lineage.build_id,
-            routing_contract_hash=self.artifact_lineage.routing_contract_hash,
-            routing_catalog_hash=self.artifact_lineage.routing_catalog_hash,
-            routing_policy_hash=self.artifact_lineage.routing_policy_hash,
-            feature_schema_hash=self.artifact_lineage.feature_schema_hash,
-            verifier_contract_hash=self.artifact_lineage.verifier_contract_hash,
+            artifact_lineage_hash=artifact_lineage.identity_hash(),
+            pointer_document_hash=artifact_lineage.pointer_document_hash,
+            model_artifact_hash=artifact_lineage.model_artifact_hash,
+            manifest_hash=artifact_lineage.manifest_hash,
+            image_digest=artifact_lineage.image_digest,
+            commit_sha=artifact_lineage.commit_sha,
+            build_id=artifact_lineage.build_id,
+            routing_contract_hash=artifact_lineage.routing_contract_hash,
+            routing_catalog_hash=artifact_lineage.routing_catalog_hash,
+            routing_policy_hash=artifact_lineage.routing_policy_hash,
+            feature_schema_hash=artifact_lineage.feature_schema_hash,
+            verifier_contract_hash=artifact_lineage.verifier_contract_hash,
             binding=binding,
             transport_id=prepared.transport_id,
             binding_catalog_manifest_hash=prepared.binding_catalog_manifest_hash,
@@ -2110,7 +2177,7 @@ class ReviewedProviderBrokerRoutingRunner:
         )
         proof = self.authorization_authority.authorize(
             exact_authorization,
-            artifact_lineage=self.artifact_lineage,
+            artifact_lineage=artifact_lineage,
             model_binding_observation=self.model_binding_requirements,
             execution_envelope=self.execution_envelope,
             admission_bundle=admission,

@@ -62,14 +62,30 @@ def load_reviewed_routing_release_dependencies() -> (
     """
 
     try:
-        from gateway.research_lab.routing_release_dependencies import (
-            REVIEWED_ROUTING_RELEASE_DEPENDENCIES,
-        )
+        from gateway.research_lab import routing_release_dependencies
     except ModuleNotFoundError as exc:
         if exc.name != "gateway.research_lab.routing_release_dependencies":
             raise
         return None
-    return REVIEWED_ROUTING_RELEASE_DEPENDENCIES
+
+    loader = getattr(
+        routing_release_dependencies,
+        "load_reviewed_routing_release_dependencies",
+        None,
+    )
+    if callable(loader):
+        dependencies = loader()
+    else:
+        dependencies = getattr(
+            routing_release_dependencies,
+            "REVIEWED_ROUTING_RELEASE_DEPENDENCIES",
+            None,
+        )
+    if not isinstance(dependencies, ReviewedRoutingBootstrapDependencies):
+        raise RoutingProductBootstrapError(
+            "reviewed routing release dependencies are not a typed signed bundle"
+        )
+    return dependencies
 
 
 def build_reviewed_routing_product_from_release(

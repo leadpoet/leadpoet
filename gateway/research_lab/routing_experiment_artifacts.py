@@ -56,10 +56,13 @@ def _pointer_uri(value: Any) -> str:
     uri = str(value or "").strip()
     if (
         not uri.startswith("s3://")
-        or not uri.endswith("/branches/leadpoet-lab/current.json")
+        or not (
+            uri.endswith("/branches/main/current.json")
+            or uri.endswith("/branches/leadpoet-lab/current.json")
+        )
     ):
         raise RoutingArtifactAuthorityError(
-            "routing artifact pointer must be the leadpoet-lab current.json"
+            "routing artifact pointer must be the main or leadpoet-lab current.json"
         )
     return uri
 
@@ -278,7 +281,12 @@ class SignedRoutingArtifactAuthority:
             != ROUTING_ARTIFACT_LINEAGE_SCHEMA_VERSION
             or lineage_document["manifest_uri"] != self.lineage_manifest_uri
             or lineage_document["repository"] != ROUTING_ARTIFACT_REPOSITORY
-            or lineage_document["branch"] != ROUTING_ARTIFACT_BRANCH
+            or lineage_document["branch"]
+            != (
+                "main"
+                if self.pointer_uri.endswith("/branches/main/current.json")
+                else ROUTING_ARTIFACT_BRANCH
+            )
             or lineage_document["pointer_uri"] != self.pointer_uri
             or lineage_document["pointer_document_hash"]
             != sha256_json(pointer.to_dict())
@@ -302,9 +310,14 @@ class SignedRoutingArtifactAuthority:
                 "model_artifact_hash",
             }
         }
+        artifact_branch = (
+            "main"
+            if self.pointer_uri.endswith("/branches/main/current.json")
+            else ROUTING_ARTIFACT_BRANCH
+        )
         lineage = VerifiedRoutingArtifactLineage(
             repository=ROUTING_ARTIFACT_REPOSITORY,
-            branch=ROUTING_ARTIFACT_BRANCH,
+            branch=artifact_branch,
             commit_sha=pointer.git_commit_sha,
             pointer_uri=self.pointer_uri,
             pointer_document_hash=sha256_json(pointer.to_dict()),

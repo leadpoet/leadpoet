@@ -143,6 +143,7 @@ def _result(*, credit: int = 10, timeout_ms: int = 1):
         "evidence_hash": _hash("d"),
         "credit_microunits": credit,
         "latency_ms": timeout_ms,
+        "call_count": 1,
         "billing_state": "known",
         "binding_id": "deepline-jobs",
         "provider_id": "deepline",

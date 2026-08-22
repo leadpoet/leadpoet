@@ -2162,6 +2162,10 @@ class ProviderReceipt:
     credit_microunits: int
     latency_ms: int
     execution_mode: str
+    # New measured receipts carry the number of physical provider calls that
+    # produced this terminal result.  Older fixture receipts omit the field;
+    # their one-record fixture contract remains backward compatible.
+    call_count: int | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderReceipt":
@@ -2182,12 +2186,18 @@ class ProviderReceipt:
             "credit_microunits",
             "latency_ms",
             "execution_mode",
+            "call_count",
         }
         unknown = sorted(set(data) - allowed)
         if unknown:
             raise RoutingExperimentError(
                 "provider_receipt_unknown_fields:" + ",".join(str(item) for item in unknown)
             )
+        raw_call_count = data.get("call_count")
+        if raw_call_count is not None and (
+            type(raw_call_count) is not int or raw_call_count < 0
+        ):
+            raise RoutingExperimentError("provider_receipt_call_count_is_invalid")
         return cls(
             receipt_ref=str(data.get("receipt_ref") or ""),
             binding_id=str(data.get("binding_id") or ""),
@@ -2201,10 +2211,16 @@ class ProviderReceipt:
             credit_microunits=int(data.get("credit_microunits", 0)),
             latency_ms=int(data.get("latency_ms", 0)),
             execution_mode=str(data.get("execution_mode") or ""),
+            call_count=raw_call_count,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.call_count is None:
+            # Preserve legacy fixture receipt bytes.  Measured receipts must
+            # carry the explicit terminal call count before validation passes.
+            data.pop("call_count", None)
+        return data
 
 
 def provider_receipt_key(
@@ -2262,6 +2278,19 @@ def validate_provider_receipt(receipt: ProviderReceipt | Mapping[str, Any]) -> l
         errors.append("provider_outcome_is_invalid")
     if receipt.execution_mode not in {mode.value for mode in ReceiptExecutionMode}:
         errors.append("provider_receipt_execution_mode_is_invalid")
+    if receipt.call_count is None:
+        if receipt.execution_mode == ReceiptExecutionMode.MEASURED_LAB.value:
+            errors.append("provider_receipt_call_count_missing")
+    else:
+        try:
+            _bounded_int(
+                receipt.call_count,
+                "call_count",
+                minimum=0,
+                maximum=MAX_TOOLS_PER_VARIANT,
+            )
+        except RoutingExperimentError as exc:
+            errors.append(str(exc))
     try:
         _bounded_int(receipt.credit_microunits, "credit_microunits", minimum=0, maximum=MAX_CREDIT_MICROUNITS_PER_VARIANT)
         _bounded_int(receipt.latency_ms, "latency_ms", minimum=0, maximum=MAX_LATENCY_MS)
@@ -5858,6 +5887,10 @@ def _v2_failure_receipt(
         "evidence_hash": sha256_json(payload),
         "credit_microunits": 0,
         "latency_ms": 0,
+        # No provider transport result exists when the runner fails before a
+        # physical request is completed. Preserve that fact explicitly; do
+        # not invent one call for an adapter failure.
+        "call_count": 0,
         "execution_mode": execution_mode,
     }
     return ProviderReceipt(

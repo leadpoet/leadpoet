@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -62,6 +63,9 @@ from gateway.research_lab.routing_execution_authorization import (
 )
 from gateway.research_lab.routing_execution_envelope import (
     RoutingExperimentExecutionEnvelopeV2,
+)
+from gateway.research_lab.routing_experiment_artifacts import (
+    VerifiedRoutingArtifactLineage,
 )
 from gateway.research_lab.routing_provider_bindings import (
     VerifiedRoutingBindingCatalog,
@@ -311,23 +315,44 @@ class _DurableStore:
         return self.identity
 
 
-class _Lineage(SimpleNamespace):
-    def identity_hash(self):
-        return sha256_json(
-            {
-                "commit_sha": self.commit_sha,
-                "routing_catalog_hash": self.routing_catalog_hash,
-                "routing_contract_hash": self.routing_contract_hash,
-            }
+def _dual_lineages() -> tuple[VerifiedRoutingArtifactLineage, ...]:
+    values = []
+    for branch, marker in (("main", "0"), ("leadpoet-lab", "1")):
+        values.append(
+            VerifiedRoutingArtifactLineage(
+                repository="leadpoet/Sourcing_model",
+                branch=branch,
+                commit_sha=COMMIT if branch == "main" else "b" * 40,
+                pointer_uri=f"s3://reviewed/branches/{branch}/current.json",
+                pointer_document_hash="sha256:" + marker * 64,
+                immutable_manifest_uri=f"s3://reviewed/releases/{branch}.json",
+                routing_lineage_manifest_uri=(
+                    f"s3://reviewed/releases/{branch}-lineage.json"
+                ),
+                routing_lineage_manifest_hash="sha256:" + ("2" if marker == "0" else "3") * 64,
+                manifest_hash="sha256:" + ("4" if marker == "0" else "5") * 64,
+                signature_ref=f"s3://reviewed/signatures/{branch}.sig",
+                signature_key_id=f"{branch}-key",
+                signature_algorithm="ECDSA_SHA_256",
+                model_artifact_hash="sha256:" + ("6" if marker == "0" else "7") * 64,
+                image_digest="model@sha256:" + ("8" if marker == "0" else "9") * 64,
+                config_hash="sha256:" + "a" * 64,
+                build_id=f"build-{branch}",
+                component_registry_version="components-v1",
+                scoring_adapter_version="adapter-v1",
+                routing_contract_hash=CONTRACT,
+                routing_catalog_hash=MODEL_CATALOG,
+                routing_policy_hash="sha256:" + "d" * 64,
+                feature_schema_hash="sha256:" + "e" * 64,
+                verifier_contract_hash="sha256:" + "f" * 64,
+            )
         )
+    return tuple(values)
 
 
 def _inputs():
-    lineage = _Lineage(
-        commit_sha=COMMIT,
-        routing_catalog_hash=MODEL_CATALOG,
-        routing_contract_hash=CONTRACT,
-    )
+    lineages = _dual_lineages()
+    lineage = lineages[0]
     binding_catalog = VerifiedRoutingBindingCatalog(
         manifest_uri="s3://reviewed/bindings.json",
         manifest_hash=BINDING_CATALOG,
@@ -351,6 +376,7 @@ def _inputs():
         unit_dataset=unit_dataset,
         authority_bundle=VerifiedRoutingAuthorityBundle(
             artifact_lineage=lineage,
+            artifact_lineages=lineages,
             binding_catalog=binding_catalog,
             unit_dataset=unit_dataset,
             bundle_hash=BUNDLE,
@@ -367,6 +393,7 @@ def _inputs():
         scoring_job_rpc=_Rpc(),
         call_authorization_job_rpc=_Rpc(),
         dispatch_job_rpc=_Rpc(),
+        artifact_lineages=lineages,
     )
 
 
@@ -480,6 +507,7 @@ def test_reviewed_gate_rejects_bundle_binding_catalog_substitution():
     )
     substituted_bundle = VerifiedRoutingAuthorityBundle(
         artifact_lineage=inputs.artifact_lineage,
+        artifact_lineages=inputs.artifact_lineages,
         binding_catalog=substituted_catalog,
         unit_dataset=inputs.unit_dataset,
         bundle_hash=BUNDLE,
@@ -500,6 +528,7 @@ def test_reviewed_gate_rejects_bundle_unit_dataset_substitution():
     )
     substituted_bundle = VerifiedRoutingAuthorityBundle(
         artifact_lineage=inputs.artifact_lineage,
+        artifact_lineages=inputs.artifact_lineages,
         binding_catalog=inputs.binding_catalog,
         unit_dataset=substituted_dataset,
         bundle_hash=BUNDLE,
@@ -721,6 +750,12 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
     context = _context()
     release = context["protected_receipt"]
     bundle_hash = "sha256:" + "1" * 64
+    baseline_lineage = replace(
+        context["lineage"],
+        branch="main",
+        pointer_uri="s3://model/branches/main/current.json",
+    )
+    lineages = (baseline_lineage, context["lineage"])
 
     def manager_executor(_operation, payload, execution_context):
         result = execute_routing_provider_call_authorization_v2(
@@ -749,11 +784,12 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
     )
     rpc = _ExecutionManagerRpc(manager)
     inputs = ReviewedRoutingReleaseInputs(
-        artifact_lineage=context["lineage"],
+        artifact_lineage=baseline_lineage,
         binding_catalog=context["catalog"],
         unit_dataset=context["unit_dataset"],
         authority_bundle=VerifiedRoutingAuthorityBundle(
-            artifact_lineage=context["lineage"],
+            artifact_lineage=baseline_lineage,
+            artifact_lineages=lineages,
             binding_catalog=context["catalog"],
             unit_dataset=context["unit_dataset"],
             bundle_hash=bundle_hash,
@@ -768,18 +804,15 @@ def test_authorize_composition_and_manager_preserve_authorization_parent_order(
         scoring_job_rpc=_Rpc(),
         call_authorization_job_rpc=rpc,
         dispatch_job_rpc=_Rpc(),
+        artifact_lineages=lineages,
     )
     environment = {
         PRODUCT_COMPOSITION_ENV: PRODUCT_COMPOSITION_VERSION,
-        "RESEARCH_LAB_ROUTING_MODEL_COMMIT_SHA": context[
-            "lineage"
-        ].commit_sha,
-        MODEL_ROUTING_CATALOG_HASH_ENV: context["lineage"].routing_catalog_hash,
+        "RESEARCH_LAB_ROUTING_MODEL_COMMIT_SHA": baseline_lineage.commit_sha,
+        MODEL_ROUTING_CATALOG_HASH_ENV: baseline_lineage.routing_catalog_hash,
         SITE_PRODUCTION_MODEL_RELEASE_IDENTITY_ENV: SITE_MODEL_RELEASE,
         BINDING_CATALOG_MANIFEST_HASH_ENV: context["catalog"].manifest_hash,
-        "RESEARCH_LAB_ROUTING_CONTRACT_HASH": context[
-            "lineage"
-        ].routing_contract_hash,
+        "RESEARCH_LAB_ROUTING_CONTRACT_HASH": baseline_lineage.routing_contract_hash,
         AUTHORITY_BUNDLE_HASH_ENV: bundle_hash,
         PROTECTED_RELEASE_RECEIPT_HASH_ENV: release["receipt_hash"],
         PROTECTED_RELEASE_COMMIT_SHA_ENV: release["commit_sha"],
@@ -873,6 +906,9 @@ def test_reviewed_product_composition_installs_api_and_one_factory():
     assert set(composition.factory_registry) == {REVIEWED_ROUTING_FACTORY_NAME}
     assert composition.api_service.store_factory() is durable_store
     assert composition.run_factory.name == REVIEWED_ROUTING_FACTORY_NAME
+    assert composition.run_factory.site_production_model_release_identity_sha256 == (
+        SITE_MODEL_RELEASE.removeprefix("sha256:")
+    )
     assert calls == []
 
 

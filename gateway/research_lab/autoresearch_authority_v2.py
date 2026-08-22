@@ -37,6 +37,7 @@ from gateway.research_lab.v2_authority import (
 )
 from gateway.tee.autoresearch_executor_v2 import (
     AUTORESEARCH_REQUEST_SCHEMA_VERSION,
+    COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2,
     HOST_APPEND_EVENT,
     HOST_ARTIFACT_RESULT_SCHEMA_VERSION,
     HOST_BUILD_CANDIDATE,
@@ -1196,7 +1197,7 @@ async def run_authoritative_autoresearch_v2(
         != component_execution_receipt.get("receipt_hash")
         or component_execution_receipt.get("role") != "gateway_scoring"
         or component_execution_receipt.get("purpose")
-        != "research_lab.private_model_run.v2"
+        != COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2
         or component_execution_receipt.get("status") != "succeeded"
         or component_execution_receipt.get("output_root")
         != sha256_json(dict(component_result))

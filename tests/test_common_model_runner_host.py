@@ -186,6 +186,49 @@ def test_artifact_protocol_rejects_incomplete_transport():
         raise AssertionError("incomplete artifact transport must fail closed")
 
 
+def test_artifact_protocol_rejects_invalid_action_state_before_host_dispatch():
+    class InvalidStateTransport(FakeArtifactTransport):
+        def continue_runner(self, *args, **kwargs):
+            return {
+                "status": "action_required",
+                "action": {"action_type": "execute_intent_tool"},
+                "continuation": {"step": 1},
+            }
+
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=InvalidStateTransport(),
+        expected_release_identity={"release": "exact"},
+    )
+    try:
+        protocol.advance(
+            _start_request(), continuation=None, completion=None
+        )
+    except ModelRunnerHostError as exc:
+        assert "action identity" in str(exc)
+    else:
+        raise AssertionError("invalid action state must fail closed")
+
+
+def test_artifact_protocol_rejects_invalid_terminal_result():
+    class InvalidResultTransport(FakeArtifactTransport):
+        def validate_runner_result(self, _value, **_kwargs):
+            return {"status": "completed", "result": {}}
+
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=InvalidResultTransport(),
+        expected_release_identity={"release": "exact"},
+    )
+    try:
+        protocol.validate_result(
+            {"status": "completed", "result": {}},
+            start_request=_start_request(),
+        )
+    except ModelRunnerHostError as exc:
+        assert "terminal result" in str(exc)
+    else:
+        raise AssertionError("invalid terminal result must fail closed")
+
+
 def test_champion_preflights_and_validates_the_complete_protocol(monkeypatch):
     calls = []
 
@@ -247,6 +290,134 @@ def test_champion_preflights_and_validates_the_complete_protocol(monkeypatch):
         "run",
         "validate",
     ]
+
+
+def test_registered_model_unit_is_the_live_lab_protocol_caller():
+    from research_lab.champion_model_runner import run_registered_model_unit
+
+    registration = _registration_for_live_caller()
+    persisted = []
+    result = run_registered_model_unit(
+        registration=registration,
+        input={"icp": "test"},
+        execution_mode="full_company",
+        target_count=1,
+        evaluated_on="2026-08-21",
+        bindings=[
+            HostActionBinding(
+                action_type="execute_candidate_tool",
+                tool_id="candidate.reviewed",
+                binding_contract_sha256=CONTRACT_HASH,
+                dispatch=lambda _action: HostActionResult(
+                    outcome="succeeded",
+                    reason_code="fixture",
+                    provider_response={"records": []},
+                    calls=1,
+                    cost_credits=0,
+                    latency_ms=1,
+                ),
+            )
+        ],
+        persist_transition=lambda **value: persisted.append(value),
+    )
+    assert result["status"] == "completed"
+    assert len(persisted) == 1
+
+
+def _registration_for_live_caller():
+    from research_lab.model_runner_protocol import ExactModelRunnerRegistration
+
+    release = {
+        "source_commit": "1" * 40,
+        "model_artifact_digest": "sha256:" + "a" * 64,
+        "consumer_contract_sha256": "c" * 64,
+        "catalog_sha256": "d" * 64,
+        "policy_sha256": "e" * 64,
+        "candidate_profiles_sha256": "2" * 64,
+        "intent_profiles_sha256": "3" * 64,
+        "feature_schema_sha256": "f" * 64,
+        "candidate_waterfall_contract_sha256": "4" * 64,
+        "tool_binding_manifest_sha256": "5" * 64,
+        "release_identity_sha256": "6" * 64,
+    }
+    live_action = {
+        "action_type": "execute_candidate_tool",
+        "tool_id": "candidate.reviewed",
+        "binding_contract_sha256": CONTRACT_HASH,
+        "action_sha256": "b" * 64,
+        "idempotency_key": "c" * 64,
+    }
+
+    class _Transport(FakeArtifactTransport):
+        def build_runner_start(self, **values):
+            return {"start": True, **values}
+
+        def runner_preflight(self, **_values):
+            return {
+                "release_identity_sha256": release["release_identity_sha256"],
+                "source_commit": release["source_commit"],
+                "consumer_contract_sha256": release["consumer_contract_sha256"],
+                "catalog_sha256": release["catalog_sha256"],
+                "policy_sha256": release["policy_sha256"],
+                "candidate_profiles_sha256": release["candidate_profiles_sha256"],
+                "intent_profiles_sha256": release["intent_profiles_sha256"],
+                "feature_schema_sha256": release["feature_schema_sha256"],
+                "host_capability_manifest_sha256": "b" * 64,
+                "binding_contracts_sha256": release["tool_binding_manifest_sha256"],
+                "candidate_waterfall_contract_sha256": release[
+                    "candidate_waterfall_contract_sha256"
+                ],
+            }
+
+        def continue_runner(
+            self,
+            _start,
+            *,
+            expected_release_identity,
+            continuation,
+            completion,
+        ):
+            assert expected_release_identity == release
+            if continuation is None:
+                return {
+                    "status": "action_required",
+                    "action": live_action,
+                    "continuation": {"step": 1},
+                }
+            assert completion["completion_sha256"] == "e" * 64
+            return {
+                "status": "completed",
+                "continuation": {"step": 2},
+                "result": {"leads": []},
+                "model_receipt": {"receipt_sha256": "f" * 64},
+            }
+
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=_Transport(), expected_release_identity=release
+    )
+    return ExactModelRunnerRegistration(
+        artifact_identity={
+            "repository": "leadpoet/Sourcing_model",
+            "branch": "main",
+            "commit_sha": "1" * 40,
+            "model_artifact_hash": "sha256:" + "a" * 64,
+            "manifest_hash": "sha256:" + "b" * 64,
+            "routing_contract_hash": "sha256:" + "c" * 64,
+            "routing_catalog_hash": "sha256:" + "d" * 64,
+            "routing_policy_hash": "sha256:" + "e" * 64,
+            "feature_schema_hash": "sha256:" + "f" * 64,
+        },
+        protocol=protocol,
+        host_capability_manifest={
+            "manifest_sha256": "b" * 64,
+            "bindings": [{
+                "action_type": "execute_candidate_tool",
+                "tool_id": "candidate.reviewed",
+                "binding_contract_sha256": CONTRACT_HASH,
+                "available": True,
+            }],
+        },
+    )
 
 
 def test_oci_runner_transport_does_not_forward_provider_credentials(

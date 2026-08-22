@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import time
+from types import SimpleNamespace
 
 import pytest
+
+import gateway.research_lab.routing_experiment_worker as worker_module
 
 from gateway.research_lab.routing_experiment_runtime import (
     AttestedScoringV2RoutingProviderCallAuthority,
@@ -166,6 +169,56 @@ def test_worker_does_not_close_claim_when_recovery_is_deferred():
     with pytest.raises(RoutingExperimentDeferredRecoveryError):
         worker.run(spec=_Spec(), inputs=_inputs(), lease=service.lease)
     assert service.store.closed == []
+
+
+def test_exact_model_worker_passes_variant_registrations_to_dispatcher(monkeypatch):
+    service = _Service()
+    worker = RoutingExperimentWorker(service=service, worker_ref="worker-1")
+    registrations = {"baseline": object(), "challenger": object()}
+    observed = {}
+
+    class _StopAfterConstruction(Exception):
+        pass
+
+    class _Heartbeat:
+        deadline_monotonic = time.monotonic() + 60
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def ensure_held(self):
+            pass
+
+    class _Dispatcher:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+            raise _StopAfterConstruction()
+
+    monkeypatch.setattr(worker_module, "_RoutingClaimHeartbeat", _Heartbeat)
+    monkeypatch.setattr(
+        worker_module,
+        "ReviewedProtectedModelActionDispatcher",
+        _Dispatcher,
+    )
+    monkeypatch.setattr(worker, "_append_execution_event", lambda **_kwargs: None)
+    monkeypatch.setattr(worker, "_close_claim", lambda **_kwargs: None)
+
+    inputs = SimpleNamespace(
+        execution_envelope=None,
+        registry_registrations=registrations,
+        reviewed_runner=object(),
+        verifier=object(),
+    )
+    with pytest.raises(_StopAfterConstruction):
+        worker._run_exact_model(spec=_Spec(), inputs=inputs, lease=service.lease)
+
+    assert observed["registrations"] is registrations
 
 
 def test_claim_heartbeat_uses_sql_expiry_after_a_delayed_renewal():

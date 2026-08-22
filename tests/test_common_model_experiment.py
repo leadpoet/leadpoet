@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from research_lab.common_model_runner_host import HostActionResult
 from research_lab.model_runner_protocol import (
     ExactModelRunnerRegistration,
@@ -15,12 +17,17 @@ from gateway.research_lab.common_model_experiment import (
     ExactModelExperimentCoordinator,
     FencedModelTransitionRepository,
     ProtectedModelActionResult,
+    ReviewedProtectedModelActionDispatcher,
+    _validate_variant_provider_binding,
+)
+from gateway.research_lab.routing_provider_terminal_protected import (
+    build_routing_model_completion_contract_v1,
 )
 
 
 HASHES = {name: char * 64 for name, char in zip(
     ("artifact", "manifest", "contract", "catalog", "policy", "feature", "binding", "release"),
-    "abcdefgh",
+    "abcdef12",
 )}
 
 
@@ -185,6 +192,7 @@ class _Dispatcher:
             credit_microunits=10,
             latency_ms=20,
             execution_mode="measured_lab",
+            call_count=1,
         )
         return ProtectedModelActionResult(
             host_result=HostActionResult(
@@ -232,6 +240,67 @@ def test_exact_coordinator_replays_persisted_completion_without_paid_call():
     assert first.terminal_result == second.terminal_result
     assert dispatcher.calls == 1
     assert second.replayed_transition_count == 1
+
+
+def _protected_action_payload(*, call_count):
+    response = {"provider": "fixture"}
+    receipt = ProviderReceipt(
+        receipt_ref="provider_receipt:" + "a" * 16,
+        binding_id="reviewed-binding",
+        tool_id="candidate.reviewed",
+        binding_version="v1",
+        source_lineage_id="reviewed-source",
+        unit_ref="unit-1",
+        request_fingerprint="sha256:" + "b" * 64,
+        outcome="verified",
+        evidence_hash="sha256:" + "c" * 64,
+        credit_microunits=10,
+        latency_ms=20,
+        execution_mode="measured_lab",
+        call_count=call_count,
+    )
+    identity = receipt.to_dict()
+    identity.pop("receipt_ref")
+    receipt = replace(
+        receipt,
+        receipt_ref="provider_receipt:" + sha256_json(identity).split(":", 1)[1][:16],
+    )
+    action = {
+        **_action(),
+        "response_schema_version": "model-provider-response:v1",
+    }
+    return action, {
+        "provider_receipt": receipt.to_dict(),
+        "model_provider_response": response,
+        "model_provider_response_sha256": sha256_json(response),
+        "model_completion_contract_hash": sha256_json(
+            build_routing_model_completion_contract_v1(action)
+        ),
+        "protected_dispatch_job_id": "dispatch-1",
+        "terminal_receipt_hash": "sha256:" + "d" * 64,
+    }
+
+
+def test_protected_model_result_uses_authoritative_multi_call_receipt():
+    action, protected = _protected_action_payload(call_count=3)
+
+    result = ReviewedProtectedModelActionDispatcher._protected_action_result(
+        action=action,
+        protected=protected,
+    )
+
+    assert result.provider_receipt.call_count == 3
+    assert result.host_result.calls == 3
+
+
+def test_protected_model_result_rejects_missing_measured_call_count():
+    action, protected = _protected_action_payload(call_count=None)
+
+    with pytest.raises(CommonModelExperimentError, match="call count"):
+        ReviewedProtectedModelActionDispatcher._protected_action_result(
+            action=action,
+            protected=protected,
+        )
 
 
 def test_fenced_restart_replays_signed_job_result_without_paid_call():
@@ -385,3 +454,38 @@ def test_exact_variant_payload_is_identity_only_and_tamper_evident():
             assert "exact Model artifact identity" in str(exc)
         else:
             raise AssertionError("forged variant payload must fail closed")
+
+
+def test_variant_provider_binding_is_checked_against_its_own_manifest():
+    registration = _registration()
+    _validate_variant_provider_binding(
+        registration=registration,
+        action=_action(),
+        provider_binding=type(
+            "Binding",
+            (),
+            {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+        )(),
+    )
+
+    forged_registration = replace(
+        registration,
+        host_capability_manifest={
+            **registration.host_capability_manifest,
+            "bindings": [],
+        },
+    )
+    try:
+        _validate_variant_provider_binding(
+            registration=forged_registration,
+            action=_action(),
+            provider_binding=type(
+                "Binding",
+                (),
+                {"execution_contract_hash": "sha256:" + HASHES["binding"]},
+            )(),
+        )
+    except CommonModelExperimentError as exc:
+        assert "variant" in str(exc)
+    else:
+        raise AssertionError("variant binding substitution must fail closed")

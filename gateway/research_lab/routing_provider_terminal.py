@@ -66,7 +66,7 @@ def _ref(value: Any, name: str) -> str:
 def _projection(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {
         "receipt_ref", "outcome", "evidence_hash", "credit_microunits",
-        "latency_ms", "billing_state",
+        "latency_ms", "billing_state", "call_count",
     }
     if not isinstance(value, Mapping) or set(value) != expected:
         raise RoutingProviderTerminalError("routing billing projection fields are invalid")
@@ -79,6 +79,9 @@ def _projection(value: Mapping[str, Any]) -> dict[str, Any]:
     if not receipt_ref.startswith("provider_receipt:"):
         raise RoutingProviderTerminalError("routing billing projection receipt is invalid")
     _hash(value["evidence_hash"], "billing evidence hash")
+    call_count = value["call_count"]
+    if type(call_count) is not int or not 1 <= call_count <= 10_000:
+        raise RoutingProviderTerminalError("routing billing projection call count is invalid")
     for name, maximum in (("credit_microunits", 100_000_000), ("latency_ms", 900_000)):
         current = value[name]
         if type(current) is not int or not 0 <= current <= maximum:
@@ -89,6 +92,7 @@ def _projection(value: Mapping[str, Any]) -> dict[str, Any]:
         "evidence_hash": str(value["evidence_hash"]),
         "credit_microunits": int(value["credit_microunits"]),
         "latency_ms": int(value["latency_ms"]),
+        "call_count": int(call_count),
         "billing_state": "known",
     }
 
@@ -111,6 +115,7 @@ def _expected_receipt_ref(
         "evidence_hash": projection["evidence_hash"],
         "credit_microunits": projection["credit_microunits"],
         "latency_ms": projection["latency_ms"],
+        "call_count": projection["call_count"],
         "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
     }
     return "provider_receipt:" + sha256_json(identity).split(":", 1)[1][:16]
@@ -365,6 +370,7 @@ def validate_routing_provider_terminal_v2(
         "evidence_hash": projection["evidence_hash"],
         "credit_microunits": projection["credit_microunits"],
         "latency_ms": projection["latency_ms"],
+        "call_count": projection["call_count"],
         "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
     }
     receipt_identity = dict(identity)

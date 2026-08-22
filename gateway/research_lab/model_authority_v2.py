@@ -2105,6 +2105,7 @@ class AttestedPrivateModelRunnerV2:
             or provider_cost_cap_microusd
             or provider_call_cap
             or publish_provider_evidence_cache
+            or additional_parent_graphs
         ):
             raise AttestedPrivateModelRunnerV2Error(
                 "model compatibility metadata inputs are not isolated"
@@ -2278,7 +2279,7 @@ class AttestedPrivateModelRunnerV2:
         parent_graph_by_root = {
             str(graph.get("root_receipt_hash") or ""): dict(graph)
             for graph in (
-                *self.parent_graphs,
+                *(self.parent_graphs if not metadata_operation else ()),
                 *additional_parent_graphs,
                 *catalog_parent_graphs,
             )

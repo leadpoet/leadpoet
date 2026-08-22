@@ -252,7 +252,7 @@ ATTEMPT_FIELDS = {
 PROVIDER_FIELDS = {
     "receipt_ref", "binding_id", "tool_id", "binding_version", "source_lineage_id",
     "unit_ref", "request_fingerprint", "outcome", "evidence_hash",
-    "credit_microunits", "latency_ms", "execution_mode",
+    "credit_microunits", "latency_ms", "call_count", "execution_mode",
 }
 ATTEMPT_DOC_FIELDS = {
     "schema_version", "binding_id", "tool_id", "action_id",
@@ -287,7 +287,10 @@ def _provider_receipt(row: Mapping[str, Any]) -> ProviderReceipt:
         "credit_microunits": "credit_microunits", "latency_ms": "latency_ms",
         "execution_mode": "execution_mode",
     }
-    if any(getattr(receipt, left) != row[right] for left, right in pairs.items()):
+    if (
+        any(getattr(receipt, left) != row[right] for left, right in pairs.items())
+        or ("call_count" in row and receipt.call_count != row["call_count"])
+    ):
         _fail("routing reconciliation provider attempt scalar differs")
     return receipt
 
@@ -615,6 +618,7 @@ def _attempts(
             or projection.get("evidence_hash") != receipt.evidence_hash
             or projection.get("credit_microunits") != receipt.credit_microunits
             or projection.get("latency_ms") != receipt.latency_ms
+            or projection.get("call_count") != receipt.call_count
             or projection.get("binding_id") != receipt.binding_id
             or projection.get("tool_id") != receipt.tool_id
             or projection.get("request_fingerprint") != receipt.request_fingerprint

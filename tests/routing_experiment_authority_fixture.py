@@ -515,6 +515,7 @@ def authority_fixture():
             "evidence_hash": provider_record["record_hash"],
             "credit_microunits": old_receipt.credit_microunits,
             "latency_ms": old_receipt.latency_ms,
+            "call_count": 1,
             "execution_mode": ReceiptExecutionMode.MEASURED_LAB.value,
         }
         new_receipt_ref = "provider_receipt:" + sha256_json(
@@ -525,6 +526,7 @@ def authority_fixture():
             receipt_ref=new_receipt_ref,
             evidence_hash=provider_record["record_hash"],
             execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+            call_count=1,
         )
         receipt_ref_map[old_receipt.receipt_ref] = new_receipt_ref
         terminal_body = build_routing_provider_terminal_body_v2(
@@ -549,6 +551,7 @@ def authority_fixture():
                 "evidence_hash": provider_record["record_hash"],
                 "credit_microunits": old_receipt.credit_microunits,
                 "latency_ms": old_receipt.latency_ms,
+                "call_count": 1,
                 "billing_state": "known",
             },
         )

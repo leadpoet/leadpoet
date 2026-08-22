@@ -108,6 +108,8 @@ BEGIN
        OR p_failure_doc->>'outcome' IS DISTINCT FROM 'adapter_failure'
        OR p_failure_doc->>'credit_microunits' IS DISTINCT FROM '0'
        OR p_failure_doc->>'latency_ms' IS DISTINCT FROM p_latency_ms::TEXT
+       OR p_failure_doc->'provider_receipt'->>'call_count'
+            IS DISTINCT FROM '0'
        OR p_failure_doc->>'execution_mode' IS DISTINCT FROM p_execution_mode
        OR p_failure_doc->>'pre_dispatch' IS DISTINCT FROM 'true'
        OR pg_catalog.jsonb_typeof(p_failure_doc->'provider_receipt')
@@ -139,7 +141,7 @@ BEGIN
                     AS keys(key)
              ORDER BY key
           ) IS DISTINCT FROM ARRAY[
-            'binding_id', 'binding_version', 'credit_microunits',
+            'binding_id', 'binding_version', 'call_count', 'credit_microunits',
             'evidence_hash', 'execution_mode', 'latency_ms', 'outcome',
             'receipt_ref', 'request_fingerprint', 'source_lineage_id',
             'tool_id', 'unit_ref'

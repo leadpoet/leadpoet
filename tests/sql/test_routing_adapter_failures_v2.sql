@@ -40,6 +40,7 @@ BEGIN
         'evidence_hash', p_evidence_hash,
         'credit_microunits', 0,
         'latency_ms', 0,
+        'call_count', 0,
         'execution_mode', p_execution_mode
     );
     provider_receipt := pg_catalog.jsonb_set(

@@ -804,7 +804,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         "execution_receipt": {
             "receipt_hash": component_execution_hash,
             "role": "gateway_scoring",
-            "purpose": "research_lab.private_model_run.v2",
+            "purpose": authority.COMPONENT_REGISTRY_EVIDENCE_PURPOSE_V2,
             "status": "succeeded",
             "output_root": sha256_json(component_result),
         },

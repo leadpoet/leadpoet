@@ -64,6 +64,9 @@ from leadpoet_canonical.attested_v2 import (
     merkle_root,
     sha256_json,
 )
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
@@ -5312,8 +5315,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             ).stdout.strip()
         )
         expected_pairs = {
-            str(role): frozenset(str(purpose) for purpose in purposes)
-            for role, purposes in ROLE_PURPOSES.items()
+            str(role): frozenset(
+                canonical_purposes_before_routing_experiment_v2(str(role))
+            )
+            for role in ROLE_PURPOSES
         }
         expected_pairs["gateway_scoring"] = expected_pairs[
             "gateway_scoring"
@@ -5456,9 +5461,14 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             for role, encoded_purposes in clauses
         }
         expected_pairs = {
-            str(role): frozenset(str(purpose) for purpose in purposes)
-            for role, purposes in ROLE_PURPOSES.items()
+            str(role): frozenset(
+                canonical_purposes_before_routing_experiment_v2(str(role))
+            )
+            for role in ROLE_PURPOSES
         }
+        expected_pairs["gateway_scoring"] = expected_pairs[
+            "gateway_scoring"
+        ] | frozenset({"research_lab.model_compatibility.v2"})
         if (
             candidate_hybrid_purpose_contract.get("constraint_valid")
             is not True

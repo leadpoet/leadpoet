@@ -829,18 +829,23 @@ def validate_reviewed_release_inputs(
         raise RoutingProductCompositionError(
             "routing authority bundle artifact lineage differs"
         )
+    if not inputs.artifact_lineages:
+        raise RoutingProductCompositionError(
+            "routing release must contain exactly two artifact lineages"
+        )
     if inputs.artifact_lineages:
         if len(inputs.artifact_lineages) != 2:
             raise RoutingProductCompositionError(
                 "routing release must contain exactly two artifact lineages"
             )
-        if any(
-            type(lineage) is not VerifiedRoutingArtifactLineage
-            or lineage.branch != "leadpoet-lab"
-            for lineage in inputs.artifact_lineages
+        if (
+            type(inputs.artifact_lineages[0]) is not VerifiedRoutingArtifactLineage
+            or inputs.artifact_lineages[0].branch != "main"
+            or type(inputs.artifact_lineages[1]) is not VerifiedRoutingArtifactLineage
+            or inputs.artifact_lineages[1].branch != "leadpoet-lab"
         ):
             raise RoutingProductCompositionError(
-                "routing release artifact lineages must be signed leadpoet-lab artifacts"
+                "routing release artifact lineages must be signed main and leadpoet-lab artifacts"
             )
         if len({lineage.identity_hash() for lineage in inputs.artifact_lineages}) != 2:
             raise RoutingProductCompositionError(

@@ -54,6 +54,7 @@ from research_lab.model_runner_protocol import (
     ExactModelRunnerRegistry,
 )
 from research_lab.routing_experiments import RoutingExperimentArtifactAuthority
+from research_lab.canonical import sha256_json
 
 
 RELEASE_SOURCE_SCHEMA_VERSION = "leadpoet.research_lab.routing_release_sources.v1"
@@ -100,10 +101,9 @@ class ReviewedRoutingReleaseAuthoritySources:
     store_factory: Callable[[], Any]
     protected_workflow_manifest_hash: str
     model_runner_registry: ExactModelRunnerRegistry | None = None
-    # The registry is rebuilt from these exact, release-published registrations
-    # when supplied.  Keeping the legacy field during the transition lets old
-    # unit fixtures fail closed on the dual-artifact count without making a
-    # caller-provided registry an authority for the new release path.
+    # This legacy field is retained for typed compatibility only.  The release
+    # builder never accepts it as an authority; it rebuilds the registry from
+    # the exact per-artifact registrations below.
     model_runner_registrations: tuple[ExactModelRunnerRegistration, ...] | None = None
 
 
@@ -202,27 +202,21 @@ def build_reviewed_routing_release_dependencies(
         raise RoutingReleaseDependencyError(
             "routing release model binding observation is unavailable"
         )
-    if sources.model_runner_registrations is not None:
-        registrations = tuple(sources.model_runner_registrations)
-        if len(registrations) != 2:
-            raise RoutingReleaseDependencyError(
-                "routing release requires exactly two model runner registrations"
-            )
-        try:
-            model_runner_registry = ExactModelRunnerRegistry(registrations)
-        except Exception as exc:  # noqa: BLE001 - exact registration boundary
-            raise RoutingReleaseDependencyError(
-                "routing release exact model runner registrations are invalid"
-            ) from exc
-    elif isinstance(sources.model_runner_registry, ExactModelRunnerRegistry):
-        # Legacy fixtures are retained only as an explicit compatibility seam;
-        # the signed dual-artifact release path below still rejects one-lineage
-        # bundles and therefore cannot activate through this fallback.
-        model_runner_registry = sources.model_runner_registry
-    else:
+    if sources.model_runner_registrations is None:
         raise RoutingReleaseDependencyError(
-            "routing release exact model runner registry is unavailable"
+            "routing release exact per-artifact model runner registrations are unavailable"
         )
+    registrations = tuple(sources.model_runner_registrations)
+    if len(registrations) != 2:
+        raise RoutingReleaseDependencyError(
+            "routing release requires exactly two model runner registrations"
+        )
+    try:
+        model_runner_registry = ExactModelRunnerRegistry(registrations)
+    except Exception as exc:  # noqa: BLE001 - exact registration boundary
+        raise RoutingReleaseDependencyError(
+            "routing release exact model runner registrations are invalid"
+        ) from exc
     if not callable(getattr(sources.artifact_authority, "verify", None)):
         raise RoutingReleaseDependencyError(
             "routing release artifact authority is unavailable"
@@ -277,7 +271,7 @@ def build_reviewed_routing_release_dependencies(
         ) from exc
     if len(authority_bundle.artifact_lineages) != 2:
         raise RoutingReleaseDependencyError(
-            "routing release requires two distinct signed leadpoet-lab artifacts"
+            "routing release requires two distinct signed artifacts"
         )
     if sources.model_runner_registrations is not None:
         expected_artifacts = {

@@ -402,7 +402,8 @@ def _load_verified_routing_authority_bundle_v2(
             if isinstance(exc, RoutingAuthorityBundleError):
                 raise
             raise RoutingAuthorityBundleError(f"routing authority {variant} artifact is invalid") from exc
-        if lineage.branch != "leadpoet-lab":
+        expected_branch = "main" if variant == "baseline" else "leadpoet-lab"
+        if lineage.branch != expected_branch:
             raise RoutingAuthorityBundleError(f"routing authority {variant} artifact branch is invalid")
         if lineage.identity_hash() in seen_identity:
             raise RoutingAuthorityBundleError("routing authority artifact identity is duplicated")

@@ -31,10 +31,11 @@ def _artifact_documents(
     commit: str,
     model_hash: str,
     key: ec.EllipticCurvePrivateKey,
+    branch: str,
     artifact_signature_ref: str,
     lineage_signature_ref: str,
 ) -> dict:
-    pointer_uri = f"s3://{bucket}/branches/leadpoet-lab/current.json"
+    pointer_uri = f"s3://{bucket}/branches/{branch}/current.json"
     private = deepcopy(source["documents"]["artifact_pointer"])
     private.update(
         {
@@ -45,6 +46,32 @@ def _artifact_documents(
             "build_id": f"build-{commit[:8]}",
         }
     )
+    private["model_release_identity"] = {
+        "schema_version": "model-release-identity:v1",
+        "source_commit": commit,
+        "model_artifact_digest": model_hash.removeprefix("sha256:"),
+        "dependency_lock_sha256": "3" * 64,
+        "runtime_base_image_digest": "model-base@sha256:" + "4" * 64,
+        "consumer_contract_sha256": source["documents"]["artifact_lineage"][
+            "routing_contract_hash"
+        ].removeprefix("sha256:"),
+        "catalog_sha256": source["documents"]["artifact_lineage"][
+            "routing_catalog_hash"
+        ].removeprefix("sha256:"),
+        "policy_sha256": source["documents"]["artifact_lineage"][
+            "routing_policy_hash"
+        ].removeprefix("sha256:"),
+        "candidate_profiles_sha256": "8" * 64,
+        "intent_profiles_sha256": "9" * 64,
+        "feature_schema_sha256": source["documents"]["artifact_lineage"][
+            "feature_schema_hash"
+        ].removeprefix("sha256:"),
+        "candidate_waterfall_contract_sha256": "b" * 64,
+        "verifier_artifact_digest": "verifier@sha256:" + "c" * 64,
+        "tool_binding_manifest_sha256": "d" * 64,
+        "llm_configuration_sha256": "e" * 64,
+        "release_identity_sha256": "f" * 64,
+    }
     private = _signed(
         {name: value for name, value in private.items() if name not in {"manifest_hash", "signature_ref"}},
         key,
@@ -59,6 +86,7 @@ def _artifact_documents(
             "private_manifest_hash": private["manifest_hash"],
             "model_artifact_hash": model_hash,
             "commit_sha": commit,
+            "branch": branch,
             "image_digest": "111111111111.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "2" * 64,
             "build_id": private["build_id"],
             "signature_ref": lineage_signature_ref,
@@ -104,6 +132,7 @@ def _dual_bundle() -> tuple[dict, dict[str, str]]:
         commit="b" * 40,
         model_hash="sha256:" + "b" * 64,
         key=baseline_key,
+        branch="main",
         artifact_signature_ref="s3://private-model-baseline/signatures/model.sig",
         lineage_signature_ref="s3://private-model-baseline/signatures/lineage.sig",
     )
@@ -113,6 +142,7 @@ def _dual_bundle() -> tuple[dict, dict[str, str]]:
         commit="c" * 40,
         model_hash="sha256:" + "c" * 64,
         key=challenger_key,
+        branch="leadpoet-lab",
         artifact_signature_ref="s3://private-model-challenger/signatures/model.sig",
         lineage_signature_ref="s3://private-model-challenger/signatures/lineage.sig",
     )
@@ -175,30 +205,17 @@ def _dual_bundle() -> tuple[dict, dict[str, str]]:
     return bundle, pins
 
 
-def test_dual_bundle_reconstructs_two_distinct_lab_lineages():
+def test_dual_bundle_reconstructs_main_and_lab_lineages():
     bundle, pins = _dual_bundle()
     result = load_verified_routing_authority_bundle(bundle, pinned_public_keys=pins)
-    assert [item.branch for item in result.artifact_lineages] == [
-        "leadpoet-lab",
-        "leadpoet-lab",
-    ]
+    assert [item.branch for item in result.artifact_lineages] == ["main", "leadpoet-lab"]
     assert len({item.identity_hash() for item in result.artifact_lineages}) == 2
 
 
-def test_dual_bundle_rejects_main_branch_and_duplicate_identity():
+def test_dual_bundle_rejects_wrong_challenger_branch_and_duplicate_identity():
     bundle, pins = _dual_bundle()
-    bundle["artifact_registrations"]["baseline"]["documents"]["artifact_lineage"]["branch"] = "main"
-    lineage = bundle["artifact_registrations"]["baseline"]["documents"]["artifact_lineage"]
+    bundle["artifact_registrations"]["challenger"]["documents"]["artifact_lineage"]["branch"] = "main"
+    lineage = bundle["artifact_registrations"]["challenger"]["documents"]["artifact_lineage"]
     lineage["manifest_hash"] = sha256_json({key: value for key, value in lineage.items() if key != "manifest_hash"})
-    with pytest.raises(RoutingAuthorityBundleError):
-        load_verified_routing_authority_bundle(bundle, pinned_public_keys=pins)
-
-    bundle, pins = _dual_bundle()
-    bundle["artifact_registrations"]["challenger"]["documents"] = deepcopy(
-        bundle["artifact_registrations"]["baseline"]["documents"]
-    )
-    bundle["artifact_registrations"]["challenger"]["signatures"] = deepcopy(
-        bundle["artifact_registrations"]["baseline"]["signatures"]
-    )
     with pytest.raises(RoutingAuthorityBundleError):
         load_verified_routing_authority_bundle(bundle, pinned_public_keys=pins)

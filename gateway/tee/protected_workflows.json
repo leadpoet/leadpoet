@@ -172,7 +172,7 @@
       "symbol": "AttestedRoutingTeeJobRpc"
     },
     {
-      "ast_sha256": "sha256:990702b17f84213c40d39e94dba9c643b7a5a731285f6383fe1af4faaec93208",
+      "ast_sha256": "sha256:e322be2680875e73dd10190cd6e9e928eff50cd45118b7b2f078b83d0c47e747",
       "path": "gateway/research_lab/attested_routing_release_authorities.py",
       "symbol": "load_reviewed_routing_release_authority_sources"
     },
@@ -1292,7 +1292,7 @@
       "symbol": "ROUTING_AUTHORITY_BUNDLE_SCHEMA"
     },
     {
-      "ast_sha256": "sha256:fdc859392fa48421e1456feb5d421e86f5601e940f7eaa4d579b1f020eb7e801",
+      "ast_sha256": "sha256:573c0d3f749581dfdb5068ea89b7219676cf796abdc44400ea0b35d255a1c8ca",
       "path": "gateway/research_lab/routing_authority_bundle.py",
       "symbol": "VerifiedRoutingAuthorityBundle"
     },
@@ -1317,7 +1317,7 @@
       "symbol": "_signature_bytes"
     },
     {
-      "ast_sha256": "sha256:aa824af4e10eeedf6646434e473945ce932ef450245250cbd64ece7ef157ecec",
+      "ast_sha256": "sha256:cfcd0ebac4e9318121ef762cadc07dc006c964b9d9c2b5a233f7fb012ecca059",
       "path": "gateway/research_lab/routing_authority_bundle.py",
       "symbol": "load_verified_routing_authority_bundle"
     },
@@ -1817,7 +1817,7 @@
       "symbol": "RELEASE_SOURCE_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:72503bdfe4168cf224971e372206295ac06794c95e5aa46f75bba23883f81650",
+      "ast_sha256": "sha256:7728111d1234e95026bec59228371501f2e14d40ba21a45ab63a3832bd0066e5",
       "path": "gateway/research_lab/routing_release_builder.py",
       "symbol": "ReviewedRoutingReleaseAuthoritySources"
     },
@@ -1837,7 +1837,7 @@
       "symbol": "_verify_protected_workflow_manifest"
     },
     {
-      "ast_sha256": "sha256:18a3b93747fa3fba185e0f68f2d895510e9f23312acba99cd72cf11a00616540",
+      "ast_sha256": "sha256:1025648cfc7b8799a34c6ba39de016c834dc0b73d33fbcbbdc1a7fb1e0e12ba8",
       "path": "gateway/research_lab/routing_release_builder.py",
       "symbol": "build_reviewed_routing_release_dependencies"
     },
@@ -6962,7 +6962,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8db793cd93196964a6e164e741aaab560561b3cf508da0e3d090c69a8864e9ff",
+  "manifest_hash": "sha256:44337b3c8df4cb2f386ddae95609458a8a74152023654812dd5f1bc58b8a759e",
   "protected_source_commit": "30ed12ad3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,12 @@ from gateway.research_lab.routing_release_builder import (
 )
 from gateway.tee.protected_workflows import load_manifest
 from research_lab.canonical import sha256_json
-from tests.test_routing_authority_bundle import _bundle
+from research_lab.model_runner_protocol import (
+    ExactModelRunnerRegistration,
+    ResearchLabModelRunnerProtocol,
+)
+from tests.test_routing_authority_bundle_dual import _dual_bundle
 from tests.test_routing_product_composition import (
-    _ModelRunnerRegistry,
     _ModelVerifier,
     _EvaluationAdapter,
     _ArtifactAuthority,
@@ -40,6 +44,65 @@ class _ReadyRunnerFactory:
         raise AssertionError("the release builder must not run a provider runner")
 
 
+class _RegistrationTransport:
+    def __init__(self, host_manifest):
+        self.host_manifest = host_manifest
+
+    def runner_preflight(self, *, host_capability_manifest, release_identity):
+        return {
+            "release_identity_sha256": release_identity["release_identity_sha256"],
+            "source_commit": release_identity["source_commit"],
+            "consumer_contract_sha256": release_identity["consumer_contract_sha256"],
+            "catalog_sha256": release_identity["catalog_sha256"],
+            "policy_sha256": release_identity["policy_sha256"],
+            "candidate_profiles_sha256": release_identity["candidate_profiles_sha256"],
+            "intent_profiles_sha256": release_identity["intent_profiles_sha256"],
+            "feature_schema_sha256": release_identity["feature_schema_sha256"],
+            "host_capability_manifest_sha256": host_capability_manifest[
+                "manifest_sha256"
+            ],
+            "binding_contracts_sha256": release_identity[
+                "tool_binding_manifest_sha256"
+            ],
+            "candidate_waterfall_contract_sha256": release_identity[
+                "candidate_waterfall_contract_sha256"
+            ],
+        }
+
+    def build_runner_start(self, **_values):
+        return {"status": "action_required"}
+
+    def continue_runner(self, **_values):
+        return {"status": "completed"}
+
+    def build_runner_completion(self, _action, _result):
+        return {}
+
+    def validate_runner_result(self, value, **_values):
+        return value
+
+
+def _runner_registrations(bundle, verified):
+    host_manifest = {"manifest_sha256": "sha256:" + "1" * 64}
+    registrations = []
+    for variant, lineage in zip(("baseline", "challenger"), verified.artifact_lineages):
+        pointer = bundle["artifact_registrations"][variant]["documents"][
+            "artifact_pointer"
+        ]
+        protocol = ResearchLabModelRunnerProtocol(
+            transport=_RegistrationTransport(host_manifest),
+            expected_release_identity=pointer["model_release_identity"],
+        )
+        registrations.append(
+            ExactModelRunnerRegistration(
+                artifact_identity=lineage.sourcing_model_identity().to_dict(),
+                protocol=protocol,
+                host_capability_manifest=host_manifest,
+            )
+        )
+    return tuple(registrations)
+
+
 def _gold_document(unit_ref: str) -> dict:
     labels = {unit_ref: True}
     payload = {
@@ -54,7 +117,7 @@ def _gold_document(unit_ref: str) -> dict:
 
 
 def _sources_and_environment(*, tamper_bundle: bool = False):
-    bundle, pins = _bundle()
+    bundle, pins = _dual_bundle()
     from gateway.research_lab.routing_authority_bundle import (
         load_verified_routing_authority_bundle,
     )
@@ -68,6 +131,7 @@ def _sources_and_environment(*, tamper_bundle: bool = False):
     gold = _gold_document(unit_ref)
     protected_manifest_hash = load_manifest(PROTECTED_MANIFEST)["manifest_hash"]
     fixture = authority_fixture()
+    registrations = _runner_registrations(bundle, verified)
     source = ReviewedRoutingReleaseAuthoritySources(
         authority_bundle_document=bundle,
         authority_bundle_pinned_public_keys=pins,
@@ -85,7 +149,7 @@ def _sources_and_environment(*, tamper_bundle: bool = False):
         model_binding_observation=fixture["model_binding_observation"],
         protected_release_receipt=dict(_PROTECTED_RELEASE_RECEIPT),
         artifact_authority=_ArtifactAuthority(),
-        model_runner_registry=_ModelRunnerRegistry(),
+        model_runner_registrations=registrations,
         model_verifier=_ModelVerifier(),
         evaluation_adapter=_EvaluationAdapter(),
         scoring_job_rpc=_Rpc(),
@@ -134,21 +198,13 @@ def test_generated_release_module_loads_without_sys_modules_injection(
     sources, environment, protected_hash = _sources_and_environment()
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
-    provider_dir = tmp_path / "release_provider"
-    provider_dir.mkdir()
-    (provider_dir / "attested_routing_release_authorities.py").write_text(
-        "import os\n"
-        "from tests.test_routing_release_builder import _sources_and_environment\n"
-        "def load_reviewed_routing_release_authority_sources():\n"
-        "    sources, environment, _ = _sources_and_environment()\n"
-        "    os.environ.update(environment)\n"
-        "    return sources\n",
-        encoding="utf-8",
-    )
-    import gateway.research_lab as research_lab_package
+    import gateway.research_lab.attested_routing_release_authorities as release_authorities
 
-    original_path = list(research_lab_package.__path__)
-    research_lab_package.__path__.insert(0, str(provider_dir))
+    monkeypatch.setattr(
+        release_authorities,
+        "load_reviewed_routing_release_authority_sources",
+        lambda: sources,
+    )
     generated = tmp_path / "routing_release_dependencies.py"
     generated.write_text(
         render_generated_release_module(
@@ -156,16 +212,13 @@ def test_generated_release_module_loads_without_sys_modules_injection(
         ),
         encoding="utf-8",
     )
-    try:
-        specification = importlib.util.spec_from_file_location(
-            "generated_routing_release_dependencies", generated
-        )
-        assert specification is not None and specification.loader is not None
-        module = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(module)
-        dependencies = module.load_reviewed_routing_release_dependencies()
-    finally:
-        research_lab_package.__path__[:] = original_path
+    specification = importlib.util.spec_from_file_location(
+        "generated_routing_release_dependencies", generated
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    dependencies = module.load_reviewed_routing_release_dependencies()
     assert dependencies.inputs.gold_labels.labels == {"company-1": True}
 
 
@@ -178,6 +231,21 @@ def test_release_builder_rejects_tampered_signed_bundle(monkeypatch):
     with pytest.raises(RoutingReleaseDependencyError, match="signed authority"):
         build_reviewed_routing_release_dependencies(
             sources,
+            environment=environment,
+            expected_protected_workflow_manifest_hash=protected_hash,
+        )
+
+
+def test_release_builder_rejects_registry_without_per_artifact_registrations(
+    monkeypatch,
+):
+    sources, environment, protected_hash = _sources_and_environment()
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    without_registrations = replace(sources, model_runner_registrations=None)
+    with pytest.raises(RoutingReleaseDependencyError, match="per-artifact"):
+        build_reviewed_routing_release_dependencies(
+            without_registrations,
             environment=environment,
             expected_protected_workflow_manifest_hash=protected_hash,
         )
@@ -209,4 +277,32 @@ def test_generated_release_module_rejects_protected_manifest_drift(
             expected_protected_workflow_manifest_hash=(
                 module.EXPECTED_PROTECTED_WORKFLOW_MANIFEST_HASH
             ),
+        )
+
+
+def test_release_startup_fails_closed_without_upstream_model_operations():
+    import gateway.research_lab.attested_routing_release_authorities as release_authorities
+
+    with pytest.raises(
+        RoutingReleaseDependencyError,
+        match="build_host_capability_manifest.*evaluate_model_verifier_action",
+    ):
+        release_authorities._require_upstream_model_operations()
+
+
+def test_oci_registration_requires_signed_model_release_identity():
+    import gateway.research_lab.attested_routing_release_authorities as release_authorities
+    from gateway.research_lab.routing_authority_bundle import (
+        load_verified_routing_authority_bundle,
+    )
+
+    bundle, pins = _dual_bundle()
+    verified = load_verified_routing_authority_bundle(bundle, pinned_public_keys=pins)
+    bundle["artifact_registrations"]["baseline"]["documents"][
+        "artifact_pointer"
+    ].pop("model_release_identity")
+    with pytest.raises(RoutingReleaseDependencyError, match="model_release_identity"):
+        release_authorities._artifact_registrations(
+            lineages=verified.artifact_lineages,
+            bundle=bundle,
         )

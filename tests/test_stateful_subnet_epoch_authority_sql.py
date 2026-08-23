@@ -11,6 +11,9 @@ import uuid
 import pytest
 
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 SQL = (
@@ -87,7 +90,7 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        expected_purposes = set(canonical_purposes)
+        expected_purposes = canonical_purposes_before_routing_experiment_v2(role)
         if role == "gateway_coordinator":
             expected_purposes.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
@@ -111,6 +114,9 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         if role == "validator_weights":

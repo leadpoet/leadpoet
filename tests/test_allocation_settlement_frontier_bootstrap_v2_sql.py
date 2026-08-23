@@ -22,6 +22,9 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES, sha256_json
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -199,13 +202,18 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
             re.DOTALL,
         )
         assert match is not None, role
-        historical_purposes = set(expected_purposes)
+        historical_purposes = canonical_purposes_before_routing_experiment_v2(
+            role
+        )
         if role == "gateway_scoring":
             historical_purposes.difference_update(
                 {
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         assert set(re.findall(r"'([^']+)'", match.group(1))) == (

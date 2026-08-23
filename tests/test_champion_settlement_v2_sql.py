@@ -3,6 +3,9 @@ import re
 
 from leadpoet_canonical.attested_v2 import COORDINATOR_ROLE, ROLE_PURPOSES
 from leadpoet_canonical.weight_authority_v2 import WEIGHT_INPUT_PURPOSES
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 SQL = (
@@ -253,7 +256,7 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        expected_at_126 = set(expected_purposes)
+        expected_at_126 = canonical_purposes_before_routing_experiment_v2(role)
         if role == "gateway_coordinator":
             expected_at_126.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
@@ -267,6 +270,9 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         assert migrated_purposes == expected_at_126, role
@@ -434,7 +440,7 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        expected_at_99 = set(expected_purposes)
+        expected_at_99 = canonical_purposes_before_routing_experiment_v2(role)
         if role == "gateway_coordinator":
             expected_at_99.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
@@ -458,6 +464,9 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         if role == "validator_weights":

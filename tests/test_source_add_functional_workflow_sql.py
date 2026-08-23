@@ -4,6 +4,9 @@ from pathlib import Path
 import re
 
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,7 +238,7 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        expected_at_96 = set(expected_purposes)
+        expected_at_96 = canonical_purposes_before_routing_experiment_v2(role)
         if role == "gateway_coordinator":
             expected_at_96.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
@@ -259,6 +262,9 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
                     "research_lab.candidate_hybrid_test.v2",
                     "research_lab.candidate_hybrid_discovery.v2",
                     "research_lab.model_compatibility.v2",
+                    "research_lab.routing_experiment.v2",
+                    "research_lab.routing_model_binding_observation.v2",
+                    "research_lab.routing_provider_evidence.v2",
                 }
             )
         if role == "validator_weights":

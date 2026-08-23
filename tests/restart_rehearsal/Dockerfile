@@ -15,6 +15,7 @@ RUN echo "REHEARSAL_IMAGE_BUILD_PHASE phase=system-packages status=started"; \
       libffi-devel \
       make \
       openssl-devel \
+      postgresql15-contrib \
       postgresql15-server \
       procps-ng \
       python3.11 \

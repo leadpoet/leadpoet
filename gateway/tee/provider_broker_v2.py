@@ -42,12 +42,20 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_bytes,
     sha256_json,
+    validate_boot_identity,
+    validate_signed_execution_receipt,
     validate_transport_attempt,
 )
 from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_job_slot,
     source_add_dynamic_retry_policy_hash,
     validate_source_add_runtime_route_v2,
+)
+from gateway.research_lab.routing_execution_authorization import (
+    RoutingProviderCallAuthorizationV2,
+    execute_routing_provider_call_authorization_v2,
+    routing_provider_dispatch_job_id_v2,
+    routing_provider_logical_operation_id_v2,
 )
 
 
@@ -58,6 +66,291 @@ PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC_SCHEMA_VERSION = (
 )
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 PROVIDER_RPC_RESPONSE_RESERVE_BYTES = 8 * 1024 * 1024
+_ROUTING_AUTH_PROOF_FIELDS = frozenset(
+    {
+        "authorization_hash",
+        "authorization_request_hash",
+        "authorization_proof_hash",
+        "request_body_hash",
+        "action_id",
+        "credit_cap_microunits",
+        "timeout_ms",
+        "authorization",
+        "authorization_result",
+        "authorization_receipt",
+    }
+)
+_ROUTING_FIXED_REQUEST_HEADERS = {
+    "content-type": "application/json",
+    "x-deepline-execute-response-intent": "raw",
+}
+_ROUTING_TRUSTED_PEER_BOOT_IDENTITY = contextvars.ContextVar(
+    "leadpoet_routing_trusted_peer_boot_identity",
+    default=None,
+)
+
+
+@contextmanager
+def trusted_routing_peer_boot_identity(
+    boot_identity: Mapping[str, Any],
+):
+    """Bind the already attested scoring peer to nested broker validation.
+
+    The inter-enclave TLS handler obtains this document from
+    ``AttestedPeerRegistry``.  It is deliberately kept in a context variable
+    instead of request data so provider semantics cannot replace it with a
+    caller-supplied boot identity while calling the broker.
+    """
+
+    if not isinstance(boot_identity, Mapping):
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer identity is unavailable"
+        )
+    try:
+        validate_boot_identity(boot_identity)
+    except Exception as exc:  # noqa: BLE001 - trust boundary
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer identity is invalid"
+        ) from exc
+    if (
+        boot_identity.get("role") != "gateway_scoring"
+        or boot_identity.get("physical_role") != "gateway_scoring"
+    ):
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer role is invalid"
+        )
+    token = _ROUTING_TRUSTED_PEER_BOOT_IDENTITY.set(dict(boot_identity))
+    try:
+        yield
+    finally:
+        _ROUTING_TRUSTED_PEER_BOOT_IDENTITY.reset(token)
+
+
+def _trusted_routing_peer_boot_identity() -> Mapping[str, Any] | None:
+    value = _ROUTING_TRUSTED_PEER_BOOT_IDENTITY.get()
+    return value if isinstance(value, Mapping) else None
+
+
+def _validate_trusted_routing_authorization_receipt(
+    *,
+    receipt: Mapping[str, Any],
+    authorization: RoutingProviderCallAuthorizationV2,
+    authorization_job_id: str,
+    trusted_peer_boot_identity: Mapping[str, Any],
+) -> None:
+    """Require the receipt signer to be the authenticated scoring peer.
+
+    ``validate_signed_execution_receipt`` proves possession of the public key
+    included in a receipt.  That is not a trust anchor: any caller can create
+    a new key pair.  The peer identity below comes only from the attested TLS
+    registry and is therefore the authority for this comparison.
+    """
+
+    if not isinstance(trusted_peer_boot_identity, Mapping):
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer identity is unavailable"
+        )
+    try:
+        validate_boot_identity(trusted_peer_boot_identity)
+    except Exception as exc:  # noqa: BLE001 - trust boundary
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer identity is invalid"
+        ) from exc
+    if (
+        trusted_peer_boot_identity.get("role") != "gateway_scoring"
+        or trusted_peer_boot_identity.get("physical_role") != "gateway_scoring"
+    ):
+        raise ProviderBrokerV2Error(
+            "routing trusted scoring peer role is invalid"
+        )
+    expected = {
+        "enclave_pubkey": trusted_peer_boot_identity.get("signing_pubkey"),
+        "boot_identity_hash": trusted_peer_boot_identity.get("boot_identity_hash"),
+        "role": trusted_peer_boot_identity.get("role"),
+        "commit_sha": trusted_peer_boot_identity.get("commit_sha"),
+        "pcr0": trusted_peer_boot_identity.get("pcr0"),
+        "build_manifest_hash": trusted_peer_boot_identity.get("build_manifest_hash"),
+        "dependency_lock_hash": trusted_peer_boot_identity.get("dependency_lock_hash"),
+        "config_hash": trusted_peer_boot_identity.get("config_hash"),
+        "purpose": authorization.purpose,
+        "job_id": authorization_job_id,
+    }
+    if any(receipt.get(field) != value for field, value in expected.items()):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization signer identity differs"
+        )
+    if (
+        authorization.protected_boot_identity_hash
+        != trusted_peer_boot_identity.get("boot_identity_hash")
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization protected boot identity differs"
+        )
+
+
+def validate_routing_authorization_proof_v2(
+    proof: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    trusted_peer_boot_identity: Mapping[str, Any] | None = None,
+) -> None:
+    """Validate a routing grant without process-local authority state.
+
+    The complete grant, deterministic result, and signed execution receipt
+    travel with the broker request.  This lets a restarted coordinator verify
+    the same proof without an in-memory registry from the issuing worker.
+    """
+
+    if not isinstance(proof, Mapping) or set(proof) != _ROUTING_AUTH_PROOF_FIELDS:
+        raise ProviderBrokerV2Error("routing provider authorization proof is unavailable")
+    try:
+        authorization = RoutingProviderCallAuthorizationV2.from_mapping(
+            proof["authorization"]
+        )
+    except Exception as exc:
+        raise ProviderBrokerV2Error(
+            "routing provider authorization grant is invalid"
+        ) from exc
+    receipt = proof.get("authorization_receipt")
+    if not isinstance(receipt, Mapping):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization receipt is unavailable"
+        )
+    authorization_job_id = str(receipt.get("job_id") or "")
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}", authorization_job_id
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization execution job identity is invalid"
+        )
+    try:
+        authorization_result = proof.get("authorization_result")
+        if not isinstance(authorization_result, Mapping):
+            raise ValueError("authorization result is not an object")
+        expected = execute_routing_provider_call_authorization_v2(
+            authorization.to_dict(),
+            authorization_job_id=authorization_job_id,
+        )
+        expected_logical_operation_id = routing_provider_logical_operation_id_v2(
+            experiment_hash=authorization.experiment_hash,
+            variant_id=authorization.variant_id,
+            unit_ref=authorization.unit_ref,
+            tool_id=authorization.binding.tool_id,
+            attempt=authorization.attempt,
+            core_request_fingerprint=authorization.core_request_fingerprint,
+            request_body_hash=authorization.request_body_hash,
+        )
+    except Exception as exc:
+        raise ProviderBrokerV2Error(
+            "routing provider authorization result is invalid"
+        ) from exc
+    authorization_hash = authorization.authorization_hash()
+    dispatch_job_id = routing_provider_dispatch_job_id_v2(proof)
+    proof_hash = proof.get("authorization_proof_hash")
+    authorization_request_hash = proof.get("authorization_request_hash")
+    request_body_hash = proof.get("request_body_hash")
+    if (
+        not _HASH_RE.fullmatch(str(proof.get("authorization_hash") or ""))
+        or proof.get("authorization_hash") != authorization_hash
+        or not isinstance(proof_hash, str)
+        or not _HASH_RE.fullmatch(proof_hash)
+        or not isinstance(authorization_request_hash, str)
+        or not _HASH_RE.fullmatch(authorization_request_hash)
+        or not isinstance(request_body_hash, str)
+        or not _HASH_RE.fullmatch(request_body_hash)
+        or request_body_hash != authorization.request_body_hash
+        or proof.get("action_id") != authorization.action_id
+        or type(proof.get("credit_cap_microunits")) is not int
+        or proof.get("credit_cap_microunits") != authorization.credit_cap_microunits
+        or type(proof.get("timeout_ms")) is not int
+        or proof.get("timeout_ms") != authorization.timeout_ms
+        or authorization_result != expected
+        or authorization_result.get("authorization_job_id")
+        != authorization_job_id
+        or expected.get("admission_job_id") != authorization.admission_job_id
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization proof identity differs"
+        )
+    try:
+        validate_signed_execution_receipt(receipt)
+    except Exception as exc:
+        raise ProviderBrokerV2Error(
+            "routing provider authorization receipt is invalid"
+        ) from exc
+    if (
+        receipt.get("receipt_hash") != proof_hash
+        or receipt.get("role") != "gateway_scoring"
+        or receipt.get("purpose") != authorization.purpose
+        or receipt.get("status") != "succeeded"
+        or receipt.get("job_id") != authorization_job_id
+        or receipt.get("input_root") != authorization_request_hash
+        or receipt.get("output_root") != expected["output_root"]
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization receipt identity differs"
+        )
+    trusted_peer = (
+        trusted_peer_boot_identity
+        if trusted_peer_boot_identity is not None
+        else _trusted_routing_peer_boot_identity()
+    )
+    if trusted_peer is not None:
+        _validate_trusted_routing_authorization_receipt(
+            receipt=receipt,
+            authorization=authorization,
+            authorization_job_id=authorization_job_id,
+            trusted_peer_boot_identity=trusted_peer,
+        )
+    if (
+        not isinstance(request, Mapping)
+        or request.get("purpose") != authorization.purpose
+        or request.get("routing_authorization") != proof
+        or request.get("job_id") != dispatch_job_id
+        or request.get("provider_id") != authorization.transport_id
+        or request.get("retry_policy_hash") != authorization.retry_policy_hash
+        or request.get("logical_operation_id") != expected_logical_operation_id
+        or str(request.get("method") or "").upper() != "POST"
+        or type(request.get("attempt_number")) is not int
+        or request.get("attempt_number") != authorization.attempt
+        or type(request.get("timeout_ms")) is not int
+        or request.get("timeout_ms") != authorization.timeout_ms
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization request binding differs"
+        )
+    parsed = urlsplit(str(request.get("url") or ""))
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "code.deepline.com"
+        or parsed.path != f"/api/v2/integrations/{authorization.action_id}/execute"
+        or parsed.query
+        or parsed.fragment
+        or proof.get("action_id") != authorization.action_id
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization action differs"
+        )
+    try:
+        body = base64.b64decode(str(request.get("body_b64") or ""), validate=True)
+        decoded_body = json.loads(body)
+    except Exception as exc:
+        raise ProviderBrokerV2Error(
+            "routing provider authorization body is invalid"
+        ) from exc
+    if sha256_json(decoded_body) != authorization.request_body_hash:
+        raise ProviderBrokerV2Error(
+            "routing provider authorization body differs"
+        )
+    headers = request.get("headers")
+    if (
+        not isinstance(headers, Mapping)
+        or any(str(name).lower() in _SECRET_HEADER_NAMES for name in headers)
+        or _nonsecret_headers(headers) != _ROUTING_FIXED_REQUEST_HEADERS
+    ):
+        raise ProviderBrokerV2Error(
+            "routing provider authorization headers differ"
+        )
 
 
 def _provider_rpc_response_body_limit(
@@ -2773,7 +3066,7 @@ class ProviderBrokerV2:
         request_fields = (
             frozenset(request) if isinstance(request, Mapping) else frozenset()
         )
-        if request_fields not in {
+        accepted_fields = {
             frozenset(required),
             frozenset(required | {"dynamic_route"}),
             frozenset(required | {"max_response_bytes", "artifact_mode"}),
@@ -2781,7 +3074,20 @@ class ProviderBrokerV2:
                 required
                 | {"dynamic_route", "max_response_bytes", "artifact_mode"}
             ),
-        }:
+        }
+        # Routing experiments carry the complete attested grant alongside
+        # the compact transport identity.  The broker uses the stable
+        # stateless verifier below before transport.
+        accepted_fields.update(
+            frozenset(
+                set(fields)
+                | {
+                    "routing_authorization",
+                }
+            )
+            for fields in tuple(accepted_fields)
+        )
+        if request_fields not in accepted_fields:
             raise ProviderBrokerV2Error("provider request fields are invalid")
         if request["schema_version"] != PROVIDER_BROKER_SCHEMA_VERSION:
             raise ProviderBrokerV2Error("provider request schema is invalid")
@@ -2837,6 +3143,72 @@ class ProviderBrokerV2:
             raise ProviderBrokerV2Error("provider body is invalid base64") from exc
         if len(body) > MAX_REQUEST_BODY_BYTES:
             raise ProviderBrokerV2Error("provider request body exceeds size limit")
+        routing_authorization = request.get("routing_authorization")
+        routing_purpose = str(request.get("purpose") or "") == (
+            "research_lab.routing_provider_evidence.v2"
+        )
+        routing_budget_reservation = (
+            routing_purpose
+            and provider_id == "supabase"
+            and method == "POST"
+            and parsed.path
+            == "/rest/v1/rpc/research_lab_routing_reserve_budget_v3"
+            and str(request.get("logical_operation_id") or "").startswith(
+                f"{str(request.get('job_id') or '')}:"
+                "routing-budget-reservation:"
+            )
+            and routing_authorization is None
+        )
+        if routing_purpose and not routing_budget_reservation:
+            if (
+                not isinstance(routing_authorization, Mapping)
+                or set(routing_authorization) != _ROUTING_AUTH_PROOF_FIELDS
+            ):
+                raise ProviderBrokerV2Error(
+                    "routing provider authorization proof is unavailable"
+                )
+            for field in (
+                "authorization_hash",
+                "authorization_proof_hash",
+                "request_body_hash",
+            ):
+                if not _HASH_RE.fullmatch(str(routing_authorization.get(field) or "")):
+                    raise ProviderBrokerV2Error(
+                        "routing provider authorization proof is invalid"
+                    )
+            action_id = str(routing_authorization.get("action_id") or "")
+            if (
+                not re.fullmatch(r"[a-z][a-z0-9_]{1,127}", action_id)
+                or parsed.path
+                != f"/api/v2/integrations/{action_id}/execute"
+                or routing_authorization.get("timeout_ms") != request.get("timeout_ms")
+                or type(routing_authorization.get("credit_cap_microunits")) is not int
+                or routing_authorization["credit_cap_microunits"] < 1
+            ):
+                raise ProviderBrokerV2Error(
+                    "routing provider authorization identity differs"
+                )
+            try:
+                decoded_body = json.loads(body)
+            except Exception as exc:
+                raise ProviderBrokerV2Error(
+                    "routing provider body is not canonical JSON"
+                ) from exc
+            if sha256_json(decoded_body) != routing_authorization["request_body_hash"]:
+                raise ProviderBrokerV2Error(
+                    "routing provider authorization body differs"
+                )
+            # This direct broker check proves only the self-contained proof's
+            # internal consistency.  The trust anchor is the authenticated
+            # scoring peer bound by handle_inter_enclave_rpc; direct
+            # callers must not treat this path as peer authentication.
+            validate_routing_authorization_proof_v2(
+                dict(routing_authorization), dict(request)
+            )
+        elif routing_authorization is not None:
+            raise ProviderBrokerV2Error(
+                "routing authorization proof is not allowed for this purpose"
+            )
         attempt_number = request["attempt_number"]
         timeout_ms = request["timeout_ms"]
         if not isinstance(attempt_number, int) or attempt_number < 0:
@@ -3181,6 +3553,10 @@ class ProviderBrokerV2:
             response_payload = {
                 "terminal_status": "authenticated_response",
                 "http_status": int(response["http_status"]),
+                # One response record represents one physical provider
+                # transport.  Composite callers must provide their own
+                # signed aggregate count; the Lab must not infer it.
+                "call_count": 1,
                 "headers": _nonsecret_headers(response.get("headers", {})),
                 "body_b64": base64.b64encode(response_body).decode("ascii"),
                 "encrypted_request_artifact_id": request_artifact_id,
@@ -3200,6 +3576,7 @@ class ProviderBrokerV2:
             }
             response_payload = {
                 "terminal_status": "transport_failure",
+                "call_count": 1,
                 "failure_code": terminal_kwargs["failure_code"],
                 "failure_stage": failure_stage,
                 "failure_error_type": _safe_error_type(exc),

@@ -3847,6 +3847,82 @@ class _LocalS3:
         }
 
 
+def _validate_local_boto3_client_options(
+    service_name: str,
+    options: Mapping[str, Any],
+) -> None:
+    from botocore.config import Config
+
+    config = options.get("config")
+    if config is None:
+        if set(options) - {"region_name", "endpoint_url"}:
+            raise ValueError("local boto3 client options differ")
+        return
+    regional_config = {
+        "signature_version": "s3v4",
+        "s3": {"addressing_style": "virtual"},
+    }
+    upload_config = {"signature_version": "s3v4"}
+    region = options.get("region_name")
+    if (
+        service_name != "s3"
+        or not isinstance(config, Config)
+        or not isinstance(region, str)
+        or region != region.strip()
+        or not region
+    ):
+        raise ValueError("local boto3 client options differ")
+    configured = config._user_provided_options
+    if configured == regional_config:
+        if (
+            set(options) != {"region_name", "endpoint_url", "config"}
+            or options.get("endpoint_url")
+            != f"https://s3.{region}.amazonaws.com"
+        ):
+            raise ValueError("local boto3 client options differ")
+        return
+    if configured == upload_config:
+        access_key = options.get("aws_access_key_id")
+        secret_key = options.get("aws_secret_access_key")
+        static_credentials = (
+            isinstance(access_key, str)
+            and bool(access_key)
+            and access_key == os.environ.get("AWS_ACCESS_KEY_ID")
+            and isinstance(secret_key, str)
+            and bool(secret_key)
+            and secret_key == os.environ.get("AWS_SECRET_ACCESS_KEY")
+        )
+        instance_role_credentials = (
+            access_key is None
+            and secret_key is None
+            and os.environ.get("LEADPOET_AWS_INSTANCE_ROLE_ONLY") == "true"
+            and all(
+                name not in os.environ
+                for name in (
+                    "AWS_ACCESS_KEY_ID",
+                    "AWS_SECRET_ACCESS_KEY",
+                    "AWS_SESSION_TOKEN",
+                    "AWS_SECURITY_TOKEN",
+                    "AWS_PROFILE",
+                    "AWS_DEFAULT_PROFILE",
+                )
+            )
+        )
+        if (
+            set(options)
+            != {
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "region_name",
+                "config",
+            }
+            or not (static_credentials or instance_role_credentials)
+        ):
+            raise ValueError("local boto3 client options differ")
+        return
+    raise ValueError("local boto3 client options differ")
+
+
 class _LocalKMS:
     def verify(
         self,
@@ -4502,8 +4578,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
             raise ValueError("local boto3 AWS service is unknown")
         if args:
             raise ValueError("local boto3 client positional arguments differ")
-        if set(kwargs) - {"region_name", "endpoint_url"}:
-            raise ValueError("local boto3 client options differ")
+        _validate_local_boto3_client_options(str(service_name), kwargs)
         return client_type()
 
     boto3.client = _local_boto3_client

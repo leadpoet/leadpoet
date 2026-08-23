@@ -64,6 +64,9 @@ from leadpoet_canonical.attested_v2 import (
     merkle_root,
     sha256_json,
 )
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
@@ -243,6 +246,24 @@ ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION = (
 PRODUCTION_PARITY_READER_MIGRATION = (
     "156-production-parity-readonly-role.sql"
 )
+ROUTING_EXPERIMENT_AUTHORITY_MIGRATION = (
+    "157-research-lab-routing-experiment-authority.sql"
+)
+ROUTING_EXPERIMENT_PURPOSES_MIGRATION = (
+    "158-research-lab-routing-experiment-purposes.sql"
+)
+ROUTING_EXECUTION_QUEUE_MIGRATION = (
+    "159-research-lab-routing-execution-queue.sql"
+)
+ROUTING_ADAPTER_FAILURES_MIGRATION = (
+    "160-research-lab-routing-adapter-failures.sql"
+)
+EXACT_MODEL_TRANSITIONS_MIGRATION = (
+    "161-research-lab-exact-model-transitions.sql"
+)
+CANDIDATE_WATERFALL_SIDECARS_MIGRATION = (
+    "162-research-lab-candidate-routing-experiments.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -300,6 +321,12 @@ EXPECTED_APPLIED_MIGRATIONS = (
     MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
     ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION,
     PRODUCTION_PARITY_READER_MIGRATION,
+    ROUTING_EXPERIMENT_AUTHORITY_MIGRATION,
+    ROUTING_EXPERIMENT_PURPOSES_MIGRATION,
+    ROUTING_EXECUTION_QUEUE_MIGRATION,
+    ROUTING_ADAPTER_FAILURES_MIGRATION,
+    EXACT_MODEL_TRANSITIONS_MIGRATION,
+    CANDIDATE_WATERFALL_SIDECARS_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -333,6 +360,8 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_154_model_compatibility_purpose_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
+    "post_161_exact_model_transition_contract_valid",
+    "post_162_candidate_waterfall_sidecars_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -414,6 +443,8 @@ SYSTEM_BINARY_DIRS = tuple(
     for value in ("/usr/local/sbin", "/usr/sbin", "/sbin", "/usr/bin", "/bin")
 )
 ALLOCATION_MIGRATION_PREREQUISITES_SQL = """
+CREATE SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 CREATE SCHEMA auth;
 CREATE FUNCTION auth.role()
 RETURNS TEXT
@@ -5286,8 +5317,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             ).stdout.strip()
         )
         expected_pairs = {
-            str(role): frozenset(str(purpose) for purpose in purposes)
-            for role, purposes in ROLE_PURPOSES.items()
+            str(role): frozenset(
+                canonical_purposes_before_routing_experiment_v2(str(role))
+            )
+            for role in ROLE_PURPOSES
         }
         expected_pairs["gateway_scoring"] = expected_pairs[
             "gateway_scoring"
@@ -5430,9 +5463,14 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             for role, encoded_purposes in clauses
         }
         expected_pairs = {
-            str(role): frozenset(str(purpose) for purpose in purposes)
-            for role, purposes in ROLE_PURPOSES.items()
+            str(role): frozenset(
+                canonical_purposes_before_routing_experiment_v2(str(role))
+            )
+            for role in ROLE_PURPOSES
         }
+        expected_pairs["gateway_scoring"] = expected_pairs[
+            "gateway_scoring"
+        ] | frozenset({"research_lab.model_compatibility.v2"})
         if (
             candidate_hybrid_purpose_contract.get("constraint_valid")
             is not True
@@ -5498,6 +5536,243 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-156 production parity reader contract differs"
+            )
+        database.apply_migration(
+            scripts / ROUTING_EXPERIMENT_AUTHORITY_MIGRATION
+        )
+        applied.append(ROUTING_EXPERIMENT_AUTHORITY_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_EXPERIMENT_PURPOSES_MIGRATION
+        )
+        applied.append(ROUTING_EXPERIMENT_PURPOSES_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_EXECUTION_QUEUE_MIGRATION
+        )
+        applied.append(ROUTING_EXECUTION_QUEUE_MIGRATION)
+        database.apply_migration(
+            scripts / ROUTING_ADAPTER_FAILURES_MIGRATION
+        )
+        applied.append(ROUTING_ADAPTER_FAILURES_MIGRATION)
+        database.apply_migration(
+            scripts / EXACT_MODEL_TRANSITIONS_MIGRATION
+        )
+        applied.append(EXACT_MODEL_TRANSITIONS_MIGRATION)
+        exact_model_transition_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'event_constraint', pg_catalog.pg_get_constraintdef(oid),
+                    'v3_append_callable', pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.research_lab_routing_append_fenced_event_v3(text,text,text,text,bigint,jsonb)',
+                        'EXECUTE'
+                    ),
+                    'retired_v2_mutations', (
+                        SELECT pg_catalog.bool_and(
+                            NOT pg_catalog.has_function_privilege(
+                                'service_role', rpc, 'EXECUTE'
+                            )
+                        )
+                        FROM pg_catalog.unnest(ARRAY[
+                            'public.research_lab_routing_claim_experiment_v2(text,text,text,text,integer,jsonb,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_renew_claim_v2(text,text,text,bigint,text,integer,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_close_claim_v2(text,text,text,bigint,text,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_fenced_event_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_provider_attempt_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,text,text,text,bigint,bigint,text,text,bigint,text,text,text,text,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_decision_receipt_v2(text,text,text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_append_evaluation_v2(text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_reserve_budget_v2(text,text,text,text,text,bigint,text,bigint,integer,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_settle_budget_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_mark_budget_uncertain_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_recover_budget_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
+                            'public.research_lab_routing_promote_v2(text,text,text,text,text,jsonb,text,jsonb)'::REGPROCEDURE
+                        ]) AS retired(rpc)
+                    ),
+                    'bootstrap_recovery_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_recover_claim_v2(text,text,text,jsonb,text,jsonb)',
+                            'EXECUTE'
+                        ),
+                    'queue_claim_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_claim_execution_requests_v2(text,integer,integer)',
+                            'EXECUTE'
+                        )
+                )::text
+                  FROM pg_catalog.pg_constraint
+                 WHERE conrelid =
+                       'public.research_lab_routing_experiment_events_v2'::REGCLASS
+                   AND conname =
+                       'research_lab_routing_experiment_events_v2_event_type_check';
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            "model_transition_completed"
+            not in str(exact_model_transition_contract.get("event_constraint"))
+            or exact_model_transition_contract.get("v3_append_callable") is not True
+            or exact_model_transition_contract.get("retired_v2_mutations") is not True
+            or exact_model_transition_contract.get("bootstrap_recovery_callable") is not True
+            or exact_model_transition_contract.get("queue_claim_callable") is not True
+        ):
+            raise PostgresContractProbeError(
+                "post-161 exact Model transition contract differs"
+            )
+        database.apply_migration(
+            scripts / CANDIDATE_WATERFALL_SIDECARS_MIGRATION
+        )
+        applied.append(CANDIDATE_WATERFALL_SIDECARS_MIGRATION)
+        candidate_sidecar_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'forced_rls', (
+                        SELECT pg_catalog.bool_and(
+                            relation_meta.relrowsecurity
+                            AND relation_meta.relforcerowsecurity
+                        )
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relname IN (
+                              'research_lab_candidate_model_unit_terminals',
+                              'research_lab_candidate_waterfall_receipts',
+                              'research_lab_candidate_waterfall_metrics'
+                          )
+                    ),
+                    'relation_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relkind = 'r'
+                          AND relation_meta.relname IN (
+                              'research_lab_candidate_model_unit_terminals',
+                              'research_lab_candidate_waterfall_receipts',
+                              'research_lab_candidate_waterfall_metrics'
+                          )
+                    ),
+                    'foreign_key_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'f'
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                    ),
+                    'composite_lineage_foreign_key_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'f'
+                          AND pg_catalog.array_length(constraint_meta.conkey, 1) = 2
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                    ),
+                    'content_hash_check_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.contype = 'c'
+                          AND constraint_meta.conrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                          AND pg_catalog.pg_get_constraintdef(
+                              constraint_meta.oid
+                          ) LIKE '%research_lab_routing_jsonb_hash_v2%'
+                    ),
+                    'append_only_trigger_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE NOT trigger_meta.tgisinternal
+                          AND trigger_meta.tgrelid IN (
+                              'public.research_lab_candidate_model_unit_terminals'::regclass,
+                              'public.research_lab_candidate_waterfall_receipts'::regclass,
+                              'public.research_lab_candidate_waterfall_metrics'::regclass
+                          )
+                          AND trigger_meta.tgname LIKE '%no_mutation'
+                    ),
+                    'provider_receipt_unique', EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.pg_indexes index_meta
+                        WHERE index_meta.schemaname = 'public'
+                          AND index_meta.tablename =
+                              'research_lab_candidate_waterfall_receipts'
+                          AND index_meta.indexname =
+                              'idx_research_lab_candidate_waterfall_provider_receipt'
+                          AND index_meta.indexdef LIKE 'CREATE UNIQUE INDEX%'
+                          AND index_meta.indexdef LIKE '%provider_receipt_ref%'
+                          AND index_meta.indexdef LIKE '%WHERE%'
+                    )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if candidate_sidecar_contract != {
+            "forced_rls": True,
+            "relation_count": 3,
+            "foreign_key_count": 7,
+            "composite_lineage_foreign_key_count": 4,
+            "content_hash_check_count": 4,
+            "append_only_trigger_count": 3,
+            "provider_receipt_unique": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-162 candidate waterfall sidecar contract differs"
+            )
+        routing_purpose_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        routing_definition = routing_purpose_contract.get(
+            "constraint_definition"
+        )
+        routing_clauses = re.findall(
+            r"\(role = '([^']+)'::text\)\s+AND\s+"
+            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
+            routing_definition if isinstance(routing_definition, str) else "",
+            flags=re.DOTALL,
+        )
+        routing_pairs = {
+            role: frozenset(
+                re.findall(r"'([^']+)'::text", encoded_purposes)
+            )
+            for role, encoded_purposes in routing_clauses
+        }
+        expected_routing_pairs = {
+            str(role): frozenset(str(purpose) for purpose in purposes)
+            for role, purposes in ROLE_PURPOSES.items()
+        }
+        expected_routing_pairs["gateway_scoring"] = expected_routing_pairs[
+            "gateway_scoring"
+        ] | frozenset(
+            {
+                "research_lab.routing_experiment.v2",
+                "research_lab.routing_provider_evidence.v2",
+            }
+        )
+        if (
+            routing_purpose_contract.get("constraint_valid") is not True
+            or routing_pairs != expected_routing_pairs
+        ):
+            raise PostgresContractProbeError(
+                "post-158 routing experiment purpose contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(

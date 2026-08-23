@@ -1147,11 +1147,15 @@ class CodeEditCandidateBuilder:
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )
-            admitted_source = _sourcing_contract_gate(
-                repo_dir,
-                manifest=candidate_manifest,
-                force_enforce=True,
-            )
+            with _exclude_generated_manifest_from_source_identity(
+                repo_dir=repo_dir,
+                manifest_path=manifest_path,
+            ):
+                admitted_source = _sourcing_contract_gate(
+                    repo_dir,
+                    manifest=candidate_manifest,
+                    force_enforce=True,
+                )
             if admitted_source is None:
                 raise CodeEditPrivateTestError(
                     "candidate source compatibility admission did not return a receipt"
@@ -2540,6 +2544,37 @@ def _sourcing_contract_check_mode() -> str:
         )
         return "enforce"
     return value
+
+
+@contextmanager
+def _exclude_generated_manifest_from_source_identity(
+    *,
+    repo_dir: Path,
+    manifest_path: Path,
+) -> Iterator[None]:
+    """Recompute source identity without the post-image manifest output.
+
+    The build command creates this file only after it has built the candidate
+    image and computed ``model_artifact_hash``.  A relative output path lives
+    inside the temporary checkout, but it was not part of the source copied
+    into that image.  Remove only this generated file while admission repeats
+    the canonical tree extraction, then restore it for diagnostics.
+    """
+
+    resolved_repo = repo_dir.resolve()
+    resolved_manifest = manifest_path.resolve()
+    try:
+        resolved_manifest.relative_to(resolved_repo)
+    except ValueError:
+        yield
+        return
+    payload = resolved_manifest.read_bytes()
+    resolved_manifest.unlink()
+    try:
+        yield
+    finally:
+        resolved_manifest.parent.mkdir(parents=True, exist_ok=True)
+        resolved_manifest.write_bytes(payload)
 
 
 def _sourcing_contract_gate(

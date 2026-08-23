@@ -858,6 +858,126 @@ def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
     assert "Error in sitecustomize" not in result.stderr
 
 
+def test_sitecustomize_accepts_only_exact_s3_client_options(monkeypatch) -> None:
+    from botocore.config import Config
+
+    regional = {
+        "region_name": "us-east-1",
+        "endpoint_url": "https://s3.us-east-1.amazonaws.com",
+        "config": Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options(
+        "s3", regional
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "rehearsal-access")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "rehearsal-secret")
+    upload = {
+        "aws_access_key_id": "rehearsal-access",
+        "aws_secret_access_key": "rehearsal-secret",
+        "region_name": "us-east-1",
+        "config": Config(signature_version="s3v4"),
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options("s3", upload)
+    for options in (
+        {**upload, "aws_access_key_id": "different"},
+        {**upload, "aws_secret_access_key": "different"},
+        {**upload, "endpoint_url": "https://s3.us-east-1.amazonaws.com"},
+    ):
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID")
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY")
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
+    instance_role_upload = {
+        **upload,
+        "aws_access_key_id": None,
+        "aws_secret_access_key": None,
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options(
+        "s3", instance_role_upload
+    )
+
+    class ConfigImpostor:
+        _user_provided_options = {
+            "signature_version": "s3v4",
+            "s3": {"addressing_style": "virtual"},
+        }
+
+    invalid = (
+        {**regional, "endpoint_url": "https://example.invalid"},
+        {**regional, "region_name": " us-east-1"},
+        {
+            **regional,
+            "config": Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+        },
+        {**regional, "config": Config(signature_version="s3")},
+        {**regional, "config": ConfigImpostor()},
+        {**regional, "use_ssl": True},
+        {**instance_role_upload, "aws_access_key_id": ""},
+        {**instance_role_upload, "aws_secret_access_key": ""},
+        {**instance_role_upload, "aws_access_key_id": "mixed"},
+        {**instance_role_upload, "aws_secret_access_key": "mixed"},
+    )
+    for options in invalid:
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "kms", regional
+        )
+
+
+def test_sitecustomize_rejects_unbound_instance_role_s3_options(
+    monkeypatch,
+) -> None:
+    from botocore.config import Config
+
+    options = {
+        "aws_access_key_id": None,
+        "aws_secret_access_key": None,
+        "region_name": "us-east-1",
+        "config": Config(signature_version="s3v4"),
+    }
+    monkeypatch.delenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", raising=False)
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "s3", options
+        )
+
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "false")
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "s3", options
+        )
+
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        monkeypatch.setenv(name, "unexpected")
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+        monkeypatch.delenv(name)
+
+
 def test_chain_settlement_boundary_persists_zero_credit_readback(
     tmp_path,
 ) -> None:
@@ -1155,6 +1275,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
             "research_lab_compact_weight_authorities_v2",
+            "research_lab_candidate_model_unit_terminals",
+            "research_lab_candidate_waterfall_receipts",
+            "research_lab_candidate_waterfall_metrics",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1207,6 +1330,10 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_routing_exact_model_transition_contract_v1",
+            "research_lab_candidate_append_model_unit_terminal_v1",
+            "research_lab_candidate_append_waterfall_receipt_v1",
+            "research_lab_candidate_append_waterfall_metric_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
@@ -1416,6 +1543,18 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["authority_hash"],
             },
+            "research_lab_candidate_model_unit_terminals": {
+                "kind": "r",
+                "columns": ["receipt_id", "experiment_hash"],
+            },
+            "research_lab_candidate_waterfall_receipts": {
+                "kind": "r",
+                "columns": ["receipt_id", "experiment_hash"],
+            },
+            "research_lab_candidate_waterfall_metrics": {
+                "kind": "r",
+                "columns": ["metric_id", "experiment_hash"],
+            },
             "research_lab_autoresearch_trees": {
                 "kind": "r",
                 "columns": ["tree_id", "run_id"],
@@ -1483,6 +1622,10 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_routing_exact_model_transition_contract_v1",
+            "research_lab_candidate_append_model_unit_terminal_v1",
+            "research_lab_candidate_append_waterfall_receipt_v1",
+            "research_lab_candidate_append_waterfall_metric_v1",
         ],
         "atomic_credit_resume": _atomic_credit_resume_fixture(),
         "compact_weight_settlement_contract": (
@@ -1908,6 +2051,11 @@ def test_credit_resume_rehearsal_uses_final_production_queue_guard() -> None:
     positions = [applied.index(name) for name in ordered]
 
     assert positions == sorted(positions)
+    assert "CREATE SCHEMA extensions;" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    assert (
+        "CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;"
+        in ALLOCATION_MIGRATION_PREREQUISITES_SQL
+    )
     assert "miner_hotkey TEXT NOT NULL" in ALLOCATION_MIGRATION_PREREQUISITES_SQL
     assert (
         "CREATE TABLE public.research_loop_run_queue_events"
@@ -5589,6 +5737,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "/harness/postgres_v2_contract_probe.py \\" in run_inside
     assert "/harness/gateway_enclave_service.py \\" in dockerfile
     assert "/harness/tls_connect_proxy_service.py \\" in dockerfile
+    assert "postgresql15-contrib" in dockerfile
     assert "postgresql15-server" in dockerfile
     assert "/harness/postgres_v2_contract_probe.py \\" in dockerfile
     assert (
@@ -8752,10 +8901,14 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
     assert 'bash /home/ec2-user/gw_restart.sh\n' in script
     assert "direct miner-maintenance restart performed secret writes" in script
-    first_rollout = script.split(
-        'elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
-    )[1].split('bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh"', 1)[0]
-    for variable in (
+    launcher = script.split(
+        '  set +e\n  if [ "$TRANSITION" = "rollback" ]; then', 1
+    )[1].split("  set -e\n", 1)[0]
+    rollback, remaining = launcher.split(
+        '  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
+    )
+    first_rollout, direct = remaining.split("  else\n", 1)
+    git_environment_overrides = (
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",
         "GIT_COMMON_DIR",
@@ -8769,10 +8922,12 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         "GIT_OBJECT_DIRECTORY",
         "GIT_REPLACE_REF_BASE",
         "GIT_WORK_TREE",
-    ):
-        assert f"-u {variable}" in first_rollout
-    assert "-u GIT_CONFIG_KEY_0" in first_rollout
-    assert "-u GIT_CONFIG_VALUE_0" in first_rollout
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    )
+    for restart_path in (rollback, first_rollout, direct):
+        for variable in git_environment_overrides:
+            assert f"-u {variable}" in restart_path
     assert "return _real_boto3_client" not in adapter
     assert 'raise ValueError("local boto3 AWS service is unknown")' in adapter
 

@@ -2,6 +2,9 @@ from pathlib import Path
 import re
 
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+from tests.historical_sql_purpose_contract import (
+    canonical_purposes_before_routing_experiment_v2,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +51,9 @@ def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> No
             "research_lab.candidate_hybrid_test.v2",
             "research_lab.candidate_hybrid_discovery.v2",
             "research_lab.model_compatibility.v2",
+            "research_lab.routing_experiment.v2",
+            "research_lab.routing_model_binding_observation.v2",
+            "research_lab.routing_provider_evidence.v2",
         },
     }
     for role, expected_purposes in ROLE_PURPOSES.items():
@@ -58,7 +64,9 @@ def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> No
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        historical_purposes = set(expected_purposes) - later_purposes.get(
+        historical_purposes = canonical_purposes_before_routing_experiment_v2(
+            role
+        ) - later_purposes.get(
             role, set()
         )
         assert migrated_purposes == historical_purposes, role

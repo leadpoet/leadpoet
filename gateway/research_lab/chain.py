@@ -18,6 +18,29 @@ _DEFAULT_DIRECT_EPOCH_ATTEMPTS = 3
 _DIRECT_EPOCH_RESULT_PREFIX = "LEADPOET_EPOCH_RESULT="
 
 
+def _bind_probe_lifetime_to_parent() -> None:
+    """Kill a Linux epoch probe if its gateway parent exits mid-request."""
+    if not sys.platform.startswith("linux"):
+        return
+
+    parent_pid = os.getppid()
+    if parent_pid <= 1:
+        os._exit(70)
+
+    import ctypes
+    import signal
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+    # PR_SET_PDEATHSIG is not retroactive. Close the race where the parent
+    # exited after the first getppid() but before prctl() completed.
+    if os.getppid() != parent_pid:
+        os._exit(70)
+
+
 async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | None = None) -> tuple[int, int | None, str]:
     """Resolve the live Bittensor epoch without requiring an operator override."""
     from gateway.utils.epoch import (
@@ -114,6 +137,7 @@ import json
 import os
 import sys
 import bittensor as bt
+from gateway.research_lab.chain import _bind_probe_lifetime_to_parent
 from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
@@ -123,6 +147,7 @@ from gateway.utils.subnet_epoch_archive import (
     validate_cutover_anchor_from_archive,
 )
 
+_bind_probe_lifetime_to_parent()
 network = os.getenv("BITTENSOR_NETWORK", "finney")
 netuid = int(os.getenv("BITTENSOR_NETUID", "71"))
 subtensor = bt.Subtensor(network=network)

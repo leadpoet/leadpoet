@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 
 import pytest
@@ -36,6 +37,10 @@ def test_direct_epoch_probe_runs_in_killable_proxy_free_subprocess(monkeypatch):
     assert "subtensor," in probe
     assert "finalized=True" in probe
     assert "validate_cutover_anchor_from_archive(cutover)" in probe
+    assert "_bind_probe_lifetime_to_parent()" in probe
+    assert probe.index("_bind_probe_lifetime_to_parent()") < probe.index(
+        "subtensor = bt.Subtensor"
+    )
     assert "sys.stdout.flush()" in probe
     assert "os._exit(0)" in probe
     assert "subtensor.close()" not in probe
@@ -44,6 +49,40 @@ def test_direct_epoch_probe_runs_in_killable_proxy_free_subprocess(monkeypatch):
     assert "HTTPS_PROXY" not in captured["env"]
     assert captured["timeout"] == 59.0
     assert captured["capture_output"] is True
+
+
+def test_probe_lifetime_is_bound_to_unchanged_linux_parent(monkeypatch):
+    calls = []
+
+    class FakeLibc:
+        def prctl(self, *args):
+            calls.append(args)
+            return 0
+
+    parent_ids = iter((4321, 4321))
+    monkeypatch.setattr(chain.sys, "platform", "linux")
+    monkeypatch.setattr(chain.os, "getppid", lambda: next(parent_ids))
+    monkeypatch.setattr("ctypes.CDLL", lambda *_args, **_kwargs: FakeLibc())
+
+    chain._bind_probe_lifetime_to_parent()
+
+    assert calls == [(1, signal.SIGKILL, 0, 0, 0)]
+
+
+def test_probe_lifetime_exits_if_parent_is_already_gone(monkeypatch):
+    class ProbeExited(RuntimeError):
+        pass
+
+    monkeypatch.setattr(chain.sys, "platform", "linux")
+    monkeypatch.setattr(chain.os, "getppid", lambda: 1)
+    monkeypatch.setattr(
+        chain.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(ProbeExited(code)),
+    )
+
+    with pytest.raises(ProbeExited, match="70"):
+        chain._bind_probe_lifetime_to_parent()
 
 
 def test_direct_epoch_probe_timeout_is_visible(monkeypatch):

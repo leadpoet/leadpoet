@@ -3882,6 +3882,32 @@ def _validate_local_boto3_client_options(
             raise ValueError("local boto3 client options differ")
         return
     if configured == upload_config:
+        access_key = options.get("aws_access_key_id")
+        secret_key = options.get("aws_secret_access_key")
+        static_credentials = (
+            isinstance(access_key, str)
+            and bool(access_key)
+            and access_key == os.environ.get("AWS_ACCESS_KEY_ID")
+            and isinstance(secret_key, str)
+            and bool(secret_key)
+            and secret_key == os.environ.get("AWS_SECRET_ACCESS_KEY")
+        )
+        instance_role_credentials = (
+            access_key is None
+            and secret_key is None
+            and os.environ.get("LEADPOET_AWS_INSTANCE_ROLE_ONLY") == "true"
+            and all(
+                name not in os.environ
+                for name in (
+                    "AWS_ACCESS_KEY_ID",
+                    "AWS_SECRET_ACCESS_KEY",
+                    "AWS_SESSION_TOKEN",
+                    "AWS_SECURITY_TOKEN",
+                    "AWS_PROFILE",
+                    "AWS_DEFAULT_PROFILE",
+                )
+            )
+        )
         if (
             set(options)
             != {
@@ -3890,12 +3916,7 @@ def _validate_local_boto3_client_options(
                 "region_name",
                 "config",
             }
-            or not options.get("aws_access_key_id")
-            or options.get("aws_access_key_id")
-            != os.environ.get("AWS_ACCESS_KEY_ID")
-            or not options.get("aws_secret_access_key")
-            or options.get("aws_secret_access_key")
-            != os.environ.get("AWS_SECRET_ACCESS_KEY")
+            or not (static_credentials or instance_role_credentials)
         ):
             raise ValueError("local boto3 client options differ")
         return

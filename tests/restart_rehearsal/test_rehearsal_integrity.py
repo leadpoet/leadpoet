@@ -881,6 +881,27 @@ def test_sitecustomize_accepts_only_exact_s3_client_options(monkeypatch) -> None
         "config": Config(signature_version="s3v4"),
     }
     rehearsal_sitecustomize._validate_local_boto3_client_options("s3", upload)
+    for options in (
+        {**upload, "aws_access_key_id": "different"},
+        {**upload, "aws_secret_access_key": "different"},
+        {**upload, "endpoint_url": "https://s3.us-east-1.amazonaws.com"},
+    ):
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID")
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY")
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
+    instance_role_upload = {
+        **upload,
+        "aws_access_key_id": None,
+        "aws_secret_access_key": None,
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options(
+        "s3", instance_role_upload
+    )
 
     class ConfigImpostor:
         _user_provided_options = {
@@ -901,8 +922,10 @@ def test_sitecustomize_accepts_only_exact_s3_client_options(monkeypatch) -> None
         {**regional, "config": Config(signature_version="s3")},
         {**regional, "config": ConfigImpostor()},
         {**regional, "use_ssl": True},
-        {**upload, "aws_secret_access_key": "different"},
-        {**upload, "endpoint_url": "https://s3.us-east-1.amazonaws.com"},
+        {**instance_role_upload, "aws_access_key_id": ""},
+        {**instance_role_upload, "aws_secret_access_key": ""},
+        {**instance_role_upload, "aws_access_key_id": "mixed"},
+        {**instance_role_upload, "aws_secret_access_key": "mixed"},
     )
     for options in invalid:
         with pytest.raises(ValueError, match="client options differ"):
@@ -913,6 +936,46 @@ def test_sitecustomize_accepts_only_exact_s3_client_options(monkeypatch) -> None
         rehearsal_sitecustomize._validate_local_boto3_client_options(
             "kms", regional
         )
+
+
+def test_sitecustomize_rejects_unbound_instance_role_s3_options(
+    monkeypatch,
+) -> None:
+    from botocore.config import Config
+
+    options = {
+        "aws_access_key_id": None,
+        "aws_secret_access_key": None,
+        "region_name": "us-east-1",
+        "config": Config(signature_version="s3v4"),
+    }
+    monkeypatch.delenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", raising=False)
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "s3", options
+        )
+
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "false")
+    with pytest.raises(ValueError, match="client options differ"):
+        rehearsal_sitecustomize._validate_local_boto3_client_options(
+            "s3", options
+        )
+
+    monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        monkeypatch.setenv(name, "unexpected")
+        with pytest.raises(ValueError, match="client options differ"):
+            rehearsal_sitecustomize._validate_local_boto3_client_options(
+                "s3", options
+            )
+        monkeypatch.delenv(name)
 
 
 def test_chain_settlement_boundary_persists_zero_credit_readback(

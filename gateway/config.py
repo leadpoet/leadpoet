@@ -12,15 +12,6 @@ import re
 import sys
 from pathlib import Path
 
-# Load environment variables from .env file (if dotenv available)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    # dotenv not installed - environment variables must be set directly
-    pass
-
-
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _AWS_STATIC_CREDENTIAL_KEYS = {
     "AWS_ACCESS_KEY_ID",
@@ -76,6 +67,16 @@ def _load_gateway_env_file(path: Path) -> None:
 
 _gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/.config/leadpoet/gateway.env")
 _load_gateway_env_file(Path(_gateway_env_file).expanduser())
+
+# The canonical gateway cache must precede a checkout-local developer .env.
+# Explicit process environment still wins because both loaders are non-overriding.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    # dotenv not installed - environment variables must be set directly
+    pass
 
 if _instance_role_only():
     for _aws_env_key in _AWS_STATIC_CREDENTIAL_KEYS:

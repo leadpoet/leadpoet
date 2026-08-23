@@ -1,4 +1,50 @@
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
 from gateway import config
+
+
+@pytest.mark.parametrize(
+    ("ambient_value", "expected_value"),
+    ((None, "canonical-cache"), ("ambient-process", "ambient-process")),
+)
+def test_gateway_config_precedence_is_process_then_cache_then_dotenv(
+    tmp_path,
+    ambient_value,
+    expected_value,
+):
+    env_name = "LEADPOET_TEST_CONFIG_PRECEDENCE"
+    gateway_env = tmp_path / "gateway.env"
+    gateway_env.write_text(f"{env_name}=canonical-cache\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(f"{env_name}=stale-dotenv\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment["GATEWAY_ENV_FILE"] = str(gateway_env)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    if ambient_value is None:
+        environment.pop(env_name, None)
+    else:
+        environment[env_name] = ambient_value
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import gateway.config, os; print('RESULT=' + os.environ[{env_name!r}])",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert f"RESULT={expected_value}" in result.stdout.splitlines()
+    assert "stale-dotenv" not in result.stdout
 
 
 def test_fallback_env_diagnostic_does_not_contaminate_stdout(

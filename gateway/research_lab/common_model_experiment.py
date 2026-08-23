@@ -21,6 +21,7 @@ from gateway.research_lab.routing_provider_terminal_protected import (
 )
 from research_lab.common_model_runner_host import (
     HostActionResult,
+    HostCompiledProviderDispatch,
     ModelRunnerHostError,
 )
 from research_lab.model_runner_protocol import ExactModelRunnerRegistration
@@ -62,6 +63,7 @@ class ExactModelActionDispatcher(Protocol):
         action: Mapping[str, Any],
         variant_id: str,
         unit_ref: str,
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult: ...
 
     def verify_company_action(
@@ -83,6 +85,7 @@ class ExactModelActionDispatcher(Protocol):
         variant_id: str,
         unit_ref: str,
         replay_ref: Mapping[str, Any],
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult: ...
 
 
@@ -229,6 +232,7 @@ class ReviewedProtectedModelActionDispatcher:
         action: Mapping[str, Any],
         variant_id: str,
         unit_ref: str,
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult:
         variant = self._variants.get(variant_id)
         if variant is None:
@@ -245,6 +249,20 @@ class ReviewedProtectedModelActionDispatcher:
             provider_binding=binding,
             allowed_binding_ids=variant.binding_ids,
         )
+        registration = self._registrations[variant_id]
+        if (
+            registration.protocol_generation
+            .requires_raw_provider_response_custody
+        ):
+            _validate_compiled_provider_dispatch(
+                protocol=registration.protocol,
+                action=action,
+                compiled_dispatch=compiled_dispatch,
+            )
+        elif compiled_dispatch is not None:
+            raise CommonModelExperimentError(
+                "legacy provider action carries a compiled dispatch"
+            )
         binding_contract = str(action.get("binding_contract_sha256") or "")
         if binding.execution_contract_hash != "sha256:" + binding_contract:
             raise CommonModelExperimentError(
@@ -309,6 +327,12 @@ class ReviewedProtectedModelActionDispatcher:
             binding=binding,
             protected=protected,
         )
+        initial = self._bind_current_action_custody(
+            registration=registration,
+            action=action,
+            protected=protected,
+            result=initial,
+        )
         if not isinstance(initial.replay_ref, Mapping):
             raise CommonModelExperimentError(
                 "protected Model action has no durable replay reference"
@@ -328,6 +352,12 @@ class ReviewedProtectedModelActionDispatcher:
             binding=binding,
             protected=replayed,
         )
+        durable = self._bind_current_action_custody(
+            registration=registration,
+            action=action,
+            protected=replayed,
+            result=durable,
+        )
         if durable != initial:
             raise CommonModelExperimentError(
                 "durable provider attempt differs from dispatch result"
@@ -341,6 +371,7 @@ class ReviewedProtectedModelActionDispatcher:
         variant_id: str,
         unit_ref: str,
         replay_ref: Mapping[str, Any],
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult:
         variant = self._variants.get(variant_id)
         binding = self._bindings.get(str(action.get("tool_id") or ""))
@@ -354,16 +385,84 @@ class ReviewedProtectedModelActionDispatcher:
             provider_binding=binding,
             allowed_binding_ids=variant.binding_ids,
         )
+        registration = self._registrations[variant_id]
+        if (
+            registration.protocol_generation
+            .requires_raw_provider_response_custody
+        ):
+            _validate_compiled_provider_dispatch(
+                protocol=registration.protocol,
+                action=action,
+                compiled_dispatch=compiled_dispatch,
+            )
+        elif compiled_dispatch is not None:
+            raise CommonModelExperimentError(
+                "legacy provider action carries a compiled dispatch"
+            )
         protected = self._runner.replay_model_action(
             binding=binding,
             unit_ref=unit_ref,
             action=action,
             replay_ref=replay_ref,
         )
-        return self._protected_action_result(
+        result = self._protected_action_result(
             action=action,
             binding=binding,
             protected=protected,
+        )
+        return self._bind_current_action_custody(
+            registration=registration,
+            action=action,
+            protected=protected,
+            result=result,
+        )
+
+    @staticmethod
+    def _bind_current_action_custody(
+        *,
+        registration: ExactModelRunnerRegistration,
+        action: Mapping[str, Any],
+        protected: Mapping[str, Any],
+        result: ProtectedModelActionResult,
+    ) -> ProtectedModelActionResult:
+        """Join the current model ingestion to one durable protected receipt."""
+
+        if not (
+            registration.protocol_generation
+            .requires_raw_provider_response_custody
+        ):
+            return result
+        response = result.host_result.provider_response
+        try:
+            ingestion = (
+                None
+                if response is None
+                else dict(
+                    registration.protocol.ingest_provider_response(
+                        action,
+                        response,
+                    )
+                )
+            )
+        except Exception as exc:
+            raise CommonModelExperimentError(
+                "artifact provider response ingestion failed"
+            ) from exc
+        action_receipt_sha256 = str(
+            protected.get("terminal_receipt_hash") or ""
+        ).removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-f]{64}", action_receipt_sha256) is None:
+            raise CommonModelExperimentError(
+                "protected provider action receipt hash is invalid"
+            )
+        return replace(
+            result,
+            host_result=replace(
+                result.host_result,
+                model_provider_response_ingestion=ingestion,
+                provider_action_receipt_sha256=action_receipt_sha256,
+            ),
+            model_provider_response_ingestion=ingestion,
         )
 
     @staticmethod
@@ -767,6 +866,44 @@ def _validate_variant_provider_binding(
         )
 
 
+def _validate_compiled_provider_dispatch(
+    *,
+    protocol: Any,
+    action: Mapping[str, Any],
+    compiled_dispatch: Mapping[str, Any] | None,
+) -> HostCompiledProviderDispatch:
+    """Bind the host call to the exact artifact-compiled request pre-spend."""
+
+    if not isinstance(compiled_dispatch, Mapping):
+        raise CommonModelExperimentError(
+            "artifact-compiled provider dispatch is unavailable"
+        )
+    try:
+        supplied = HostCompiledProviderDispatch.from_mapping(
+            action, compiled_dispatch
+        )
+        prepare = getattr(protocol, "prepare_provider_request", None)
+        if not callable(prepare):
+            raise CommonModelExperimentError(
+                "artifact provider compiler is unavailable"
+            )
+        expected_value = prepare(action)
+        expected = HostCompiledProviderDispatch.from_mapping(
+            action, expected_value
+        )
+    except CommonModelExperimentError:
+        raise
+    except Exception as exc:
+        raise CommonModelExperimentError(
+            "artifact provider request preparation failed"
+        ) from exc
+    if expected != supplied:
+        raise CommonModelExperimentError(
+            "artifact-compiled provider dispatch differs"
+        )
+    return supplied
+
+
 def _completion_from_transition(
     transition: Mapping[str, Any],
     *,
@@ -877,9 +1014,42 @@ def _bind_durable_provider_result(
         action=action,
         protected=protected,
     )
+    requires_raw_custody = bool(
+        getattr(protocol, "requires_raw_provider_response_custody", False)
+    )
+    if requires_raw_custody:
+        if (
+            not isinstance(
+                host_result.provider_action_receipt_sha256, str
+            )
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                host_result.provider_action_receipt_sha256,
+            )
+            is None
+            or host_result.model_provider_response_ingestion != ingestion
+        ):
+            raise CommonModelExperimentError(
+                "durable provider action custody is incomplete"
+            )
+    elif (
+        host_result.model_provider_response_ingestion is not None
+        or host_result.provider_action_receipt_sha256 is not None
+    ):
+        raise CommonModelExperimentError(
+            "legacy provider result carries current custody fields"
+        )
+    binding_result = (
+        replace(
+            host_result,
+            model_provider_response_ingestion=ingestion,
+        )
+        if requires_raw_custody
+        else host_result
+    )
     try:
         binding = protocol.build_provider_receipt_binding(
-            action, host_result
+            action, binding_result
         )
     except ModelRunnerHostError as exc:
         raise CommonModelExperimentError(
@@ -901,8 +1071,8 @@ def _bind_durable_provider_result(
             r"[0-9a-f]{64}", str(binding.get("receipt_sha256") or "")
         )
         or (
-            host_result.provider_receipt_sha256 is not None
-            and host_result.provider_receipt_sha256
+            binding_result.provider_receipt_sha256 is not None
+            and binding_result.provider_receipt_sha256
             != binding.get("receipt_sha256")
         )
     ):
@@ -910,7 +1080,7 @@ def _bind_durable_provider_result(
             "artifact provider receipt custody differs from durable attempt"
         )
     return replace(
-        host_result,
+        binding_result,
         provider_receipt_sha256=str(binding["receipt_sha256"]),
         provider_identity_sha256=str(binding["provider_identity_sha256"]),
     )
@@ -1094,6 +1264,27 @@ class ExactModelExperimentCoordinator:
                 raise CommonModelExperimentError(
                     "Model action idempotency key is invalid"
                 )
+            action_type = str(action.get("action_type") or "")
+            compiled_dispatch: Mapping[str, Any] | None = None
+            if (
+                action_type in _PROVIDER_ACTION_TYPES
+                and generation.requires_raw_provider_response_custody
+            ):
+                prepare = getattr(protocol, "prepare_provider_request", None)
+                if not callable(prepare):
+                    raise CommonModelExperimentError(
+                        "artifact provider compiler is unavailable"
+                    )
+                try:
+                    compiled_dispatch = (
+                        HostCompiledProviderDispatch.from_mapping(
+                            action, prepare(action)
+                        ).to_mapping()
+                    )
+                except Exception as exc:
+                    raise CommonModelExperimentError(
+                        "artifact provider request preparation failed"
+                    ) from exc
             stored = self._transitions.load_model_transition(
                 experiment_hash=self._experiment_hash,
                 variant_id=variant_id,
@@ -1118,18 +1309,24 @@ class ExactModelExperimentCoordinator:
                         continuation=continuation,
                         protocol_generation_sha256=generation_sha256,
                     )
-                    action_type = str(action.get("action_type") or "")
                     receipt = None
                     if action_type in _PROVIDER_ACTION_TYPES:
                         if replay_ref is None:
                             raise CommonModelExperimentError(
                                 "durable provider transition replay is missing"
                             )
+                        replay_kwargs = {
+                            "action": action,
+                            "variant_id": variant_id,
+                            "unit_ref": unit_ref,
+                            "replay_ref": replay_ref,
+                        }
+                        if compiled_dispatch is not None:
+                            replay_kwargs["compiled_dispatch"] = (
+                                compiled_dispatch
+                            )
                         protected = self._dispatcher.replay_provider_action(
-                            action=action,
-                            variant_id=variant_id,
-                            unit_ref=unit_ref,
-                            replay_ref=replay_ref,
+                            **replay_kwargs
                         )
                         if not isinstance(
                             protected, ProtectedModelActionResult
@@ -1190,13 +1387,19 @@ class ExactModelExperimentCoordinator:
                         )
                 replayed += 1
             else:
-                action_type = str(action.get("action_type") or "")
                 receipt = None
                 if action_type in _PROVIDER_ACTION_TYPES:
+                    dispatch_kwargs = {
+                        "action": action,
+                        "variant_id": variant_id,
+                        "unit_ref": unit_ref,
+                    }
+                    if compiled_dispatch is not None:
+                        dispatch_kwargs["compiled_dispatch"] = (
+                            compiled_dispatch
+                        )
                     protected = self._dispatcher.dispatch_provider_action(
-                        action=action,
-                        variant_id=variant_id,
-                        unit_ref=unit_ref,
+                        **dispatch_kwargs
                     )
                     if not isinstance(protected, ProtectedModelActionResult):
                         raise CommonModelExperimentError(

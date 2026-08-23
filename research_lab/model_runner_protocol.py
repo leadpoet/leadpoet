@@ -25,6 +25,13 @@ _MODEL_RUNNER_CONSTANTS_PATH = "sourcing_model/model_runner.py"
 _RAW_ICP_CONSTANTS_PATH = "sourcing_model/raw_icp_normalization.py"
 _GENERATION_V2 = "model-runner-protocol:v2"
 _GENERATION_V3 = "model-runner-protocol:v3"
+_ZERO_SHA256 = "0" * 64
+_MODEL_PROVIDER_ACTION_TYPES = frozenset({
+    "normalize_icp",
+    "execute_candidate_tool",
+    "execute_intent_tool",
+    "execute_contact_tool",
+})
 
 _V3_BASE_ROLES = frozenset({
     "start",
@@ -188,7 +195,7 @@ _V2_VERSIONS = {
     "MODEL_RUNNER_PREFLIGHT_SCHEMA_VERSION": "model-runner-preflight:v2",
     "MODEL_RELEASE_IDENTITY_SCHEMA_VERSION": "model-release-identity:v2",
 }
-_V3_VERSIONS = {
+_V3_LEGACY_VERSIONS = {
     "MODEL_RUNNER_START_SCHEMA_VERSION": "model-runner-start:v3",
     "MODEL_RUNNER_ACTION_SCHEMA_VERSION": "model-runner-action:v2",
     "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION": "model-runner-completion:v3",
@@ -197,6 +204,10 @@ _V3_VERSIONS = {
     "MODEL_RUNNER_RECEIPT_SCHEMA_VERSION": "model-runner-receipt:v3",
     "MODEL_RUNNER_PREFLIGHT_SCHEMA_VERSION": "model-runner-preflight:v3",
     "MODEL_RELEASE_IDENTITY_SCHEMA_VERSION": "model-release-identity:v3",
+}
+_V3_INGESTION_CUSTODY_VERSIONS = {
+    **_V3_LEGACY_VERSIONS,
+    "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION": "model-runner-completion:v4",
 }
 _V3_RAW_VERSIONS = {
     "RAW_ICP_ENVELOPE_SCHEMA_VERSION": "model-raw-icp-envelope:v1",
@@ -213,8 +224,11 @@ _V3_RAW_VERSIONS = {
     "NORMALIZATION_CREDIT_CAP": 1.0,
     "NORMALIZATION_TIMEOUT_SECONDS": 120.0,
 }
-_V3_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION = (
+_V3_LEGACY_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION = (
     "model-provider-receipt-binding:v1"
+)
+_V3_INGESTION_CUSTODY_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION = (
+    "model-provider-receipt-binding:v2"
 )
 _V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION = (
     "model-runner-completion-accounting:v2"
@@ -305,7 +319,8 @@ _V3_OFFICIAL_BASELINE_METADATA_KEYS = frozenset(
 ) | _V3_OFFICIAL_BASELINE_HASH_KEYS
 
 _RUNNER_ROLE_CONTRACT_SCHEMA_VERSION = "model-runner-role-contract:v1"
-_RUNNER_ROLE_COMPATIBILITY_MAJOR = 1
+_RUNNER_ROLE_LEGACY_COMPATIBILITY_MAJOR = 1
+_RUNNER_ROLE_INGESTION_CUSTODY_COMPATIBILITY_MAJOR = 2
 _RUNNER_ROLE_ADDITIVE_COMPATIBILITY = {
     "known_required_roles": (
         "bind_stable_interface_and_exact_signed_consumer_signature"
@@ -487,6 +502,7 @@ def _validate_provider_response_ingestion_contract(
     value: Any,
     *,
     provider_dispatch_contract_sha256: str,
+    requires_ingestion_custody: bool | None = None,
 ) -> Mapping[str, Any]:
     """Validate the host-visible ingestion contract before any paid action."""
 
@@ -494,7 +510,7 @@ def _validate_provider_response_ingestion_contract(
         value,
         label="artifact provider response ingestion contract",
     )
-    required_fields = {
+    legacy_fields = {
         "schema_version",
         "ingestion_entrypoint",
         "ingestion_signature",
@@ -519,12 +535,49 @@ def _validate_provider_response_ingestion_contract(
         "canonical_json",
         "contract_sha256",
     }
+    ingestion_custody = (
+        contract.get("ingestion_receipt_required_for_response") is True
+    )
+    if (
+        requires_ingestion_custody is not None
+        and ingestion_custody is not requires_ingestion_custody
+    ):
+        raise ModelRunnerHostError(
+            "artifact provider response ingestion custody generation differs"
+        )
+    expected_fields = (
+        legacy_fields | {"ingestion_receipt_required_for_response"}
+        if ingestion_custody
+        else legacy_fields
+    )
+    completion_input = (
+        "original_unchanged_host_response+"
+        "exact_model_provider_response_ingestion"
+        if ingestion_custody
+        else "original_unchanged_host_response"
+    )
+    custody_join = (
+        [
+            "action_sha256",
+            "dispatch_sha256",
+            "request_sha256",
+            "host_response_sha256",
+            "parsed_response_sha256",
+            "ingestion_sha256",
+        ]
+        if ingestion_custody
+        else [
+            "action_sha256",
+            "host_response_sha256",
+            "parsed_response_sha256",
+        ]
+    )
     parsed_schemas = _string_sequence(
         contract.get("parsed_response_schema_versions"),
         label="artifact parsed provider response schemas",
     )
     if (
-        not required_fields.issubset(contract)
+        not expected_fields.issubset(contract)
         or contract.get("schema_version")
         != "model-runner-provider-response-ingestion:v1"
         or contract.get("ingestion_signature")
@@ -548,10 +601,9 @@ def _validate_provider_response_ingestion_contract(
         or contract.get("closed_fields")
         != list(_PROVIDER_RESPONSE_INGESTION_FIELD_ORDER)
         or contract.get("raw_host_response_returned") is not False
-        or contract.get("completion_input")
-        != "original_unchanged_host_response"
+        or contract.get("completion_input") != completion_input
         or contract.get("provider_receipt_binding_input")
-        != "original_unchanged_host_response"
+        != completion_input
         or contract.get("completion_reparses_response") is not True
         or contract.get("durable_custody")
         != "host_provider_action_receipt_before_completion"
@@ -559,12 +611,7 @@ def _validate_provider_response_ingestion_contract(
         != "model_provider_response_ingestion"
         or contract.get("replay_requirement")
         != "reload_raw_response_reingest_and_require_byte_identical_receipt"
-        or contract.get("custody_join")
-        != [
-            "action_sha256",
-            "host_response_sha256",
-            "parsed_response_sha256",
-        ]
+        or contract.get("custody_join") != custody_join
         or contract.get("host_semantic_projection_allowed") is not False
     ):
         raise ModelRunnerHostError(
@@ -573,13 +620,17 @@ def _validate_provider_response_ingestion_contract(
     return contract
 
 
-def _runner_interface_contract(role: str) -> dict[str, Any]:
+def _runner_interface_contract(
+    role: str,
+    *,
+    interface_major: int,
+) -> dict[str, Any]:
     positional, host_keywords, required_keyword_only = (
         _ROLE_INTERFACE_SHAPES[role]
     )
     return {
         "interface_id": "leadpoet.model_runner." + role,
-        "interface_major": 1,
+        "interface_major": interface_major,
         "positional_parameters": list(positional),
         "host_keyword_parameters": list(host_keywords),
         "required_keyword_only": list(required_keyword_only),
@@ -596,6 +647,8 @@ def _validate_runner_role_contract(
     keyword_only: Mapping[str, Any],
     exact_signatures: frozenset[str],
     frozen_asyncness: Mapping[str, Any],
+    compatibility_major: int,
+    interface_majors: Mapping[str, int],
 ) -> dict[str, str]:
     """Validate the signed additive map and bind exact artifact members."""
 
@@ -628,8 +681,7 @@ def _validate_runner_role_contract(
         set(role_contract) != expected_top_fields
         or role_contract.get("schema_version")
         != _RUNNER_ROLE_CONTRACT_SCHEMA_VERSION
-        or role_contract.get("compatibility_major")
-        != _RUNNER_ROLE_COMPATIBILITY_MAJOR
+        or role_contract.get("compatibility_major") != compatibility_major
         or role_contract.get("consumer_contract_id") != consumer_contract_id
         or role_contract.get("canonical_json")
         != "utf8-json-sort-keys-compact-ascii-no-nan"
@@ -677,7 +729,10 @@ def _validate_runner_role_contract(
         != "reject_before_preflight_or_spend"
         or required_roles != tuple(sorted(_V3_FULL_COMPANY_REQUIRED_ROLES))
         or set(minimum_majors) != set(required_roles)
-        or any(minimum_majors.get(role) != 1 for role in required_roles)
+        or any(
+            minimum_majors.get(role) != interface_majors.get(role)
+            for role in required_roles
+        )
     ):
         raise ModelRunnerHostError(
             "artifact runner full-company role requirements differ"
@@ -831,7 +886,10 @@ def _validate_runner_role_contract(
                     "artifact runner has an unknown required full-company role"
                 )
             continue
-        expected_interface = _runner_interface_contract(role)
+        expected_interface = _runner_interface_contract(
+            role,
+            interface_major=interface_majors[role],
+        )
         stable_positional = tuple(
             expected_interface["positional_parameters"]
         )
@@ -989,19 +1047,51 @@ class ArtifactRunnerProtocolGeneration:
             )
         )
         role_contract_members: dict[str, str] | None = None
-        if all(
+        ingestion_custody_generation = all(
             model_constants.get(name) == expected
-            for name, expected in _V3_VERSIONS.items()
-        ):
+            for name, expected in (
+                _V3_INGESTION_CUSTODY_VERSIONS.items()
+            )
+        )
+        legacy_v3_generation = all(
+            model_constants.get(name) == expected
+            for name, expected in _V3_LEGACY_VERSIONS.items()
+        )
+        if ingestion_custody_generation or legacy_v3_generation:
             family = _GENERATION_V3
-            expected_versions = dict(_V3_VERSIONS)
+            expected_versions = dict(
+                _V3_INGESTION_CUSTODY_VERSIONS
+                if ingestion_custody_generation
+                else _V3_LEGACY_VERSIONS
+            )
+            expected_provider_receipt_schema = (
+                _V3_INGESTION_CUSTODY_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION
+                if ingestion_custody_generation
+                else _V3_LEGACY_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION
+            )
+            expected_role_compatibility_major = (
+                _RUNNER_ROLE_INGESTION_CUSTODY_COMPATIBILITY_MAJOR
+                if ingestion_custody_generation
+                else _RUNNER_ROLE_LEGACY_COMPATIBILITY_MAJOR
+            )
+            expected_role_interface_majors = {
+                role: (
+                    2
+                    if ingestion_custody_generation
+                    and role in {"completion", "provider_receipt_binding"}
+                    else 1
+                )
+                for role in (
+                    _V3_FULL_COMPANY_REQUIRED_ROLES | _V3_OPTIONAL_ROLES
+                )
+            }
             required_roles = _V3_BASE_ROLES
             if any(
                 raw_constants.get(name) != expected
                 for name, expected in _V3_RAW_VERSIONS.items()
             ) or model_constants.get(
                 "MODEL_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION"
-            ) != _V3_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION:
+            ) != expected_provider_receipt_schema:
                 raise ModelRunnerHostError(
                     "artifact runner v3 normalization identities differ"
                 )
@@ -1109,6 +1199,9 @@ class ArtifactRunnerProtocolGeneration:
                     provider_dispatch_contract_sha256=str(
                         provider_dispatch_contract["contract_sha256"]
                     ),
+                    requires_ingestion_custody=(
+                        ingestion_custody_generation
+                    ),
                 )
                 for hash_key in sorted(_V3_OFFICIAL_BASELINE_HASH_KEYS):
                     if not re.fullmatch(
@@ -1127,6 +1220,10 @@ class ArtifactRunnerProtocolGeneration:
                     keyword_only=keyword_only,
                     exact_signatures=exact_signatures,
                     frozen_asyncness=frozen_asyncness,
+                    compatibility_major=(
+                        expected_role_compatibility_major
+                    ),
+                    interface_majors=expected_role_interface_majors,
                 )
         elif all(
             model_constants.get(name) == expected
@@ -1328,11 +1425,20 @@ class ArtifactRunnerProtocolGeneration:
                 "timeout_seconds": _V3_RAW_VERSIONS[
                     "NORMALIZATION_TIMEOUT_SECONDS"
                 ],
-                "completion_custody_fields": [
-                    "provider_receipt_ref",
-                    "provider_receipt_sha256",
-                    "provider_identity_sha256",
-                ],
+                "completion_custody_fields": (
+                    [
+                        "provider_response_ingestion",
+                        "provider_receipt_ref",
+                        "provider_receipt_sha256",
+                        "provider_identity_sha256",
+                    ]
+                    if ingestion_custody_generation
+                    else [
+                        "provider_receipt_ref",
+                        "provider_receipt_sha256",
+                        "provider_identity_sha256",
+                    ]
+                ),
             }
             if role_contract_present and (
                 "normalization_prepare_legacy" in members
@@ -1411,6 +1517,16 @@ class ArtifactRunnerProtocolGeneration:
     @property
     def supports_provider_response_ingestion(self) -> bool:
         return "provider_response_ingestion" in self.members
+
+    @property
+    def requires_raw_provider_response_custody(self) -> bool:
+        """Whether completion consumes raw host bytes plus ingestion proof."""
+
+        return self.versions.get(
+            "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION"
+        ) == _V3_INGESTION_CUSTODY_VERSIONS[
+            "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION"
+        ]
 
     def official_contract_sha256(self, metadata_key: str) -> str:
         if not self.supports_official_baseline:
@@ -1747,6 +1863,12 @@ class ResearchLabModelRunnerProtocol:
         """Whether this exact generation declared the receipt member."""
 
         return self.protocol_generation.supports_provider_receipt_binding
+
+    @property
+    def requires_raw_provider_response_custody(self) -> bool:
+        """Whether this generation requires exact raw-response replay."""
+
+        return self.protocol_generation.requires_raw_provider_response_custody
 
     @property
     def artifact_official_baseline_supported(self) -> bool:
@@ -2091,7 +2213,8 @@ class ResearchLabModelRunnerProtocol:
             != generation.champion_execution[
                 "verifier_execution_schema_version"
             ]
-            or expected_action_type not in {"verify_company", "verify_intent"}
+            or expected_action_type
+            not in {"verify_company", "verify_intent", "verify_contact"}
             or execution.get("action_type") != expected_action_type
             or not re.fullmatch(r"[0-9a-f]{64}", expected_action_sha256)
             or execution.get("action_sha256") != expected_action_sha256
@@ -2185,6 +2308,9 @@ class ResearchLabModelRunnerProtocol:
                     ],
                     label="artifact provider dispatch contract",
                 )["contract_sha256"]
+            ),
+            requires_ingestion_custody=(
+                generation.requires_raw_provider_response_custody
             ),
         )
         if not isinstance(result, Mapping):
@@ -2379,23 +2505,24 @@ class ResearchLabModelRunnerProtocol:
         action: Mapping[str, Any],
         result: HostActionResult,
     ) -> Mapping[str, Any]:
+        result_payload = {
+            "outcome": result.outcome,
+            "reason_code": result.reason_code,
+            "provider_response": result.provider_response,
+            "calls": result.calls,
+            "cost_credits": result.cost_credits,
+            "latency_ms": result.latency_ms,
+            "provider_receipt_ref": result.provider_receipt_ref,
+            "provider_receipt_sha256": result.provider_receipt_sha256,
+            "provider_identity_sha256": result.provider_identity_sha256,
+        }
+        if self.protocol_generation.requires_raw_provider_response_custody:
+            result_payload["provider_response_ingestion"] = (
+                result.model_provider_response_ingestion
+            )
         completion = self._transport.build_runner_completion(
             action,
-            {
-                "outcome": result.outcome,
-                "reason_code": result.reason_code,
-                "provider_response": result.provider_response,
-                "calls": result.calls,
-                "cost_credits": result.cost_credits,
-                "latency_ms": result.latency_ms,
-                "provider_receipt_ref": result.provider_receipt_ref,
-                "provider_receipt_sha256": (
-                    result.provider_receipt_sha256
-                ),
-                "provider_identity_sha256": (
-                    result.provider_identity_sha256
-                ),
-            },
+            result_payload,
             member_name=self.protocol_generation.member("completion"),
         )
         if not isinstance(completion, Mapping) or completion.get(
@@ -2404,6 +2531,54 @@ class ResearchLabModelRunnerProtocol:
             "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION"
         ):
             raise ModelRunnerHostError("artifact completion is invalid")
+        if (
+            self.protocol_generation.requires_raw_provider_response_custody
+            and action.get("action_type") in _MODEL_PROVIDER_ACTION_TYPES
+        ):
+            ingestion = result.model_provider_response_ingestion
+            if ingestion is None:
+                expected = {
+                    "provider_response": None,
+                    "provider_response_sha256": _bare_sha256_json(None),
+                    "provider_response_ingestion_sha256": _ZERO_SHA256,
+                    "provider_dispatch_sha256": _ZERO_SHA256,
+                    "provider_request_sha256": _ZERO_SHA256,
+                    "host_provider_response_sha256": _ZERO_SHA256,
+                }
+            elif isinstance(ingestion, Mapping):
+                expected = {
+                    "provider_response": ingestion.get("parsed_response"),
+                    "provider_response_sha256": ingestion.get(
+                        "parsed_response_sha256"
+                    ),
+                    "provider_response_ingestion_sha256": ingestion.get(
+                        "ingestion_sha256"
+                    ),
+                    "provider_dispatch_sha256": ingestion.get(
+                        "dispatch_sha256"
+                    ),
+                    "provider_request_sha256": ingestion.get(
+                        "request_sha256"
+                    ),
+                    "host_provider_response_sha256": ingestion.get(
+                        "host_response_sha256"
+                    ),
+                }
+            else:
+                raise ModelRunnerHostError(
+                    "artifact completion provider ingestion is invalid"
+                )
+            if (
+                completion.get("action_sha256")
+                != action.get("action_sha256")
+                or any(
+                    completion.get(field) != value
+                    for field, value in expected.items()
+                )
+            ):
+                raise ModelRunnerHostError(
+                    "artifact completion provider custody differs"
+                )
         return completion
 
     def build_provider_receipt_binding(
@@ -2416,18 +2591,21 @@ class ResearchLabModelRunnerProtocol:
             raise ModelRunnerHostError(
                 "artifact runner generation has no provider receipt binding"
             )
+        result_payload = {
+            "provider_response": result.provider_response,
+            "provider_receipt_ref": result.provider_receipt_ref,
+            "provider_identity_sha256": result.provider_identity_sha256,
+            "calls": result.calls,
+            "cost_credits": result.cost_credits,
+            "latency_ms": result.latency_ms,
+        }
+        if generation.requires_raw_provider_response_custody:
+            result_payload["provider_response_ingestion"] = (
+                result.model_provider_response_ingestion
+            )
         binding = self._transport.build_runner_provider_receipt_binding(
             action,
-            {
-                "provider_response": result.provider_response,
-                "provider_receipt_ref": result.provider_receipt_ref,
-                "provider_identity_sha256": (
-                    result.provider_identity_sha256
-                ),
-                "calls": result.calls,
-                "cost_credits": result.cost_credits,
-                "latency_ms": result.latency_ms,
-            },
+            result_payload,
             member_name=generation.member("provider_receipt_binding"),
         )
         expected_schema = generation.champion_execution[
@@ -2447,6 +2625,49 @@ class ResearchLabModelRunnerProtocol:
             raise ModelRunnerHostError(
                 "artifact provider receipt binding is invalid"
             )
+        if generation.requires_raw_provider_response_custody:
+            ingestion = result.model_provider_response_ingestion
+            if ingestion is None:
+                expected_custody = {
+                    "provider_response_sha256": _bare_sha256_json(None),
+                    "provider_response_ingestion_sha256": _ZERO_SHA256,
+                    "provider_dispatch_sha256": _ZERO_SHA256,
+                    "provider_request_sha256": _ZERO_SHA256,
+                    "host_provider_response_sha256": _ZERO_SHA256,
+                }
+            elif isinstance(ingestion, Mapping):
+                expected_custody = {
+                    "provider_response_sha256": ingestion.get(
+                        "parsed_response_sha256"
+                    ),
+                    "provider_response_ingestion_sha256": ingestion.get(
+                        "ingestion_sha256"
+                    ),
+                    "provider_dispatch_sha256": ingestion.get(
+                        "dispatch_sha256"
+                    ),
+                    "provider_request_sha256": ingestion.get(
+                        "request_sha256"
+                    ),
+                    "host_provider_response_sha256": ingestion.get(
+                        "host_response_sha256"
+                    ),
+                }
+            else:
+                raise ModelRunnerHostError(
+                    "artifact provider receipt ingestion is invalid"
+                )
+            if (
+                binding.get("action_sha256")
+                != action.get("action_sha256")
+                or any(
+                    binding.get(field) != value
+                    for field, value in expected_custody.items()
+                )
+            ):
+                raise ModelRunnerHostError(
+                    "artifact provider receipt custody differs"
+                )
         return dict(binding)
 
     def validate_normalization_action(

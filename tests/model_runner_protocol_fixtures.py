@@ -149,6 +149,10 @@ _V3_VERSIONS = {
     "MODEL_RUNNER_PREFLIGHT_SCHEMA_VERSION": "model-runner-preflight:v3",
     "MODEL_RELEASE_IDENTITY_SCHEMA_VERSION": "model-release-identity:v3",
 }
+_V4_VERSIONS = {
+    **_V3_VERSIONS,
+    "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION": "model-runner-completion:v4",
+}
 
 _RAW_CONSTANTS = {
     "RAW_ICP_ENVELOPE_SCHEMA_VERSION": "model-raw-icp-envelope:v1",
@@ -262,7 +266,11 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _role_contract(contract_id: str) -> dict[str, Any]:
+def _role_contract(
+    contract_id: str,
+    *,
+    ingestion_custody: bool = False,
+) -> dict[str, Any]:
     required_roles = tuple(sorted(
         role for role in _ROLE_MEMBERS
         if role != "normalization_prepare_legacy"
@@ -272,9 +280,15 @@ def _role_contract(contract_id: str) -> dict[str, Any]:
         positional, host_keywords, required_keyword_only = (
             _ROLE_HOST_CALLS[role]
         )
+        interface_major = (
+            2
+            if ingestion_custody
+            and role in {"completion", "provider_receipt_binding"}
+            else 1
+        )
         interface = {
             "interface_id": "leadpoet.model_runner." + role,
-            "interface_major": 1,
+            "interface_major": interface_major,
             "positional_parameters": list(positional),
             "host_keyword_parameters": list(host_keywords),
             "required_keyword_only": list(required_keyword_only),
@@ -290,7 +304,7 @@ def _role_contract(contract_id: str) -> dict[str, Any]:
         }
         roles[role] = {
             "interface_id": interface["interface_id"],
-            "interface_major": 1,
+            "interface_major": interface_major,
             "interface_contract": interface,
             "interface_contract_sha256": _canonical_sha256(interface),
             "adapter_member": member,
@@ -302,14 +316,15 @@ def _role_contract(contract_id: str) -> dict[str, Any]:
         }
     payload = {
         "schema_version": "model-runner-role-contract:v1",
-        "compatibility_major": 1,
+        "compatibility_major": 2 if ingestion_custody else 1,
         "consumer_contract_id": contract_id,
         "roles": roles,
         "activation_profiles": {
             "full_company": {
                 "required_roles": list(required_roles),
                 "minimum_interface_major": {
-                    role: 1 for role in required_roles
+                    role: roles[role]["interface_major"]
+                    for role in required_roles
                 },
                 "unknown_required_role_policy": (
                     "reject_before_preflight_or_spend"
@@ -339,7 +354,13 @@ def runner_release_identity(
     contract_hash: str = CONTRACT_HASH,
     **values: Any,
 ) -> dict[str, Any]:
-    versions = _V3_VERSIONS if family == "v3" else _V2_VERSIONS
+    versions = (
+        _V4_VERSIONS
+        if family == "v4"
+        else _V3_VERSIONS
+        if family == "v3"
+        else _V2_VERSIONS
+    )
     return {
         "schema_version": versions["MODEL_RELEASE_IDENTITY_SCHEMA_VERSION"],
         "consumer_contract_sha256": contract_hash,
@@ -353,14 +374,23 @@ def runner_declaration(
     contract_hash: str = CONTRACT_HASH,
     official_baseline: bool = False,
 ) -> dict[str, Any]:
-    if family not in {"v2", "v3"}:
-        raise ValueError("fixture runner family must be v2 or v3")
+    if family not in {"v2", "v3", "v4"}:
+        raise ValueError("fixture runner family must be v2, v3, or v4")
     contract_id = "test-runner-contract-" + family
-    versions = dict(_V3_VERSIONS if family == "v3" else _V2_VERSIONS)
+    versions = dict(
+        _V4_VERSIONS
+        if family == "v4"
+        else _V3_VERSIONS
+        if family == "v3"
+        else _V2_VERSIONS
+    )
+    ingestion_custody = family == "v4"
     model_constants = {
         **versions,
         "MODEL_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION": (
-            "model-provider-receipt-binding:v1"
+            "model-provider-receipt-binding:v2"
+            if ingestion_custody
+            else "model-provider-receipt-binding:v1"
         ),
     }
     champion: dict[str, Any] = {
@@ -397,7 +427,7 @@ def runner_declaration(
     exact_constants: dict[str, Mapping[str, Any]] = {
         "sourcing_model/model_runner.py": model_constants,
     }
-    if family == "v3":
+    if family in {"v3", "v4"}:
         champion.update({
             "raw_icp_envelope_schema_version": (
                 "model-raw-icp-envelope:v1"
@@ -425,12 +455,19 @@ def runner_declaration(
                     "model-icp-normalization-provider-response:v1"
                 ),
                 "provider_receipt_binding_schema_version": (
-                    "model-provider-receipt-binding:v1"
+                    "model-provider-receipt-binding:v2"
+                    if ingestion_custody
+                    else "model-provider-receipt-binding:v1"
                 ),
                 "call_cap": 1,
                 "credit_cap": 1.0,
                 "timeout_seconds": 120.0,
                 "completion_custody_fields": [
+                    *(
+                        ["provider_response_ingestion"]
+                        if ingestion_custody
+                        else []
+                    ),
                     "provider_receipt_ref",
                     "provider_receipt_sha256",
                     "provider_identity_sha256",
@@ -614,11 +651,26 @@ def runner_declaration(
                                 "ingestion_sha256",
                             ],
                             "raw_host_response_returned": False,
+                            **(
+                                {
+                                    "ingestion_receipt_required_for_response": (
+                                        True
+                                    )
+                                }
+                                if ingestion_custody
+                                else {}
+                            ),
                             "completion_input": (
-                                "original_unchanged_host_response"
+                                "original_unchanged_host_response+"
+                                "exact_model_provider_response_ingestion"
+                                if ingestion_custody
+                                else "original_unchanged_host_response"
                             ),
                             "provider_receipt_binding_input": (
-                                "original_unchanged_host_response"
+                                "original_unchanged_host_response+"
+                                "exact_model_provider_response_ingestion"
+                                if ingestion_custody
+                                else "original_unchanged_host_response"
                             ),
                             "completion_reparses_response": True,
                             "durable_custody": (
@@ -632,8 +684,21 @@ def runner_declaration(
                             ),
                             "custody_join": [
                                 "action_sha256",
+                                *(
+                                    [
+                                        "dispatch_sha256",
+                                        "request_sha256",
+                                    ]
+                                    if ingestion_custody
+                                    else []
+                                ),
                                 "host_response_sha256",
                                 "parsed_response_sha256",
+                                *(
+                                    ["ingestion_sha256"]
+                                    if ingestion_custody
+                                    else []
+                                ),
                             ],
                             "host_semantic_projection_allowed": False,
                             "hash_algorithm": "sha256",
@@ -728,7 +793,10 @@ def runner_declaration(
                 "runner_official_host_binding_catalog",
                 "build_runner_official_host_capability_manifest",
             })
-            champion["runner_role_contract"] = _role_contract(contract_id)
+            champion["runner_role_contract"] = _role_contract(
+                contract_id,
+                ingestion_custody=ingestion_custody,
+            )
     functions = {
         name: list(_MEMBERS[name][0]) for name in sorted(required_names)
     }
@@ -769,4 +837,10 @@ def runner_declaration(
 
 
 def runner_versions(family: str = "v3") -> dict[str, str]:
-    return dict(_V3_VERSIONS if family == "v3" else _V2_VERSIONS)
+    return dict(
+        _V4_VERSIONS
+        if family == "v4"
+        else _V3_VERSIONS
+        if family == "v3"
+        else _V2_VERSIONS
+    )

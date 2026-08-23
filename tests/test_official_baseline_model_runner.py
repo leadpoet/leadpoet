@@ -516,6 +516,111 @@ class _OfficialTransport(_Transport):
         return {**body, "request_sha256": self._wire_hash(body)}
 
 
+class _CurrentOfficialTransport(_OfficialTransport):
+    def runner_protocol_generation(self, *, release_identity):
+        assert release_identity == _release()
+        return runner_declaration(
+            "v4",
+            contract_hash=HASH["contract"],
+            official_baseline=True,
+        )
+
+    def prepare_runner_provider_request(self, action, *, member_name):
+        assert member_name == "prepare_runner_provider_request"
+        request = {
+            "credential_binding": {
+                "source": "host_fixture_credential",
+                "persist": False,
+            }
+        }
+        body = {
+            "schema_version": "model-runner-provider-dispatch:v1",
+            "action_sha256": action["action_sha256"],
+            "action_type": action["action_type"],
+            "tool_id": action["tool_id"],
+            "compiler_id": "fixture.compiler:v1",
+            "compiler_contract_sha256": action[
+                "binding_contract_sha256"
+            ],
+            "provider": "fixture",
+            "request": request,
+            "request_sha256": self._wire_hash(request),
+            "response_contract": {},
+            "budgets": {},
+            "idempotency_key": "model-action:" + action["action_sha256"],
+        }
+        return {**body, "dispatch_sha256": self._wire_hash(body)}
+
+    def build_runner_completion(self, action, result, *, member_name):
+        assert member_name == "build_runner_completion"
+        ingestion = self.ingest_runner_provider_response(
+            action,
+            result["provider_response"],
+            member_name="ingest_runner_provider_response",
+        )
+        assert result["provider_response_ingestion"] == ingestion
+        body = {
+            "schema_version": "model-runner-completion:v4",
+            "action_sha256": action["action_sha256"],
+            "outcome": result["outcome"],
+            "reason_code": result["reason_code"],
+            "provider_response": ingestion["parsed_response"],
+            "provider_response_sha256": ingestion[
+                "parsed_response_sha256"
+            ],
+            "provider_response_ingestion_sha256": ingestion[
+                "ingestion_sha256"
+            ],
+            "provider_dispatch_sha256": ingestion["dispatch_sha256"],
+            "provider_request_sha256": ingestion["request_sha256"],
+            "host_provider_response_sha256": ingestion[
+                "host_response_sha256"
+            ],
+            "provider_receipt_ref": result["provider_receipt_ref"],
+            "provider_receipt_sha256": result[
+                "provider_receipt_sha256"
+            ],
+            "provider_identity_sha256": result[
+                "provider_identity_sha256"
+            ],
+            "calls": result["calls"],
+            "cost_credits": result["cost_credits"],
+            "latency_ms": result["latency_ms"],
+        }
+        return {**body, "completion_sha256": self._wire_hash(body)}
+
+    def build_runner_provider_receipt_binding(
+        self, action, result, *, member_name
+    ):
+        assert member_name == "build_runner_provider_receipt_binding"
+        ingestion = self.ingest_runner_provider_response(
+            action,
+            result["provider_response"],
+            member_name="ingest_runner_provider_response",
+        )
+        assert result["provider_response_ingestion"] == ingestion
+        body = {
+            "schema_version": "model-provider-receipt-binding:v2",
+            "action_sha256": action["action_sha256"],
+            "provider_response_ingestion_sha256": ingestion[
+                "ingestion_sha256"
+            ],
+            "provider_response_sha256": ingestion[
+                "parsed_response_sha256"
+            ],
+            "provider_dispatch_sha256": ingestion["dispatch_sha256"],
+            "provider_request_sha256": ingestion["request_sha256"],
+            "host_provider_response_sha256": ingestion[
+                "host_response_sha256"
+            ],
+            "provider_receipt_ref": result["provider_receipt_ref"],
+            "provider_identity_sha256": result[
+                "provider_identity_sha256"
+            ],
+        }
+        return {**body, "receipt_sha256": self._wire_hash(body)}
+
+
 def _registration() -> ExactModelRunnerRegistration:
     identity = {
         "repository": "leadpoet/Sourcing_model",
@@ -553,6 +658,18 @@ def _official_registration() -> ExactModelRunnerRegistration:
         artifact_identity=registration.artifact_identity,
         protocol=ResearchLabModelRunnerProtocol(
             transport=_OfficialTransport(),
+            expected_release_identity=_release(),
+        ),
+        host_capability_manifest=registration.host_capability_manifest,
+    )
+
+
+def _current_official_registration() -> ExactModelRunnerRegistration:
+    registration = _registration()
+    return ExactModelRunnerRegistration(
+        artifact_identity=registration.artifact_identity,
+        protocol=ResearchLabModelRunnerProtocol(
+            transport=_CurrentOfficialTransport(),
             expected_release_identity=_release(),
         ),
         host_capability_manifest=registration.host_capability_manifest,
@@ -683,13 +800,44 @@ class _Dispatcher:
     verify_contact_action = verify_company_action
 
 
+class _CurrentDispatcher(_Dispatcher):
+    def __init__(self):
+        super().__init__()
+        self.compiled_dispatches = []
+
+    def dispatch_provider_action(
+        self, *, action, unit_ref, compiled_dispatch=None, **values
+    ):
+        assert isinstance(compiled_dispatch, dict)
+        self.compiled_dispatches.append(deepcopy(compiled_dispatch))
+        protected = super().dispatch_provider_action(
+            action=action,
+            unit_ref=unit_ref,
+            **values,
+        )
+        ingestion = _CurrentOfficialTransport().ingest_runner_provider_response(
+            action,
+            protected.host_result.provider_response,
+            member_name="ingest_runner_provider_response",
+        )
+        return replace(
+            protected,
+            model_provider_response_ingestion=ingestion,
+            host_result=replace(
+                protected.host_result,
+                model_provider_response_ingestion=ingestion,
+                provider_action_receipt_sha256="d" * 64,
+            ),
+        )
+
+
 class _ProtectedAuthority:
     authority_identity_sha256 = "sha256:" + HASH["authority"]
 
-    def __init__(self, registration):
+    def __init__(self, registration, *, current=False):
         generation = registration.protocol_generation.protocol_generation_sha256
         self.transitions = _Transitions(generation)
-        self.dispatcher = _Dispatcher()
+        self.dispatcher = _CurrentDispatcher() if current else _Dispatcher()
         self.closures = {}
 
     def preflight_run(self, *, run_identity, registration):
@@ -790,10 +938,14 @@ class _TerminalAuthority:
         return deepcopy(self.records[identity])
 
 
-def _exact_fixture():
-    registration = _official_registration()
+def _exact_fixture(*, current=False):
+    registration = (
+        _current_official_registration()
+        if current
+        else _official_registration()
+    )
     projector = _Projector(registration)
-    authority = _ProtectedAuthority(registration)
+    authority = _ProtectedAuthority(registration, current=current)
     terminal = _TerminalAuthority()
     execution = {
         "schema_version": OFFICIAL_BASELINE_EXECUTION_SCHEMA_VERSION,
@@ -924,6 +1076,39 @@ def test_restart_reconstructs_and_does_not_duplicate_provider_call():
     assert second.checkpoint == first.checkpoint
     assert second.replayed_transition_count == 1
     assert authority.dispatcher.provider_calls == 1
+    assert len(terminal.records) == 1
+
+
+def test_current_official_baseline_uses_compiled_dispatch_and_v4_custody():
+    runner, _projector, authority, terminal = _exact_fixture(current=True)
+    raw = {"requires_action": True, "outputs": [_company()]}
+
+    first = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-current-custody",
+        target_count=1,
+    )
+    second = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-current-custody",
+        target_count=1,
+        expected_checkpoint=first.checkpoint,
+    )
+
+    assert second.checkpoint == first.checkpoint
+    assert second.replayed_transition_count == 1
+    assert authority.dispatcher.provider_calls == 1
+    assert len(authority.dispatcher.compiled_dispatches) == 1
+    compiled = authority.dispatcher.compiled_dispatches[0]
+    assert compiled["schema_version"] == "model-runner-provider-dispatch:v1"
+    assert compiled["request"]["credential_binding"]["persist"] is False
+    transition = next(iter(authority.transitions.values.values()))
+    assert transition["completion"]["schema_version"] == (
+        "model-runner-completion:v4"
+    )
+    assert transition["completion"][
+        "provider_response_ingestion_sha256"
+    ]
     assert len(terminal.records) == 1
 
 
@@ -1209,6 +1394,112 @@ def test_missing_or_incompatible_provider_ingestion_fails_generation_admission()
     with pytest.raises(ModelRunnerHostError, match="contract differs"):
         ArtifactRunnerProtocolGeneration.from_declaration(
             incompatible,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+
+def test_current_ingestion_custody_generation_is_admitted_without_commit_allowlist():
+    declaration = runner_declaration(
+        "v4",
+        contract_hash=HASH["contract"],
+        official_baseline=True,
+    )
+    generation = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256=HASH["contract"],
+    )
+
+    assert generation.family == "model-runner-protocol:v3"
+    assert generation.requires_raw_provider_response_custody is True
+    assert generation.version("MODEL_RUNNER_COMPLETION_SCHEMA_VERSION") == (
+        "model-runner-completion:v4"
+    )
+    assert generation.member("completion") == "build_runner_completion"
+    assert generation.member("provider_receipt_binding") == (
+        "build_runner_provider_receipt_binding"
+    )
+
+    additive = deepcopy(declaration)
+    ingestion_contract = additive["champion_execution"][
+        "provider_response_ingestion_contract"
+    ]
+    ingestion_contract["leadpoet.future_optional"] = {"enabled": True}
+    ingestion_contract["contract_sha256"] = _bare_wire_hash({
+        key: value
+        for key, value in ingestion_contract.items()
+        if key != "contract_sha256"
+    })
+    additive_generation = ArtifactRunnerProtocolGeneration.from_declaration(
+        additive,
+        expected_consumer_contract_sha256=HASH["contract"],
+    )
+
+    assert additive_generation.requires_raw_provider_response_custody is True
+    assert additive_generation.protocol_generation_sha256 != (
+        generation.protocol_generation_sha256
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "compatibility_major",
+        "completion_major",
+        "receipt_binding_major",
+        "ingestion_custody_contract",
+    ),
+)
+def test_current_role_or_custody_downgrade_fails_before_provider_spend(failure):
+    declaration = runner_declaration(
+        "v4",
+        contract_hash=HASH["contract"],
+        official_baseline=True,
+    )
+    role_contract = declaration["champion_execution"][
+        "runner_role_contract"
+    ]
+    if failure == "compatibility_major":
+        role_contract["compatibility_major"] = 1
+        _rehash_role_contract(declaration)
+    elif failure in {"completion_major", "receipt_binding_major"}:
+        role = (
+            "completion"
+            if failure == "completion_major"
+            else "provider_receipt_binding"
+        )
+        entry = role_contract["roles"][role]
+        entry["interface_major"] = 1
+        entry["interface_contract"]["interface_major"] = 1
+        entry["interface_contract_sha256"] = _bare_wire_hash(
+            entry["interface_contract"]
+        )
+        role_contract["activation_profiles"]["full_company"][
+            "minimum_interface_major"
+        ][role] = 1
+        _rehash_role_contract(declaration)
+    else:
+        contract = declaration["champion_execution"][
+            "provider_response_ingestion_contract"
+        ]
+        contract.pop("ingestion_receipt_required_for_response")
+        contract["completion_input"] = "original_unchanged_host_response"
+        contract["provider_receipt_binding_input"] = (
+            "original_unchanged_host_response"
+        )
+        contract["custody_join"] = [
+            "action_sha256",
+            "host_response_sha256",
+            "parsed_response_sha256",
+        ]
+        contract["contract_sha256"] = _bare_wire_hash({
+            key: value
+            for key, value in contract.items()
+            if key != "contract_sha256"
+        })
+
+    with pytest.raises(ModelRunnerHostError):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            declaration,
             expected_consumer_contract_sha256=HASH["contract"],
         )
 

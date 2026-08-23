@@ -12,6 +12,7 @@ from research_lab.common_model_runner_host import (
     CommonModelRunnerHost,
     HostActionBinding,
     HostActionResult,
+    HostCompiledProviderDispatch,
     ModelRunnerHostError,
     ProviderReceiptCustodyRecord,
 )
@@ -226,6 +227,347 @@ class FakeDeeplineClient:
             provider_receipt_sha256=PROVIDER_RECEIPT_SHA256,
             provider_identity_sha256=PROVIDER_IDENTITY_SHA256,
         )
+
+
+def _current_sha256(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _current_action(action_type="execute_candidate_tool"):
+    tool_id = (
+        "verifier.company"
+        if action_type == "verify_company"
+        else "candidate.current"
+    )
+    body = {
+        "schema_version": "model-runner-action:v2",
+        "action_phase": "candidate_acquisition",
+        "action_type": action_type,
+        "tool_id": tool_id,
+        "binding_contract_sha256": "1" * 64,
+        "arguments": {"candidate": {"official_domain": "acme.test"}},
+    }
+    action_sha256 = _current_sha256(body)
+    return {
+        **body,
+        "action_sha256": action_sha256,
+        "idempotency_key": "model-action:" + action_sha256,
+    }
+
+
+def _current_start(action):
+    return {
+        "host_capability_manifest": {
+            "bindings": [{
+                "action_type": action["action_type"],
+                "tool_id": action["tool_id"],
+                "binding_contract_sha256": action[
+                    "binding_contract_sha256"
+                ],
+                "available": True,
+            }]
+        }
+    }
+
+
+class _CurrentProtocol:
+    requires_raw_provider_response_custody = True
+
+    def __init__(self, action):
+        self.action = action
+        self.completion_inputs = []
+        self.verifier_calls = 0
+
+    def advance(self, _start, *, continuation, completion):
+        if continuation is None:
+            return {
+                "status": "action_required",
+                "action": self.action,
+                "continuation": {
+                    "schema_version": "model-runner-continuation:v3",
+                    "step": 1,
+                },
+            }
+        assert completion is not None
+        return {
+            "status": "completed",
+            "continuation": {
+                "schema_version": "model-runner-continuation:v3",
+                "step": 2,
+            },
+            "result": {
+                "schema_version": "model-runner-result:v3",
+                "leads": [],
+            },
+            "model_receipt": {
+                "schema_version": "model-runner-receipt:v3",
+                "receipt_sha256": "2" * 64,
+            },
+        }
+
+    def prepare_provider_request(self, action):
+        request = {
+            "credential_binding": {
+                "source": "host_fixture_credential",
+                "persist": False,
+            },
+            "payload": {"domain": "acme.test"},
+        }
+        body = {
+            "schema_version": "model-runner-provider-dispatch:v1",
+            "action_sha256": action["action_sha256"],
+            "action_type": action["action_type"],
+            "tool_id": action["tool_id"],
+            "compiler_id": "fixture.current:v1",
+            "compiler_contract_sha256": action[
+                "binding_contract_sha256"
+            ],
+            "provider": "fixture",
+            "request": request,
+            "request_sha256": _current_sha256(request),
+            "response_contract": {},
+            "budgets": {"call_cap": 1},
+            "idempotency_key": "model-action:" + action["action_sha256"],
+        }
+        return {**body, "dispatch_sha256": _current_sha256(body)}
+
+    def ingest_provider_response(self, action, host_response):
+        dispatch = self.prepare_provider_request(action)
+        parsed = dict(host_response["body"])
+        body = {
+            "schema_version": (
+                "model-runner-provider-response-ingestion:v1"
+            ),
+            "action_sha256": action["action_sha256"],
+            "dispatch_sha256": dispatch["dispatch_sha256"],
+            "compiler_id": dispatch["compiler_id"],
+            "compiler_contract_sha256": dispatch[
+                "compiler_contract_sha256"
+            ],
+            "request_sha256": dispatch["request_sha256"],
+            "host_response_schema_version": "host-provider-response:v1",
+            "host_response_sha256": _current_sha256(host_response),
+            "provider": dispatch["provider"],
+            "parsed_response_schema_version": parsed["schema_version"],
+            "parsed_response": parsed,
+            "parsed_response_sha256": _current_sha256(parsed),
+        }
+        return {**body, "ingestion_sha256": _current_sha256(body)}
+
+    def build_completion(self, action, result):
+        ingestion = result.model_provider_response_ingestion
+        provider_response = (
+            ingestion["parsed_response"]
+            if isinstance(ingestion, dict)
+            else result.provider_response
+        )
+        body = {
+            "schema_version": "model-runner-completion:v4",
+            "action_sha256": action["action_sha256"],
+            "outcome": result.outcome,
+            "reason_code": result.reason_code,
+            "provider_response": provider_response,
+            "provider_response_sha256": _current_sha256(provider_response),
+            "provider_response_ingestion_sha256": (
+                ingestion["ingestion_sha256"]
+                if isinstance(ingestion, dict)
+                else None
+            ),
+            "provider_dispatch_sha256": (
+                ingestion["dispatch_sha256"]
+                if isinstance(ingestion, dict)
+                else "0" * 64
+            ),
+            "provider_request_sha256": (
+                ingestion["request_sha256"]
+                if isinstance(ingestion, dict)
+                else "0" * 64
+            ),
+            "host_provider_response_sha256": (
+                ingestion["host_response_sha256"]
+                if isinstance(ingestion, dict)
+                else "0" * 64
+            ),
+            "provider_receipt_ref": result.provider_receipt_ref,
+            "provider_receipt_sha256": result.provider_receipt_sha256,
+            "provider_identity_sha256": result.provider_identity_sha256,
+            "calls": result.calls,
+            "cost_credits": result.cost_credits,
+            "latency_ms": result.latency_ms,
+        }
+        self.completion_inputs.append(result)
+        return {**body, "completion_sha256": _current_sha256(body)}
+
+    def execute_verifier_action(self, action):
+        self.verifier_calls += 1
+        result = {"status": "accepted", "reason_code": "artifact_fixture"}
+        return {
+            "schema_version": "model-runner-verifier-execution:v1",
+            "action_sha256": action["action_sha256"],
+            "action_type": action["action_type"],
+            "calls": 0,
+            "cost_credits": 0.0,
+            "provider_receipt_allowed": False,
+            "result": result,
+        }
+
+
+def _run_current_provider(*, load_completion=None, mutate_result=None):
+    action = _current_action()
+    protocol = _CurrentProtocol(action)
+    persisted = []
+    dispatches = []
+
+    def dispatch(dispatched_action, compiled_dispatch):
+        assert dispatched_action == action
+        assert isinstance(compiled_dispatch, HostCompiledProviderDispatch)
+        response = {
+            "schema_version": "host-provider-response:v1",
+            "provider": compiled_dispatch.provider,
+            "status_code": 200,
+            "body": {
+                "schema_version": "fixture-provider-response:v1",
+                "records": [],
+            },
+        }
+        ingestion = protocol.ingest_provider_response(action, response)
+        result = HostActionResult(
+            outcome="succeeded",
+            reason_code="fixture",
+            provider_response=response,
+            calls=1,
+            cost_credits=0.0,
+            latency_ms=1.0,
+            provider_request_id="private-provider-id",
+            provider_receipt_ref="provider_receipt:" + "3" * 16,
+            provider_identity_sha256="4" * 64,
+            model_provider_response_ingestion=ingestion,
+            provider_action_receipt_sha256="5" * 64,
+        )
+        dispatches.append(compiled_dispatch)
+        return mutate_result(result) if mutate_result is not None else result
+
+    terminal = CommonModelRunnerHost(
+        consumer_id="research-lab-champion",
+        protocol=protocol,
+        bindings=[HostActionBinding(
+            action_type=action["action_type"],
+            tool_id=action["tool_id"],
+            binding_contract_sha256=action["binding_contract_sha256"],
+            dispatch=dispatch,
+        )],
+        persist_transition=lambda **value: persisted.append(value),
+        load_completion=load_completion,
+    ).run(_current_start(action))
+    return terminal, protocol, persisted, dispatches
+
+
+def test_current_host_persists_raw_response_ingestion_and_action_receipt():
+    terminal, protocol, persisted, dispatches = _run_current_provider()
+
+    assert terminal["status"] == "completed"
+    assert len(dispatches) == 1
+    custody = persisted[0]["provider_action_custody"]
+    assert custody["host_response"] == {
+        "schema_version": "host-provider-response:v1",
+        "provider": "fixture",
+        "status_code": 200,
+        "body": {
+            "schema_version": "fixture-provider-response:v1",
+            "records": [],
+        },
+    }
+    assert custody["model_provider_response_ingestion"] == (
+        protocol.completion_inputs[0].model_provider_response_ingestion
+    )
+    assert custody["provider_action_receipt_sha256"] == "5" * 64
+    assert persisted[0]["completion"]["provider_response"] == (
+        custody["model_provider_response_ingestion"]["parsed_response"]
+    )
+
+
+def test_current_host_reload_reingests_byte_identically_without_dispatch():
+    first, _protocol, persisted, _dispatches = _run_current_provider()
+    cached = deepcopy(persisted[0])
+    second, _protocol, replayed, dispatches = _run_current_provider(
+        load_completion=lambda _key: cached,
+        mutate_result=lambda _result: pytest.fail(
+            "durable replay must not call the provider"
+        ),
+    )
+
+    assert second == first
+    assert dispatches == []
+    assert replayed[0]["host_receipt"]["replayed"] is True
+    assert replayed[0]["provider_action_custody"] == (
+        cached["provider_action_custody"]
+    )
+
+
+@pytest.mark.parametrize("tamper", ("raw_response", "ingestion"))
+def test_current_host_reload_rejects_tampered_provider_custody(tamper):
+    _terminal, _protocol, persisted, _dispatches = _run_current_provider()
+    cached = deepcopy(persisted[0])
+    custody = cached["provider_action_custody"]
+    if tamper == "raw_response":
+        custody["host_response"]["body"]["records"] = [{"forged": True}]
+    else:
+        custody["model_provider_response_ingestion"][
+            "ingestion_sha256"
+        ] = "0" * 64
+
+    with pytest.raises(ModelRunnerHostError):
+        _run_current_provider(load_completion=lambda _key: cached)
+
+
+def test_current_host_requires_provider_action_receipt_after_dispatch():
+    with pytest.raises(
+        ModelRunnerHostError,
+        match="durable custody receipt is invalid",
+    ):
+        _run_current_provider(
+            mutate_result=lambda result: HostActionResult(
+                **{
+                    **result.__dict__,
+                    "provider_action_receipt_sha256": None,
+                }
+            )
+        )
+
+
+def test_current_verifier_executes_in_artifact_without_host_dispatch():
+    action = _current_action("verify_company")
+    protocol = _CurrentProtocol(action)
+    persisted = []
+
+    result = CommonModelRunnerHost(
+        consumer_id="research-lab-champion",
+        protocol=protocol,
+        bindings=[HostActionBinding(
+            action_type=action["action_type"],
+            tool_id=action["tool_id"],
+            binding_contract_sha256=action["binding_contract_sha256"],
+            dispatch=lambda *_args: pytest.fail(
+                "artifact verifier must not call a host binding"
+            ),
+        )],
+        persist_transition=lambda **value: persisted.append(value),
+    ).run(_current_start(action))
+
+    assert result["status"] == "completed"
+    assert protocol.verifier_calls == 1
+    completion_input = protocol.completion_inputs[0]
+    assert completion_input.model_provider_response_ingestion is None
+    assert completion_input.provider_action_receipt_sha256 is None
+    assert "provider_action_custody" not in persisted[0]
 
 
 def test_lab_dispatches_deepline_through_the_artifact_protocol():

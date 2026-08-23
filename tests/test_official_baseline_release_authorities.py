@@ -114,9 +114,17 @@ def _inventory(*rows: dict) -> dict:
 
 
 class _Protocol:
-    def __init__(self, dispatch: dict | None = None, verifier: dict | None = None):
+    def __init__(
+        self,
+        dispatch: dict | None = None,
+        verifier: dict | None = None,
+        *,
+        current: bool = False,
+    ):
         self.dispatch = dispatch
         self.verifier = verifier
+        self.requires_raw_provider_response_custody = current
+        self.binding_inputs = []
 
     def prepare_provider_request(self, action):
         assert self.dispatch is not None
@@ -126,6 +134,9 @@ class _Protocol:
     def build_provider_receipt_binding(self, action, result):
         assert action["action_sha256"]
         assert result.provider_receipt_ref
+        self.binding_inputs.append(result)
+        if self.requires_raw_provider_response_custody:
+            assert result.model_provider_response_ingestion is not None
         binding = {
             "provider_receipt_ref": result.provider_receipt_ref,
             "provider_identity_sha256": result.provider_identity_sha256,
@@ -294,7 +305,7 @@ def _provider_fixture():
 
 def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     action, dispatch, catalog, inventory = _provider_fixture()
-    protocol = _Protocol(dispatch=dispatch)
+    protocol = _Protocol(dispatch=dispatch, current=True)
     custody = _custody()
     interrupted = _Proxy(
         [
@@ -379,6 +390,14 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     assert terminal.protected_action_result.model_provider_response_ingestion[
         "schema_version"
     ] == "model-runner-provider-response-ingestion:v1"
+    assert protocol.binding_inputs[-1].model_provider_response_ingestion == (
+        terminal.protected_action_result.model_provider_response_ingestion
+    )
+    assert (
+        terminal.protected_action_result.host_result
+        .model_provider_response_ingestion
+        is None
+    )
 
 
 def test_deepline_tampered_progress_fails_closed_without_network():

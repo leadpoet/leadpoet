@@ -1627,7 +1627,21 @@ class ArtifactPreparedActionExecutor:
                     "official baseline artifact provider response ingestion is invalid"
                 )
             ingestion = dict(ingestion)
-        binding = self._protocol.build_provider_receipt_binding(action, host)
+        binding_host = (
+            replace(
+                host,
+                model_provider_response_ingestion=ingestion,
+            )
+            if getattr(
+                self._protocol,
+                "requires_raw_provider_response_custody",
+                False,
+            )
+            else host
+        )
+        binding = self._protocol.build_provider_receipt_binding(
+            action, binding_host
+        )
         if (
             not isinstance(binding, Mapping)
             or binding.get("provider_receipt_ref") != host.provider_receipt_ref

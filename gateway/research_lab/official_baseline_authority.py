@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import importlib
 import os
 import re
@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol
 from gateway.research_lab.common_model_experiment import (
     CommonModelExperimentRecoveryError,
     ProtectedModelActionResult,
+    _validate_compiled_provider_dispatch,
 )
 from gateway.research_lab.official_baseline_custody import (
     OFFICIAL_BASELINE_CUSTODY_KMS_KEY_ENV,
@@ -215,13 +216,20 @@ def _protected_result_document(result: ProtectedModelActionResult) -> dict[str, 
         raise OfficialBaselineProtectedAuthorityError(
             "official baseline protected result is invalid"
         )
+    host_document = asdict(result.host_result)
+    for optional_custody_field in (
+        "model_provider_response_ingestion",
+        "provider_action_receipt_sha256",
+    ):
+        if host_document.get(optional_custody_field) is None:
+            host_document.pop(optional_custody_field, None)
     document = {
         "schema_version": (
             "leadpoet.research_lab.official_baseline_protected_result.v2"
             if result.model_provider_response_ingestion is not None
             else "leadpoet.research_lab.official_baseline_protected_result.v1"
         ),
-        "host_result": asdict(result.host_result),
+        "host_result": host_document,
         "provider_receipt": (
             None
             if result.provider_receipt is None
@@ -619,8 +627,24 @@ class _ReservedOfficialBaselineDispatcher:
         self._transitions = transitions
 
     def _preparation(
-        self, action: Mapping[str, Any]
+        self,
+        action: Mapping[str, Any],
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> OfficialBaselineProtectedPreparation:
+        generation = self._authority._registration.protocol_generation
+        if (
+            action.get("action_type") in _PROVIDER_ACTION_TYPES
+            and getattr(
+                generation,
+                "requires_raw_provider_response_custody",
+                False,
+            )
+        ):
+            _validate_compiled_provider_dispatch(
+                protocol=self._authority._registration.protocol,
+                action=action,
+                compiled_dispatch=compiled_dispatch,
+            )
         value = self._authority.bridge.prepare(
             run_identity=self._run_identity,
             unit_ref=self._unit_ref,
@@ -817,6 +841,8 @@ class _ReservedOfficialBaselineDispatcher:
                 or not host.provider_receipt_ref
                 or not host.provider_receipt_sha256
                 or not host.provider_identity_sha256
+                or host.model_provider_response_ingestion is not None
+                or host.provider_action_receipt_sha256 is not None
             ):
                 raise OfficialBaselineProtectedAuthorityError(
                     "official baseline provider result custody is incomplete"
@@ -835,6 +861,8 @@ class _ReservedOfficialBaselineDispatcher:
             or host.provider_receipt_ref is not None
             or host.provider_receipt_sha256 is not None
             or host.provider_identity_sha256 is not None
+            or host.model_provider_response_ingestion is not None
+            or host.provider_action_receipt_sha256 is not None
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline verifier result contains provider custody"
@@ -937,7 +965,26 @@ class _ReservedOfficialBaselineDispatcher:
                 "official baseline terminal-known readback differs"
             )
         assert terminal.protected_action_result is not None
-        return terminal.protected_action_result
+        protected = terminal.protected_action_result
+        if preparation.action_type not in _PROVIDER_ACTION_TYPES:
+            return protected
+        receipt_sha256 = str(
+            terminal.protected_terminal_receipt_sha256 or ""
+        ).removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-f]{64}", receipt_sha256) is None:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline provider action custody hash is invalid"
+            )
+        return replace(
+            protected,
+            host_result=replace(
+                protected.host_result,
+                model_provider_response_ingestion=(
+                    protected.model_provider_response_ingestion
+                ),
+                provider_action_receipt_sha256=receipt_sha256,
+            ),
+        )
 
     def _persist_uncertain(
         self,
@@ -1067,8 +1114,13 @@ class _ReservedOfficialBaselineDispatcher:
             "official baseline execute returned authoritative absence"
         )
 
-    def _run_action(self, action: Mapping[str, Any]) -> ProtectedModelActionResult:
-        preparation = self._preparation(action)
+    def _run_action(
+        self,
+        action: Mapping[str, Any],
+        *,
+        compiled_dispatch: Mapping[str, Any] | None = None,
+    ) -> ProtectedModelActionResult:
+        preparation = self._preparation(action, compiled_dispatch)
         identity, authorization = self._authorization(
             action=action,
             preparation=preparation,
@@ -1149,6 +1201,7 @@ class _ReservedOfficialBaselineDispatcher:
         action: Mapping[str, Any],
         variant_id: str,
         unit_ref: str,
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult:
         if (
             variant_id != "official_baseline"
@@ -1158,7 +1211,10 @@ class _ReservedOfficialBaselineDispatcher:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider dispatch identity differs"
             )
-        return self._run_action(action)
+        return self._run_action(
+            action,
+            compiled_dispatch=compiled_dispatch,
+        )
 
     def replay_provider_action(
         self,
@@ -1167,11 +1223,13 @@ class _ReservedOfficialBaselineDispatcher:
         variant_id: str,
         unit_ref: str,
         replay_ref: Mapping[str, Any],
+        compiled_dispatch: Mapping[str, Any] | None = None,
     ) -> ProtectedModelActionResult:
         result = self.dispatch_provider_action(
             action=action,
             variant_id=variant_id,
             unit_ref=unit_ref,
+            compiled_dispatch=compiled_dispatch,
         )
         if not isinstance(replay_ref, Mapping) or result.replay_ref != replay_ref:
             raise OfficialBaselineProtectedAuthorityError(

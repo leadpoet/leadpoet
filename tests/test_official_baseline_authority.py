@@ -13,6 +13,7 @@ from gateway.research_lab import (
     official_baseline_release_dependencies as release_dependencies_module,
 )
 from gateway.research_lab.common_model_experiment import (
+    CommonModelExperimentError,
     CommonModelExperimentRecoveryError,
     ProtectedModelActionResult,
 )
@@ -328,8 +329,10 @@ class _Bridge:
         )
 
 
-def _authority():
-    runner, _projector, _old_authority, _terminal = _exact_fixture()
+def _authority(*, current=False):
+    runner, _projector, _old_authority, _terminal = _exact_fixture(
+        current=current
+    )
     context = _context(runner)
     store = _AttemptStore()
     s3 = _S3()
@@ -379,6 +382,75 @@ def test_new_action_reserves_before_execute_and_restart_reconciles_no_duplicate(
     assert bridge.execute_count == 1
     assert bridge.reconcile_count == 1
     assert store.events.index("reserve") < store.events.index("known")
+
+
+def test_current_authority_requires_compiled_dispatch_before_spend_and_joins_custody():
+    authority, bridge, store, _custody, run_identity, unit_ref = _authority(
+        current=True
+    )
+    action = _provider_action({})
+    dispatcher = authority.dispatcher_for_unit(
+        run_identity=run_identity,
+        unit_ref=unit_ref,
+    )
+    events_before = list(store.events)
+
+    with pytest.raises(
+        CommonModelExperimentError,
+        match="artifact-compiled provider dispatch is unavailable",
+    ):
+        dispatcher.dispatch_provider_action(
+            action=action,
+            variant_id="official_baseline",
+            unit_ref=unit_ref,
+        )
+
+    assert store.events == events_before
+    assert bridge.execute_count == 0
+
+    host_response = {
+        "schema_version": "host-provider-response:v1",
+        "provider": "fixture",
+        "status_code": 200,
+        "body": {"records": []},
+    }
+    ingestion = authority._registration.protocol.ingest_provider_response(
+        action,
+        host_response,
+    )
+    terminal = _known_provider_terminal(action, unit_ref)
+    assert terminal.protected_action_result is not None
+    protected = replace(
+        terminal.protected_action_result,
+        host_result=replace(
+            terminal.protected_action_result.host_result,
+            provider_response=host_response,
+        ),
+        model_provider_response_ingestion=ingestion,
+    )
+    bridge.next_execute = replace(
+        terminal,
+        protected_action_result=protected,
+        protected_result_sha256=sha256_json(
+            _protected_result_document(protected)
+        ),
+        model_provider_response_sha256=sha256_json(host_response),
+    )
+    compiled = authority._registration.protocol.prepare_provider_request(
+        action
+    )
+
+    result = dispatcher.dispatch_provider_action(
+        action=action,
+        variant_id="official_baseline",
+        unit_ref=unit_ref,
+        compiled_dispatch=compiled,
+    )
+
+    assert result.host_result.provider_response == host_response
+    assert result.host_result.model_provider_response_ingestion == ingestion
+    assert result.host_result.provider_action_receipt_sha256 == "e" * 64
+    assert bridge.execute_count == 1
 
 
 def test_reserved_existing_requires_same_authorization_then_absent_reconcile():

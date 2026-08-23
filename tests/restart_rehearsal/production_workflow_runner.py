@@ -10443,14 +10443,18 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
     provider_observations = dict(
         (matched.details or {}).get("provider_observations") or {}
     )
-    contradicted = dict(verdict)
-    contradicted["employee_size_matches"] = False
+    inconsistent = dict(verdict)
+    inconsistent["employee_size_matches"] = False
+    contradicted = dict(inconsistent)
+    contradicted["observed_employee_count"] = "51"
     malformed = ("50.0", "1-10", -1)
     if (
         matched.decision != COMPANY_FIT_MATCH
         or provider_observations.get("observed_employee_count") != "50"
         or _decision_from_observed_employee_size(contradicted, icp)
         != COMPANY_FIT_MISMATCH
+        or _decision_from_observed_employee_size(inconsistent, icp)
+        != COMPANY_FIT_UNAVAILABLE
         or any(
             _decision_from_observed_employee_size(
                 {

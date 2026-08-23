@@ -965,6 +965,8 @@ async def test_exact_employee_count_is_bucketed_without_rewriting_company(
     observed,
     expected_bucket,
 ):
+    from importlib import import_module as real_import
+
     class FakeModels:
         class CompanyOutput:
             def __init__(self, **kwargs):
@@ -987,7 +989,7 @@ async def test_exact_employee_count_is_bucketed_without_rewriting_company(
             return FakeModels
         if name == "qualification.scoring.lead_scorer":
             return FakeLeadScorer
-        raise ImportError(name)
+        return real_import(name)
 
     monkeypatch.setattr(evaluator, "import_module", fake_import)
     scorer = evaluator.QualificationStyleCompanyScorer()

@@ -1327,7 +1327,9 @@ def _qualification_compatibility_receipt(
         "contract_id": contract["contract_id"],
         "contract_hash": contract["sha256"],
         "parity_hash": parity["sha256"],
-        "bindings": {},
+        "bindings": {
+            "scoring_adapter_version": artifact["scoring_adapter_version"],
+        },
         "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
     }
     return {**body, "receipt_hash": sha256_json(body)}

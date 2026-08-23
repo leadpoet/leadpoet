@@ -187,6 +187,19 @@ async def test_qualification_executor_replays_tape_without_second_provider_call(
     tape = recorder.document()
 
     class FakeScorer:
+        def __init__(
+            self,
+            *,
+            reference_scoring_adapter_version,
+            candidate_scoring_adapter_version,
+        ):
+            assert reference_scoring_adapter_version == (
+                "qualification-company-scorer:v1"
+            )
+            assert candidate_scoring_adapter_version == (
+                "qualification-company-scorer:v1"
+            )
+
         async def score_with_breakdowns(self, companies, icp, is_reference_model):
             async def forbidden_handler(_request):
                 raise AssertionError("enclave replay attempted a second provider call")
@@ -204,6 +217,7 @@ async def test_qualification_executor_replays_tape_without_second_provider_call(
             "companies": [{"company_name": "Example"}],
             "icp": {"industry": "Software"},
             "is_reference_model": False,
+            "scoring_adapter_version": "qualification-company-scorer:v1",
             "provider_tape": tape,
         },
     )
@@ -233,6 +247,19 @@ async def test_live_qualification_executor_keeps_raw_evidence_inside_enclave(mon
         )
 
     class FakeScorer:
+        def __init__(
+            self,
+            *,
+            reference_scoring_adapter_version,
+            candidate_scoring_adapter_version,
+        ):
+            assert reference_scoring_adapter_version == (
+                "qualification-company-scorer:v1"
+            )
+            assert candidate_scoring_adapter_version == (
+                "qualification-company-scorer:v1"
+            )
+
         async def score_with_breakdowns(self, companies, icp, is_reference_model):
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(live_handler)
@@ -249,6 +276,7 @@ async def test_live_qualification_executor_keeps_raw_evidence_inside_enclave(mon
             "companies": [{"company_name": "Example"}],
             "icp": {"industry": "Software"},
             "is_reference_model": False,
+            "scoring_adapter_version": "qualification-company-scorer:v1",
             "provider_execution_mode": "live_enclave",
         },
     )

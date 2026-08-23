@@ -442,6 +442,15 @@ def snapshot_readiness(
             "model_config_hash": str(
                 provenance.get("model_config_hash") or ""
             ),
+            "compatibility_admission_mode": str(
+                provenance.get("compatibility_admission_mode") or ""
+            ),
+            "compatibility_policy_hash": str(
+                provenance.get("compatibility_policy_hash") or ""
+            ),
+            "compatibility_admission_hash": str(
+                provenance.get("compatibility_admission_hash") or ""
+            ),
             "provider_model_ids": provider_ids,
         }
     except Exception as exc:

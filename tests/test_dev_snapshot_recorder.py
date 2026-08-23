@@ -42,7 +42,13 @@ def test_snapshot_adapter_authority_selects_artifact_bound_bootstrap(
     monkeypatch, tmp_path
 ):
     artifact = _artifact_document()
-    receipt = {"admission_mode": "qualification_protocol_v2"}
+    policy_hash = "sha256:" + "6" * 64
+    receipt_hash = "sha256:" + "7" * 64
+    receipt = {
+        "admission_mode": "qualification_protocol_v2",
+        "policy_hash": policy_hash,
+        "receipt_hash": receipt_hash,
+    }
     artifact_path = tmp_path / "artifact.json"
     receipt_path = tmp_path / "receipt.json"
     artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
@@ -59,6 +65,11 @@ def test_snapshot_adapter_authority_selects_artifact_bound_bootstrap(
         "_model_adapter_bootstrap_for_compatibility_receipt_v1",
         select,
     )
+    monkeypatch.setattr(
+        "research_lab.sourcing_model_contract_check."
+        "compatibility_admission_policy_identity",
+        lambda value: ({}, str(value["policy_hash"])),
+    )
 
     assert recorder._load_snapshot_adapter_authority(
         artifact_path=str(artifact_path),
@@ -67,7 +78,12 @@ def test_snapshot_adapter_authority_selects_artifact_bound_bootstrap(
         source_commit=str(artifact["git_commit_sha"]),
         model_config_hash=str(artifact["config_hash"]),
         manifest_hash=str(artifact["manifest_hash"]),
-    ) == ("selected-v2-bootstrap", "qualification_protocol_v2")
+    ) == (
+        "selected-v2-bootstrap",
+        "qualification_protocol_v2",
+        policy_hash,
+        receipt_hash,
+    )
     assert observed["receipt"] == receipt
     assert {
         key: observed["artifact"][key] for key in artifact
@@ -109,11 +125,27 @@ def test_v2_snapshot_output_requires_complete_typed_outcome(monkeypatch):
         admission_mode="qualification_protocol_v2",
     ) == complete["companies"]
 
-    with pytest.raises(RuntimeError, match="qualification outcome is incomplete"):
+    incomplete = {
+        "completion_state": "incomplete",
+        "companies": [{"company_name": "Partial"}],
+        "route_completion_receipt": {
+            "disposition": "incomplete_retryable",
+            "retryable": True,
+            "failure_classes": ["retryable_provider"],
+        },
+    }
+    with pytest.raises(
+        recorder.SnapshotQualificationIncomplete,
+        match="qualification outcome is incomplete",
+    ) as captured:
         recorder._decode_adapter_companies(
-            {"completion_state": "incomplete", "companies": []},
+            incomplete,
             admission_mode="qualification_protocol_v2",
         )
+    assert captured.value.retryable is True
+    assert captured.value.disposition == "incomplete_retryable"
+    assert captured.value.failure_classes == ("retryable_provider",)
+    assert captured.value.partial_company_count == 1
 
 
 def test_legacy_snapshot_output_remains_a_company_array():
@@ -464,6 +496,88 @@ def test_snapshot_record_retry_remains_bounded_and_fail_closed(
     assert [call["reuse_existing"] for call in calls] == [False, True, True]
     assert [call["retry_transient"] for call in calls] == [False, True, True]
     assert delays == [5.0, 15.0]
+
+
+def test_snapshot_record_retry_uses_signed_incomplete_disposition(monkeypatch) -> None:
+    calls = []
+    delays = []
+
+    retryable = recorder.SnapshotQualificationIncomplete(
+        {
+            "companies": [],
+            "route_completion_receipt": {
+                "disposition": "incomplete_retryable",
+                "retryable": True,
+                "failure_classes": ["retryable_provider"],
+            },
+        }
+    )
+
+    def record(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            raise retryable
+        return [{"company": "accepted"}]
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", record)
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    result = recorder._record_icp_with_retries(
+        image_digest="example.invalid/model@sha256:" + "1" * 64,
+        module_name="research_lab_adapter",
+        callable_name="run_icp",
+        icp={"industry": "Software"},
+        icp_ref="icp-a",
+        snapshot_dir="/tmp/snapshot-test",
+        timeout_seconds=300,
+        reuse_existing=False,
+        item_index=1,
+        item_count=5,
+    )
+
+    assert result == [{"company": "accepted"}]
+    assert [call["retry_transient"] for call in calls] == [False, True]
+    assert delays == [5.0]
+
+
+def test_snapshot_record_terminal_incomplete_is_not_retried(monkeypatch) -> None:
+    calls = []
+    delays = []
+    terminal = recorder.SnapshotQualificationIncomplete(
+        {
+            "companies": [],
+            "route_completion_receipt": {
+                "disposition": "incomplete_terminal",
+                "retryable": False,
+                "failure_classes": ["tracking_failed"],
+            },
+        }
+    )
+
+    def fail(**kwargs):
+        calls.append(dict(kwargs))
+        raise terminal
+
+    monkeypatch.setattr(recorder, "_record_icp_with_docker", fail)
+    monkeypatch.setattr(recorder.time, "sleep", delays.append)
+
+    with pytest.raises(recorder.SnapshotQualificationIncomplete) as captured:
+        recorder._record_icp_with_retries(
+            image_digest="example.invalid/model@sha256:" + "1" * 64,
+            module_name="research_lab_adapter",
+            callable_name="run_icp",
+            icp={"industry": "Software"},
+            icp_ref="icp-a",
+            snapshot_dir="/tmp/snapshot-test",
+            timeout_seconds=300,
+            reuse_existing=False,
+            item_index=1,
+            item_count=5,
+        )
+
+    assert captured.value.retryable is False
+    assert len(calls) == 1
+    assert delays == []
 
 
 def test_snapshot_record_retry_stops_at_boundary_when_superseded(

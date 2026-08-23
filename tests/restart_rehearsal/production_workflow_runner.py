@@ -10474,7 +10474,7 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
     return {
         "numeric_observation_with_web_evidence_matched": True,
         "raw_observation_committed": True,
-        "explicit_false_remained_mismatch": True,
+        "contradictory_boolean_failed_closed": True,
         "malformed_range_decimal_negative_failed_closed": True,
     }
 

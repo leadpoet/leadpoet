@@ -1682,6 +1682,7 @@ _RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").s
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
 _RL_DEV_EXA_AGENT_NONTERMINAL_STATUSES = ("queued", "running", "in_progress", "pending")
+_RL_DEV_SCRAPINGDOG_RETRY_STATUSES = (400, 403)
 _RL_DEV_SECRET_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
     "DEEPLINE_API_KEY",
@@ -1993,7 +1994,14 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
             status = int(response.get("status") or 0)
         except (TypeError, ValueError):
             status = 0
-        if status in (408, 425, 429) or status >= 500:
+        if (
+            status in (408, 425, 429)
+            or status >= 500
+            or (
+                provider == "scrapingdog"
+                and status in _RL_DEV_SCRAPINGDOG_RETRY_STATUSES
+            )
+        ):
             return None
     return dict(response)
 
@@ -2483,13 +2491,27 @@ def _rl_dev_record(
         if not _rl_dev_record_provider_model(provider, body, request_key):
             return None
         path = _rl_dev_snapshot_path(storage_name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        temporary = path + "." + str(os.getpid()) + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(_rl_dev_canonical_json(record))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        import tempfile
+
+        descriptor, temporary = tempfile.mkstemp(
+            prefix="." + os.path.basename(path) + "." + str(os.getpid()) + ".",
+            suffix=".tmp",
+            dir=directory,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(_rl_dev_canonical_json(record))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
         return response
     except Exception as exc:
         _rl_dev_record_failure("record_write_error:" + type(exc).__name__, request_key)

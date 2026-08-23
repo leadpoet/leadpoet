@@ -148,6 +148,9 @@ from research_lab.reimbursements import (
     compute_participation_score,
     compute_reimbursement_award,
 )
+from research_lab.sourcing_model_contract_check import (
+    compatibility_admission_mode_policy_identity,
+)
 from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.axis_provenance import (
     current_call_episode,
@@ -1424,8 +1427,9 @@ def _tree_evaluator_commitment(
         raise HostedResearchLabWorkerError(
             "Git-tree snapshot pointer hash is invalid"
         )
+    compatibility_identity = _snapshot_compatibility_identity(readiness)
     return {
-        "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+        "schema_version": "research_lab.git_tree_evaluator_commitment.v4",
         "resolved_snapshot_uri": resolved_snapshot_uri,
         "snapshot_pointer_hash": pointer_hash,
         "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
@@ -1462,6 +1466,9 @@ def _tree_evaluator_commitment(
         ),
         "source_commit": str(readiness.get("source_commit") or ""),
         "model_config_hash": str(readiness.get("model_config_hash") or ""),
+        "compatibility_admission_mode": compatibility_identity[0],
+        "compatibility_policy_hash": compatibility_identity[1],
+        "compatibility_admission_hash": compatibility_identity[2],
         "provider_model_ids": list(readiness.get("provider_model_ids") or ()),
         "miss_policy": "strict",
         "score_version": "research_lab.dev_eval.v2",
@@ -1471,6 +1478,37 @@ def _tree_evaluator_commitment(
         "live_cap_microusd": policy.live_cap_microusd,
         "minimum_evidence_retention_days": policy.evidence_retention_days,
     }
+
+
+def _snapshot_compatibility_identity(
+    readiness: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    identity = (
+        str(readiness.get("compatibility_admission_mode") or ""),
+        str(readiness.get("compatibility_policy_hash") or ""),
+        str(readiness.get("compatibility_admission_hash") or ""),
+    )
+    if (
+        not identity[0]
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", identity[1]) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", identity[2]) is None
+    ):
+        raise HostedResearchLabWorkerError(
+            "Git-tree snapshot compatibility evidence is invalid"
+        )
+    try:
+        _policy, current_policy_hash = (
+            compatibility_admission_mode_policy_identity(identity[0])
+        )
+    except ValueError as exc:
+        raise HostedResearchLabWorkerError(
+            "Git-tree snapshot compatibility mode is unsupported"
+        ) from exc
+    if identity[1] != current_policy_hash:
+        raise HostedResearchLabWorkerError(
+            "Git-tree snapshot compatibility policy is stale"
+        )
+    return identity
 
 
 def _tree_authority_evaluator_commitment(
@@ -1488,7 +1526,7 @@ def _tree_authority_evaluator_commitment(
         dict(raw_commitment)
         if isinstance(raw_commitment, Mapping)
         and raw_commitment.get("schema_version")
-        == "research_lab.git_tree_evaluator_commitment.v3"
+        == "research_lab.git_tree_evaluator_commitment.v4"
         else None
     )
     if commitment is None:
@@ -1505,6 +1543,14 @@ def _tree_authority_evaluator_commitment(
         raise HostedResearchLabWorkerError(
             "Git-tree evaluator commitment differs from its authority"
         )
+    try:
+        _snapshot_compatibility_identity(commitment)
+    except HostedResearchLabWorkerError:
+        # A hash-bound commitment created under an older admission contract is
+        # valid history, but it cannot authorize new work. Returning no current
+        # commitment routes the run through the existing controlled tree
+        # replacement path, which must pin fresh compatibility evidence.
+        return None
     return commitment
 
 
@@ -2426,6 +2472,11 @@ class ResearchLabHostedWorker:
             artifact.manifest_hash or ""
         ):
             reason = "tree_snapshot_benchmark_model_differs_from_active_model"
+        else:
+            try:
+                _snapshot_compatibility_identity(readiness)
+            except HostedResearchLabWorkerError:
+                reason = "tree_snapshot_compatibility_not_current"
 
         evaluator_commitment: dict[str, Any] = {}
         if not reason:

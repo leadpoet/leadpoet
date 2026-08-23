@@ -436,6 +436,9 @@ def test_current_day_snapshot_is_eligible_only_for_its_utc_benchmark_date(
             "source_commit": "a" * 40,
             "model_config_hash": "sha256:" + "b" * 64,
             "private_model_manifest_hash": "sha256:" + "4" * 64,
+            "compatibility_admission_mode": "qualification_protocol_v2",
+            "compatibility_policy_hash": "sha256:" + "5" * 64,
+            "compatibility_admission_hash": "sha256:" + "6" * 64,
             "provider_model_ids": [],
             "replay_output_hashes": [
                 {
@@ -470,6 +473,9 @@ def test_current_day_snapshot_is_eligible_only_for_its_utc_benchmark_date(
     assert current["dev_set_size"] == 5
     assert current["snapshot_bank_size"] == 10
     assert current["benchmark_date"] == "2026-07-16"
+    assert current["compatibility_admission_mode"] == "qualification_protocol_v2"
+    assert current["compatibility_policy_hash"] == "sha256:" + "5" * 64
+    assert current["compatibility_admission_hash"] == "sha256:" + "6" * 64
     assert expired == {
         "ready": False,
         "reason": "snapshot_is_not_current_day_rebenchmark_bank",

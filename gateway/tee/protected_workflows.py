@@ -334,6 +334,12 @@ PROTECTED_SYMBOLS = {
         "CodeEditLoopEngine",
         "_bind_loop_direction_plan",
     ),
+    "gateway/research_lab/worker.py": (
+        "_snapshot_compatibility_identity",
+        "_tree_evaluator_commitment",
+        "_tree_authority_evaluator_commitment",
+        "ResearchLabHostedWorker._load_tree_snapshot_readiness",
+    ),
     "research_lab/sourcing_model_contract_check.py": (
         "CONTRACT_V68_PATH",
         "PARITY_FIXTURE_V28_PATH",
@@ -406,6 +412,7 @@ PROTECTED_SYMBOLS = {
         "semantic_compatibility_policy_identity_v1",
         "qualification_protocol_policy_identity_v2",
         "COMPATIBILITY_ADMISSION_POLICY_PROFILE_REGISTRY",
+        "compatibility_admission_mode_policy_identity",
         "compatibility_admission_policy_identity",
         "_safe_json_document",
         "_semantic_tree",
@@ -780,7 +787,11 @@ PROTECTED_SYMBOLS = {
         "_write_private_json",
         "_write_record_cancel_marker",
         "_active_model_compatibility_receipt",
+        "_compatibility_receipt_identity",
         "_run_record_command_with_active_guard",
+        "_state_compatibility_identity",
+        "_readiness_matches_compatibility_receipt",
+        "_refresh_reason",
         "maybe_refresh_dev_snapshot",
     ),
     "gateway/tee/autoresearch_executor_v2.py": (

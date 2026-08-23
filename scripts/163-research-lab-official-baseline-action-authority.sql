@@ -869,6 +869,7 @@ BEGIN
        OR p_terminal->>'protected_terminal_receipt_ref' !~ '^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$'
        OR p_terminal->>'protected_terminal_receipt_sha256' !~ '^sha256:[0-9a-f]{64}$'
        OR p_terminal->>'model_provider_response_sha256' !~ '^sha256:[0-9a-f]{64}$'
+       OR p_terminal->>'outcome' IS NULL
        OR p_terminal->>'outcome' NOT IN ('succeeded', 'empty', 'failed')
        OR pg_catalog.jsonb_typeof(p_terminal->'call_count') IS DISTINCT FROM 'number'
        OR (p_terminal->>'call_count') !~ '^[0-9]{1,6}$'
@@ -927,7 +928,8 @@ BEGIN
         'verify_company', 'verify_intent', 'verify_contact'
     );
     IF is_verifier THEN
-        IF p_terminal->>'outcome' IS DISTINCT FROM 'succeeded'
+        IF p_terminal->>'outcome' IS NULL
+           OR p_terminal->>'outcome' NOT IN ('succeeded', 'failed')
            OR (p_terminal->>'call_count')::INTEGER <> 0
            OR (p_terminal->>'cost_microunits')::BIGINT <> 0
            OR p_terminal->'provider_request_ref' IS DISTINCT FROM 'null'::JSONB

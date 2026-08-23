@@ -124,12 +124,27 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
         "credential_envelope_paths",
         None,
     ) or _credential_envelopes(tmp_path)
+    custody_environment = {
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/rehearsal/incontainer-traces"
+        ),
+        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID": (
+            "alias/leadpoet-research-lab-trace-encryption"
+        ),
+    }
     worker_environment = {
+        **custody_environment,
         "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
         "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
         "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
     }
+    if "parent_environment" in overrides:
+        worker_environment = {
+            **custody_environment,
+            **dict(overrides.pop("parent_environment")),
+        }
     values = {
         "deploy_commit": COMMIT,
         "release_manifest": _release(),
@@ -167,6 +182,45 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     }
     assert result["deferred_worker_fleet_roles"] == []
     assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
+    assert result["official_baseline_custody"] == {
+        "bucket": "leadpoet-private-model-artifacts-493765492819",
+        "prefix": (
+            "research-lab/rehearsal/incontainer-traces/official-baseline-v1"
+        ),
+        "kms_key_id_sha256": preflight.sha256_text(
+            "alias/leadpoet-research-lab-trace-encryption"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
+        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID",
+    ),
+)
+def test_restart_preflight_requires_official_baseline_custody_pair(
+    tmp_path: Path,
+    monkeypatch,
+    field: str,
+) -> None:
+    environment = {
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+        field: "",
+    }
+    with pytest.raises(
+        preflight.GatewayRestartPreflightV2Error,
+        match="official baseline encrypted custody",
+    ):
+        _verify(
+            tmp_path,
+            monkeypatch,
+            parent_environment=environment,
+        )
 
 
 def test_full_restart_preflight_reports_explicit_worker_deferral(

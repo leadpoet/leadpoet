@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+from io import StringIO
+import json
+import sys
 
 import pytest
 
@@ -23,6 +26,7 @@ from research_lab.model_runner_protocol import (
     ResearchLabModelRunnerProtocol,
 )
 from research_lab.docker_model_runner_transport import (
+    _COMMON_RUNNER_BOOTSTRAP,
     DockerModelRunnerTransport,
 )
 from research_lab.eval.private_runtime import (
@@ -928,6 +932,91 @@ def test_oci_runner_transport_does_not_forward_provider_credentials(
     assert transport._runner.spec.env_passthrough == ()
     assert transport._runner.spec.extra_env == {}
     assert transport._runner.spec.pull_before_run is False
+
+
+def test_oci_generation_discovers_signed_role_path_and_extensions(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    member = "artifact_provider_prepare"
+    consumer_path = "compat/research_lab_adapter.py:" + member
+    contract = {
+        "schema_version": 73,
+        "contract_id": "fixture-v73",
+        "functions": {
+            "compat/research_lab_adapter.py": {member: ["action"]}
+        },
+        "exact_signatures": [consumer_path],
+        "full_parameters": {
+            consumer_path: ["action", "future_optional"]
+        },
+        "required_keyword_only": {},
+        "frozen_asyncness": {consumer_path: False},
+        "exact_constants": {},
+        "extensions": {
+            "leadpoet.fixture": {"hash_bound": True}
+        },
+    }
+    model_dir = tmp_path / "sourcing_model"
+    model_dir.mkdir()
+    contract_bytes = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    (model_dir / "consumer_contract.json").write_bytes(contract_bytes)
+    metadata = {
+        "champion_execution": {
+            "runner_role_contract": {
+                "roles": {
+                    "provider_prepare": {
+                        "adapter_member": member,
+                        "consumer_signature": {
+                            "consumer_contract_path": consumer_path
+                        },
+                    }
+                }
+            }
+        }
+    }
+    (tmp_path / "fixture_adapter.py").write_text(
+        "METADATA = "
+        + repr(metadata)
+        + "\n\ndef adapter_metadata():\n    return METADATA\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["bootstrap", "fixture_adapter", "runner_protocol_generation"],
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        StringIO(json.dumps({
+            "release_identity": {
+                "consumer_contract_sha256": hashlib.sha256(
+                    contract_bytes
+                ).hexdigest()
+            }
+        })),
+    )
+
+    exec(_COMMON_RUNNER_BOOTSTRAP, {"__name__": "bootstrap_fixture"})
+
+    result = json.loads(capsys.readouterr().out)
+    consumer = result["consumer_contract"]
+    assert consumer["functions"] == {member: ["action"]}
+    assert consumer["exact_signatures"] == [consumer_path]
+    assert consumer["full_parameters"] == {
+        member: ["action", "future_optional"]
+    }
+    assert consumer["frozen_asyncness"] == {member: False}
+    assert consumer["extensions"] == {
+        "leadpoet.fixture": {"hash_bound": True}
+    }
 
 
 def test_oci_runner_transport_exposes_the_complete_artifact_protocol(monkeypatch):

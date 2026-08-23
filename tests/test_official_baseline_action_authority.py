@@ -37,6 +37,7 @@ def test_official_baseline_behavior_covers_replay_zero_call_and_uncertainty():
     assert "'action_type', 'verify_company'" in sql
     assert "'call_count', 0" in sql
     assert "'provider_request_ref', NULL" in sql
+    assert "failed verifier replay custody invalid" in sql
     assert "unit closure replay was not idempotent" in sql
     assert "uncertain provider call was redispatched" in sql
     assert "append-only attempt update unexpectedly succeeded" in sql

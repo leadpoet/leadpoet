@@ -3,12 +3,60 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 from typing import Any, Mapping
 
 
 CONTRACT_HASH = "c" * 64
 
 _MEMBERS = {
+    "build_host_capability_manifest": (
+        ["bindings"],
+        ["bindings"],
+        [],
+    ),
+    "project_runner_result_for_benchmark": (
+        ["value"],
+        ["value", "start_request", "expected_release_identity"],
+        ["start_request", "expected_release_identity"],
+    ),
+    "build_official_baseline_execution": (
+        [],
+        [
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ],
+        [
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ],
+    ),
+    "prepare_runner_provider_request": (
+        ["action"],
+        ["action"],
+        [],
+    ),
+    "prepare_runner_normalization_request": (
+        ["action"],
+        ["action"],
+        [],
+    ),
+    "model_runner_provider_compiler_inventory": ([], [], []),
+    "runner_provider_compiler_preflight": (
+        ["host_capability_manifest"],
+        ["host_capability_manifest"],
+        [],
+    ),
+    "execute_runner_verifier_action": (["action"], ["action"], []),
+    "runner_official_host_binding_catalog": ([], [], []),
+    "build_runner_official_host_capability_manifest": (
+        ["availability"],
+        ["availability"],
+        [],
+    ),
     "build_runner_start": (
         [],
         [
@@ -113,6 +161,166 @@ _RAW_CONSTANTS = {
     "NORMALIZATION_TIMEOUT_SECONDS": 120.0,
 }
 
+_ROLE_MEMBERS = {
+    "raw_icp_input": "build_raw_runner_input",
+    "start": "build_runner_start",
+    "continuation": "continue_runner",
+    "completion": "build_runner_completion",
+    "provider_receipt_binding": "build_runner_provider_receipt_binding",
+    "preflight": "runner_preflight",
+    "preflight_validation": "validate_runner_preflight",
+    "result_validation": "validate_runner_result",
+    "benchmark_projection": "project_runner_result_for_benchmark",
+    "host_capability_manifest": "build_host_capability_manifest",
+    "official_baseline_execution": "build_official_baseline_execution",
+    "provider_prepare": "prepare_runner_provider_request",
+    "provider_compiler_inventory": "model_runner_provider_compiler_inventory",
+    "provider_compiler_preflight": "runner_provider_compiler_preflight",
+    "verifier_execution": "execute_runner_verifier_action",
+    "official_host_binding_catalog": "runner_official_host_binding_catalog",
+    "official_host_capability_manifest": (
+        "build_runner_official_host_capability_manifest"
+    ),
+    "normalization_prepare_legacy": "prepare_runner_normalization_request",
+}
+_ROLE_HOST_CALLS = {
+    "raw_icp_input": (["payload"], ["source_schema"], ["source_schema"]),
+    "start": ([], list(_MEMBERS["build_runner_start"][1]), list(
+        _MEMBERS["build_runner_start"][2]
+    )),
+    "continuation": (
+        ["start_request"],
+        ["expected_release_identity", "continuation", "completion"],
+        ["expected_release_identity"],
+    ),
+    "completion": (["action", "result"], [], []),
+    "provider_receipt_binding": (["action", "result"], [], []),
+    "preflight": (
+        ["host_capability_manifest", "release_identity"],
+        ["execution_mode"],
+        ["execution_mode"],
+    ),
+    "preflight_validation": (
+        ["value"],
+        ["host_capability_manifest", "release_identity", "execution_mode"],
+        ["host_capability_manifest", "release_identity", "execution_mode"],
+    ),
+    "result_validation": (
+        ["value"],
+        ["start_request", "expected_release_identity"],
+        ["start_request", "expected_release_identity"],
+    ),
+    "benchmark_projection": (
+        ["value"],
+        ["start_request", "expected_release_identity"],
+        ["start_request", "expected_release_identity"],
+    ),
+    "host_capability_manifest": (["bindings"], [], []),
+    "official_baseline_execution": (
+        [],
+        [
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ],
+        [
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ],
+    ),
+    "provider_prepare": (["action"], [], []),
+    "provider_compiler_inventory": ([], [], []),
+    "provider_compiler_preflight": (["host_capability_manifest"], [], []),
+    "verifier_execution": (["action"], [], []),
+    "official_host_binding_catalog": ([], [], []),
+    "official_host_capability_manifest": (["availability"], [], []),
+    "normalization_prepare_legacy": (["action"], [], []),
+}
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _role_contract(contract_id: str) -> dict[str, Any]:
+    required_roles = tuple(sorted(
+        role for role in _ROLE_MEMBERS
+        if role != "normalization_prepare_legacy"
+    ))
+    roles: dict[str, Any] = {}
+    for role, member in sorted(_ROLE_MEMBERS.items()):
+        positional, host_keywords, required_keyword_only = (
+            _ROLE_HOST_CALLS[role]
+        )
+        interface = {
+            "interface_id": "leadpoet.model_runner." + role,
+            "interface_major": 1,
+            "positional_parameters": list(positional),
+            "host_keyword_parameters": list(host_keywords),
+            "required_keyword_only": list(required_keyword_only),
+            "is_async": False,
+        }
+        signature = {
+            "consumer_contract_id": contract_id,
+            "consumer_contract_path": "research_lab_adapter.py:" + member,
+            "positional_parameters": list(_MEMBERS[member][0]),
+            "full_parameters": list(_MEMBERS[member][1]),
+            "required_keyword_only": list(_MEMBERS[member][2]),
+            "is_async": False,
+        }
+        roles[role] = {
+            "interface_id": interface["interface_id"],
+            "interface_major": 1,
+            "interface_contract": interface,
+            "interface_contract_sha256": _canonical_sha256(interface),
+            "adapter_member": member,
+            "consumer_signature": signature,
+            "consumer_signature_sha256": _canonical_sha256(signature),
+            "required_for_profiles": (
+                ["full_company"] if role in required_roles else []
+            ),
+        }
+    payload = {
+        "schema_version": "model-runner-role-contract:v1",
+        "compatibility_major": 1,
+        "consumer_contract_id": contract_id,
+        "roles": roles,
+        "activation_profiles": {
+            "full_company": {
+                "required_roles": list(required_roles),
+                "minimum_interface_major": {
+                    role: 1 for role in required_roles
+                },
+                "unknown_required_role_policy": (
+                    "reject_before_preflight_or_spend"
+                ),
+            }
+        },
+        "additive_compatibility": {
+            "known_required_roles": (
+                "bind_stable_interface_and_exact_signed_consumer_signature"
+            ),
+            "unknown_required_roles": "reject_before_preflight_or_spend",
+            "unknown_optional_roles": "accept_ignore_and_hash_bind",
+            "member_names_are_discovered_from_roles": True,
+            "commit_allowlists": False,
+            "exact_member_tuple_allowlists": False,
+        },
+        "extensions": {},
+        "canonical_json": "utf8-json-sort-keys-compact-ascii-no-nan",
+        "hash_algorithm": "sha256",
+    }
+    return {**payload, "contract_sha256": _canonical_sha256(payload)}
+
 
 def runner_release_identity(
     family: str = "v3",
@@ -132,9 +340,11 @@ def runner_declaration(
     family: str = "v3",
     *,
     contract_hash: str = CONTRACT_HASH,
+    official_baseline: bool = False,
 ) -> dict[str, Any]:
     if family not in {"v2", "v3"}:
         raise ValueError("fixture runner family must be v2 or v3")
+    contract_id = "test-runner-contract-" + family
     versions = dict(_V3_VERSIONS if family == "v3" else _V2_VERSIONS)
     model_constants = {
         **versions,
@@ -223,6 +433,200 @@ def runner_declaration(
         exact_constants["sourcing_model/raw_icp_normalization.py"] = (
             _RAW_CONSTANTS
         )
+        if official_baseline:
+            model_constants[
+                "MODEL_RUNNER_COMPLETION_ACCOUNTING_SCHEMA_VERSION"
+            ] = "model-runner-completion-accounting:v2"
+            champion["completion_accounting_schema_version"] = (
+                "model-runner-completion-accounting:v2"
+            )
+            def identity(
+                schema_version: str, **values: Any
+            ) -> dict[str, Any]:
+                payload = {
+                    "schema_version": schema_version,
+                    "contract_fields": ["fixture"],
+                    **values,
+                }
+                encoded = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+                return {
+                    **payload,
+                    "contract_sha256": hashlib.sha256(encoded).hexdigest(),
+                }
+
+            champion["normalization_action"].update({
+                "dispatch_schema_version": (
+                    "model-runner-normalization-dispatch:v1"
+                ),
+                "dispatch_entrypoint": (
+                    "prepare_runner_normalization_request"
+                ),
+                "dispatch_contract": identity(
+                    "model-runner-normalization-dispatch:v1"
+                ),
+            })
+            fixture_catalog_bindings = [{
+                "schema_version": "host-capability-binding:v1",
+                "action_type": "verify_company",
+                "tool_id": "verifier.company",
+                "binding_contract_sha256": "1" * 64,
+                "response_schema_version": "company-verifier-result:v1",
+                "idempotency": "idempotent",
+                "max_response_bytes": 100_000,
+            }]
+            fixture_binding_contracts_sha256 = hashlib.sha256(
+                json.dumps(
+                    fixture_catalog_bindings,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            fixture_catalog_payload = {
+                "schema_version": (
+                    "model-runner-official-host-binding-catalog:v1"
+                ),
+                "bindings": fixture_catalog_bindings,
+                "binding_contracts_sha256": (
+                    fixture_binding_contracts_sha256
+                ),
+            }
+            fixture_catalog_sha256 = hashlib.sha256(
+                json.dumps(
+                    fixture_catalog_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+
+            champion.update({
+                "host_capability_manifest_entrypoint": (
+                    "build_host_capability_manifest"
+                ),
+                "host_capability_manifest_schema_version": (
+                    "host-capability-manifest:v1"
+                ),
+                "host_capability_manifest_contract": identity(
+                    "host-capability-manifest-contract:v1"
+                ),
+                "benchmark_projection_entrypoint": (
+                    "project_runner_result_for_benchmark"
+                ),
+                "benchmark_projection_schema_version": (
+                    "model-runner-benchmark-projection:v1"
+                ),
+                "benchmark_projection_contract": identity(
+                    "model-runner-benchmark-projection-contract:v1"
+                ),
+                "official_baseline_execution_entrypoint": (
+                    "build_official_baseline_execution"
+                ),
+                "official_baseline_execution_schema_version": (
+                    "leadpoet.research_lab.official_baseline_execution.v1"
+                ),
+                "official_baseline_execution_contract": identity(
+                    "leadpoet.research_lab.official_baseline_execution-contract.v1"
+                ),
+                "provider_prepare_entrypoint": (
+                    "prepare_runner_provider_request"
+                ),
+                "provider_prepare_schema_version": (
+                    "model-runner-provider-dispatch:v1"
+                ),
+                "provider_prepare_contract": identity(
+                    "model-runner-provider-dispatch-contract:v1"
+                ),
+                "provider_compiler_inventory_entrypoint": (
+                    "model_runner_provider_compiler_inventory"
+                ),
+                "provider_compiler_inventory_schema_version": (
+                    "model-runner-provider-compiler-inventory:v1"
+                ),
+                "provider_compiler_preflight_entrypoint": (
+                    "runner_provider_compiler_preflight"
+                ),
+                "provider_compiler_preflight_schema_version": (
+                    "model-runner-provider-compiler-preflight:v1"
+                ),
+                "verifier_execution_entrypoint": (
+                    "execute_runner_verifier_action"
+                ),
+                "verifier_execution_schema_version": (
+                    "model-runner-verifier-execution:v1"
+                ),
+                "verifier_execution_contract": identity(
+                    "model-runner-verifier-execution-contract:v1"
+                ),
+                "official_host_binding_catalog_entrypoint": (
+                    "runner_official_host_binding_catalog"
+                ),
+                "official_host_binding_catalog_schema_version": (
+                    "model-runner-official-host-binding-catalog:v1"
+                ),
+                "official_host_binding_catalog_contract": identity(
+                    "model-runner-official-host-binding-catalog-contract:v1",
+                    binding_contracts_sha256=(
+                        fixture_binding_contracts_sha256
+                    ),
+                    catalog_sha256=fixture_catalog_sha256,
+                ),
+                "official_host_capability_manifest_entrypoint": (
+                    "build_runner_official_host_capability_manifest"
+                ),
+                "provider_response_schema_version": (
+                    "model-provider-response:v3"
+                ),
+                "candidate_provider_record_schema_version": (
+                    "model-candidate-provider-record:v1"
+                ),
+                "candidate_provider_projection_schema_version": (
+                    "model-candidate-provider-projection:v1"
+                ),
+                "candidate_provider_projection_contract": identity(
+                    "model-candidate-provider-projection:v1"
+                ),
+                "company_verifier_result_schema_version": (
+                    "company-verifier-response:v2"
+                ),
+                "company_verifier_result_contract": identity(
+                    "company-verifier-response:v2"
+                ),
+                "company_fit_source_evidence_schema_version": (
+                    "company-fit-source-evidence:v1"
+                ),
+                "company_fit_source_evidence_contract": identity(
+                    "company-fit-source-evidence:v1"
+                ),
+                "company_verifier_evidence_schema_version": (
+                    "company-verifier-evidence:v2"
+                ),
+                "model_verified_lead_evidence_schema_version": (
+                    "model-verified-lead-evidence:v2"
+                ),
+                "company_fit_proof_contract_sha256": "d" * 64,
+            })
+            required_names.update({
+                "build_host_capability_manifest",
+                "project_runner_result_for_benchmark",
+                "build_official_baseline_execution",
+                "prepare_runner_provider_request",
+                "prepare_runner_normalization_request",
+                "model_runner_provider_compiler_inventory",
+                "runner_provider_compiler_preflight",
+                "execute_runner_verifier_action",
+                "runner_official_host_binding_catalog",
+                "build_runner_official_host_capability_manifest",
+            })
+            champion["runner_role_contract"] = _role_contract(contract_id)
     functions = {
         name: list(_MEMBERS[name][0]) for name in sorted(required_names)
     }
@@ -230,26 +634,34 @@ def runner_declaration(
         name: list(_MEMBERS[name][1]) for name in sorted(required_names)
     }
     keyword_only = {
-        name: list(_MEMBERS[name][2]) for name in sorted(required_names)
+        name: list(_MEMBERS[name][2])
+        for name in sorted(required_names)
+        if _MEMBERS[name][2]
     }
+    consumer_contract: dict[str, Any] = {
+        "schema_version": 1,
+        "contract_id": contract_id,
+        "functions": functions,
+        "exact_signatures": [
+            "research_lab_adapter.py:" + name
+            for name in sorted(required_names)
+        ],
+        "full_parameters": full_parameters,
+        "required_keyword_only": keyword_only,
+        "exact_constants": exact_constants,
+    }
+    if official_baseline:
+        consumer_contract["extensions"] = {}
+        consumer_contract["frozen_asyncness"] = {
+            name: False for name in sorted(required_names)
+        }
     declaration = {
         "schema_version": (
             "leadpoet.research_lab.artifact_runner_declaration.v1"
         ),
         "champion_execution": champion,
         "consumer_contract_sha256": contract_hash,
-        "consumer_contract": {
-            "schema_version": 1,
-            "contract_id": "test-runner-contract-" + family,
-            "functions": functions,
-            "exact_signatures": [
-                "research_lab_adapter.py:" + name
-                for name in sorted(required_names)
-            ],
-            "full_parameters": full_parameters,
-            "required_keyword_only": keyword_only,
-            "exact_constants": exact_constants,
-        },
+        "consumer_contract": consumer_contract,
     }
     return deepcopy(declaration)
 

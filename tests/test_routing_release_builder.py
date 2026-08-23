@@ -315,7 +315,7 @@ def test_release_startup_fails_closed_without_upstream_model_operations():
 
     with pytest.raises(
         RoutingReleaseDependencyError,
-        match="build_host_capability_manifest.*evaluate_model_verifier_action",
+        match="evaluate_model_verifier_action",
     ):
         release_authorities._require_upstream_model_operations()
 
@@ -338,7 +338,7 @@ def test_authority_loader_stops_before_any_local_model_fallback(monkeypatch, tmp
     )
     with pytest.raises(
         RoutingReleaseDependencyError,
-        match="build_host_capability_manifest.*evaluate_model_verifier_action",
+        match="evaluate_model_verifier_action",
     ):
         release_authorities.load_reviewed_routing_release_authority_sources()
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 import threading
 from typing import Any, Mapping, Protocol, Sequence
@@ -24,14 +26,108 @@ _RAW_ICP_CONSTANTS_PATH = "sourcing_model/raw_icp_normalization.py"
 _GENERATION_V2 = "model-runner-protocol:v2"
 _GENERATION_V3 = "model-runner-protocol:v3"
 
+_V3_BASE_ROLES = frozenset({
+    "start",
+    "continuation",
+    "completion",
+    "preflight",
+    "preflight_validation",
+    "result_validation",
+    "raw_icp_input",
+    "provider_receipt_binding",
+})
+_V3_OFFICIAL_BASELINE_ROLES = frozenset({
+    "host_capability_manifest",
+    "benchmark_projection",
+    "official_baseline_execution",
+    "provider_prepare",
+    "provider_compiler_inventory",
+    "provider_compiler_preflight",
+    "verifier_execution",
+    "official_host_binding_catalog",
+    "official_host_capability_manifest",
+})
+_V3_OPTIONAL_ROLES = frozenset({"normalization_prepare_legacy"})
+_V3_FULL_COMPANY_REQUIRED_ROLES = (
+    _V3_BASE_ROLES | _V3_OFFICIAL_BASELINE_ROLES
+)
+
 _MEMBER_SIGNATURES = {
+    "host_capability_manifest": (
+        "build_host_capability_manifest",
+        ("bindings",),
+        ("bindings",),
+        (),
+    ),
+    "benchmark_projection": (
+        "project_runner_result_for_benchmark",
+        ("value",),
+        ("value", "start_request", "expected_release_identity"),
+        ("start_request", "expected_release_identity"),
+    ),
+    "official_baseline_execution": (
+        "build_official_baseline_execution",
+        (),
+        (
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ),
+        (
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ),
+    ),
+    "provider_prepare": (
+        "prepare_runner_provider_request",
+        ("action",),
+        ("action",),
+        (),
+    ),
+    "normalization_prepare_legacy": (
+        "prepare_runner_normalization_request",
+        ("action",),
+        ("action",),
+        (),
+    ),
+    "provider_compiler_inventory": (
+        "model_runner_provider_compiler_inventory",
+        (),
+        (),
+        (),
+    ),
+    "provider_compiler_preflight": (
+        "runner_provider_compiler_preflight",
+        ("host_capability_manifest",),
+        ("host_capability_manifest",),
+        (),
+    ),
+    "verifier_execution": (
+        "execute_runner_verifier_action",
+        ("action",),
+        ("action",),
+        (),
+    ),
+    "official_host_binding_catalog": (
+        "runner_official_host_binding_catalog",
+        (),
+        (),
+        (),
+    ),
+    "official_host_capability_manifest": (
+        "build_runner_official_host_capability_manifest",
+        ("availability",),
+        ("availability",),
+        (),
+    ),
     "start": (
         "build_runner_start",
         (),
         ("input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"),
         ("input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"),
     ),
-    "continue": (
+    "continuation": (
         "continue_runner",
         ("start_request",),
         ("start_request", "expected_release_identity", "continuation", "completion"),
@@ -61,7 +157,7 @@ _MEMBER_SIGNATURES = {
         ("value", "start_request", "expected_release_identity"),
         ("start_request", "expected_release_identity"),
     ),
-    "raw_input": (
+    "raw_icp_input": (
         "build_raw_runner_input",
         ("payload",),
         ("payload", "source_schema"),
@@ -116,6 +212,174 @@ _V3_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION = (
 _V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION = (
     "model-runner-completion-accounting:v2"
 )
+_V3_OFFICIAL_BASELINE_MEMBER_METADATA_KEYS = {
+    "host_capability_manifest": "host_capability_manifest_entrypoint",
+    "benchmark_projection": "benchmark_projection_entrypoint",
+    "official_baseline_execution": "official_baseline_execution_entrypoint",
+    "provider_prepare": "provider_prepare_entrypoint",
+    "provider_compiler_inventory": "provider_compiler_inventory_entrypoint",
+    "provider_compiler_preflight": "provider_compiler_preflight_entrypoint",
+    "verifier_execution": "verifier_execution_entrypoint",
+    "official_host_binding_catalog": (
+        "official_host_binding_catalog_entrypoint"
+    ),
+    "official_host_capability_manifest": (
+        "official_host_capability_manifest_entrypoint"
+    ),
+}
+_V3_OFFICIAL_BASELINE_SCHEMA_VERSIONS = {
+    "host_capability_manifest_schema_version": "host-capability-manifest:v1",
+    "benchmark_projection_schema_version": (
+        "model-runner-benchmark-projection:v1"
+    ),
+    "official_baseline_execution_schema_version": (
+        "leadpoet.research_lab.official_baseline_execution.v1"
+    ),
+    "provider_prepare_schema_version": "model-runner-provider-dispatch:v1",
+    "provider_compiler_inventory_schema_version": (
+        "model-runner-provider-compiler-inventory:v1"
+    ),
+    "provider_compiler_preflight_schema_version": (
+        "model-runner-provider-compiler-preflight:v1"
+    ),
+    "verifier_execution_schema_version": (
+        "model-runner-verifier-execution:v1"
+    ),
+    "official_host_binding_catalog_schema_version": (
+        "model-runner-official-host-binding-catalog:v1"
+    ),
+    # This identity belongs only to the signed official role-contract bundle.
+    # Legacy generations without that bundle retain their exact declarations.
+    "provider_response_schema_version": "model-provider-response:v3",
+    "candidate_provider_record_schema_version": (
+        "model-candidate-provider-record:v1"
+    ),
+    "candidate_provider_projection_schema_version": (
+        "model-candidate-provider-projection:v1"
+    ),
+    "company_verifier_result_schema_version": (
+        "company-verifier-response:v2"
+    ),
+    "company_fit_source_evidence_schema_version": (
+        "company-fit-source-evidence:v1"
+    ),
+    "company_verifier_evidence_schema_version": (
+        "company-verifier-evidence:v2"
+    ),
+    "model_verified_lead_evidence_schema_version": (
+        "model-verified-lead-evidence:v2"
+    ),
+}
+_V3_OFFICIAL_BASELINE_CONTRACT_KEYS = frozenset({
+    "host_capability_manifest_contract",
+    "benchmark_projection_contract",
+    "official_baseline_execution_contract",
+    "provider_prepare_contract",
+    "verifier_execution_contract",
+    "official_host_binding_catalog_contract",
+    "candidate_provider_projection_contract",
+    "company_verifier_result_contract",
+    "company_fit_source_evidence_contract",
+})
+_V3_OFFICIAL_BASELINE_HASH_KEYS = frozenset({
+    "company_fit_proof_contract_sha256",
+})
+_V3_OFFICIAL_BASELINE_METADATA_KEYS = frozenset(
+    _V3_OFFICIAL_BASELINE_MEMBER_METADATA_KEYS.values()
+) | frozenset(_V3_OFFICIAL_BASELINE_SCHEMA_VERSIONS) | (
+    _V3_OFFICIAL_BASELINE_CONTRACT_KEYS
+) | _V3_OFFICIAL_BASELINE_HASH_KEYS
+
+_RUNNER_ROLE_CONTRACT_SCHEMA_VERSION = "model-runner-role-contract:v1"
+_RUNNER_ROLE_COMPATIBILITY_MAJOR = 1
+_RUNNER_ROLE_ADDITIVE_COMPATIBILITY = {
+    "known_required_roles": (
+        "bind_stable_interface_and_exact_signed_consumer_signature"
+    ),
+    "unknown_required_roles": "reject_before_preflight_or_spend",
+    "unknown_optional_roles": "accept_ignore_and_hash_bind",
+    "member_names_are_discovered_from_roles": True,
+    "commit_allowlists": False,
+    "exact_member_tuple_allowlists": False,
+}
+_ROLE_INTERFACE_SHAPES = {
+    "raw_icp_input": (
+        ("payload",),
+        ("source_schema",),
+        ("source_schema",),
+    ),
+    "start": (
+        (),
+        (
+            "input",
+            "execution_mode",
+            "target_count",
+            "evaluated_on",
+            "host_capability_manifest",
+            "release_identity",
+        ),
+        (
+            "input",
+            "execution_mode",
+            "target_count",
+            "evaluated_on",
+            "host_capability_manifest",
+            "release_identity",
+        ),
+    ),
+    "continuation": (
+        ("start_request",),
+        ("expected_release_identity", "continuation", "completion"),
+        ("expected_release_identity",),
+    ),
+    "completion": (("action", "result"), (), ()),
+    "provider_receipt_binding": (("action", "result"), (), ()),
+    "preflight": (
+        ("host_capability_manifest", "release_identity"),
+        ("execution_mode",),
+        ("execution_mode",),
+    ),
+    "preflight_validation": (
+        ("value",),
+        ("host_capability_manifest", "release_identity", "execution_mode"),
+        ("host_capability_manifest", "release_identity", "execution_mode"),
+    ),
+    "result_validation": (
+        ("value",),
+        ("start_request", "expected_release_identity"),
+        ("start_request", "expected_release_identity"),
+    ),
+    "benchmark_projection": (
+        ("value",),
+        ("start_request", "expected_release_identity"),
+        ("start_request", "expected_release_identity"),
+    ),
+    "host_capability_manifest": (("bindings",), (), ()),
+    "official_baseline_execution": (
+        (),
+        (
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ),
+        (
+            "release_identity",
+            "protocol_generation_sha256",
+            "protected_action_authority_sha256",
+        ),
+    ),
+    "provider_prepare": (("action",), (), ()),
+    "provider_compiler_inventory": ((), (), ()),
+    "provider_compiler_preflight": (
+        ("host_capability_manifest",),
+        (),
+        (),
+    ),
+    "verifier_execution": (("action",), (), ()),
+    "official_host_binding_catalog": ((), (), ()),
+    "official_host_capability_manifest": (("availability",), (), ()),
+    "normalization_prepare_legacy": (("action",), (), ()),
+}
 
 
 def _closed_string_mapping(value: Any, *, label: str) -> dict[str, Any]:
@@ -132,6 +396,340 @@ def _string_sequence(value: Any, *, label: str) -> tuple[str, ...]:
     ):
         raise ModelRunnerHostError(f"{label} is invalid")
     return tuple(value)
+
+
+def _validate_contract_identity(value: Any, *, label: str) -> Mapping[str, Any]:
+    """Validate a model-owned, self-hashed static contract identity."""
+
+    identity = _closed_string_mapping(value, label=label)
+    contract_hash = identity.get("contract_sha256")
+    if not isinstance(contract_hash, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", contract_hash
+    ):
+        raise ModelRunnerHostError(f"{label} hash is invalid")
+    payload = {
+        key: item for key, item in identity.items() if key != "contract_sha256"
+    }
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ModelRunnerHostError(f"{label} is not canonical JSON") from exc
+    if hashlib.sha256(encoded).hexdigest() != contract_hash:
+        raise ModelRunnerHostError(f"{label} hash differs")
+    return identity
+
+
+def _bare_sha256_json(value: Any) -> str:
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ModelRunnerHostError("artifact value is not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runner_interface_contract(role: str) -> dict[str, Any]:
+    positional, host_keywords, required_keyword_only = (
+        _ROLE_INTERFACE_SHAPES[role]
+    )
+    return {
+        "interface_id": "leadpoet.model_runner." + role,
+        "interface_major": 1,
+        "positional_parameters": list(positional),
+        "host_keyword_parameters": list(host_keywords),
+        "required_keyword_only": list(required_keyword_only),
+        "is_async": False,
+    }
+
+
+def _validate_runner_role_contract(
+    value: Any,
+    *,
+    consumer_contract_id: str,
+    functions: Mapping[str, Any],
+    full_parameters: Mapping[str, Any],
+    keyword_only: Mapping[str, Any],
+    exact_signatures: frozenset[str],
+    frozen_asyncness: Mapping[str, Any],
+) -> dict[str, str]:
+    """Validate the signed additive map and bind exact artifact members."""
+
+    role_contract = _closed_string_mapping(
+        value, label="artifact runner role contract"
+    )
+    expected_top_fields = {
+        "schema_version",
+        "compatibility_major",
+        "consumer_contract_id",
+        "roles",
+        "activation_profiles",
+        "additive_compatibility",
+        "extensions",
+        "canonical_json",
+        "hash_algorithm",
+        "contract_sha256",
+    }
+    contract_sha256 = str(role_contract.get("contract_sha256") or "")
+    extensions = _closed_string_mapping(
+        role_contract.get("extensions"),
+        label="artifact runner role contract extensions",
+    )
+    contract_payload = {
+        key: item
+        for key, item in role_contract.items()
+        if key != "contract_sha256"
+    }
+    if (
+        set(role_contract) != expected_top_fields
+        or role_contract.get("schema_version")
+        != _RUNNER_ROLE_CONTRACT_SCHEMA_VERSION
+        or role_contract.get("compatibility_major")
+        != _RUNNER_ROLE_COMPATIBILITY_MAJOR
+        or role_contract.get("consumer_contract_id") != consumer_contract_id
+        or role_contract.get("canonical_json")
+        != "utf8-json-sort-keys-compact-ascii-no-nan"
+        or role_contract.get("hash_algorithm") != "sha256"
+        or any(
+            "." not in key
+            or re.fullmatch(r"[a-z][a-z0-9_.-]{2,127}", key) is None
+            for key in extensions
+        )
+        or role_contract.get("additive_compatibility")
+        != _RUNNER_ROLE_ADDITIVE_COMPATIBILITY
+        or not re.fullmatch(r"[0-9a-f]{64}", contract_sha256)
+        or _bare_sha256_json(contract_payload) != contract_sha256
+    ):
+        raise ModelRunnerHostError(
+            "artifact runner role contract identity differs"
+        )
+
+    roles = _closed_string_mapping(
+        role_contract.get("roles"), label="artifact runner roles"
+    )
+    profiles = _closed_string_mapping(
+        role_contract.get("activation_profiles"),
+        label="artifact runner activation profiles",
+    )
+    full_company = _closed_string_mapping(
+        profiles.get("full_company"),
+        label="artifact runner full-company profile",
+    )
+    required_roles = tuple(sorted(_string_sequence(
+        full_company.get("required_roles"),
+        label="artifact runner full-company required roles",
+    )))
+    minimum_majors = _closed_string_mapping(
+        full_company.get("minimum_interface_major"),
+        label="artifact runner full-company minimum majors",
+    )
+    if (
+        set(full_company) != {
+            "required_roles",
+            "minimum_interface_major",
+            "unknown_required_role_policy",
+        }
+        or full_company.get("unknown_required_role_policy")
+        != "reject_before_preflight_or_spend"
+        or required_roles != tuple(sorted(_V3_FULL_COMPANY_REQUIRED_ROLES))
+        or set(minimum_majors) != set(required_roles)
+        or any(minimum_majors.get(role) != 1 for role in required_roles)
+    ):
+        raise ModelRunnerHostError(
+            "artifact runner full-company role requirements differ"
+        )
+
+    members: dict[str, str] = {}
+    known_roles = _V3_FULL_COMPANY_REQUIRED_ROLES | _V3_OPTIONAL_ROLES
+    for role, raw_entry in sorted(roles.items()):
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", role):
+            raise ModelRunnerHostError("artifact runner role name is invalid")
+        entry = _closed_string_mapping(
+            raw_entry, label=f"artifact runner {role} role"
+        )
+        if set(entry) != {
+            "interface_id",
+            "interface_major",
+            "interface_contract",
+            "interface_contract_sha256",
+            "adapter_member",
+            "consumer_signature",
+            "consumer_signature_sha256",
+            "required_for_profiles",
+        }:
+            raise ModelRunnerHostError(
+                f"artifact runner {role} role fields differ"
+            )
+        interface = _closed_string_mapping(
+            entry.get("interface_contract"),
+            label=f"artifact runner {role} interface contract",
+        )
+        interface_sha256 = str(
+            entry.get("interface_contract_sha256") or ""
+        )
+        signature = _closed_string_mapping(
+            entry.get("consumer_signature"),
+            label=f"artifact runner {role} consumer signature",
+        )
+        signature_sha256 = str(
+            entry.get("consumer_signature_sha256") or ""
+        )
+        member = str(entry.get("adapter_member") or "")
+        interface_major = interface.get("interface_major")
+        interface_is_async = interface.get("is_async")
+        required_for_profiles = tuple(_string_sequence(
+            entry.get("required_for_profiles"),
+            label=f"artifact runner {role} required profiles",
+        ))
+        if (
+            set(interface) != {
+                "interface_id",
+                "interface_major",
+                "positional_parameters",
+                "host_keyword_parameters",
+                "required_keyword_only",
+                "is_async",
+            }
+            or interface.get("interface_id")
+            != "leadpoet.model_runner." + role
+            or type(interface_major) is not int
+            or interface_major < 1
+            or type(interface_is_async) is not bool
+            or entry.get("interface_id") != interface.get("interface_id")
+            or entry.get("interface_major") != interface_major
+            or not re.fullmatch(r"[0-9a-f]{64}", interface_sha256)
+            or _bare_sha256_json(interface) != interface_sha256
+            or not member.isidentifier()
+            or required_for_profiles
+            != tuple(sorted(set(required_for_profiles)))
+        ):
+            raise ModelRunnerHostError(
+                f"artifact runner {role} interface identity differs"
+            )
+        for field in (
+            "positional_parameters",
+            "host_keyword_parameters",
+            "required_keyword_only",
+        ):
+            values = _string_sequence(
+                interface.get(field),
+                label=f"artifact runner {role} interface {field}",
+            )
+            if len(values) != len(set(values)):
+                raise ModelRunnerHostError(
+                    f"artifact runner {role} interface {field} is duplicated"
+                )
+        if not set(interface["required_keyword_only"]).issubset(
+            set(interface["host_keyword_parameters"])
+        ):
+            raise ModelRunnerHostError(
+                f"artifact runner {role} interface keywords differ"
+            )
+
+        if set(signature) != {
+            "consumer_contract_id",
+            "consumer_contract_path",
+            "positional_parameters",
+            "full_parameters",
+            "required_keyword_only",
+            "is_async",
+        }:
+            raise ModelRunnerHostError(
+                f"artifact runner {role} consumer signature fields differ"
+            )
+        path = str(signature.get("consumer_contract_path") or "")
+        path_parts = path.rsplit(":", 1)
+        signature_positional = _string_sequence(
+            signature.get("positional_parameters"),
+            label=f"artifact runner {role} signature positional parameters",
+        )
+        signature_full = _string_sequence(
+            signature.get("full_parameters"),
+            label=f"artifact runner {role} signature full parameters",
+        )
+        signature_keyword_only = _string_sequence(
+            signature.get("required_keyword_only"),
+            label=f"artifact runner {role} signature keyword-only parameters",
+        )
+        if (
+            signature.get("consumer_contract_id") != consumer_contract_id
+            or len(path_parts) != 2
+            or path_parts[1] != member
+            or type(signature.get("is_async")) is not bool
+            or signature.get("is_async") is not interface_is_async
+            or not re.fullmatch(r"[0-9a-f]{64}", signature_sha256)
+            or _bare_sha256_json(signature) != signature_sha256
+            or path not in exact_signatures
+            or _string_sequence(
+                functions.get(member),
+                label=f"artifact runner {role} exact positional parameters",
+            )
+            != signature_positional
+            or _string_sequence(
+                full_parameters.get(member),
+                label=f"artifact runner {role} exact full parameters",
+            )
+            != signature_full
+            or _string_sequence(
+                keyword_only.get(member, []),
+                label=f"artifact runner {role} exact keyword-only parameters",
+            )
+            != signature_keyword_only
+            or frozen_asyncness.get(member) is not signature.get("is_async")
+        ):
+            raise ModelRunnerHostError(
+                f"artifact runner {role} exact consumer signature differs"
+            )
+
+        if role not in known_roles:
+            if "full_company" in required_for_profiles:
+                raise ModelRunnerHostError(
+                    "artifact runner has an unknown required full-company role"
+                )
+            continue
+        expected_interface = _runner_interface_contract(role)
+        stable_positional = tuple(
+            expected_interface["positional_parameters"]
+        )
+        stable_host_keywords = tuple(
+            expected_interface["host_keyword_parameters"]
+        )
+        stable_required_keywords = tuple(
+            expected_interface["required_keyword_only"]
+        )
+        if (
+            interface != expected_interface
+            or signature_positional != stable_positional
+            or signature_keyword_only != stable_required_keywords
+            or not set(stable_positional + stable_host_keywords).issubset(
+                signature_full
+            )
+        ):
+            raise ModelRunnerHostError(
+                f"artifact runner {role} interface major or host call differs"
+            )
+        should_require = role in _V3_FULL_COMPANY_REQUIRED_ROLES
+        if ("full_company" in required_for_profiles) is not should_require:
+            raise ModelRunnerHostError(
+                f"artifact runner {role} activation profile differs"
+            )
+        members[role] = member
+
+    if not _V3_FULL_COMPANY_REQUIRED_ROLES.issubset(members):
+        raise ModelRunnerHostError(
+            "artifact runner full-company role members are incomplete"
+        )
+    return dict(sorted(members.items()))
 
 
 @dataclass(frozen=True)
@@ -186,7 +784,7 @@ class ArtifactRunnerProtocolGeneration:
             declaration["consumer_contract"],
             label="artifact runner consumer contract",
         )
-        if set(contract) != {
+        contract_fields = {
             "schema_version",
             "contract_id",
             "functions",
@@ -194,7 +792,23 @@ class ArtifactRunnerProtocolGeneration:
             "full_parameters",
             "required_keyword_only",
             "exact_constants",
-        }:
+        }
+        role_contract_present = champion.get("runner_role_contract") is not None
+        if role_contract_present:
+            contract_fields.update({"extensions", "frozen_asyncness"})
+            contract_extensions = _closed_string_mapping(
+                contract.get("extensions"),
+                label="artifact runner consumer contract extensions",
+            )
+            if any(
+                "." not in key
+                or re.fullmatch(r"[a-z][a-z0-9_.-]{2,127}", key) is None
+                for key in contract_extensions
+            ):
+                raise ModelRunnerHostError(
+                    "artifact runner consumer contract extensions are invalid"
+                )
+        if set(contract) != contract_fields:
             raise ModelRunnerHostError(
                 "artifact runner consumer declaration is not closed"
             )
@@ -208,6 +822,14 @@ class ArtifactRunnerProtocolGeneration:
         keyword_only = _closed_string_mapping(
             contract["required_keyword_only"],
             label="artifact runner keyword-only parameters",
+        )
+        frozen_asyncness = (
+            _closed_string_mapping(
+                contract.get("frozen_asyncness"),
+                label="artifact runner frozen asyncness",
+            )
+            if role_contract_present
+            else {}
         )
         exact_signatures = frozenset(
             _string_sequence(
@@ -232,13 +854,14 @@ class ArtifactRunnerProtocolGeneration:
                 label="artifact runner raw ICP constants",
             )
         )
+        role_contract_members: dict[str, str] | None = None
         if all(
             model_constants.get(name) == expected
             for name, expected in _V3_VERSIONS.items()
         ):
             family = _GENERATION_V3
             expected_versions = dict(_V3_VERSIONS)
-            required_roles = frozenset(_MEMBER_SIGNATURES)
+            required_roles = _V3_BASE_ROLES
             if any(
                 raw_constants.get(name) != expected
                 for name, expected in _V3_RAW_VERSIONS.items()
@@ -286,15 +909,91 @@ class ArtifactRunnerProtocolGeneration:
                 expected_champion_keys.add(
                     "completion_accounting_schema_version"
                 )
+
+            official_metadata_present = bool(
+                set(champion) & _V3_OFFICIAL_BASELINE_METADATA_KEYS
+            )
+            if official_metadata_present and not role_contract_present:
+                raise ModelRunnerHostError(
+                    "artifact official baseline role contract is unavailable"
+                )
+            if role_contract_present:
+                if not official_metadata_present:
+                    raise ModelRunnerHostError(
+                        "artifact official baseline declaration is incomplete"
+                    )
+                expected_champion_keys.update(
+                    _V3_OFFICIAL_BASELINE_METADATA_KEYS
+                )
+                expected_champion_keys.add("runner_role_contract")
+                expected_champion_keys.difference_update({
+                    "raw_icp_entrypoint",
+                    "entrypoint",
+                    "start_entrypoint",
+                    "completion_entrypoint",
+                    "provider_receipt_binding_entrypoint",
+                    "preflight_entrypoint",
+                    "preflight_validation_entrypoint",
+                    "result_validation_entrypoint",
+                    "legacy_rollback_entrypoint",
+                    *_V3_OFFICIAL_BASELINE_MEMBER_METADATA_KEYS.values(),
+                })
+                required_roles = _V3_FULL_COMPANY_REQUIRED_ROLES
+                if completion_accounting != (
+                    _V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION
+                ):
+                    raise ModelRunnerHostError(
+                        "artifact official baseline completion accounting differs"
+                    )
+                if any(
+                    champion.get(key) != expected
+                    for key, expected in (
+                        _V3_OFFICIAL_BASELINE_SCHEMA_VERSIONS.items()
+                    )
+                ):
+                    raise ModelRunnerHostError(
+                        "artifact official baseline schema identities differ"
+                    )
+                for contract_key in sorted(
+                    _V3_OFFICIAL_BASELINE_CONTRACT_KEYS
+                ):
+                    _validate_contract_identity(
+                        champion.get(contract_key),
+                        label=(
+                            "artifact official baseline " + contract_key
+                        ),
+                    )
+                for hash_key in sorted(_V3_OFFICIAL_BASELINE_HASH_KEYS):
+                    if not re.fullmatch(
+                        r"[0-9a-f]{64}", str(champion.get(hash_key) or "")
+                    ):
+                        raise ModelRunnerHostError(
+                            "artifact official baseline "
+                            + hash_key
+                            + " is invalid"
+                        )
+                role_contract_members = _validate_runner_role_contract(
+                    champion.get("runner_role_contract"),
+                    consumer_contract_id=str(contract.get("contract_id") or ""),
+                    functions=functions,
+                    full_parameters=full_parameters,
+                    keyword_only=keyword_only,
+                    exact_signatures=exact_signatures,
+                    frozen_asyncness=frozen_asyncness,
+                )
         elif all(
             model_constants.get(name) == expected
             for name, expected in _V2_VERSIONS.items()
         ):
+            if role_contract_present:
+                raise ModelRunnerHostError(
+                    "artifact runner v2 role contract is unsupported"
+                )
             family = _GENERATION_V2
             expected_versions = _V2_VERSIONS
             required_roles = frozenset({
                 "start",
-                "continue",
+                "continuation",
                 "completion",
                 "preflight",
                 "preflight_validation",
@@ -319,7 +1018,13 @@ class ArtifactRunnerProtocolGeneration:
             raise ModelRunnerHostError(
                 "artifact runner protocol generation is unsupported"
             )
-        if set(champion) != expected_champion_keys:
+        if (
+            not role_contract_present
+            and set(champion) != expected_champion_keys
+        ) or (
+            role_contract_present
+            and not expected_champion_keys.issubset(champion)
+        ):
             raise ModelRunnerHostError(
                 "artifact champion execution metadata differs from generation"
             )
@@ -370,55 +1075,61 @@ class ArtifactRunnerProtocolGeneration:
 
         member_metadata_keys = {
             "start": "start_entrypoint",
-            "continue": "entrypoint",
+            "continuation": "entrypoint",
             "completion": "completion_entrypoint",
             "preflight": "preflight_entrypoint",
             "preflight_validation": "preflight_validation_entrypoint",
             "result_validation": "result_validation_entrypoint",
-            "raw_input": "raw_icp_entrypoint",
+            "raw_icp_input": "raw_icp_entrypoint",
             "provider_receipt_binding": (
                 "provider_receipt_binding_entrypoint"
             ),
+            **_V3_OFFICIAL_BASELINE_MEMBER_METADATA_KEYS,
         }
-        members: dict[str, str] = {}
-        for role in sorted(required_roles):
-            (
-                expected_name,
-                expected_required_positional,
-                expected_parameters,
-                expected_keyword_only,
-            ) = (
-                _MEMBER_SIGNATURES[role]
-            )
-            declared_name = champion.get(member_metadata_keys[role])
-            if declared_name is None and family == _GENERATION_V2 and role == "start":
-                declared_name = expected_name
-            if declared_name != expected_name:
-                raise ModelRunnerHostError(
-                    f"artifact runner {role} member is unsupported"
-                )
-            if (
-                f"{_ADAPTER_PATH}:{expected_name}" not in exact_signatures
-                or _string_sequence(
-                    functions.get(expected_name),
-                    label=f"artifact runner {role} positional parameters",
-                )
-                != expected_required_positional
-                or _string_sequence(
-                    full_parameters.get(expected_name),
-                    label=f"artifact runner {role} full parameters",
-                )
-                != expected_parameters
-                or _string_sequence(
-                    keyword_only.get(expected_name),
-                    label=f"artifact runner {role} keyword-only parameters",
-                )
-                != expected_keyword_only
-            ):
-                raise ModelRunnerHostError(
-                    f"artifact runner {role} signature differs"
-                )
-            members[role] = expected_name
+        if role_contract_present:
+            members = dict(role_contract_members or {})
+        else:
+            members: dict[str, str] = {}
+            for role in sorted(required_roles):
+                (
+                    expected_name,
+                    expected_required_positional,
+                    expected_parameters,
+                    expected_keyword_only,
+                ) = _MEMBER_SIGNATURES[role]
+                declared_name = champion.get(member_metadata_keys[role])
+                if (
+                    declared_name is None
+                    and family == _GENERATION_V2
+                    and role == "start"
+                ):
+                    declared_name = expected_name
+                if declared_name != expected_name:
+                    raise ModelRunnerHostError(
+                        f"artifact runner {role} member is unsupported"
+                    )
+                if (
+                    f"{_ADAPTER_PATH}:{expected_name}" not in exact_signatures
+                    or _string_sequence(
+                        functions.get(expected_name),
+                        label=f"artifact runner {role} positional parameters",
+                    )
+                    != expected_required_positional
+                    or _string_sequence(
+                        full_parameters.get(expected_name),
+                        label=f"artifact runner {role} full parameters",
+                    )
+                    != expected_parameters
+                    or _string_sequence(
+                        keyword_only.get(expected_name, []),
+                        label=f"artifact runner {role} keyword-only parameters",
+                    )
+                    != expected_keyword_only
+                ):
+                    raise ModelRunnerHostError(
+                        f"artifact runner {role} signature differs"
+                    )
+                members[role] = expected_name
 
         raw_sources: tuple[str, ...] = ()
         if family == _GENERATION_V3:
@@ -426,11 +1137,22 @@ class ArtifactRunnerProtocolGeneration:
                 champion.get("raw_icp_source_schemas"),
                 label="artifact raw ICP source schemas",
             )))
-            if raw_sources != tuple(sorted({
+            required_raw_sources = {
                 _V3_RAW_VERSIONS["SITE_RAW_ICP_SOURCE_SCHEMA"],
                 _V3_RAW_VERSIONS["LAB_RAW_ICP_SOURCE_SCHEMA"],
-            })) or champion.get("raw_icp_envelope_schema_version") != (
+            }
+            if (
+                (role_contract_present and not required_raw_sources.issubset(
+                    raw_sources
+                ))
+                or (
+                    not role_contract_present
+                    and raw_sources != tuple(sorted(required_raw_sources))
+                )
+                or len(raw_sources) != len(set(raw_sources))
+                or champion.get("raw_icp_envelope_schema_version") != (
                 _V3_RAW_VERSIONS["RAW_ICP_ENVELOPE_SCHEMA_VERSION"]
+                )
             ):
                 raise ModelRunnerHostError(
                     "artifact raw ICP source identity differs"
@@ -465,7 +1187,35 @@ class ArtifactRunnerProtocolGeneration:
                     "provider_identity_sha256",
                 ],
             }
-            if normalization != expected_normalization:
+            if role_contract_present and (
+                "normalization_prepare_legacy" in members
+            ):
+                dispatch_contract = _validate_contract_identity(
+                    normalization.get("dispatch_contract"),
+                    label="artifact normalization dispatch contract",
+                )
+                expected_normalization.update({
+                    "dispatch_schema_version": (
+                        "model-runner-normalization-dispatch:v1"
+                    ),
+                    "dispatch_entrypoint": (
+                        members["normalization_prepare_legacy"]
+                    ),
+                    "dispatch_contract": dispatch_contract,
+                })
+            if (
+                (
+                    role_contract_present
+                    and any(
+                        normalization.get(key) != expected
+                        for key, expected in expected_normalization.items()
+                    )
+                )
+                or (
+                    not role_contract_present
+                    and normalization != expected_normalization
+                )
+            ):
                 raise ModelRunnerHostError(
                     "artifact normalization action identity differs"
                 )
@@ -506,6 +1256,25 @@ class ArtifactRunnerProtocolGeneration:
     @property
     def supports_provider_receipt_binding(self) -> bool:
         return self.family == _GENERATION_V3
+
+    @property
+    def supports_official_baseline(self) -> bool:
+        return _V3_OFFICIAL_BASELINE_ROLES.issubset(self.members)
+
+    def official_contract_sha256(self, metadata_key: str) -> str:
+        if not self.supports_official_baseline:
+            raise ModelRunnerHostError(
+                "artifact runner generation has no official baseline bundle"
+            )
+        if metadata_key not in _V3_OFFICIAL_BASELINE_CONTRACT_KEYS:
+            raise ModelRunnerHostError(
+                "artifact official baseline contract key is unsupported"
+            )
+        identity = _validate_contract_identity(
+            self.champion_execution.get(metadata_key),
+            label=f"artifact official baseline {metadata_key}",
+        )
+        return "sha256:" + str(identity["contract_sha256"])
 
     def member(self, role: str) -> str:
         value = self.members.get(role)
@@ -563,6 +1332,78 @@ class ArtifactRunnerTransport(Protocol):
         self,
         action: Mapping[str, Any],
         result: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def build_host_capability_manifest(
+        self,
+        *,
+        bindings: Sequence[Mapping[str, Any]],
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def project_runner_result_for_benchmark(
+        self,
+        terminal_result: Mapping[str, Any],
+        *,
+        start_request: Mapping[str, Any],
+        expected_release_identity: Mapping[str, Any],
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def build_official_baseline_execution(
+        self,
+        *,
+        release_identity: Mapping[str, Any],
+        protocol_generation_sha256: str,
+        protected_action_authority_sha256: str,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def prepare_runner_provider_request(
+        self,
+        action: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def prepare_runner_normalization_request(
+        self,
+        action: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def model_runner_provider_compiler_inventory(
+        self,
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def runner_provider_compiler_preflight(
+        self,
+        host_capability_manifest: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def execute_runner_verifier_action(
+        self,
+        action: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def runner_official_host_binding_catalog(
+        self,
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def build_runner_official_host_capability_manifest(
+        self,
+        availability: Mapping[str, Any],
         *,
         member_name: str,
     ) -> Mapping[str, Any]: ...
@@ -638,6 +1479,18 @@ class ResearchLabModelRunnerProtocol:
         self._generation: ArtifactRunnerProtocolGeneration | None = None
         self._generation_lock = threading.Lock()
 
+    def _official_transport_method(self, method_name: str) -> Any:
+        if not self.protocol_generation.supports_official_baseline:
+            raise ModelRunnerHostError(
+                "artifact runner generation has no official baseline bundle"
+            )
+        method = getattr(self._transport, method_name, None)
+        if not callable(method):
+            raise ModelRunnerHostError(
+                f"artifact transport method {method_name} is unavailable"
+            )
+        return method
+
     @property
     def protocol_generation(self) -> ArtifactRunnerProtocolGeneration:
         generation = self._generation
@@ -691,7 +1544,7 @@ class ResearchLabModelRunnerProtocol:
         result = self._transport.build_raw_runner_input(
             payload,
             source_schema=source_schema,
-            member_name=generation.member("raw_input"),
+            member_name=generation.member("raw_icp_input"),
         )
         if not isinstance(result, Mapping) or set(result) != {
             "kind", "raw_icp"
@@ -722,7 +1575,7 @@ class ResearchLabModelRunnerProtocol:
             expected_release_identity=self._release_identity,
             continuation=continuation,
             completion=completion,
-            member_name=self.protocol_generation.member("continue"),
+            member_name=self.protocol_generation.member("continuation"),
         )
         return self._validate_state(result, "artifact continuation")
 
@@ -735,6 +1588,450 @@ class ResearchLabModelRunnerProtocol:
         """Whether this exact generation declared the receipt member."""
 
         return self.protocol_generation.supports_provider_receipt_binding
+
+    @property
+    def artifact_official_baseline_supported(self) -> bool:
+        return self.protocol_generation.supports_official_baseline
+
+    def _validate_host_capability_manifest_result(
+        self,
+        value: Any,
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema_version",
+            "binding_contracts_sha256",
+            "bindings",
+            "manifest_sha256",
+        }:
+            raise ModelRunnerHostError(
+                "artifact host capability manifest is not closed"
+            )
+        manifest = dict(value)
+        declared_schema = generation.champion_execution[
+            "host_capability_manifest_schema_version"
+        ]
+        returned_bindings = manifest.get("bindings")
+        if (
+            manifest.get("schema_version") != declared_schema
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(manifest.get("binding_contracts_sha256") or ""),
+            )
+            or not isinstance(returned_bindings, list)
+            or any(
+                not isinstance(item, Mapping)
+                or set(item)
+                != {
+                    "schema_version",
+                    "action_type",
+                    "tool_id",
+                    "binding_contract_sha256",
+                    "response_schema_version",
+                    "available",
+                    "idempotency",
+                    "max_response_bytes",
+                }
+                for item in returned_bindings
+            )
+            or manifest.get("manifest_sha256")
+            != _bare_sha256_json(
+                {
+                    key: item
+                    for key, item in manifest.items()
+                    if key != "manifest_sha256"
+                }
+            )
+        ):
+            raise ModelRunnerHostError(
+                "artifact host capability manifest is invalid"
+            )
+        return manifest
+
+    def build_host_capability_manifest(
+        self,
+        *,
+        bindings: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "build_host_capability_manifest"
+        )(
+            bindings=bindings,
+            member_name=generation.member("host_capability_manifest"),
+        )
+        return self._validate_host_capability_manifest_result(result)
+
+    def project_runner_result_for_benchmark(
+        self,
+        value: Mapping[str, Any],
+        *,
+        start_request: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "project_runner_result_for_benchmark"
+        )(
+            value,
+            start_request=start_request,
+            expected_release_identity=self._release_identity,
+            member_name=generation.member("benchmark_projection"),
+        )
+        if not isinstance(result, Mapping):
+            raise ModelRunnerHostError(
+                "artifact benchmark projection is invalid"
+            )
+        return dict(result)
+
+    def build_official_baseline_execution(
+        self,
+        *,
+        protected_action_authority_sha256: str,
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(protected_action_authority_sha256 or ""),
+        ):
+            raise ModelRunnerHostError(
+                "protected action authority identity is invalid"
+            )
+        result = self._official_transport_method(
+            "build_official_baseline_execution"
+        )(
+            release_identity=self._release_identity,
+            protocol_generation_sha256=(
+                generation.protocol_generation_sha256
+            ),
+            protected_action_authority_sha256=(
+                protected_action_authority_sha256
+            ),
+            member_name=generation.member("official_baseline_execution"),
+        )
+        expected = {
+            "schema_version": generation.champion_execution[
+                "official_baseline_execution_schema_version"
+            ],
+            "runner_family": "exact_model_runner:v3",
+            "execution_mode": "measured_lab",
+            "release_identity_sha256": sha256_json(self._release_identity),
+            "protocol_generation_sha256": (
+                generation.protocol_generation_sha256
+            ),
+            "benchmark_projection_sha256": (
+                generation.official_contract_sha256(
+                    "benchmark_projection_contract"
+                )
+            ),
+            "protected_action_authority_sha256": (
+                protected_action_authority_sha256
+            ),
+        }
+        if not isinstance(result, Mapping) or dict(result) != expected:
+            raise ModelRunnerHostError(
+                "artifact official baseline selection differs"
+            )
+        return expected
+
+    def provider_compiler_inventory(self) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "model_runner_provider_compiler_inventory"
+        )(
+            member_name=generation.member("provider_compiler_inventory")
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("schema_version")
+            != generation.champion_execution[
+                "provider_compiler_inventory_schema_version"
+            ]
+        ):
+            raise ModelRunnerHostError(
+                "artifact provider compiler inventory is invalid"
+            )
+        return dict(result)
+
+    def provider_compiler_preflight(
+        self,
+        host_capability_manifest: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "runner_provider_compiler_preflight"
+        )(
+            host_capability_manifest,
+            member_name=generation.member("provider_compiler_preflight"),
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("schema_version")
+            != generation.champion_execution[
+                "provider_compiler_preflight_schema_version"
+            ]
+        ):
+            raise ModelRunnerHostError(
+                "artifact provider compiler preflight is invalid"
+            )
+        return dict(result)
+
+    def official_host_binding_catalog(self) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "runner_official_host_binding_catalog"
+        )(
+            member_name=generation.member(
+                "official_host_binding_catalog"
+            )
+        )
+        if not isinstance(result, Mapping) or set(result) != {
+            "schema_version",
+            "bindings",
+            "binding_contracts_sha256",
+            "catalog_sha256",
+        }:
+            raise ModelRunnerHostError(
+                "artifact official host binding catalog is not closed"
+            )
+        catalog = dict(result)
+        bindings = catalog.get("bindings")
+        contract = _validate_contract_identity(
+            generation.champion_execution[
+                "official_host_binding_catalog_contract"
+            ],
+            label="artifact official host binding catalog contract",
+        )
+        if (
+            catalog.get("schema_version")
+            != generation.champion_execution[
+                "official_host_binding_catalog_schema_version"
+            ]
+            or not isinstance(bindings, list)
+            or any(
+                not isinstance(item, Mapping)
+                or set(item)
+                != {
+                    "schema_version",
+                    "action_type",
+                    "tool_id",
+                    "binding_contract_sha256",
+                    "response_schema_version",
+                    "idempotency",
+                    "max_response_bytes",
+                }
+                or not isinstance(item.get("action_type"), str)
+                or not item.get("action_type")
+                or not isinstance(item.get("tool_id"), str)
+                or not item.get("tool_id")
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(item.get("binding_contract_sha256") or ""),
+                )
+                or not isinstance(item.get("response_schema_version"), str)
+                or not item.get("response_schema_version")
+                or type(item.get("max_response_bytes")) is not int
+                or item.get("max_response_bytes", 0) <= 0
+                for item in bindings
+            )
+            or catalog.get("binding_contracts_sha256")
+            != _bare_sha256_json(bindings)
+            or catalog.get("catalog_sha256")
+            != _bare_sha256_json(
+                {
+                    key: item
+                    for key, item in catalog.items()
+                    if key != "catalog_sha256"
+                }
+            )
+            or catalog.get("binding_contracts_sha256")
+            != contract.get("binding_contracts_sha256")
+            or catalog.get("catalog_sha256")
+            != contract.get("catalog_sha256")
+        ):
+            raise ModelRunnerHostError(
+                "artifact official host binding catalog is invalid"
+            )
+        return catalog
+
+    def build_official_host_capability_manifest(
+        self,
+        availability: Mapping[str, bool],
+    ) -> Mapping[str, Any]:
+        if not isinstance(availability, Mapping) or any(
+            not isinstance(key, str) or not key or type(value) is not bool
+            for key, value in availability.items()
+        ):
+            raise ModelRunnerHostError(
+                "official host binding availability is invalid"
+            )
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "build_runner_official_host_capability_manifest"
+        )(
+            dict(availability),
+            member_name=generation.member(
+                "official_host_capability_manifest"
+            ),
+        )
+        manifest = self._validate_host_capability_manifest_result(result)
+        catalog = self.official_host_binding_catalog()
+        catalog_bindings = catalog["bindings"]
+        tool_ids = [str(item["tool_id"]) for item in catalog_bindings]
+        expected_availability = set(tool_ids)
+        expected_bindings = [
+            {**dict(item), "available": availability[item["tool_id"]]}
+            for item in catalog_bindings
+        ]
+        if (
+            len(expected_availability) != len(tool_ids)
+            or set(availability) != expected_availability
+            or manifest["binding_contracts_sha256"]
+            != catalog["binding_contracts_sha256"]
+            or manifest["bindings"] != expected_bindings
+        ):
+            raise ModelRunnerHostError(
+                "artifact official host capability manifest differs from catalog"
+            )
+        return manifest
+
+    def execute_verifier_action(
+        self,
+        action: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "execute_runner_verifier_action"
+        )(
+            action,
+            member_name=generation.member("verifier_execution"),
+        )
+        expected_action_sha256 = str(action.get("action_sha256") or "")
+        expected_action_type = str(action.get("action_type") or "")
+        if not isinstance(result, Mapping) or set(result) != {
+            "schema_version",
+            "action_sha256",
+            "action_type",
+            "calls",
+            "cost_credits",
+            "provider_receipt_allowed",
+            "result",
+            "result_sha256",
+            "execution_sha256",
+        }:
+            raise ModelRunnerHostError(
+                "artifact verifier execution is not closed"
+            )
+        execution = dict(result)
+        verifier_result = execution.get("result")
+        if (
+            execution.get("schema_version")
+            != generation.champion_execution[
+                "verifier_execution_schema_version"
+            ]
+            or expected_action_type not in {"verify_company", "verify_intent"}
+            or execution.get("action_type") != expected_action_type
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_action_sha256)
+            or execution.get("action_sha256") != expected_action_sha256
+            or execution.get("calls") != 0
+            or type(execution.get("cost_credits")) not in {int, float}
+            or float(execution["cost_credits"]) != 0.0
+            or execution.get("provider_receipt_allowed") is not False
+            or not isinstance(verifier_result, Mapping)
+            or execution.get("result_sha256")
+            != _bare_sha256_json(verifier_result)
+            or execution.get("execution_sha256")
+            != _bare_sha256_json(
+                {
+                    key: item
+                    for key, item in execution.items()
+                    if key != "execution_sha256"
+                }
+            )
+        ):
+            raise ModelRunnerHostError(
+                "artifact verifier execution is invalid"
+            )
+        return execution
+
+    def prepare_provider_request(
+        self,
+        action: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "prepare_runner_provider_request"
+        )(
+            action,
+            member_name=generation.member("provider_prepare"),
+        )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("schema_version")
+            != generation.champion_execution[
+                "provider_prepare_schema_version"
+            ]
+        ):
+            raise ModelRunnerHostError(
+                "artifact provider dispatch request is invalid"
+            )
+        return dict(result)
+
+    def prepare_normalization_request(
+        self,
+        action: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        generation = self.protocol_generation
+        result = self._official_transport_method(
+            "prepare_runner_normalization_request"
+        )(
+            action,
+            member_name=generation.member("normalization_prepare_legacy"),
+        )
+        expected_action_sha256 = str(action.get("action_sha256") or "")
+        if not isinstance(result, Mapping) or set(result) != {
+            "schema_version",
+            "action_sha256",
+            "provider",
+            "method",
+            "url",
+            "credential_binding",
+            "static_headers",
+            "body",
+            "body_sha256",
+            "call_cap",
+            "credit_cap",
+            "timeout_seconds",
+            "max_response_bytes",
+            "request_sha256",
+        }:
+            raise ModelRunnerHostError(
+                "artifact normalization dispatch is not closed"
+            )
+        dispatch = dict(result)
+        body = dispatch.get("body")
+        normalization = generation.champion_execution[
+            "normalization_action"
+        ]
+        if (
+            dispatch.get("schema_version")
+            != normalization["dispatch_schema_version"]
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_action_sha256)
+            or dispatch.get("action_sha256") != expected_action_sha256
+            or not isinstance(body, Mapping)
+            or dispatch.get("body_sha256") != _bare_sha256_json(body)
+            or dispatch.get("request_sha256")
+            != _bare_sha256_json(
+                {
+                    key: item
+                    for key, item in dispatch.items()
+                    if key != "request_sha256"
+                }
+            )
+        ):
+            raise ModelRunnerHostError(
+                "artifact normalization dispatch is invalid"
+            )
+        return dispatch
 
     def build_start(
         self,

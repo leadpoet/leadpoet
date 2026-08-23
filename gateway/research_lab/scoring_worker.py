@@ -99,10 +99,22 @@ from gateway.research_lab.model_authority_v2 import (
 )
 from gateway.research_lab.official_baseline_model_runner import (
     ExactOfficialBaselineRunner,
+    OfficialBaselineAttemptStore,
+    OfficialBaselineAuthorityUnavailable,
+    OfficialBaselineDependencyContext,
     OfficialBaselineExactDependencies,
     OfficialBaselineModelOutput,
     select_official_baseline_release,
     validate_official_baseline_checkpoint,
+)
+from gateway.research_lab.official_baseline_store import (
+    SupabaseOfficialBaselineAttemptStore,
+)
+from gateway.research_lab.official_baseline_authority import (
+    build_production_official_baseline_exact_dependencies,
+)
+from gateway.research_lab.official_baseline_release_authorities import (
+    preflight_official_baseline_artifact_protocol,
 )
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
@@ -781,6 +793,18 @@ def _baseline_scoring_contract_hash() -> str:
     from gateway.research_lab import (
         official_baseline_model_runner as official_baseline_model_runner_module,
     )
+    from gateway.research_lab import (
+        official_baseline_store as official_baseline_store_module,
+    )
+    from gateway.research_lab import (
+        official_baseline_authority as official_baseline_authority_module,
+    )
+    from gateway.research_lab import (
+        official_baseline_custody as official_baseline_custody_module,
+    )
+    from gateway.research_lab import (
+        official_baseline_release_dependencies as official_baseline_release_dependencies_module,
+    )
     from qualification.scoring import lead_scorer as lead_scorer_module
     from research_lab import employee_buckets as employee_buckets_module
     from gateway.tee import model_sandbox_v2 as model_sandbox_module
@@ -836,6 +860,10 @@ def _baseline_scoring_contract_hash() -> str:
             lead_scorer_module,
             employee_buckets_module,
             official_baseline_model_runner_module,
+            official_baseline_store_module,
+            official_baseline_authority_module,
+            official_baseline_custody_module,
+            official_baseline_release_dependencies_module,
         ):
             sources.append(
                 (
@@ -5386,6 +5414,207 @@ def _load_average_per_cpu() -> float | None:
         return None
 
 
+_OFFICIAL_BASELINE_EVIDENCE_PROXY_URL_ENV = (
+    "RESEARCH_LAB_EVIDENCE_PROXY_URL"
+)
+_OFFICIAL_BASELINE_PROXY_PROVIDER_ID_RE = re.compile(
+    r"[a-z][a-z0-9_-]{0,63}"
+)
+
+
+def _exact_official_baseline_model_spec(
+    spec: DockerPrivateModelSpec,
+) -> DockerPrivateModelSpec:
+    """Remove every credential/proxy channel from the immutable model OCI."""
+
+    extra_env = dict(spec.extra_env or {})
+    proxy_names = {
+        _OFFICIAL_BASELINE_EVIDENCE_PROXY_URL_ENV,
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    }
+    for name in tuple(extra_env):
+        upper = name.upper()
+        if name in proxy_names or upper.endswith(
+            ("_API_KEY", "_ACCESS_KEY", "_SECRET", "_TOKEN", "_PASSWORD")
+        ):
+            extra_env.pop(name, None)
+    return replace(spec, env_passthrough=(), extra_env=extra_env)
+
+
+class _OfficialBaselineEvidenceProxyLease:
+    """One live loopback proxy whose shutdown is owned by the scoring pass."""
+
+    def __init__(self, *, server: Any, thread: threading.Thread) -> None:
+        self._server = server
+        self._thread = thread
+        self._closed = False
+        self.url = ""
+        self.capability_sha256 = ""
+        self.ready_provider_ids: tuple[str, ...] = ()
+
+    def validate_live(self) -> None:
+        address = getattr(self._server, "server_address", None)
+        if (
+            not isinstance(address, tuple)
+            or len(address) < 2
+            or address[0] != "127.0.0.1"
+            or type(address[1]) is not int
+            or address[1] < 1
+            or address[1] > 65535
+            or not self._thread.is_alive()
+        ):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy did not bind a live loopback port"
+            )
+        registry_state = getattr(self._server, "registry_state", None)
+        capabilities = (
+            registry_state.capabilities()
+            if registry_state is not None
+            and callable(getattr(registry_state, "capabilities", None))
+            else None
+        )
+        providers = getattr(capabilities, "providers", None)
+        capability_sha256 = str(
+            getattr(capabilities, "capability_hash", "") or ""
+        )
+        if (
+            not isinstance(providers, tuple)
+            or not providers
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", capability_sha256)
+            is None
+        ):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy registry is unavailable"
+            )
+        ready_provider_ids = tuple(sorted({
+            str(provider.get("id") or "")
+            for provider in providers
+            if isinstance(provider, Mapping)
+            and provider.get("active", True) is True
+            and provider.get("credential_ready") is True
+            and _OFFICIAL_BASELINE_PROXY_PROVIDER_ID_RE.fullmatch(
+                str(provider.get("id") or "")
+            )
+            is not None
+        }))
+        if not ready_provider_ids:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy has no ready providers"
+            )
+        self.url = f"http://127.0.0.1:{address[1]}"
+        request = urlrequest.Request(
+            self.url + "/__official_baseline_health__",
+            method="GET",
+        )
+        opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=2.0) as response:
+                response.read(256)
+                status = int(response.status)
+        except HTTPError as exc:
+            exc.read(256)
+            status = int(exc.code)
+        except (OSError, URLError, TimeoutError) as exc:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy health check failed"
+            ) from exc
+        if status != 404 or not self._thread.is_alive():
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy health response differs"
+            )
+        self.capability_sha256 = capability_sha256
+        self.ready_provider_ids = ready_provider_ids
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_error: BaseException | None = None
+        try:
+            self._server.shutdown()
+        except BaseException as exc:  # noqa: BLE001 - cleanup must continue
+            close_error = exc
+        try:
+            self._server.server_close()
+        except BaseException as exc:  # noqa: BLE001 - cleanup must continue
+            close_error = close_error or exc
+        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy thread did not stop"
+            )
+        if close_error is not None:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy cleanup failed"
+            ) from close_error
+
+
+def _start_official_baseline_evidence_proxy(
+    *,
+    benchmark_date: str,
+    rolling_window_hash: str,
+    artifact_hash: str,
+    worker_ref: str,
+) -> _OfficialBaselineEvidenceProxyLease:
+    """Start and preflight one registry-derived, credential-owning host proxy."""
+
+    from gateway.research_lab.provider_evidence_proxy import serve_evidence_proxy
+
+    server: Any | None = None
+    lease: _OfficialBaselineEvidenceProxyLease | None = None
+    try:
+        server, _store, thread = serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            baseline_dir=os.getenv(
+                "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", ""
+            ),
+            day_cache_path=os.getenv(
+                "RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE", ""
+            ),
+            registry_path=os.getenv("RESEARCH_LAB_PROVIDER_REGISTRY_PATH", ""),
+            usage_ledger_path=os.getenv(
+                "RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH", ""
+            ),
+            outcome_sidecar_path=os.getenv(
+                "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH", ""
+            ),
+            caller_context={
+                "caller_kind": "official_baseline_v3",
+                "benchmark_date": benchmark_date,
+                "rolling_window_hash": rolling_window_hash,
+                "artifact_hash": artifact_hash,
+                "worker_ref_sha256": sha256_json({"worker_ref": worker_ref}),
+            },
+            credential_overrides=None,
+            dynamic_registry=True,
+        )
+        lease = _OfficialBaselineEvidenceProxyLease(
+            server=server,
+            thread=thread,
+        )
+        lease.validate_live()
+        return lease
+    except BaseException as exc:  # noqa: BLE001 - partial construction is closed
+        if lease is not None:
+            lease.close()
+        elif server is not None:
+            try:
+                server.shutdown()
+            finally:
+                server.server_close()
+        if isinstance(exc, OfficialBaselineAuthorityUnavailable):
+            raise
+        raise OfficialBaselineAuthorityUnavailable(
+            "official baseline evidence proxy construction failed"
+        ) from exc
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -5397,6 +5626,22 @@ class ResearchLabGatewayScoringWorker:
         official_baseline_exact_dependencies: (
             OfficialBaselineExactDependencies | None
         ) = None,
+        official_baseline_exact_dependencies_factory: (
+            Callable[
+                [OfficialBaselineDependencyContext, OfficialBaselineAttemptStore],
+                OfficialBaselineExactDependencies,
+            ]
+            | None
+        ) = None,
+        official_baseline_attempt_store_factory: Callable[
+            [], OfficialBaselineAttemptStore
+        ] = SupabaseOfficialBaselineAttemptStore,
+        official_baseline_evidence_proxy_factory: Callable[..., Any] = (
+            _start_official_baseline_evidence_proxy
+        ),
+        official_baseline_protocol_preflight: Callable[..., None] = (
+            preflight_official_baseline_artifact_protocol
+        ),
     ):
         config.validate_public_benchmark_split()
         self.config = config
@@ -5417,17 +5662,114 @@ class ResearchLabGatewayScoringWorker:
         self._baseline_publication_failure_logged_key: str | None = None
         self._baseline_publication_failures_in_process: set[str] = set()
         self._baseline_publication_verified_keys: set[str] = set()
-        # V3/raw official scoring is default-off until the application injects
-        # the reviewed append-only provider/checkpoint authority and immutable
-        # artifact projector.  Release selection never falls back to V2.
+        # Exact v3 uses fixed production factories by default, but remains
+        # fail-closed unless they construct the reviewed append-only authority,
+        # loopback provider bridge, and immutable artifact projector. Release
+        # selection never falls back to v2.
         self._official_baseline_exact_dependencies = (
             official_baseline_exact_dependencies
         )
+        if (
+            official_baseline_exact_dependencies is not None
+            and official_baseline_exact_dependencies_factory is not None
+        ):
+            raise ValueError(
+                "official baseline exact dependencies and factory are mutually exclusive"
+            )
+        self._official_baseline_exact_dependencies_factory = (
+            official_baseline_exact_dependencies_factory
+            if official_baseline_exact_dependencies is None
+            and official_baseline_exact_dependencies_factory is not None
+            else (
+                build_production_official_baseline_exact_dependencies
+                if official_baseline_exact_dependencies is None
+                else None
+            )
+        )
+        self._official_baseline_attempt_store_factory = (
+            official_baseline_attempt_store_factory
+        )
+        self._official_baseline_evidence_proxy_factory = (
+            official_baseline_evidence_proxy_factory
+        )
+        self._official_baseline_protocol_preflight = (
+            official_baseline_protocol_preflight
+        )
+        self._active_official_baseline_evidence_proxy: Any | None = None
         # True only for the worker holding the scoring-recovery lease this pass.
         self._holds_maintenance_lease = False
         # Globally-unique lease token for THIS process (worker_ref is a stable
         # name shared across replicas/restarts and must not be the holder id).
         self._lease_holder_ref = make_lease_holder_ref(self.worker_ref)
+
+    def _construct_official_baseline_exact_dependencies(
+        self,
+        *,
+        context: OfficialBaselineDependencyContext,
+    ) -> OfficialBaselineExactDependencies | None:
+        if not isinstance(context, OfficialBaselineDependencyContext):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline frozen dependency context is unavailable"
+            )
+        context.validate()
+        direct = self._official_baseline_exact_dependencies
+        if direct is not None:
+            return direct
+        factory = self._official_baseline_exact_dependencies_factory
+        if factory is None:
+            return None
+        store = self._official_baseline_attempt_store_factory()
+        if not isinstance(store, SupabaseOfficialBaselineAttemptStore):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline attempt authority is not the migration-163 store"
+            )
+        dependencies = factory(context, store)
+        if not isinstance(dependencies, OfficialBaselineExactDependencies):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline exact dependency factory returned an invalid boundary"
+            )
+        return dependencies
+
+    def _start_official_baseline_proxy_for_release(
+        self,
+        *,
+        artifact: PrivateModelArtifactManifest,
+        selection: Any,
+        spec: DockerPrivateModelSpec,
+        benchmark_date: str,
+        rolling_window_hash: str,
+    ) -> Any:
+        # This credential-free OCI declaration check is deliberately first:
+        # an unknown required role/major fails before a host listener starts
+        # and before any provider action can be reserved.
+        self._official_baseline_protocol_preflight(
+            artifact=artifact,
+            selection=selection,
+            spec=spec,
+        )
+        lease = self._official_baseline_evidence_proxy_factory(
+            benchmark_date=benchmark_date,
+            rolling_window_hash=rolling_window_hash,
+            artifact_hash=artifact.model_artifact_hash,
+            worker_ref=self.worker_ref,
+        )
+        if (
+            not isinstance(getattr(lease, "url", None), str)
+            or not isinstance(
+                getattr(lease, "capability_sha256", None), str
+            )
+            or not isinstance(
+                getattr(lease, "ready_provider_ids", None), tuple
+            )
+            or not callable(getattr(lease, "close", None))
+        ):
+            if callable(getattr(lease, "close", None)):
+                lease.close()
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy factory returned an invalid lease"
+            )
+        self._active_official_baseline_evidence_proxy = lease
+        return lease
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -12767,6 +13109,19 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
+        if self._active_official_baseline_evidence_proxy is not None:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy lease is already active"
+            )
+        try:
+            return await self._maybe_run_private_baseline_impl()
+        finally:
+            lease = self._active_official_baseline_evidence_proxy
+            self._active_official_baseline_evidence_proxy = None
+            if lease is not None:
+                lease.close()
+
+    async def _maybe_run_private_baseline_impl(self) -> dict[str, Any] | None:
         from leadpoet_canonical.production_parity_boundary_v2 import (
             configured_rebenchmark_now_v2,
         )
@@ -13375,6 +13730,7 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
+        baseline_release_selection = select_official_baseline_release(artifact)
         baseline_model_spec = DockerPrivateModelSpec(
             image_digest=artifact.image_digest,
             timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
@@ -13390,18 +13746,51 @@ class ResearchLabGatewayScoringWorker:
                 started_at=start,
             ),
         )
+        if baseline_release_selection.is_exact:
+            baseline_model_spec = _exact_official_baseline_model_spec(
+                baseline_model_spec
+            )
         baseline_parent_graphs = await _attested_model_parent_graphs(
             model_kind="private",
             artifact=artifact,
             epoch_id=evaluation_epoch,
         )
-        baseline_release_selection = select_official_baseline_release(artifact)
         if baseline_release_selection.is_exact:
+            lease = self._start_official_baseline_proxy_for_release(
+                artifact=artifact,
+                selection=baseline_release_selection,
+                spec=baseline_model_spec,
+                benchmark_date=today,
+                rolling_window_hash=window.window_hash,
+            )
+            dependency_context = OfficialBaselineDependencyContext(
+                artifact=artifact,
+                selection=baseline_release_selection,
+                spec=baseline_model_spec,
+                benchmark_date=today,
+                rolling_window_hash=window.window_hash,
+                benchmark_attempt=benchmark_attempt,
+                evaluation_epoch=evaluation_epoch,
+                parent_graphs=tuple(baseline_parent_graphs),
+                worker_index=self.config.scoring_worker_index,
+                worker_ref=self.worker_ref,
+                evidence_proxy_url=lease.url,
+                evidence_proxy_capability_sha256=(
+                    lease.capability_sha256
+                ),
+                evidence_proxy_ready_provider_ids=(
+                    lease.ready_provider_ids
+                ),
+            )
             runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner = (
                 ExactOfficialBaselineRunner(
                     artifact=artifact,
                     selection=baseline_release_selection,
-                    dependencies=self._official_baseline_exact_dependencies,
+                    dependencies=(
+                        self._construct_official_baseline_exact_dependencies(
+                            context=dependency_context,
+                        )
+                    ),
                     spec=baseline_model_spec,
                     benchmark_date=today,
                     rolling_window_hash=window.window_hash,

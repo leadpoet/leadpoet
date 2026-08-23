@@ -14,6 +14,9 @@ from urllib.request import Request, urlopen
 from gateway.research_lab.provider_profiles_v2 import (
     verify_required_worker_proxy_profiles_v2,
 )
+from gateway.research_lab.official_baseline_custody import (
+    official_baseline_custody_configuration,
+)
 from gateway.research_lab.worker_autostart import (
     DeferredWorkerFleetConfigurationError,
     build_research_lab_worker_autostart_plan,
@@ -36,6 +39,7 @@ from gateway.tee.provider_broker_v2 import (
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.topology import ROLE_SPECS, validate_manifest
 from gateway.utils.tee_kms_provision_v2 import load_provider_envelopes
+from research_lab.canonical import sha256_text
 
 
 FULL_TOPOLOGY_INSTANCE_TYPE = "r7i.4xlarge"
@@ -313,6 +317,14 @@ def verify_gateway_restart_preflight_v2(
         envelopes=envelopes,
         parent_environment=parent_environment,
     )
+    try:
+        official_baseline_custody = official_baseline_custody_configuration(
+            parent_environment
+        )
+    except Exception as exc:
+        raise GatewayRestartPreflightV2Error(
+            "official baseline encrypted custody configuration is unavailable"
+        ) from exc
     profile_result = (
         verify_required_worker_proxy_profiles_v2(config_dir=Path(config_dir))
         if mode == "full"
@@ -387,6 +399,13 @@ def verify_gateway_restart_preflight_v2(
         "parent_plaintext_provider_slot_count": 0,
         "artifact_bucket_host": normalized_policy["bucket_host"],
         "artifact_bucket_protection": artifact_storage or "not_requested",
+        "official_baseline_custody": {
+            "bucket": official_baseline_custody["bucket"],
+            "prefix": official_baseline_custody["prefix"],
+            "kms_key_id_sha256": sha256_text(
+                official_baseline_custody["kms_key_id"]
+            ),
+        },
         "worker_proxy_profile_count": int(profile_result["profile_count"]),
         "worker_counts": expected_worker_counts,
         "deferred_worker_fleet_roles": sorted(deferred_roles),

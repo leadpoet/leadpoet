@@ -194,7 +194,7 @@ BEGIN
         'provider_receipt_sha256', NULL,
         'provider_identity_sha256', NULL,
         'model_provider_response_sha256', 'sha256:' || repeat('f', 64),
-        'outcome', 'succeeded',
+        'outcome', 'failed',
         'call_count', 0,
         'cost_microunits', 0,
         'latency_ms', 2
@@ -202,6 +202,30 @@ BEGIN
     PERFORM public.research_lab_official_baseline_record_terminal_known_v1(
         terminal
     );
+    identity := pg_catalog.jsonb_build_object(
+        'schema_version',
+            'leadpoet.research_lab.official_baseline_action_replay_identity.v1',
+        'attempt_key', action_auth->>'attempt_key',
+        'run_sha256', run_hash,
+        'unit_ref', unit_value,
+        'action_idempotency_sha256',
+            action_auth->>'action_idempotency_sha256',
+        'action_sha256', action_auth->>'action_sha256',
+        'request_fingerprint_sha256',
+            action_auth->>'request_fingerprint_sha256'
+    );
+    result := public.research_lab_official_baseline_load_replay_v1(identity);
+    IF result->>'state' IS DISTINCT FROM 'terminal_known'
+       OR result->>'outcome' IS DISTINCT FROM 'failed'
+       OR (result->>'call_count')::INTEGER <> 0
+       OR (result->>'cost_microunits')::BIGINT <> 0
+       OR result->'provider_request_ref' IS DISTINCT FROM 'null'::JSONB
+       OR result->'provider_receipt_ref' IS DISTINCT FROM 'null'::JSONB
+       OR result->'provider_receipt_sha256' IS DISTINCT FROM 'null'::JSONB
+       OR result->'provider_identity_sha256' IS DISTINCT FROM 'null'::JSONB
+    THEN
+        RAISE EXCEPTION 'failed verifier replay custody invalid: %', result;
+    END IF;
 
     completion := pg_catalog.jsonb_build_object(
         'schema_version',

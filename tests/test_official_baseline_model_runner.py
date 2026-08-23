@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 import concurrent.futures
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ from gateway.research_lab.common_model_experiment import ProtectedModelActionRes
 from gateway.research_lab import scoring_worker as scoring_worker_module
 from gateway.research_lab.official_baseline_model_runner import (
     ArtifactBenchmarkProjection,
+    ArtifactProtocolBenchmarkProjector,
     EXACT_MODEL_RUNNER_FAMILY,
     ExactOfficialBaselineRunner,
     OFFICIAL_BASELINE_AUTHORITY_PREFLIGHT_SCHEMA_VERSION,
@@ -58,6 +61,29 @@ HASH = {
         "abcdef123",
     )
 }
+HASH["authority"] = (
+    "7f93061601526ce3d14b8555fefe388a1fd7322b565a748f06e232e2cb5c1b7a"
+)
+
+
+def _bare_wire_hash(value) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _rehash_role_contract(declaration: dict) -> None:
+    contract = declaration["champion_execution"]["runner_role_contract"]
+    contract["contract_sha256"] = _bare_wire_hash({
+        key: value for key, value in contract.items()
+        if key != "contract_sha256"
+    })
 
 
 def _company(name: str = "Acme") -> dict:
@@ -136,6 +162,7 @@ class _Transport:
         return {
             "schema_version": "model-runner-start:v3",
             "input": deepcopy(values["input"]),
+            "execution_mode": values["execution_mode"],
             "host_capability_manifest": deepcopy(values["host_capability_manifest"]),
         }
 
@@ -222,6 +249,152 @@ class _Transport:
         }
 
 
+class _OfficialTransport(_Transport):
+    def runner_protocol_generation(self, *, release_identity):
+        assert release_identity == _release()
+        return runner_declaration(
+            "v3",
+            contract_hash=HASH["contract"],
+            official_baseline=True,
+        )
+
+    def project_runner_result_for_benchmark(
+        self,
+        value,
+        *,
+        start_request,
+        expected_release_identity,
+        member_name,
+    ):
+        assert member_name == "project_runner_result_for_benchmark"
+        assert expected_release_identity == _release()
+
+        def wire_hash(payload):
+            return hashlib.sha256(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+
+        companies = deepcopy(value["result"]["outputs"])
+        body = {
+            "schema_version": OFFICIAL_BASELINE_PROJECTION_SCHEMA_VERSION,
+            "start_request_sha256": wire_hash(dict(start_request)),
+            "release_identity_sha256": wire_hash(_release()),
+            "model_receipt_sha256": wire_hash(value["model_receipt"]),
+            "companies": companies,
+            "companies_sha256": wire_hash(companies),
+        }
+        return {**body, "projection_sha256": wire_hash(body)}
+
+    @staticmethod
+    def _wire_hash(value):
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def _catalog_bindings(cls):
+        return [{
+            "schema_version": "host-capability-binding:v1",
+            "action_type": "verify_company",
+            "tool_id": "verifier.company",
+            "binding_contract_sha256": HASH["binding"],
+            "response_schema_version": "company-verifier-result:v1",
+            "idempotency": "idempotent",
+            "max_response_bytes": 100_000,
+        }]
+
+    def runner_official_host_binding_catalog(self, *, member_name):
+        assert member_name == "runner_official_host_binding_catalog"
+        bindings = self._catalog_bindings()
+        body = {
+            "schema_version": (
+                "model-runner-official-host-binding-catalog:v1"
+            ),
+            "bindings": bindings,
+            "binding_contracts_sha256": self._wire_hash(bindings),
+        }
+        return {**body, "catalog_sha256": self._wire_hash(body)}
+
+    def build_runner_official_host_capability_manifest(
+        self, availability, *, member_name
+    ):
+        assert member_name == "build_runner_official_host_capability_manifest"
+        assert availability == {"verifier.company": True}
+        bindings = [
+            {**binding, "available": availability[binding["tool_id"]]}
+            for binding in self._catalog_bindings()
+        ]
+        body = {
+            "schema_version": "host-capability-manifest:v1",
+            "binding_contracts_sha256": self._wire_hash(
+                self._catalog_bindings()
+            ),
+            "bindings": bindings,
+        }
+        return {**body, "manifest_sha256": self._wire_hash(body)}
+
+    def execute_runner_verifier_action(
+        self, action, *, member_name
+    ):
+        assert member_name == "execute_runner_verifier_action"
+        result = {"status": "accepted", "reason_code": "fixture"}
+        body = {
+            "schema_version": "model-runner-verifier-execution:v1",
+            "action_sha256": action["action_sha256"],
+            "action_type": action["action_type"],
+            "calls": 0,
+            "cost_credits": 0.0,
+            "provider_receipt_allowed": False,
+            "result": result,
+            "result_sha256": self._wire_hash(result),
+        }
+        return {**body, "execution_sha256": self._wire_hash(body)}
+
+    def prepare_runner_normalization_request(
+        self, action, *, member_name
+    ):
+        assert member_name == "prepare_runner_normalization_request"
+        request_body = {
+            "model": "fixture",
+            "messages": [],
+            "response_format": {},
+            "temperature": 0,
+        }
+        body = {
+            "schema_version": "model-runner-normalization-dispatch:v1",
+            "action_sha256": action["action_sha256"],
+            "provider": "openrouter",
+            "method": "POST",
+            "url": "https://openrouter.ai/api/v1/chat/completions",
+            "credential_binding": {
+                "header_name": "Authorization",
+                "scheme": "Bearer",
+                "source": "host_openrouter_credential",
+                "persist": False,
+            },
+            "static_headers": {"Content-Type": "application/json"},
+            "body": request_body,
+            "body_sha256": self._wire_hash(request_body),
+            "call_cap": 1,
+            "credit_cap": 1.0,
+            "timeout_seconds": 120.0,
+            "max_response_bytes": 100_000,
+        }
+        return {**body, "request_sha256": self._wire_hash(body)}
+
+
 def _registration() -> ExactModelRunnerRegistration:
     identity = {
         "repository": "leadpoet/Sourcing_model",
@@ -253,8 +426,21 @@ def _registration() -> ExactModelRunnerRegistration:
     )
 
 
+def _official_registration() -> ExactModelRunnerRegistration:
+    registration = _registration()
+    return ExactModelRunnerRegistration(
+        artifact_identity=registration.artifact_identity,
+        protocol=ResearchLabModelRunnerProtocol(
+            transport=_OfficialTransport(),
+            expected_release_identity=_release(),
+        ),
+        host_capability_manifest=registration.host_capability_manifest,
+    )
+
+
 class _Projector:
     def __init__(self, registration):
+        self._release_identity = dict(registration.protocol.release_identity)
         self.artifact_key = registration.key
         self.protocol_generation_sha256 = (
             registration.protocol_generation.protocol_generation_sha256
@@ -266,17 +452,33 @@ class _Projector:
         outputs = deepcopy(terminal_result["result"]["outputs"])
         if self.drift:
             outputs = [*outputs, _company("Drifted")]
+
+        def wire_hash(value):
+            return hashlib.sha256(
+                json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+
         body = {
             "schema_version": OFFICIAL_BASELINE_PROJECTION_SCHEMA_VERSION,
-            "projection_identity_sha256": self.projection_identity_sha256,
-            "source_result_sha256": sha256_json(dict(terminal_result)),
-            "outputs_sha256": sha256_json(outputs),
+            "start_request_sha256": wire_hash(dict(start_request)),
+            "release_identity_sha256": wire_hash(self._release_identity),
+            "model_receipt_sha256": wire_hash(
+                dict(terminal_result["model_receipt"])
+            ),
+            "companies": outputs,
+            "companies_sha256": wire_hash(outputs),
         }
         return ArtifactBenchmarkProjection(
             outputs=tuple(outputs),
             projection_receipt={
                 **body,
-                "projection_sha256": sha256_json(body),
+                "projection_sha256": wire_hash(body),
             },
         )
 
@@ -505,7 +707,7 @@ def _exact_fixture():
 
 
 def test_exact_official_baseline_positive_and_empty_retry_zero():
-    runner, _projector, _authority, _terminal = _exact_fixture()
+    runner, _projector, _authority, terminal = _exact_fixture()
     positive = runner.run_icp(
         raw_icp={"outputs": [_company()]},
         icp_ref="icp-positive",
@@ -519,6 +721,10 @@ def test_exact_official_baseline_positive_and_empty_retry_zero():
 
     assert positive.company_outputs == (_company(),)
     assert empty.company_outputs == ()
+    assert {
+        value["start_request"]["execution_mode"]
+        for value in terminal.records.values()
+    } == {"full_company"}
     assert validate_official_baseline_checkpoint(empty.checkpoint) == empty.checkpoint
 
 
@@ -720,3 +926,709 @@ def test_completion_accounting_identity_creates_a_distinct_exact_generation():
             tampered,
             expected_consumer_contract_sha256=HASH["contract"],
         )
+
+
+def test_official_baseline_generation_bundle_is_atomic_and_pinned():
+    old = ArtifactRunnerProtocolGeneration.from_declaration(
+        runner_declaration("v3", contract_hash=HASH["contract"]),
+        expected_consumer_contract_sha256=HASH["contract"],
+    )
+    declaration = runner_declaration(
+        "v3",
+        contract_hash=HASH["contract"],
+        official_baseline=True,
+    )
+    official = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256=HASH["contract"],
+    )
+
+    assert old.supports_official_baseline is False
+    assert official.supports_official_baseline is True
+    assert old.protocol_generation_sha256 != (
+        official.protocol_generation_sha256
+    )
+    assert official.member("provider_prepare") == (
+        "prepare_runner_provider_request"
+    )
+    assert official.member("verifier_execution") == (
+        "execute_runner_verifier_action"
+    )
+    assert official.member("official_host_binding_catalog") == (
+        "runner_official_host_binding_catalog"
+    )
+    assert official.official_contract_sha256(
+        "benchmark_projection_contract"
+    ).startswith("sha256:")
+
+    partial = deepcopy(declaration)
+    partial["champion_execution"].pop("verifier_execution_entrypoint")
+    without_legacy_entrypoint = (
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            partial,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+    )
+    assert without_legacy_entrypoint.member("verifier_execution") == (
+        "execute_runner_verifier_action"
+    )
+    assert without_legacy_entrypoint.protocol_generation_sha256 != (
+        official.protocol_generation_sha256
+    )
+
+    tampered = deepcopy(declaration)
+    tampered["champion_execution"]["benchmark_projection_contract"][
+        "contract_fields"
+    ] = ["tampered"]
+    with pytest.raises(ModelRunnerHostError, match="hash differs"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            tampered,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+    missing_normalization_member = deepcopy(declaration)
+    missing_normalization_member["champion_execution"][
+        "normalization_action"
+    ].pop("dispatch_entrypoint")
+    with pytest.raises(
+        ModelRunnerHostError,
+        match="normalization action identity differs",
+    ):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            missing_normalization_member,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+    tampered_proof_identity = deepcopy(declaration)
+    tampered_proof_identity["champion_execution"][
+        "company_fit_proof_contract_sha256"
+    ] = "sha256:" + "f" * 64
+    with pytest.raises(ModelRunnerHostError, match="is invalid"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            tampered_proof_identity,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+
+def test_role_map_discovers_renamed_member_without_commit_allowlist():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    role = "provider_compiler_inventory"
+    old_member = "model_runner_provider_compiler_inventory"
+    new_member = "artifact_inventory_v2"
+    consumer = declaration["consumer_contract"]
+    consumer["functions"][new_member] = consumer["functions"].pop(old_member)
+    consumer["full_parameters"][new_member] = consumer[
+        "full_parameters"
+    ].pop(old_member)
+    consumer["frozen_asyncness"][new_member] = consumer[
+        "frozen_asyncness"
+    ].pop(old_member)
+    old_path = "research_lab_adapter.py:" + old_member
+    # The exact path/member tuple is owned by this signed consumer contract;
+    # compatibility is not tied to a Leadpoet hard-coded adapter path.
+    new_path = "compat/research_lab_adapter.py:" + new_member
+    consumer["exact_signatures"] = [
+        new_path if item == old_path else item
+        for item in consumer["exact_signatures"]
+    ]
+    entry = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ][role]
+    entry["adapter_member"] = new_member
+    entry["consumer_signature"]["consumer_contract_path"] = new_path
+    entry["consumer_signature_sha256"] = _bare_wire_hash(
+        entry["consumer_signature"]
+    )
+    _rehash_role_contract(declaration)
+
+    generation = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256="e" * 64,
+    )
+
+    assert generation.member(role) == new_member
+
+
+def test_compatible_role_interfaces_admit_distinct_artifact_identities():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+
+    class _ArtifactTransport(_OfficialTransport):
+        def __init__(self, release):
+            self.release = deepcopy(release)
+
+        def runner_protocol_generation(self, *, release_identity):
+            assert release_identity == self.release
+            return deepcopy(declaration)
+
+    generations = []
+    keys = []
+    for commit_marker, artifact_marker, manifest_marker in (
+        ("1", "a", "8"),
+        ("2", "b", "9"),
+    ):
+        release = {
+            **_release(),
+            "source_commit": commit_marker * 40,
+            "model_artifact_digest": "sha256:" + artifact_marker * 64,
+            "consumer_contract_sha256": "e" * 64,
+        }
+        identity = {
+            "repository": "leadpoet/Sourcing_model",
+            "branch": "main",
+            "commit_sha": release["source_commit"],
+            "model_artifact_hash": release["model_artifact_digest"],
+            "manifest_hash": "sha256:" + manifest_marker * 64,
+            "routing_contract_hash": "sha256:" + "e" * 64,
+            "routing_catalog_hash": "sha256:" + HASH["catalog"],
+            "routing_policy_hash": "sha256:" + HASH["policy"],
+            "feature_schema_hash": "sha256:" + HASH["feature"],
+        }
+        registration = ExactModelRunnerRegistration(
+            artifact_identity=identity,
+            protocol=ResearchLabModelRunnerProtocol(
+                transport=_ArtifactTransport(release),
+                expected_release_identity=release,
+            ),
+            host_capability_manifest={"bindings": []},
+        )
+        generations.append(
+            registration.protocol_generation.protocol_generation_sha256
+        )
+        keys.append(registration.key)
+
+    assert len(set(keys)) == 2
+    assert len(set(generations)) == 1
+
+
+def test_additive_optional_role_profile_metadata_and_source_are_hash_bound():
+    baseline = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    declaration = deepcopy(baseline)
+    role = "future_optional_probe"
+    member = "future_optional_probe_member"
+    consumer = declaration["consumer_contract"]
+    consumer["functions"][member] = []
+    consumer["full_parameters"][member] = []
+    consumer["frozen_asyncness"][member] = True
+    consumer["exact_signatures"].append(
+        "research_lab_adapter.py:" + member
+    )
+    interface = {
+        "interface_id": "leadpoet.model_runner." + role,
+        "interface_major": 2,
+        "positional_parameters": [],
+        "host_keyword_parameters": [],
+        "required_keyword_only": [],
+        "is_async": True,
+    }
+    signature = {
+        "consumer_contract_id": consumer["contract_id"],
+        "consumer_contract_path": "research_lab_adapter.py:" + member,
+        "positional_parameters": [],
+        "full_parameters": [],
+        "required_keyword_only": [],
+        "is_async": True,
+    }
+    role_contract = declaration["champion_execution"][
+        "runner_role_contract"
+    ]
+    role_contract["roles"][role] = {
+        "interface_id": interface["interface_id"],
+        "interface_major": 2,
+        "interface_contract": interface,
+        "interface_contract_sha256": _bare_wire_hash(interface),
+        "adapter_member": member,
+        "consumer_signature": signature,
+        "consumer_signature_sha256": _bare_wire_hash(signature),
+        "required_for_profiles": [],
+    }
+    role_contract["activation_profiles"]["future.optional"] = {
+        "required_roles": [role]
+    }
+    role_contract["extensions"] = {
+        "leadpoet.future": {"enabled": True}
+    }
+    consumer["extensions"] = {
+        "leadpoet.future": {"metadata": "ignored-and-hash-bound"}
+    }
+    declaration["champion_execution"]["future_optional_metadata"] = {
+        "schema_version": "future:v1"
+    }
+    declaration["champion_execution"]["raw_icp_source_schemas"].append(
+        "leadpoet-future-source:v1"
+    )
+    _rehash_role_contract(declaration)
+
+    old = ArtifactRunnerProtocolGeneration.from_declaration(
+        baseline,
+        expected_consumer_contract_sha256="e" * 64,
+    )
+    new = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256="e" * 64,
+    )
+
+    assert role not in new.members
+    assert new.protocol_generation_sha256 != old.protocol_generation_sha256
+    assert "leadpoet-future-source:v1" in new.raw_source_schemas
+
+
+def test_signed_optional_consumer_parameter_preserves_stable_interface():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    role = "provider_prepare"
+    entry = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ][role]
+    member = entry["adapter_member"]
+    declaration["consumer_contract"]["full_parameters"][member].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["full_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature_sha256"] = _bare_wire_hash(
+        entry["consumer_signature"]
+    )
+    _rehash_role_contract(declaration)
+
+    generation = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256="e" * 64,
+    )
+
+    assert generation.member(role) == member
+
+
+@pytest.mark.parametrize("failure", ("top_level", "unnamespaced_extension"))
+def test_consumer_contract_additions_are_bounded_to_namespaced_extensions(
+    failure,
+):
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    consumer = declaration["consumer_contract"]
+    if failure == "top_level":
+        consumer["future_semantics"] = {"enabled": True}
+    else:
+        consumer["extensions"]["future"] = {"enabled": True}
+
+    with pytest.raises(ModelRunnerHostError):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            declaration,
+            expected_consumer_contract_sha256="e" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "missing",
+        "major",
+        "unknown_required",
+        "renamed_host_parameter",
+        "new_required_parameter",
+        "async_kind",
+    ),
+)
+def test_required_role_drift_fails_closed(failure):
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    role_contract = declaration["champion_execution"][
+        "runner_role_contract"
+    ]
+    if failure == "missing":
+        role_contract["roles"].pop("provider_prepare")
+    elif failure == "major":
+        entry = role_contract["roles"]["provider_prepare"]
+        entry["interface_major"] = 2
+        entry["interface_contract"]["interface_major"] = 2
+        entry["interface_contract_sha256"] = _bare_wire_hash(
+            entry["interface_contract"]
+        )
+        role_contract["activation_profiles"]["full_company"][
+            "minimum_interface_major"
+        ]["provider_prepare"] = 2
+    elif failure == "unknown_required":
+        source = deepcopy(role_contract["roles"]["provider_prepare"])
+        source["interface_id"] = "leadpoet.model_runner.future_required"
+        source["interface_contract"]["interface_id"] = source[
+            "interface_id"
+        ]
+        source["interface_contract_sha256"] = _bare_wire_hash(
+            source["interface_contract"]
+        )
+        source["required_for_profiles"] = ["full_company"]
+        role_contract["roles"]["future_required"] = source
+        profile = role_contract["activation_profiles"]["full_company"]
+        profile["required_roles"] = sorted(
+            [*profile["required_roles"], "future_required"]
+        )
+        profile["minimum_interface_major"]["future_required"] = 1
+    else:
+        entry = role_contract["roles"]["provider_prepare"]
+        interface = entry["interface_contract"]
+        signature = entry["consumer_signature"]
+        member = entry["adapter_member"]
+        consumer = declaration["consumer_contract"]
+        if failure == "renamed_host_parameter":
+            signature["positional_parameters"] = ["request"]
+            signature["full_parameters"] = ["request"]
+            consumer["functions"][member] = ["request"]
+            consumer["full_parameters"][member] = ["request"]
+        elif failure == "new_required_parameter":
+            signature["full_parameters"].append("required_option")
+            signature["required_keyword_only"] = ["required_option"]
+            consumer["full_parameters"][member].append("required_option")
+            consumer["required_keyword_only"][member] = [
+                "required_option"
+            ]
+        else:
+            interface["is_async"] = True
+            signature["is_async"] = True
+            consumer["frozen_asyncness"][member] = True
+        entry["interface_contract_sha256"] = _bare_wire_hash(interface)
+        entry["consumer_signature_sha256"] = _bare_wire_hash(signature)
+    _rehash_role_contract(declaration)
+
+    with pytest.raises(ModelRunnerHostError):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            declaration,
+            expected_consumer_contract_sha256="e" * 64,
+        )
+
+
+def test_artifact_protocol_projector_uses_exact_generation_member():
+    registration = _official_registration()
+    projector = ArtifactProtocolBenchmarkProjector(registration)
+    start = {"schema_version": "fixture-start:v1"}
+    terminal = {
+        "result": {"outputs": [_company()]},
+        "model_receipt": {"schema_version": "fixture-receipt:v1"},
+    }
+
+    projected = projector.project_company_outputs(
+        start_request=start,
+        terminal_result=terminal,
+    )
+
+    assert projected.outputs == (_company(),)
+    assert projected.projection_receipt["companies"] == [_company()]
+    assert projector.projection_identity_sha256 == (
+        registration.protocol_generation.official_contract_sha256(
+            "benchmark_projection_contract"
+        )
+    )
+
+
+def test_old_v3_drain_rejects_new_official_member_use():
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=_Transport(),
+        expected_release_identity=_release(),
+    )
+    assert protocol.artifact_official_baseline_supported is False
+    with pytest.raises(
+        ModelRunnerHostError,
+        match="no official baseline bundle",
+    ):
+        protocol.provider_compiler_inventory()
+    with pytest.raises(
+        ModelRunnerHostError,
+        match="no official baseline bundle",
+    ):
+        protocol.execute_verifier_action({
+            "action_type": "verify_company",
+            "action_sha256": "a" * 64,
+        })
+
+
+def test_official_catalog_manifest_and_verifier_are_artifact_owned():
+    protocol = _official_registration().protocol
+
+    catalog = protocol.official_host_binding_catalog()
+    manifest = protocol.build_official_host_capability_manifest(
+        {"verifier.company": True}
+    )
+    execution = protocol.execute_verifier_action({
+        "action_type": "verify_company",
+        "action_sha256": "a" * 64,
+    })
+    normalization = protocol.prepare_normalization_request({
+        "action_type": "normalize_icp",
+        "action_sha256": "b" * 64,
+    })
+
+    assert catalog["bindings"][0]["tool_id"] == "verifier.company"
+    assert manifest["bindings"][0]["available"] is True
+    assert execution["calls"] == 0
+    assert execution["cost_credits"] == 0.0
+    assert execution["provider_receipt_allowed"] is False
+    assert normalization["provider"] == "openrouter"
+    assert normalization["call_cap"] == 1
+
+
+def test_official_verifier_rejects_tampered_artifact_execution():
+    class _TamperedVerifierTransport(_OfficialTransport):
+        def execute_runner_verifier_action(self, action, *, member_name):
+            value = super().execute_runner_verifier_action(
+                action, member_name=member_name
+            )
+            return {**value, "calls": 1}
+
+    protocol = ResearchLabModelRunnerProtocol(
+        transport=_TamperedVerifierTransport(),
+        expected_release_identity=_release(),
+    )
+    with pytest.raises(ModelRunnerHostError, match="execution is invalid"):
+        protocol.execute_verifier_action({
+            "action_type": "verify_company",
+            "action_sha256": "a" * 64,
+        })
+
+
+def test_exact_official_model_spec_exposes_no_proxy_or_credentials():
+    spec = DockerPrivateModelSpec(
+        image_digest="example.invalid/model@sha256:" + "a" * 64,
+        env_passthrough=(
+            "RESEARCH_LAB_OPENROUTER_API_KEY",
+            "RESEARCH_LAB_EVIDENCE_PROXY_URL",
+        ),
+        extra_env={
+            "RESEARCH_LAB_EVIDENCE_PROXY_URL": "http://127.0.0.1:8765",
+            "RESEARCH_LAB_OPENROUTER_API_KEY": "never-forward",
+            "HTTPS_PROXY": "http://127.0.0.1:9999",
+            "MODEL_OPERATIONAL_SCOPE": "sha256:" + "b" * 64,
+        },
+    )
+
+    exact = scoring_worker_module._exact_official_baseline_model_spec(spec)
+
+    assert exact.env_passthrough == ()
+    assert exact.extra_env == {
+        "MODEL_OPERATIONAL_SCOPE": "sha256:" + "b" * 64
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", (False, True))
+async def test_exact_proxy_lease_closes_on_success_and_failure(fail):
+    class _Lease:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    worker = object.__new__(
+        scoring_worker_module.ResearchLabGatewayScoringWorker
+    )
+    worker._active_official_baseline_evidence_proxy = None
+    lease = _Lease()
+
+    async def implementation():
+        worker._active_official_baseline_evidence_proxy = lease
+        if fail:
+            raise RuntimeError("fixture failure")
+        return {"status": "fixture success"}
+
+    worker._maybe_run_private_baseline_impl = implementation
+    if fail:
+        with pytest.raises(RuntimeError, match="fixture failure"):
+            await worker._maybe_run_private_baseline()
+    else:
+        assert await worker._maybe_run_private_baseline() == {
+            "status": "fixture success"
+        }
+    assert lease.closed == 1
+    assert worker._active_official_baseline_evidence_proxy is None
+
+
+def test_exact_proxy_lease_shutdown_is_complete_and_idempotent():
+    class _Server:
+        def __init__(self):
+            self.shutdowns = 0
+            self.closes = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+        def server_close(self):
+            self.closes += 1
+
+    class _Thread:
+        def __init__(self):
+            self.joins = []
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return False
+
+    server = _Server()
+    thread = _Thread()
+    lease = scoring_worker_module._OfficialBaselineEvidenceProxyLease(
+        server=server,
+        thread=thread,
+    )
+
+    lease.close()
+    lease.close()
+
+    assert server.shutdowns == 1
+    assert server.closes == 1
+    assert thread.joins == [5.0]
+
+
+def test_exact_proxy_partial_construction_closes_on_live_validation_failure(
+    monkeypatch,
+):
+    from gateway.research_lab import provider_evidence_proxy
+
+    class _Server:
+        server_address = ("127.0.0.1", 43210)
+
+        def __init__(self):
+            self.shutdowns = 0
+            self.closes = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+        def server_close(self):
+            self.closes += 1
+
+    class _Thread:
+        def __init__(self):
+            self.joins = []
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+    server = _Server()
+    thread = _Thread()
+
+    def serve(**_values):
+        return server, object(), thread
+
+    monkeypatch.setattr(provider_evidence_proxy, "serve_evidence_proxy", serve)
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="did not bind a live loopback port",
+    ):
+        scoring_worker_module._start_official_baseline_evidence_proxy(
+            benchmark_date="2026-08-23",
+            rolling_window_hash="sha256:" + "f" * 64,
+            artifact_hash="sha256:" + HASH["artifact"],
+            worker_ref="fixture-worker",
+        )
+
+    assert server.shutdowns == 1
+    assert server.closes == 1
+    assert thread.joins == [5.0]
+
+
+def test_required_role_preflight_fails_before_proxy_construction():
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(
+        scoring_worker_module.ResearchLabGatewayScoringWorker
+    )
+    worker.worker_ref = "fixture-worker"
+    worker._active_official_baseline_evidence_proxy = None
+    constructed = []
+
+    def preflight(**_values):
+        raise ModelRunnerHostError("unknown required full-company role")
+
+    def construct_proxy(**_values):
+        constructed.append(True)
+        raise AssertionError("proxy must not be constructed")
+
+    worker._official_baseline_protocol_preflight = preflight
+    worker._official_baseline_evidence_proxy_factory = construct_proxy
+
+    with pytest.raises(
+        ModelRunnerHostError,
+        match="unknown required full-company role",
+    ):
+        worker._start_official_baseline_proxy_for_release(
+            artifact=runner.artifact,
+            selection=runner.selection,
+            spec=runner.spec,
+            benchmark_date="2026-08-23",
+            rolling_window_hash="sha256:" + "f" * 64,
+        )
+
+    assert constructed == []
+    assert worker._active_official_baseline_evidence_proxy is None
+
+
+@pytest.mark.asyncio
+async def test_dependency_construction_failure_closes_assigned_proxy_lease():
+    runner, _projector, _authority, _terminal = _exact_fixture()
+
+    class _Lease:
+        url = "http://127.0.0.1:43210"
+        capability_sha256 = "sha256:" + "a" * 64
+        ready_provider_ids = ("or",)
+
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    worker = object.__new__(
+        scoring_worker_module.ResearchLabGatewayScoringWorker
+    )
+    worker.worker_ref = "fixture-worker"
+    worker._active_official_baseline_evidence_proxy = None
+    worker._official_baseline_protocol_preflight = lambda **_values: None
+    lease = _Lease()
+    worker._official_baseline_evidence_proxy_factory = (
+        lambda **_values: lease
+    )
+
+    def construct_dependencies(*, context):
+        del context
+        raise OfficialBaselineAuthorityUnavailable(
+            "dependency construction failed"
+        )
+
+    worker._construct_official_baseline_exact_dependencies = (
+        construct_dependencies
+    )
+
+    async def implementation():
+        worker._start_official_baseline_proxy_for_release(
+            artifact=runner.artifact,
+            selection=runner.selection,
+            spec=runner.spec,
+            benchmark_date="2026-08-23",
+            rolling_window_hash="sha256:" + "f" * 64,
+        )
+        worker._construct_official_baseline_exact_dependencies(
+            context=object()
+        )
+
+    worker._maybe_run_private_baseline_impl = implementation
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="dependency construction failed",
+    ):
+        await worker._maybe_run_private_baseline()
+
+    assert lease.closed == 1
+    assert worker._active_official_baseline_evidence_proxy is None

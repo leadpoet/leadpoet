@@ -1170,10 +1170,12 @@ import requests
 
 
 _CONTRACT_SHA256 = "__QUALIFICATION_OUTCOME_CONTRACT_SHA256__"
+SCORING_ADAPTER_VERSION = "qualification-company-scorer:v1"
 
 
 def adapter_metadata():
     return {
+        "scoring_adapter_version": SCORING_ADAPTER_VERSION,
         "qualification_outcome_protocol": {
             "protocol_id": "sourcing-model.qualification-outcome",
             "major": 2,
@@ -1258,6 +1260,15 @@ def run_icp_outcome(icp, context):
         "skipped": 0,
         "retried": 0,
     }
+    companies_sha256 = hashlib.sha256(
+        json.dumps(
+            companies,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
     receipt = {
         "schema_version": "sourcing-model.route-completion-receipt.v1",
         "contract_sha256": _CONTRACT_SHA256,
@@ -1274,7 +1285,10 @@ def run_icp_outcome(icp, context):
         "extensions": {
             "com.leadpoet.required-route-outcomes": [
                 {"commitment": "f" * 64, "state": "completed"}
-            ]
+            ],
+            "leadpoet.sourcing-model": {
+                "companies_sha256": companies_sha256,
+            },
         },
     }
     receipt["receipt_sha256"] = hashlib.sha256(

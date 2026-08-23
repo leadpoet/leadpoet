@@ -6345,6 +6345,9 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         }
 
     class HandledEvidenceFailureScorer:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
         async def score_with_breakdowns(
             self,
             _companies: Any,

@@ -1,4 +1,5 @@
 -- Append-only provider/verifier action authority for the official baseline.
+-- Migration 164 follows the model-transition artifact-custody authority.
 --
 -- This authority is deliberately independent of measured routing experiments.
 -- It stores only release/action identities, protected-job references, hashes,

@@ -715,7 +715,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_runs_v1",
         (
             "run_sha256",
@@ -733,7 +733,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_action_attempts_v1",
         (
             "attempt_key",
@@ -762,7 +762,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_action_terminals_v1",
         (
             "attempt_key",
@@ -790,7 +790,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_unit_closures_v1",
         (
             "closure_ref",
@@ -1160,31 +1160,31 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_routing_claim_execution_v3",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_register_run_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_reserve_action_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_record_terminal_known_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_record_terminal_uncertain_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_load_replay_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_close_unit_v1",
     ),
     (
-        "scripts/163-research-lab-official-baseline-action-authority.sql",
+        "scripts/164-research-lab-official-baseline-action-authority.sql",
         "research_lab_official_baseline_load_frontier_v1",
     ),
 )
@@ -1199,6 +1199,56 @@ REQUIRED_SUPABASE_V2_POLICY_MIGRATIONS = (
 REQUIRED_SUPABASE_V2_QUEUE_MIGRATIONS = (
     "scripts/159-research-lab-routing-execution-queue.sql",
 )
+
+# Migration 163 belongs only to the disabled-by-default reviewed routing
+# product. Requiring it from every gateway restart would couple the stable
+# rebenchmark/weight path to dormant Lab infrastructure. Activation still
+# fails closed: either reviewed routing flag (or the reviewed composition)
+# adds both custody RPCs to the exact live-schema contract below.
+ROUTING_MODEL_TRANSITION_V2_RPCS = (
+    (
+        "scripts/163-research-lab-model-transition-artifact-custody.sql",
+        "research_lab_routing_exact_model_transition_contract_v2",
+    ),
+    (
+        "scripts/163-research-lab-model-transition-artifact-custody.sql",
+        "research_lab_routing_load_model_transition_v2",
+    ),
+)
+
+_ROUTING_MODEL_TRANSITION_FEATURE_FLAGS = (
+    "RESEARCH_LAB_ROUTING_EXPERIMENT_ENABLED",
+    "RESEARCH_LAB_ROUTING_EXPERIMENT_LIVE_ENABLED",
+    "RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED",
+)
+_ROUTING_MODEL_TRANSITION_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _routing_model_transition_v2_required(
+    parent_environment: Mapping[str, str],
+) -> bool:
+    return any(
+        str(parent_environment.get(name, "")).strip().lower()
+        in _ROUTING_MODEL_TRANSITION_TRUE_VALUES
+        for name in _ROUTING_MODEL_TRANSITION_FEATURE_FLAGS
+    ) or (
+        str(
+            parent_environment.get(
+                "RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION", ""
+            )
+        )
+        .strip()
+        .lower()
+        == "reviewed_v2"
+    )
+
+
+def _required_supabase_v2_rpcs(
+    parent_environment: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    if _routing_model_transition_v2_required(parent_environment):
+        return REQUIRED_SUPABASE_V2_RPCS + ROUTING_MODEL_TRANSITION_V2_RPCS
+    return REQUIRED_SUPABASE_V2_RPCS
 
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
@@ -1496,12 +1546,16 @@ def verify_required_supabase_v2_schema(
     timeout_seconds: float = 10.0,
     chain_realized_activation_authority: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    required_rpcs = _required_supabase_v2_rpcs(parent_environment)
+    routing_model_transition_v2_required = (
+        _routing_model_transition_v2_required(parent_environment)
+    )
     activation_source = (
         "postgrest"
         if chain_realized_activation_authority is None
         else "provided-authority"
     )
-    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+    for migration, function_name in required_rpcs:
         if len(function_name.encode("utf-8")) > POSTGRES_IDENTIFIER_MAX_BYTES:
             raise SupabaseSchemaPreflightV2Error(
                 "required Supabase V2 RPC identifier exceeds PostgreSQL's "
@@ -1591,7 +1645,7 @@ def verify_required_supabase_v2_schema(
         raise SupabaseSchemaPreflightV2Error(
             "Supabase V2 RPC schema document is invalid"
         ) from exc
-    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+    for migration, function_name in required_rpcs:
         if f"/rpc/{function_name}" not in schema_paths:
             raise SupabaseSchemaPreflightV2Error(
                 "required Supabase V2 RPC is unavailable for "
@@ -1617,10 +1671,13 @@ def verify_required_supabase_v2_schema(
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
-        + len(REQUIRED_SUPABASE_V2_RPCS)
+        + len(required_rpcs)
         + 3,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
-        "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
+        "rpc_probe_count": len(required_rpcs),
+        "routing_model_transition_v2_required": (
+            routing_model_transition_v2_required
+        ),
         "data_probe_count": 3,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation_http_probe_count": (

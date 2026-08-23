@@ -28,7 +28,7 @@ from research_lab.canonical import sha256_json
 
 
 OFFICIAL_BASELINE_MIGRATION = (
-    "scripts/163-research-lab-official-baseline-action-authority.sql"
+    "scripts/164-research-lab-official-baseline-action-authority.sql"
 )
 OFFICIAL_BASELINE_RPC_REGISTER_RUN = "research_lab_official_baseline_register_run_v1"
 OFFICIAL_BASELINE_RPC_RESERVE_ACTION = (

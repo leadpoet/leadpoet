@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (
-    ROOT / "scripts" / "163-research-lab-official-baseline-action-authority.sql"
+    ROOT / "scripts" / "164-research-lab-official-baseline-action-authority.sql"
 )
 BEHAVIOR = (
     ROOT / "tests" / "sql" / "test_official_baseline_action_authority_v1.sql"

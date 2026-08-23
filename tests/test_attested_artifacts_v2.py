@@ -126,6 +126,7 @@ async def _exercise(
     policy_events: list | None = None,
     duplicate_transport: bool = False,
     missing_distinct: bool = False,
+    storage_transport: bool = False,
 ) -> dict:
     artifacts = _artifacts(persisted=replay)
     if partial:
@@ -162,6 +163,15 @@ async def _exercise(
             {
                 "request_artifact_hash": _hash("3"),
                 "response_artifact_hash": _hash("2"),
+                "terminal_status": "authenticated_response",
+            }
+        )
+    if storage_transport:
+        transport_attempts.append(
+            {
+                "provider_id": "aws_s3_object_lock",
+                "request_artifact_hash": _hash("4"),
+                "response_artifact_hash": _hash("5"),
                 "terminal_status": "authenticated_response",
             }
         )
@@ -344,6 +354,18 @@ async def test_transport_artifacts_deduplicate_repeated_plaintext_commitments(
         monkeypatch,
         replay=False,
         duplicate_transport=True,
+    )
+    assert len(result["artifacts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_transport_artifacts_exclude_object_lock_readback_commitments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _exercise(
+        monkeypatch,
+        replay=False,
+        storage_transport=True,
     )
     assert len(result["artifacts"]) == 2
 

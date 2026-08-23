@@ -5751,6 +5751,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                             'service_role',
                             'public.research_lab_routing_exact_model_transition_contract_v2()',
                             'EXECUTE'
+                        ),
+                    'lookup_service_role_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_load_model_transition_v2(text,text,text,text)',
+                            'EXECUTE'
                         )
                 )::text;
                 """,
@@ -5769,9 +5775,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "artifact_identity_required": True,
                 "logical_identity_conflict_guard": True,
+                "logical_identity_lookup_rpc": (
+                    "research_lab_routing_load_model_transition_v2"
+                ),
                 "legacy_v1_eligible": False,
             },
             "service_role_callable": True,
+            "lookup_service_role_callable": True,
         }:
             raise PostgresContractProbeError(
                 "post-163 Model transition artifact custody contract differs"

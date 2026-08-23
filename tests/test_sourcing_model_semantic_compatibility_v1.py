@@ -807,6 +807,24 @@ def test_one_custody_v3_marker_does_not_reclassify_legacy_contract(
     )
 
 
+def test_legacy_v68_label_without_custody_markers_is_not_reclassified() -> None:
+    policy = compatibility.semantic_compatibility_policy_v1()
+    contract = {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v68",
+        "exact_constants": {
+            "research_lab_adapter.py": {
+                "ADAPTER_VERSION": "sourcing-model-research-lab-adapter:v9",
+            },
+        },
+        "exact_signatures": [],
+    }
+
+    assert not compatibility._typed_dispatch_custody_v3_requested(
+        contract,
+        policy=policy,
+    )
+
+
 def test_both_custody_v3_markers_make_unknown_identity_fail_closed() -> None:
     policy = compatibility.semantic_compatibility_policy_v1()
     contract = {

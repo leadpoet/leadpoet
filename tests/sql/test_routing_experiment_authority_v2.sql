@@ -808,6 +808,7 @@ DECLARE
     attempt_doc JSONB;
     transition_doc JSONB;
     transition_result JSONB;
+    loaded_transition JSONB;
     attempt_key TEXT := public.research_lab_routing_jsonb_hash_v2(
         pg_catalog.jsonb_build_object('fixture', 'provider-attempt-v3')
     );
@@ -1128,6 +1129,7 @@ BEGIN
         'evidence_hash', provider_record_hash,
         'credit_microunits', 1,
         'latency_ms', 1,
+        'call_count', 1,
         'execution_mode', 'measured_lab',
         'binding_id', 'binding',
         'binding_version', 'v1',
@@ -1142,6 +1144,7 @@ BEGIN
         'evidence_hash', provider_record_hash,
         'credit_microunits', 1,
         'latency_ms', 1,
+        'call_count', 1,
         'billing_state', 'known',
         'binding_id', 'binding',
         'provider_id', 'bloomberry_jobs',
@@ -1343,6 +1346,52 @@ BEGIN
     IF (transition_result->>'idempotent')::BOOLEAN IS NOT TRUE THEN
         RAISE EXCEPTION 'exact Model transition replay was not idempotent: %', transition_result;
     END IF;
+    INSERT INTO public.research_lab_routing_experiment_events_v2 (
+        event_hash, experiment_hash, event_type, claim_key,
+        claim_generation, event_doc, created_at
+    )
+    SELECT 'sha256:' || pg_catalog.lpad(
+               pg_catalog.to_hex(1000000 + fixture_index), 64, '0'
+           ),
+           experiment_hash,
+           'run_started',
+           claim_key,
+           1,
+           pg_catalog.jsonb_build_object(
+               'schema_version', 'leadpoet.research_lab.routing_event.v2',
+               'fixture_index', fixture_index
+           ),
+           '2000-01-01T00:00:00Z'::TIMESTAMPTZ
+               + fixture_index * INTERVAL '1 microsecond'
+      FROM pg_catalog.generate_series(1, 1100) fixture_index;
+    loaded_transition :=
+        public.research_lab_routing_load_model_transition_v2(
+            experiment_hash, 'candidate', 'unit-one', repeat('7', 64)
+        );
+    IF loaded_transition IS DISTINCT FROM transition_doc THEN
+        RAISE EXCEPTION
+            'exact Model transition lookup missed a marker beyond a response page';
+    END IF;
+
+    INSERT INTO public.research_lab_routing_experiment_events_v2 (
+        event_hash, experiment_hash, event_type, claim_key,
+        claim_generation, event_doc
+    ) VALUES (
+        public.research_lab_routing_jsonb_hash_v2(
+            pg_catalog.jsonb_build_object(
+                'duplicate_model_transition', transition_doc
+            )
+        ),
+        experiment_hash, 'model_transition_completed', claim_key, 1,
+        transition_doc
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_load_model_transition_v2(
+            experiment_hash, 'candidate', 'unit-one', repeat('7', 64)
+        );
+        RAISE EXCEPTION 'duplicate Model transition lookup unexpectedly succeeded';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
 
     bad_doc := pg_catalog.jsonb_set(
         transition_doc, '{artifact_key}',
@@ -1955,6 +2004,7 @@ BEGIN
         'public.research_lab_routing_renew_claim_v3(text,text,text,bigint,integer,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_close_claim_v3(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_fenced_event_v3(text,text,text,text,bigint,jsonb)'::REGPROCEDURE,
+        'public.research_lab_routing_load_model_transition_v2(text,text,text,text)'::REGPROCEDURE,
         'public.research_lab_routing_assert_provider_receipt_chain_v3(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,bigint,text,bigint,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_provider_attempt_v3(text,text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,text,text,bigint,bigint,text,text,bigint,text,text,text,text,text,text,text,jsonb)'::REGPROCEDURE,
         'public.research_lab_routing_append_decision_receipt_v3(text,text,text,text,text,text,text,bigint,jsonb)'::REGPROCEDURE,

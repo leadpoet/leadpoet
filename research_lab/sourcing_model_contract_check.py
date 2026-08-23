@@ -2403,13 +2403,12 @@ def _typed_dispatch_custody_v3_requested(
             )
         except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
             source_version_claim = False
-    return (
-        str(contract.get("contract_id") or "")
-        == str(dispatch_v3["contract_id"])
-        or marker_claim
-        or contract_version_claim
-        or source_version_claim
-    )
+    # Contract labels are descriptive rather than globally unique.  The
+    # currently published Lab artifact also uses the v68 label for an older
+    # adapter contract, so the label alone cannot opt a source tree into the
+    # custody-v3 rules.  Positive protocol markers or the exact adapter
+    # version remain fail-closed signals for custody-v3 admission.
+    return marker_claim or contract_version_claim or source_version_claim
 
 
 def _merge_typed_dispatch_policy(

@@ -559,31 +559,46 @@ class FencedModelTransitionRepository:
                     "model_completion_contract_hash"
                 ],
             }
+        event_document = {
+            "event_schema_version": MODEL_TRANSITION_SCHEMA_VERSION,
+            "variant_id": variant_id,
+            "unit_ref": unit_ref,
+            "artifact_key": expected_artifact_key,
+            "idempotency_key": action.get("idempotency_key"),
+            "action_sha256": action.get("action_sha256"),
+            "continuation_sha256": _sha256(continuation),
+            "completion_sha256": completion.get("completion_sha256"),
+            "provider_response_sha256": _sha256(provider_response),
+            "provider_receipt": (
+                None
+                if provider_receipt is None
+                else dict(provider_receipt)
+            ),
+            **replay_values,
+        }
         result = self._store.append_event(
             experiment_hash=experiment_hash,
             event_type="model_transition_completed",
-            event_doc={
-                "event_schema_version": (
-                    MODEL_TRANSITION_SCHEMA_VERSION
-                ),
-                "variant_id": variant_id,
-                "unit_ref": unit_ref,
-                "artifact_key": expected_artifact_key,
-                "idempotency_key": action.get("idempotency_key"),
-                "action_sha256": action.get("action_sha256"),
-                "continuation_sha256": _sha256(continuation),
-                "completion_sha256": completion.get("completion_sha256"),
-                "provider_response_sha256": _sha256(provider_response),
-                "provider_receipt": (
-                    None
-                    if provider_receipt is None
-                    else dict(provider_receipt)
-                ),
-                **replay_values,
-            },
+            event_doc=event_document,
             claim=self._claim,
         )
-        if not isinstance(result, Mapping):
+        durable_document = {
+            "schema_version": "leadpoet.research_lab.routing_event.v2",
+            **event_document,
+        }
+        expected_event_hash = sha256_json(
+            {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                "event_type": "model_transition_completed",
+                "document": durable_document,
+            }
+        )
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"event_hash", "idempotent"}
+            or result.get("event_hash") != expected_event_hash
+            or type(result.get("idempotent")) is not bool
+        ):
             raise CommonModelExperimentError(
                 "durable Model transition result is invalid"
             )

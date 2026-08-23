@@ -76,6 +76,23 @@ def _action():
     }
 
 
+def _append_event_ack(value):
+    document = {
+        "schema_version": "leadpoet.research_lab.routing_event.v2",
+        **value["event_doc"],
+    }
+    return {
+        "event_hash": sha256_json(
+            {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                "event_type": value["event_type"],
+                "document": document,
+            }
+        ),
+        "idempotent": False,
+    }
+
+
 class _Transport:
     def __init__(self, release=None):
         self.release = dict(_release() if release is None else release)
@@ -333,7 +350,7 @@ def test_fenced_restart_rejects_artifact_b_then_replays_artifact_a():
                 "schema_version": "leadpoet.research_lab.routing_event.v2",
                 **value["event_doc"],
             }
-            return {"inserted": True}
+            return _append_event_ack(value)
 
     class _ReplayDispatcher(_Dispatcher):
         dispatch_calls = 0
@@ -449,7 +466,7 @@ def test_fenced_transition_repository_persists_hashes_not_provider_body():
 
         def append_event(self, **value):
             self.document = value["event_doc"]
-            return {"inserted": True}
+            return _append_event_ack(value)
 
     store = _Store()
     repository = FencedModelTransitionRepository(store=store, claim=object())
@@ -471,6 +488,36 @@ def test_fenced_transition_repository_persists_hashes_not_provider_body():
     assert "completion" not in store.document
     assert "continuation" not in store.document
     assert "provider-value" not in str(store.document)
+
+
+def test_fenced_transition_repository_rejects_unconfirmed_durable_append():
+    class _Store:
+        def load_model_transition_marker(self, **_identity):
+            return None
+
+        def append_event(self, **_value):
+            return {}
+
+    repository = FencedModelTransitionRepository(
+        store=_Store(), claim=object()
+    )
+    with pytest.raises(
+        CommonModelExperimentError,
+        match="durable Model transition result is invalid",
+    ):
+        repository.append_model_transition(
+            experiment_hash="sha256:" + "d" * 64,
+            variant_id="baseline",
+            unit_ref="unit-1",
+            artifact_key=_registration().key,
+            action=_action(),
+            continuation={"private": "continuation"},
+            completion={
+                "completion_sha256": "7" * 64,
+                "provider_response": {"private": "provider-value"},
+            },
+            provider_receipt=None,
+        )
 
 
 def test_stored_transition_action_substitution_fails_closed():

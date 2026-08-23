@@ -629,6 +629,7 @@ def _migration_schema_contract(
         "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v2",
+        "research_lab_routing_load_model_transition_v2",
         "research_lab_candidate_append_model_unit_terminal_v1",
         "research_lab_candidate_append_waterfall_receipt_v1",
         "research_lab_candidate_append_waterfall_metric_v1",

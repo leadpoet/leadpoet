@@ -329,6 +329,15 @@ def test_model_transition_custody_migration_binds_artifact_and_serializes_confli
     assert "research_lab_routing_model_transition_logical_conflict" in sql
     assert "research_lab_routing_exact_model_transition_contract_v2" in sql
     assert "leadpoet.research_lab.exact_model_transition_contract.v2" in sql
+    assert "research_lab_routing_load_model_transition_v2" in sql
+    assert "rl_route_model_transition_lookup_v2_idx" in sql
+    assert "LIMIT 2" in sql
+    assert "research_lab_routing_model_transition_lookup_duplicate" in sql
+    assert "logical_identity_lookup_rpc" in sql
+    assert (
+        "research_lab_routing_load_model_transition_v2(TEXT, TEXT, TEXT, TEXT)\n"
+        "FROM PUBLIC, anon, authenticated;"
+    ) in sql
     assert "'legacy_v1_eligible',\n        FALSE" in sql
     assert "provider_response'" not in sql
 

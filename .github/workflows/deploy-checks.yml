@@ -21,7 +21,7 @@ env:
   CI: "true"
   # One immutable source identity is shared by checkout verification and the
   # adapter-v10 tests. Do not replace this with a branch or a short ref.
-  SOURCING_MODEL_SOURCE_SHA: "dda2a974dfa2c5c743da6c2da8e46355293ed325"
+  SOURCING_MODEL_SOURCE_SHA: "82921b51af8aa7ed097f01964f23cc9d16b5e3d6"
   DISABLE_BACKGROUND_TASKS: "true"
   ENABLE_FULFILLMENT: "false"
   LANGFUSE_ENABLED: "false"
@@ -86,7 +86,7 @@ jobs:
           test -f "$source_root/sourcing_model/consumer_parity_fixtures.json"
           test "$(sha256sum "$source_root/sourcing_model/consumer_contract.json" | cut -d' ' -f1)" = "960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
           test "$(sha256sum "$source_root/sourcing_model/consumer_parity_fixtures.json" | cut -d' ' -f1)" = "deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
-          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "86ee8ee7b90938e6d8f28ecb3964df8f22832743cc4c93863320a1fcebe2b415"
+          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "25f940cace660965841a514b08af84e9abf52a7f561a702ede11a31b10c83117"
           test "$(sha256sum "$source_root/research_lab_adapter.py" | cut -d' ' -f1)" = "58ce3c7e56d87d4311dce43df148f752e5c90cbab93346b42f9f7b0cd3d32104"
           {
             echo "SOURCING_MODEL_SOURCE_ROOT=$source_root"
@@ -211,7 +211,7 @@ jobs:
           test "$(git -C "$source_root" ls-files -m -o --exclude-standard)" = ""
           test "$(sha256sum "$source_root/sourcing_model/consumer_contract.json" | cut -d' ' -f1)" = "960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
           test "$(sha256sum "$source_root/sourcing_model/consumer_parity_fixtures.json" | cut -d' ' -f1)" = "deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
-          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "86ee8ee7b90938e6d8f28ecb3964df8f22832743cc4c93863320a1fcebe2b415"
+          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "25f940cace660965841a514b08af84e9abf52a7f561a702ede11a31b10c83117"
           test "$(sha256sum "$source_root/research_lab_adapter.py" | cut -d' ' -f1)" = "58ce3c7e56d87d4311dce43df148f752e5c90cbab93346b42f9f7b0cd3d32104"
 
       - name: Upload coverage report

@@ -221,6 +221,91 @@ BEGIN
 END;
 $append_fenced_event_v3$;
 
+CREATE INDEX IF NOT EXISTS rl_route_model_transition_lookup_v2_idx
+    ON public.research_lab_routing_experiment_events_v2 (
+        experiment_hash,
+        (event_doc->>'variant_id'),
+        (event_doc->>'unit_ref'),
+        (event_doc->>'idempotency_key'),
+        created_at,
+        event_hash
+    )
+    WHERE event_type = 'model_transition_completed';
+
+-- Recover one transition by its model-owned logical identity.  The lookup is
+-- server-side and deliberately excludes artifact_key: a different artifact
+-- must be reported to the caller as a conflict, never treated as a cache miss
+-- that can repeat paid provider work.  LIMIT 2 makes duplicate detection
+-- independent of PostgREST response caps and experiment size.
+CREATE OR REPLACE FUNCTION
+public.research_lab_routing_load_model_transition_v2(
+    p_experiment_hash TEXT,
+    p_variant_id TEXT,
+    p_unit_ref TEXT,
+    p_idempotency_key TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $load_model_transition_v2$
+DECLARE
+    matching_docs JSONB[];
+    match_count INTEGER;
+BEGIN
+    IF p_experiment_hash !~ '^sha256:[0-9a-f]{64}$'
+       OR COALESCE(p_variant_id, '')
+            !~ '^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$'
+       OR COALESCE(p_unit_ref, '')
+            !~ '^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}$'
+       OR COALESCE(p_idempotency_key, '') !~ '^[0-9a-f]{64}$'
+    THEN
+        RAISE EXCEPTION
+            'research_lab_routing_model_transition_lookup_invalid_arguments'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT pg_catalog.array_agg(
+               candidate.event_doc
+               ORDER BY candidate.created_at, candidate.event_hash
+           )
+      INTO matching_docs
+      FROM (
+          SELECT transition_event.event_doc,
+                 transition_event.created_at,
+                 transition_event.event_hash
+            FROM public.research_lab_routing_experiment_events_v2
+                 transition_event
+           WHERE transition_event.experiment_hash = p_experiment_hash
+             AND transition_event.event_type = 'model_transition_completed'
+             AND transition_event.event_doc->>'variant_id' = p_variant_id
+             AND transition_event.event_doc->>'unit_ref' = p_unit_ref
+             AND transition_event.event_doc->>'idempotency_key' =
+                   p_idempotency_key
+           ORDER BY transition_event.created_at, transition_event.event_hash
+           LIMIT 2
+      ) candidate;
+    match_count := COALESCE(pg_catalog.array_length(matching_docs, 1), 0);
+    IF match_count = 0 THEN
+        RETURN NULL;
+    END IF;
+    IF match_count <> 1 THEN
+        RAISE EXCEPTION
+            'research_lab_routing_model_transition_lookup_duplicate'
+            USING ERRCODE = '23505';
+    END IF;
+    RETURN matching_docs[1];
+END;
+$load_model_transition_v2$;
+
+REVOKE ALL ON FUNCTION
+public.research_lab_routing_load_model_transition_v2(TEXT, TEXT, TEXT, TEXT)
+FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION
+public.research_lab_routing_load_model_transition_v2(TEXT, TEXT, TEXT, TEXT)
+TO service_role;
+
 CREATE OR REPLACE FUNCTION
 public.research_lab_routing_exact_model_transition_contract_v2()
 RETURNS JSONB
@@ -240,6 +325,8 @@ AS $exact_model_transition_contract_v2$
         TRUE,
         'logical_identity_conflict_guard',
         TRUE,
+        'logical_identity_lookup_rpc',
+        'research_lab_routing_load_model_transition_v2',
         'legacy_v1_eligible',
         FALSE
     );
@@ -255,6 +342,10 @@ TO service_role;
 COMMENT ON FUNCTION public.research_lab_routing_append_fenced_event_v3(
     TEXT, TEXT, TEXT, TEXT, BIGINT, JSONB
 ) IS 'Appends V3 claim-fenced lifecycle events and artifact-bound redacted exact-Model transition markers.';
+
+COMMENT ON FUNCTION public.research_lab_routing_load_model_transition_v2(
+    TEXT, TEXT, TEXT, TEXT
+) IS 'Loads one redacted exact-Model transition by logical identity and rejects duplicates before replay.';
 
 COMMENT ON FUNCTION
 public.research_lab_routing_exact_model_transition_contract_v2() IS

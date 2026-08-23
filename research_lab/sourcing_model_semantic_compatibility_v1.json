@@ -321,7 +321,7 @@
       },
       "sourcing_model/model_runner.py": {
         "roots": ["custody_typed_encode", "custody_json_loads", "custody_json_dumps", "custody_json_bytes", "custody_envelope_sha256", "model_runner_custody_metadata", "model_runner_custody_parity_vectors", "build_model_start_request_custody_v3", "validate_model_start_request_custody_v3", "build_model_action_custody_v3", "validate_model_action_custody_v3", "build_model_initial_continuation_custody_v3", "validate_model_initial_continuation_custody_v3"],
-        "sha256": "sha256:b467324f9906a4561461bcea9733de2fce9c55e42abdd3594d1aa119ac66d330"
+        "sha256": "sha256:1bcc6cead0ca4d07c1f983e104d7e71cbc8a291b97794833bab05acf77cdbb38"
       },
       "sourcing_model/runtime_capabilities.py": {
         "roots": ["capability_metadata", "capability", "deadline", "default_deadline", "default_emit", "default_http_fetch", "default_probe_origin", "default_resolve_host", "emit", "http_fetch", "is_terminally_unresolvable", "may_attempt", "probe_origin", "register", "registered_capabilities", "reset", "resolve_host"],

@@ -607,16 +607,22 @@ class SupabaseRoutingExperimentStore:
             "schema_version": "leadpoet.research_lab.routing_event.v2",
             **dict(event_doc),
         }
+        event_hash = _event_hash(event_type, document)
         params = {
-                "p_event_hash": _event_hash(event_type, document),
+                "p_event_hash": event_hash,
                 "p_experiment_hash": normalized_experiment_hash,
                 "p_event_type": event_type,
                 "p_claim_key": claim.claim_key,
                 "p_claim_generation": claim.claim_generation,
                 "p_event_doc": document,
-            }
+        }
         result = self._rpc("research_lab_routing_append_fenced_event_v3", params)
-        if not isinstance(result, Mapping):
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"event_hash", "idempotent"}
+            or result.get("event_hash") != event_hash
+            or type(result.get("idempotent")) is not bool
+        ):
             raise RoutingExperimentStoreError("routing event result is malformed")
         return dict(result)
 
@@ -648,32 +654,22 @@ class SupabaseRoutingExperimentStore:
             raise RoutingExperimentStoreError(
                 "Model transition artifact identity is invalid"
             )
-        matches: list[Mapping[str, Any]] = []
-        for row in self._select_rows(
-            "research_lab_routing_experiment_events_v2",
-            experiment_hash=normalized_experiment_hash,
-            order_column="created_at",
-        ):
-            if row.get("event_type") != "model_transition_completed":
-                continue
-            document = row.get("event_doc")
-            if not isinstance(document, Mapping):
-                raise RoutingExperimentStoreError(
-                    "Model transition marker is malformed"
-                )
-            if (
-                document.get("variant_id") == variant_id
-                and document.get("unit_ref") == unit_ref
-                and document.get("idempotency_key") == idempotency_key
-            ):
-                matches.append(dict(document))
-        if not matches:
+        marker_result = self._rpc(
+            "research_lab_routing_load_model_transition_v2",
+            {
+                "p_experiment_hash": normalized_experiment_hash,
+                "p_variant_id": variant_id,
+                "p_unit_ref": unit_ref,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        if marker_result is None:
             return None
-        if len(matches) != 1:
+        if not isinstance(marker_result, Mapping):
             raise RoutingExperimentStoreError(
-                "Model transition marker is duplicated"
+                "Model transition marker is malformed"
             )
-        marker = matches[0]
+        marker = dict(marker_result)
         expected = {
             "schema_version",
             "event_schema_version",

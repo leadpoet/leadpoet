@@ -98,14 +98,27 @@ class _Query:
 
 
 class _Client:
-    def __init__(self, tables):
+    def __init__(self, tables, *, rpc_results=None):
         self.tables = tables
+        self.rpc_results = dict(rpc_results or {})
+        self.rpc_calls = []
 
     def table(self, name):
         return _Query(self.tables.get(name, []))
 
-    def rpc(self, _name, _params):
-        raise AssertionError("reconcile must not write")
+    def rpc(self, name, params):
+        self.rpc_calls.append((name, dict(params)))
+        if name not in self.rpc_results:
+            raise AssertionError("reconcile must not write")
+        return _QueryResult(self.rpc_results[name])
+
+
+class _QueryResult:
+    def __init__(self, data):
+        self.data = data
+
+    def execute(self):
+        return self
 
 
 @dataclass(frozen=True)
@@ -233,16 +246,13 @@ class _Attestor:
 def test_model_transition_load_compares_artifact_after_logical_lookup():
     experiment_hash = _hash("a")
     marker = _model_transition_marker()
-    store = SupabaseRoutingExperimentStore(
-        _Client({
-            "research_lab_routing_experiment_events_v2": [{
-                "experiment_hash": experiment_hash,
-                "event_type": "model_transition_completed",
-                "event_doc": marker,
-                "created_at": "2026-08-23T00:00:00Z",
-            }]
-        })
+    client = _Client(
+        {},
+        rpc_results={
+            "research_lab_routing_load_model_transition_v2": marker,
+        },
     )
+    store = SupabaseRoutingExperimentStore(client)
     identity = {
         "experiment_hash": experiment_hash,
         "variant_id": "baseline",
@@ -253,6 +263,17 @@ def test_model_transition_load_compares_artifact_after_logical_lookup():
     assert store.load_model_transition_marker(
         **identity, artifact_key=_artifact_key()
     ) == marker
+    assert client.rpc_calls == [
+        (
+            "research_lab_routing_load_model_transition_v2",
+            {
+                "p_experiment_hash": experiment_hash,
+                "p_variant_id": "baseline",
+                "p_unit_ref": "unit-1",
+                "p_idempotency_key": "c" * 64,
+            },
+        )
+    ]
     with pytest.raises(
         RoutingExperimentStoreError,
         match="artifact identity differs",
@@ -270,14 +291,12 @@ def test_model_transition_load_rejects_legacy_identityless_v1_marker():
     )
     marker.pop("artifact_key")
     store = SupabaseRoutingExperimentStore(
-        _Client({
-            "research_lab_routing_experiment_events_v2": [{
-                "experiment_hash": experiment_hash,
-                "event_type": "model_transition_completed",
-                "event_doc": marker,
-                "created_at": "2026-08-23T00:00:00Z",
-            }]
-        })
+        _Client(
+            {},
+            rpc_results={
+                "research_lab_routing_load_model_transition_v2": marker,
+            },
+        )
     )
 
     with pytest.raises(
@@ -291,6 +310,123 @@ def test_model_transition_load_rejects_legacy_identityless_v1_marker():
             idempotency_key="c" * 64,
             artifact_key=_artifact_key(),
         )
+
+
+def test_model_transition_load_accepts_exact_rpc_null_without_table_scan():
+    experiment_hash = _hash("a")
+    client = _Client(
+        {},
+        rpc_results={
+            "research_lab_routing_load_model_transition_v2": None,
+        },
+    )
+    store = SupabaseRoutingExperimentStore(client)
+
+    assert store.load_model_transition_marker(
+        experiment_hash=experiment_hash,
+        variant_id="baseline",
+        unit_ref="unit-1",
+        idempotency_key="c" * 64,
+        artifact_key=_artifact_key(),
+    ) is None
+
+
+def _event_claim(experiment_hash: str) -> RoutingExperimentExecutionClaim:
+    claim_key = _hash("b")
+    return RoutingExperimentExecutionClaim(
+        experiment_hash=experiment_hash,
+        claim_key=claim_key,
+        claim_generation=1,
+        claim_fence_hash=routing_claim_fence_hash_v3(
+            experiment_hash=experiment_hash,
+            claim_key=claim_key,
+            claim_generation=1,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "result_kind",
+    ("empty", "wrong_hash", "non_boolean", "extra_field"),
+)
+def test_append_event_rejects_unconfirmed_durable_ack(result_kind):
+    experiment_hash = _hash("a")
+    event_doc = {"event_schema_version": "fixture.v1"}
+    document = {
+        "schema_version": "leadpoet.research_lab.routing_event.v2",
+        **event_doc,
+    }
+    expected_hash = routing_store_module._event_hash(
+        "run_started", document
+    )
+    results = {
+        "empty": {},
+        "wrong_hash": {
+            "event_hash": _hash("9"),
+            "idempotent": False,
+        },
+        "non_boolean": {
+            "event_hash": expected_hash,
+            "idempotent": "false",
+        },
+        "extra_field": {
+            "event_hash": expected_hash,
+            "idempotent": False,
+            "extra": True,
+        },
+    }
+    store = SupabaseRoutingExperimentStore(
+        _Client(
+            {},
+            rpc_results={
+                "research_lab_routing_append_fenced_event_v3": results[
+                    result_kind
+                ],
+            },
+        )
+    )
+
+    with pytest.raises(
+        RoutingExperimentStoreError,
+        match="routing event result is malformed",
+    ):
+        store.append_event(
+            experiment_hash=experiment_hash,
+            event_type="run_started",
+            event_doc=event_doc,
+            claim=_event_claim(experiment_hash),
+        )
+
+
+@pytest.mark.parametrize("idempotent", (False, True))
+def test_append_event_accepts_exact_durable_ack(idempotent):
+    experiment_hash = _hash("a")
+    event_doc = {"event_schema_version": "fixture.v1"}
+    document = {
+        "schema_version": "leadpoet.research_lab.routing_event.v2",
+        **event_doc,
+    }
+    expected_hash = routing_store_module._event_hash(
+        "run_started", document
+    )
+    store = SupabaseRoutingExperimentStore(
+        _Client(
+            {},
+            rpc_results={
+                "research_lab_routing_append_fenced_event_v3": {
+                    "event_hash": expected_hash,
+                    "idempotent": idempotent,
+                },
+            },
+        )
+    )
+
+    assert store.append_event(
+        experiment_hash=experiment_hash,
+        event_type="run_started",
+        event_doc=event_doc,
+        claim=_event_claim(experiment_hash),
+    ) == {"event_hash": expected_hash, "idempotent": idempotent}
 
 
 def test_reconciliation_recomputes_exact_durable_roots_before_attestation():

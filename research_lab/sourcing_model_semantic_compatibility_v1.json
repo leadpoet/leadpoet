@@ -209,6 +209,131 @@
       "COMPILER_VERSION": "^routing-compiler-[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
     }
   },
+  "additive_dispatch_custody_v3": {
+    "contract_id": "leadpoet-sourcing-wrapper-contract-v68",
+    "contract_sha256": "sha256:960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab",
+    "parity_sha256": "sha256:deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003",
+    "contract_snapshot_path": "research_lab/sourcing_model_contract_v68.json",
+    "parity_snapshot_path": "research_lab/sourcing_model_parity_fixtures_v28.json",
+    "required_files": [
+      "sourcing_model/model_runner.py"
+    ],
+    "integer_minimums": {
+      "sourcing_model/model_runner.py": {
+        "MODEL_RUNNER_CUSTODY_INTEGER_MAX": 9007199254740991
+      }
+    },
+    "callables": {
+      "research_lab_adapter.py": {
+        "adapter_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false, "full_parameters": []},
+        "build_runner_action_custody_v3": {"positional": ["action"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["action", "start_request"]},
+        "build_runner_completion": {"positional": ["action", "result"], "required_positional": 2, "required_keyword_only": [], "is_async": false, "full_parameters": ["action", "result"]},
+        "build_runner_initial_continuation_custody_v3": {"positional": ["continuation"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["continuation", "start_request", "action"]},
+        "dispatch_runner_initial_custody_v3": {"positional": ["start_request"], "required_positional": 1, "required_keyword_only": ["expected_release_identity"], "is_async": false, "full_parameters": ["start_request", "expected_release_identity"]},
+        "build_runner_start": {"positional": [], "required_positional": 0, "required_keyword_only": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"], "is_async": false, "full_parameters": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"]},
+        "build_runner_start_custody_v3": {"positional": [], "required_positional": 0, "required_keyword_only": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"], "is_async": false, "full_parameters": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"]},
+        "continue_runner": {"positional": ["start_request"], "required_positional": 1, "required_keyword_only": ["expected_release_identity"], "is_async": false, "full_parameters": ["start_request", "expected_release_identity", "continuation", "completion"]},
+        "runner_preflight": {"positional": ["host_capability_manifest", "release_identity"], "required_positional": 2, "required_keyword_only": ["execution_mode"], "is_async": false, "full_parameters": ["host_capability_manifest", "release_identity", "execution_mode"]},
+        "validate_runner_action_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value", "start_request"]},
+        "validate_runner_initial_continuation_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["value", "start_request", "action"]},
+        "validate_runner_preflight": {"positional": ["value"], "required_positional": 1, "required_keyword_only": ["host_capability_manifest", "release_identity", "execution_mode"], "is_async": false, "full_parameters": ["value", "host_capability_manifest", "release_identity", "execution_mode"]},
+        "validate_runner_result": {"positional": ["value"], "required_positional": 1, "required_keyword_only": ["start_request", "expected_release_identity"], "is_async": false, "full_parameters": ["value", "start_request", "expected_release_identity"]},
+        "validate_runner_start_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]}
+      },
+      "sourcing_model/model_runner.py": {
+        "custody_typed_encode": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]},
+        "custody_json_loads": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]},
+        "custody_json_dumps": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]},
+        "custody_json_bytes": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]},
+        "custody_envelope_sha256": {"positional": ["kind", "payload"], "required_positional": 2, "required_keyword_only": [], "is_async": false, "full_parameters": ["kind", "payload"]},
+        "model_runner_custody_metadata": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false, "full_parameters": []},
+        "model_runner_custody_parity_vectors": {"positional": [], "required_positional": 0, "required_keyword_only": [], "is_async": false, "full_parameters": []},
+        "build_model_start_request_custody_v3": {"positional": [], "required_positional": 0, "required_keyword_only": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"], "is_async": false, "full_parameters": ["input", "execution_mode", "target_count", "evaluated_on", "host_capability_manifest", "release_identity"]},
+        "validate_model_start_request_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value"]},
+        "build_model_action_custody_v3": {"positional": ["action"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["action", "start_request"]},
+        "validate_model_action_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": [], "is_async": false, "full_parameters": ["value", "start_request"]},
+        "build_model_initial_continuation_custody_v3": {"positional": ["continuation"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["continuation", "start_request", "action"]},
+        "validate_model_initial_continuation_custody_v3": {"positional": ["value"], "required_positional": 1, "required_keyword_only": ["start_request"], "is_async": false, "full_parameters": ["value", "start_request", "action"]}
+      }
+    },
+    "exact_constants": {
+      "research_lab_adapter.py": {
+        "ADAPTER_VERSION": "sourcing-model-research-lab-adapter:v10",
+        "COMPONENT_REGISTRY_VERSION": "sourcing-model-components:v2",
+        "RESEARCH_LAB_ICP_PROJECTION_SCHEMA_VERSION": "research-lab-icp-projection:v1",
+        "RESEARCH_LAB_SIGNAL_PROFILE_RECEIPT_AUDIENCE": "private_evaluator_only",
+        "RESEARCH_LAB_SIGNAL_PROFILE_RECEIPT_SCHEMA_VERSION": "research-lab-signal-profile-receipt:v1",
+        "SCORING_ADAPTER_VERSION": "qualification-company-scorer:v1"
+      },
+      "sourcing_model/routing/compiler.py": {
+        "COMPILER_VERSION": "routing-compiler-v5"
+      },
+      "sourcing_model/model_runner.py": {
+        "MODEL_RUNNER_START_SCHEMA_VERSION": "model-runner-start:v2",
+        "MODEL_RUNNER_ACTION_SCHEMA_VERSION": "model-runner-action:v1",
+        "MODEL_RUNNER_COMPLETION_SCHEMA_VERSION": "model-runner-completion:v2",
+        "MODEL_RUNNER_CONTINUATION_SCHEMA_VERSION": "model-runner-continuation:v2",
+        "MODEL_RUNNER_RESULT_SCHEMA_VERSION": "model-runner-result:v2",
+        "MODEL_RUNNER_RECEIPT_SCHEMA_VERSION": "model-runner-receipt:v2",
+        "MODEL_RUNNER_PREFLIGHT_SCHEMA_VERSION": "model-runner-preflight:v2",
+        "MODEL_RUNNER_CUSTODY_SCHEMA_VERSION": "model-runner-custody:v3",
+        "MODEL_RUNNER_CUSTODY_ENCODING_VERSION": "model-runner-typed-encoding:v1",
+        "MODEL_RUNNER_CUSTODY_INITIAL_DISPATCH_SCHEMA_VERSION": "model-runner-custody:v3-initial-dispatch",
+        "MODEL_RUNNER_CUSTODY_DOMAIN": "leadpoet:model-runner:custody:v3",
+        "MODEL_RUNNER_CUSTODY_SCOPE": ["start", "action", "initial_continuation"],
+        "MODEL_RUNNER_CUSTODY_INTEGER_MIN": -9007199254740991,
+        "MODEL_RUNNER_CUSTODY_INTEGER_MAX": 9007199254740991,
+        "MODEL_RUNNER_V2_CONSUMER_CONTRACT_SHA256": "92e0d157b2ffd2d5283394441a16dd4f07eecf07aade2a392fe26d3d3596e9df",
+        "CANDIDATE_WATERFALL_SCHEMA_VERSION": "candidate-waterfall-receipt:v2",
+        "CANDIDATE_WATERFALL_ATTEMPT_SCHEMA_VERSION": "candidate-waterfall-attempt:v2",
+        "MODEL_PROVIDER_RESPONSE_SCHEMA_VERSION": "model-provider-response:v1",
+        "MODEL_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION": "model-provider-receipt-binding:v1",
+        "HOST_PROVIDER_RESPONSE_SCHEMA_VERSION": "host-provider-response:v1",
+        "HOST_CAPABILITY_MANIFEST_SCHEMA_VERSION": "host-capability-manifest:v1",
+        "HOST_BINDING_SCHEMA_VERSION": "host-action-binding:v1",
+        "MODEL_RELEASE_IDENTITY_SCHEMA_VERSION": "model-release-identity:v2"
+      },
+      "sourcing_model/runtime_capabilities.py": {
+        "CAPABILITY_CONTRACT_VERSION": "sourcing-model-runtime-capabilities:v3"
+      }
+    },
+    "critical_binding_slices": {
+      "research_lab_adapter.py": {
+        "roots": ["adapter_metadata", "build_runner_action_custody_v3", "build_runner_completion", "build_runner_initial_continuation_custody_v3", "dispatch_runner_initial_custody_v3", "build_runner_start", "build_runner_start_custody_v3", "continue_runner", "runner_preflight", "validate_runner_action_custody_v3", "validate_runner_initial_continuation_custody_v3", "validate_runner_preflight", "validate_runner_result", "validate_runner_start_custody_v3"],
+        "sha256": "sha256:3a4137384653f3fc2d27bf8c0743c233dd15c392992c74840237025998e02dac"
+      },
+      "sourcing_model/model_runner.py": {
+        "roots": ["custody_typed_encode", "custody_json_loads", "custody_json_dumps", "custody_json_bytes", "custody_envelope_sha256", "model_runner_custody_metadata", "model_runner_custody_parity_vectors", "build_model_start_request_custody_v3", "validate_model_start_request_custody_v3", "build_model_action_custody_v3", "validate_model_action_custody_v3", "build_model_initial_continuation_custody_v3", "validate_model_initial_continuation_custody_v3"],
+        "sha256": "sha256:b467324f9906a4561461bcea9733de2fce9c55e42abdd3594d1aa119ac66d330"
+      },
+      "sourcing_model/runtime_capabilities.py": {
+        "roots": ["capability_metadata", "capability", "deadline", "default_deadline", "default_emit", "default_http_fetch", "default_probe_origin", "default_resolve_host", "emit", "http_fetch", "is_terminally_unresolvable", "may_attempt", "probe_origin", "register", "registered_capabilities", "reset", "resolve_host"],
+        "sha256": "sha256:9db48106fa1de263c1bd0511938c255e49118b7a7d6d67af776298e14b6a28df"
+      }
+    },
+    "import_time_binding_slices": {
+      "sourcing_model/core.py": "sha256:844fa2710fa8a7dc80841ce6bf7b28e5b4f1d5a61035ba554617a2ab1779489b",
+      "sourcing_model/discovery.py": "sha256:1be41134039bc06b58fcbe7105c44d73bb6d8c6c1f3a1e7f40b9772d228fafb8",
+      "sourcing_model/orchestrator.py": "sha256:e171473e419d68282a75e48eca070a1054a47038e8e894609f2f8f275a414173",
+      "sourcing_model/routing/compiler.py": "sha256:6eba6197648ff14185fbc4a263b756872c292880c8d5d0cf97171eb9db69e2a1",
+      "sourcing_model/routing/defaults.py": "sha256:0a23f761e8720e6b27d82d0ab3fd0ca9de8ef32eb8f5f2ef478e751a1eef3094",
+      "sourcing_model/routing/runtime.py": "sha256:6c5421540ef38bd166261eb553f7ea0f3fbdafc443cfd439f4b7074b8af34d27",
+      "sourcing_model/validation.py": "sha256:067c2b012f4ad2cd98baca9efb767fda1690a14b7c80eedab9a49f076902d85d"
+    },
+    "required_imports": {
+      "research_lab_adapter.py": [
+        {"kind": "from", "module": "sourcing_model.model_runner", "level": 0, "name": "model_runner_custody_metadata", "binding": "model_runner_custody_metadata"}
+      ]
+    },
+    "metadata_binding": {
+      "adapter_version": "sourcing-model-research-lab-adapter:v10",
+      "metadata_function": "model_runner_custody_metadata",
+      "adapter_metadata_key": "dispatch_custody",
+      "dispatch_metadata_sha256": "sha256:bcbd1d629d1328d43a56e2b3585d776d0b9e8b6c8b9af465aff915d3788239db",
+      "required_model_keys": ["schema_version", "encoding_version", "domain", "domain_terminator_hex", "scope", "initial_dispatch_schema_version", "kind_ids", "self_hash_fields", "custody_fields", "payload_fields", "envelope_fields", "integer_min", "integer_max", "legacy_v2_consumer_contract_sha256", "typed_length_encoding", "persisted_json", "raw_json", "typed_tags", "boolean_values", "integer_representation", "integer_length_encoding", "float_representation", "float_signed_zero", "string_encoding", "array_input", "array_framing", "object_framing", "object_key_order", "max_depth", "max_component_bytes", "max_node_count", "domain_framing", "required_typed_vector_ids", "required_raw_json_vector_ids", "required_dispatch_vector_kinds", "dispatch_vector_builder_id"],
+      "required_dispatch_keys": ["schema_version", "encoding_version", "domain", "domain_terminator_hex", "scope", "initial_dispatch_schema_version", "kind_ids", "self_hash_fields", "custody_fields", "payload_fields", "envelope_fields", "integer_min", "integer_max", "legacy_v2_consumer_contract_sha256", "typed_length_encoding", "persisted_json", "raw_json", "typed_tags", "boolean_values", "integer_representation", "integer_length_encoding", "float_representation", "float_signed_zero", "string_encoding", "array_input", "array_framing", "object_framing", "object_key_order", "max_depth", "max_component_bytes", "max_node_count", "domain_framing", "required_typed_vector_ids", "required_raw_json_vector_ids", "required_dispatch_vector_kinds", "dispatch_vector_builder_id", "completion_included", "initial_dispatch_entrypoint", "start_entrypoint", "start_validation_entrypoint", "action_entrypoint", "action_validation_entrypoint", "continuation_entrypoint", "continuation_validation_entrypoint"]
+    }
+  },
   "required_imports": {
     "sourcing_model/__init__.py": [
       {"kind": "from", "module": "sourcing_model.core", "level": 0, "name": "qualify", "binding": "qualify"}

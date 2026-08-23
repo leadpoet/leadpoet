@@ -582,7 +582,7 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:3d5441bd76f2fbd13f1f24be7efaaa922fec1a5e244e053c3061839e4d5a0d5d",
+      "ast_sha256": "sha256:f2ca6908f696e6971206a719ca1ecdf18b3cf947620cb3ee1ea1f7b1cb48e4cc",
       "path": "gateway/research_lab/common_model_experiment.py",
       "symbol": "ExactModelExperimentCoordinator"
     },
@@ -592,7 +592,7 @@
       "symbol": "ProtectedModelActionResult"
     },
     {
-      "ast_sha256": "sha256:f184b59a9db0f40815b4c0f56ab3ae23f3e4a3e3270aaef1c06aa1fa4aa52e64",
+      "ast_sha256": "sha256:8f4b6b19eb0da52111c5a8570f8a6a96f8e3411557da95a2dbf22c6cac152847",
       "path": "gateway/research_lab/common_model_experiment.py",
       "symbol": "_bind_durable_provider_result"
     },
@@ -967,17 +967,17 @@
       "symbol": "PROTECTED_ACTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:c36e4d36bd7107c24c70a0f0a625edc32f74d6325bca5f5403b241bc69dfcc3b",
+      "ast_sha256": "sha256:8a21396992758b995d732777a2ac38d2a6a82170f4c785cae0963578b56a0576",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher"
     },
     {
-      "ast_sha256": "sha256:a2c0f83262b00c70bbe300391bf7cc1185622394e3295f21d5e134a0e7ac5854",
+      "ast_sha256": "sha256:80f355fe73979c16e8b89c5a65a576843715ce291f052c8825d2800b2fc6bdb8",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher.dispatch_provider_action"
     },
     {
-      "ast_sha256": "sha256:791536b40730bf797c6dab48211fc9b599ebab0be62cf27f4107c17e5b960b78",
+      "ast_sha256": "sha256:1205fc9f022fca0a46ad53d24d759da968bd3193e68fb7cfa0c00b015482fd7f",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher.replay_provider_action"
     },
@@ -997,7 +997,7 @@
       "symbol": "_ReservedOfficialBaselineDispatcher.verify_intent_action"
     },
     {
-      "ast_sha256": "sha256:3e309e0cfd09aadb30d0af4598c5c16a9b138d1c20332221f469fd3827e68c0e",
+      "ast_sha256": "sha256:9741eb6dbe2d5a3963dd7bdc41e9405a5ab2347478067b453e2d0fbbd80debb0",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_protected_result_document"
     },
@@ -1287,7 +1287,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:25e81d0006579f1edb0100a5bb5a54208a120a1ae5f80d63dfb9bb9471bd892d",
+      "ast_sha256": "sha256:3a52ce9c5e2ea612a27f8e967aad456465355b2ecfe87e1c05b3246a8ddf001a",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -6452,7 +6452,7 @@
       "symbol": "validate_code_edit_draft"
     },
     {
-      "ast_sha256": "sha256:900ce4cf74e0b994d704ec9bfd6202aecd17b76c2bde66979cbfb2751f89ac32",
+      "ast_sha256": "sha256:ff6d15b054072206c35029eea43090c8238c8a9c11d682f1593ac43a78c44905",
       "path": "research_lab/common_model_runner_host.py",
       "symbol": "HostActionResult"
     },
@@ -7017,7 +7017,7 @@
       "symbol": "verify_snapshot_pointer_document"
     },
     {
-      "ast_sha256": "sha256:627e8a6c9397841c73f4ab486ba5df55f7572bc0014459d91b9b4ea801d8d104",
+      "ast_sha256": "sha256:c0b482c0b94e226f1968d88ac7c5c7ed0b76bf1484efc9609e637bbda83bf112",
       "path": "research_lab/model_runner_protocol.py",
       "symbol": "ArtifactRunnerProtocolGeneration"
     },
@@ -7027,7 +7027,7 @@
       "symbol": "ExactModelRunnerRegistration"
     },
     {
-      "ast_sha256": "sha256:f3e7427a8e53e555e93d53dcbbc470835d6e99b21468e695e51f1260e3290523",
+      "ast_sha256": "sha256:e915d8916fffb55fee84107d3e3db8bf834a3457af3666d1975f181775a8302a",
       "path": "research_lab/model_runner_protocol.py",
       "symbol": "ResearchLabModelRunnerProtocol"
     },
@@ -7072,12 +7072,12 @@
       "symbol": "_V3_OFFICIAL_BASELINE_SCHEMA_VERSIONS"
     },
     {
-      "ast_sha256": "sha256:e36aa7af2cde3d662de69affe57e2917939f184a7fe5d467d0d33c936fd05d5c",
+      "ast_sha256": "sha256:b57ee50921fc744de45372105438ed8cd03576fffb89f9d3b49dd42cc2a0db80",
       "path": "research_lab/model_runner_protocol.py",
       "symbol": "_validate_provider_response_ingestion_contract"
     },
     {
-      "ast_sha256": "sha256:9d852930989a4b0bb88d238e20a33b5bcb62e9a2e064e1393b9a5d2b9385953e",
+      "ast_sha256": "sha256:689602a96110a6d690aa27b8d6cf556174dcf154a63e6603726fa6cb3b0a2bbf",
       "path": "research_lab/model_runner_protocol.py",
       "symbol": "_validate_runner_role_contract"
     },
@@ -7737,7 +7737,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:5f276ac45f9e4021094243d703b084df6e39f89dcc2a8ff434d3efe72e44e5ff",
-  "protected_source_commit": "de0076ee7d457011a0d6c0c4c3315879d98cef36",
+  "manifest_hash": "sha256:7c8dd290e38c64c1c9c72382c35745b748628178ec96c1f157e2f93e297dd7e9",
+  "protected_source_commit": "3620de5292d30c844684e066a02c6d7a2ed5b1ca",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

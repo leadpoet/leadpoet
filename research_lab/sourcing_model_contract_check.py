@@ -2323,6 +2323,14 @@ def _semantic_contract_shape_violations_v1(
     if not functions_valid:
         violations.append("model compatibility functions declaration is invalid")
 
+    exact_signatures = contract.get("exact_signatures")
+    if not isinstance(exact_signatures, list) or not all(
+        isinstance(item, str) for item in exact_signatures
+    ):
+        violations.append(
+            "model compatibility exact signatures declaration is invalid"
+        )
+
     for key, label in (
         ("full_parameters", "full parameter declaration"),
         ("required_keyword_only", "required keyword-only declaration"),
@@ -2355,11 +2363,18 @@ def _typed_dispatch_custody_v3_requested(
     """Identify the one approved v3 surface before applying its stricter ABI."""
 
     dispatch_v3 = policy["additive_dispatch_custody_v3"]
+    declared_exact_signatures = contract.get("exact_signatures")
+    exact_signatures = (
+        set(declared_exact_signatures)
+        if isinstance(declared_exact_signatures, list)
+        and all(isinstance(item, str) for item in declared_exact_signatures)
+        else set()
+    )
     exact_marker = (
         "research_lab_adapter.py:dispatch_runner_initial_custody_v3"
-        in set(contract.get("exact_signatures") or ())
+        in exact_signatures
         or "sourcing_model/model_runner.py:model_runner_custody_metadata"
-        in set(contract.get("exact_signatures") or ())
+        in exact_signatures
     )
     return (
         str(contract.get("contract_id") or "")
@@ -2371,7 +2386,7 @@ def _typed_dispatch_custody_v3_requested(
 def _merge_typed_dispatch_policy(
     policy: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Overlay v3 requirements without changing legacy semantic admission."""
+    """Overlay v3 requirements while preserving its reviewed v2 runner ABI."""
 
     merged = deepcopy(dict(policy))
     dispatch_v3 = dict(policy["additive_dispatch_custody_v3"])

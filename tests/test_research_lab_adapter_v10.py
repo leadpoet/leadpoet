@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -24,6 +26,33 @@ def _required_source_root() -> Path:
     if not source_root.is_dir():
         pytest.fail(
             "SOURCING_MODEL_SOURCE_ROOT typed-custody source tree is unavailable"
+        )
+    expected_source_sha = os.environ.get("SOURCING_MODEL_SOURCE_SHA") or ""
+    if len(expected_source_sha) != 40 or any(
+        character not in "0123456789abcdef"
+        for character in expected_source_sha
+    ):
+        pytest.fail(
+            "SOURCING_MODEL_SOURCE_SHA must name the exact lowercase source commit"
+        )
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={source_root.resolve().as_posix()}",
+            "-C",
+            str(source_root),
+            "rev-parse",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode != 0 or result.stdout.strip() != expected_source_sha:
+        pytest.fail(
+            "SOURCING_MODEL_SOURCE_ROOT does not match SOURCING_MODEL_SOURCE_SHA"
         )
     return source_root
 
@@ -68,6 +97,69 @@ def _expected_v10_dispatch_custody_metadata() -> dict[str, object]:
     return expected
 
 
+def _copy_semantic_source_tree(source_root: Path, destination: Path) -> Path:
+    policy = compatibility.semantic_compatibility_policy_v1()
+    dispatch = policy["additive_dispatch_custody_v3"]
+    required_paths = {
+        *policy["required_files"],
+        *dispatch["required_files"],
+        policy["canonical_contract_path"],
+        policy["canonical_parity_path"],
+    }
+    for section in (
+        "callables",
+        "critical_binding_slices",
+        "exact_constants",
+        "import_time_binding_slices",
+        "opaque_constants",
+        "required_imports",
+    ):
+        required_paths.update((policy.get(section) or {}).keys())
+        required_paths.update((dispatch.get(section) or {}).keys())
+    for relative in sorted(required_paths):
+        source = source_root / relative
+        assert source.is_file(), relative
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    return destination
+
+
+def _remove_top_level_function(path: Path, name: str) -> None:
+    source = path.read_text(encoding="utf-8")
+    node = next(
+        item
+        for item in ast.parse(source).body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name == name
+    )
+    lines = source.splitlines(keepends=True)
+    del lines[node.lineno - 1 : node.end_lineno]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def _rename_top_level_function_parameter(
+    path: Path,
+    *,
+    name: str,
+    old: str,
+    new: str,
+) -> None:
+    source = path.read_text(encoding="utf-8")
+    node = next(
+        item
+        for item in ast.parse(source).body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name == name
+    )
+    lines = source.splitlines(keepends=True)
+    header_end = node.body[0].lineno - 1
+    header = "".join(lines[node.lineno - 1 : header_end])
+    assert old in header
+    lines[node.lineno - 1 : header_end] = [header.replace(old, new, 1)]
+    path.write_text("".join(lines), encoding="utf-8")
+
+
 def test_v10_reviewed_snapshots_are_byte_exact() -> None:
     assert compatibility._snapshot_sha256(compatibility.CONTRACT_V68_PATH) == (
         compatibility.ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256
@@ -89,6 +181,19 @@ def test_v10_reviewed_snapshots_are_byte_exact() -> None:
     assert parity["fixture_set_id"] == "routerverse-cross-consumer-parity-v28"
 
 
+def test_v10_source_root_is_bound_to_exact_commit(monkeypatch) -> None:
+    monkeypatch.setenv("SOURCING_MODEL_SOURCE_SHA", "0" * 40)
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match=(
+            "SOURCING_MODEL_SOURCE_ROOT does not match "
+            "SOURCING_MODEL_SOURCE_SHA"
+        ),
+    ):
+        _required_source_root()
+
+
 def test_v10_policy_freezes_complete_typed_dispatch_surface() -> None:
     policy = compatibility.semantic_compatibility_policy_v1()
     dispatch = policy["additive_dispatch_custody_v3"]
@@ -100,10 +205,15 @@ def test_v10_policy_freezes_complete_typed_dispatch_surface() -> None:
         "build_runner_action_custody_v3",
         "build_runner_initial_continuation_custody_v3",
         "dispatch_runner_initial_custody_v3",
+        "project_icp_request",
         "validate_runner_start_custody_v3",
         "validate_runner_action_custody_v3",
         "validate_runner_initial_continuation_custody_v3",
     } <= set(adapter)
+    adapter_roots = set(
+        dispatch["critical_binding_slices"]["research_lab_adapter.py"]["roots"]
+    )
+    assert {"project_icp_request", "run_icp"} <= adapter_roots
     assert {
         "custody_typed_encode",
         "custody_json_loads",
@@ -134,6 +244,44 @@ def test_v10_policy_freezes_complete_typed_dispatch_surface() -> None:
     )
 
 
+def test_v10_policy_preserves_complete_reviewed_runner_abis() -> None:
+    contract = json.loads(
+        compatibility.CONTRACT_V68_PATH.read_text(encoding="utf-8")
+    )
+    relative = "sourcing_model/model_runner.py"
+    reviewed = contract["functions"][relative]
+    policy = compatibility.semantic_compatibility_policy_v1()[
+        "additive_dispatch_custody_v3"
+    ]["callables"][relative]
+
+    assert set(policy) == set(reviewed)
+    for name, positional in reviewed.items():
+        contract_key = f"{relative}:{name}"
+        assert policy[name]["positional"] == positional
+        assert policy[name]["full_parameters"] == contract["full_parameters"][
+            contract_key
+        ]
+        assert policy[name]["required_keyword_only"] == contract[
+            "required_keyword_only"
+        ].get(contract_key, [])
+        assert policy[name]["is_async"] is contract["frozen_asyncness"].get(
+            contract_key,
+            False,
+        )
+
+    full_policy = compatibility.semantic_compatibility_policy_v1()
+    reviewed_adapter = contract["functions"]["research_lab_adapter.py"]
+    adapter_policy = dict(full_policy["callables"]["research_lab_adapter.py"])
+    adapter_policy.update(
+        full_policy["additive_dispatch_custody_v3"]["callables"][
+            "research_lab_adapter.py"
+        ]
+    )
+    assert set(adapter_policy) == set(reviewed_adapter)
+    for name, positional in reviewed_adapter.items():
+        assert adapter_policy[name]["positional"] == positional
+
+
 def test_v3_marker_with_mutated_snapshot_fails_closed(tmp_path: Path) -> None:
     contract_path = tmp_path / "sourcing_model/consumer_contract.json"
     parity_path = tmp_path / "sourcing_model/consumer_parity_fixtures.json"
@@ -149,6 +297,28 @@ def test_v3_marker_with_mutated_snapshot_fails_closed(tmp_path: Path) -> None:
     assert receipt is None
     assert "typed dispatch contract snapshot differs" in violations
     assert "typed dispatch contract identity is not approved" in violations
+
+
+def test_v3_malformed_exact_signatures_fail_closed(tmp_path: Path) -> None:
+    contract_path = tmp_path / "sourcing_model/consumer_contract.json"
+    parity_path = tmp_path / "sourcing_model/consumer_parity_fixtures.json"
+    contract_path.parent.mkdir(parents=True)
+    contract = json.loads(
+        compatibility.CONTRACT_V68_PATH.read_text(encoding="utf-8")
+    )
+    contract["exact_signatures"] = 1
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    parity_path.write_bytes(compatibility.PARITY_FIXTURE_V28_PATH.read_bytes())
+
+    violations, receipt = compatibility.verify_semantic_source_tree_compatibility_v1(
+        tmp_path
+    )
+
+    assert receipt is None
+    assert (
+        "model compatibility exact signatures declaration is invalid"
+        in violations
+    )
 
 
 def test_v3_attestation_pair_mutation_fails_closed(tmp_path: Path) -> None:
@@ -400,4 +570,71 @@ def test_v10_source_tree_semantic_admission_is_accepted() -> None:
     assert receipt is not None
     assert receipt["bindings"]["adapter_version"] == (
         "sourcing-model-research-lab-adapter:v10"
+    )
+
+
+def test_v10_existing_runner_abi_mutations_fail_closed(
+    tmp_path: Path,
+) -> None:
+    source_root = _required_source_root()
+    model_runner_relative = Path("sourcing_model/model_runner.py")
+
+    missing_root = _copy_semantic_source_tree(
+        source_root,
+        tmp_path / "missing",
+    )
+    _remove_top_level_function(
+        missing_root / model_runner_relative,
+        "build_model_start_request",
+    )
+    missing_violations, missing_receipt = (
+        compatibility.verify_semantic_source_tree_compatibility_v1(
+            missing_root
+        )
+    )
+    assert missing_receipt is None
+    assert (
+        "missing function sourcing_model/model_runner.py:build_model_start_request"
+        in missing_violations
+    )
+
+    drift_root = _copy_semantic_source_tree(
+        source_root,
+        tmp_path / "signature-drift",
+    )
+    _rename_top_level_function_parameter(
+        drift_root / model_runner_relative,
+        name="validate_model_start_request",
+        old="value",
+        new="payload",
+    )
+    drift_violations, drift_receipt = (
+        compatibility.verify_semantic_source_tree_compatibility_v1(drift_root)
+    )
+    assert drift_receipt is None
+    assert any(
+        violation.startswith(
+            "full parameter drift "
+            "sourcing_model/model_runner.py:validate_model_start_request:"
+        )
+        for violation in drift_violations
+    )
+
+    projection_root = _copy_semantic_source_tree(
+        source_root,
+        tmp_path / "projection-missing",
+    )
+    _remove_top_level_function(
+        projection_root / "research_lab_adapter.py",
+        "project_icp_request",
+    )
+    projection_violations, projection_receipt = (
+        compatibility.verify_semantic_source_tree_compatibility_v1(
+            projection_root
+        )
+    )
+    assert projection_receipt is None
+    assert (
+        "missing function research_lab_adapter.py:project_icp_request"
+        in projection_violations
     )

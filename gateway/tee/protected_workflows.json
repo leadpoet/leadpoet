@@ -572,7 +572,7 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:38ad2a8f09c94d1404bf405a87a579c3808e1ce1c5c7f02de2defc3e843b0646",
+      "ast_sha256": "sha256:ad97167426adc5afa4370ce2ca25ca6af8b70f453b390609f2a55bc42ba68067",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },

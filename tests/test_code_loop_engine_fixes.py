@@ -3000,7 +3000,133 @@ async def test_draft_source_request_is_resolved_before_existing_fallback(tmp_pat
         "source_inspection_requested",
         "source_inspection_resolved",
     ]
+    assert result.selected_candidates[0].tree_generation_attempt_count == 1
+
+
+async def test_resolved_draft_source_request_preserves_two_fallback_attempts(tmp_path):
+    events = []
+    calls = []
+    source_context = _source_context(tmp_path)
+    runtime_path = source_context.source_root / "sourcing_model" / "routing" / "runtime.py"
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        "class SourceAddRoutingRegistration:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    editable_files = tuple(
+        sorted((*source_context.editable_files, "sourcing_model/routing/runtime.py"))
+    )
+    source_context = replace(
+        source_context,
+        editable_files=editable_files,
+        planner_source_index=build_source_symbol_index(
+            source_root=source_context.source_root,
+            editable_files=editable_files,
+            source_tree_hash=source_context.source_tree_hash,
+            parent_image_digest_hash=source_context.parent_image_digest_hash,
+        ),
+    )
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        required_mechanism="extend source routing registration",
+                        selected_path_id="source_add_registration",
+                        ranked_paths=[
+                            {
+                                "path_id": "source_add_registration",
+                                "lane": "source_routing",
+                                "mechanism": "extend source routing registration",
+                            }
+                        ],
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner"},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/routing/runtime.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "draft-read"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_fallback" and calls.count(stage) == 1:
+            return OpenRouterCallResult(
+                content="I need to inspect the existing registration before editing.",
+                provider_usage={"provider": "openrouter", "response_id": "fallback-malformed"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_fallback":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane="source_routing",
+                                plan_path_id="source_add_registration",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "fallback-fixed"},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchRuntimeSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_PlannerBuildsCandidateBuilder(source_context),
+    ).run(
+        run_id="run-draft-read-preserves-fallbacks",
+        ticket={
+            "ticket_id": "ticket-draft-read-preserves-fallbacks",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "extend source routing"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert len(result.selected_candidates) == 1
+    assert calls.count("code_edit_draft") == 1
+    assert calls.count("code_edit_fallback") == 2
     assert result.selected_candidates[0].tree_generation_attempt_count == 2
+    assert any(
+        event.event_type == "candidate_generation_fallback_failed"
+        for event in events
+    )
 
 
 async def test_draft_unsafe_source_request_does_not_expand_source_access(tmp_path):

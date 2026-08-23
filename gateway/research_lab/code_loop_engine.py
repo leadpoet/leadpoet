@@ -5920,7 +5920,20 @@ class CodeEditLoopEngine:
                                     },
                                 )
                             )
-                            await _attempt_misplaced_candidate_source_inspection(raw)
+                            misplaced_inspection_resolved = (
+                                await _attempt_misplaced_candidate_source_inspection(raw)
+                            )
+                            if misplaced_inspection_resolved:
+                                # This call produced a bounded source-read request, not a
+                                # candidate. Keep its provider cost and inspection budgets,
+                                # but do not consume one of the configured candidate
+                                # generation attempts before the inspected fallback runs.
+                                candidate_generation_attempt_count = max(
+                                    0, candidate_generation_attempt_count - 1
+                                )
+                                generation_attempt_counts[tree_slot.node_id] = (
+                                    candidate_generation_attempt_count
+                                )
                             fallback_drafts = await _attempt_candidate_generation_fallback(
                                 trigger="candidate_patch_parse_failed",
                                 reason=safe_event_error_text(exc),

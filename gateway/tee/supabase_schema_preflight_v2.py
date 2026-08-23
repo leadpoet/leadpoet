@@ -1001,6 +1001,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_candidate_append_waterfall_metric_v1",
     ),
     (
+        "scripts/163-research-lab-model-transition-artifact-custody.sql",
+        "research_lab_routing_exact_model_transition_contract_v2",
+    ),
+    (
         "scripts/157-research-lab-routing-experiment-authority.sql",
         "research_lab_routing_recover_claim_v3",
     ),

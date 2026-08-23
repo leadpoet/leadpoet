@@ -264,6 +264,9 @@ EXACT_MODEL_TRANSITIONS_MIGRATION = (
 CANDIDATE_WATERFALL_SIDECARS_MIGRATION = (
     "162-research-lab-candidate-routing-experiments.sql"
 )
+MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION = (
+    "163-research-lab-model-transition-artifact-custody.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -327,6 +330,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ROUTING_ADAPTER_FAILURES_MIGRATION,
     EXACT_MODEL_TRANSITIONS_MIGRATION,
     CANDIDATE_WATERFALL_SIDECARS_MIGRATION,
+    MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -362,6 +366,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_156_production_parity_reader_contract_valid",
     "post_161_exact_model_transition_contract_valid",
     "post_162_candidate_waterfall_sidecars_valid",
+    "post_163_model_transition_artifact_custody_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5730,6 +5735,46 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-162 candidate waterfall sidecar contract differs"
+            )
+        database.apply_migration(
+            scripts / MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION
+        )
+        applied.append(MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION)
+        model_transition_artifact_custody_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'contract',
+                        public.research_lab_routing_exact_model_transition_contract_v2(),
+                    'service_role_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_routing_exact_model_transition_contract_v2()',
+                            'EXECUTE'
+                        )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if model_transition_artifact_custody_contract != {
+            "contract": {
+                "schema_version": (
+                    "leadpoet.research_lab."
+                    "exact_model_transition_contract.v2"
+                ),
+                "event_type": "model_transition_completed",
+                "marker_schema_version": (
+                    "leadpoet.research_lab.model_transition.v2"
+                ),
+                "artifact_identity_required": True,
+                "logical_identity_conflict_guard": True,
+                "legacy_v1_eligible": False,
+            },
+            "service_role_callable": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-163 Model transition artifact custody contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

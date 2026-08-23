@@ -27,6 +27,36 @@ def _hash(char: str) -> str:
     return "sha256:" + char * 64
 
 
+def _artifact_key(commit_char: str = "1") -> str:
+    return (
+        commit_char * 40
+        + ":sha256:"
+        + "a" * 64
+        + ":sha256:"
+        + "b" * 64
+    )
+
+
+def _model_transition_marker(*, artifact_key: str | None = None) -> dict:
+    marker = {
+        "schema_version": "leadpoet.research_lab.routing_event.v2",
+        "event_schema_version": "leadpoet.research_lab.model_transition.v2",
+        "variant_id": "baseline",
+        "unit_ref": "unit-1",
+        "artifact_key": artifact_key or _artifact_key(),
+        "idempotency_key": "c" * 64,
+        "action_sha256": "d" * 64,
+        "continuation_sha256": _hash("e"),
+        "completion_sha256": "f" * 64,
+        "provider_response_sha256": _hash("1"),
+        "provider_receipt": None,
+        "protected_dispatch_job_id": None,
+        "terminal_receipt_hash": None,
+        "model_completion_contract_hash": None,
+    }
+    return marker
+
+
 class _Response:
     def __init__(self, data):
         self.data = data
@@ -198,6 +228,69 @@ class _Attestor:
             "result": result,
             "receipt": receipt,
         }
+
+
+def test_model_transition_load_compares_artifact_after_logical_lookup():
+    experiment_hash = _hash("a")
+    marker = _model_transition_marker()
+    store = SupabaseRoutingExperimentStore(
+        _Client({
+            "research_lab_routing_experiment_events_v2": [{
+                "experiment_hash": experiment_hash,
+                "event_type": "model_transition_completed",
+                "event_doc": marker,
+                "created_at": "2026-08-23T00:00:00Z",
+            }]
+        })
+    )
+    identity = {
+        "experiment_hash": experiment_hash,
+        "variant_id": "baseline",
+        "unit_ref": "unit-1",
+        "idempotency_key": "c" * 64,
+    }
+
+    assert store.load_model_transition_marker(
+        **identity, artifact_key=_artifact_key()
+    ) == marker
+    with pytest.raises(
+        RoutingExperimentStoreError,
+        match="artifact identity differs",
+    ):
+        store.load_model_transition_marker(
+            **identity, artifact_key=_artifact_key("9")
+        )
+
+
+def test_model_transition_load_rejects_legacy_identityless_v1_marker():
+    experiment_hash = _hash("a")
+    marker = _model_transition_marker()
+    marker["event_schema_version"] = (
+        "leadpoet.research_lab.model_transition.v1"
+    )
+    marker.pop("artifact_key")
+    store = SupabaseRoutingExperimentStore(
+        _Client({
+            "research_lab_routing_experiment_events_v2": [{
+                "experiment_hash": experiment_hash,
+                "event_type": "model_transition_completed",
+                "event_doc": marker,
+                "created_at": "2026-08-23T00:00:00Z",
+            }]
+        })
+    )
+
+    with pytest.raises(
+        RoutingExperimentStoreError,
+        match="legacy or unknown",
+    ):
+        store.load_model_transition_marker(
+            experiment_hash=experiment_hash,
+            variant_id="baseline",
+            unit_ref="unit-1",
+            idempotency_key="c" * 64,
+            artifact_key=_artifact_key(),
+        )
 
 
 def test_reconciliation_recomputes_exact_durable_roots_before_attestation():

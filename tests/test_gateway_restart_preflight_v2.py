@@ -608,6 +608,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "scripts/156-production-parity-readonly-role.sql",
         "scripts/161-research-lab-exact-model-transitions.sql",
+        "scripts/163-research-lab-model-transition-artifact-custody.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 

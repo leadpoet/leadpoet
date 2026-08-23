@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "scripts" / "157-research-lab-routing-experiment-authority.sql"
 PURPOSE_MIGRATION = ROOT / "scripts" / "158-research-lab-routing-experiment-purposes.sql"
 TRANSITION_MIGRATION = ROOT / "scripts" / "161-research-lab-exact-model-transitions.sql"
+CUSTODY_MIGRATION = (
+    ROOT / "scripts" / "163-research-lab-model-transition-artifact-custody.sql"
+)
 BEHAVIOR = ROOT / "tests" / "sql" / "test_routing_experiment_authority_v2.sql"
 
 
@@ -302,6 +305,42 @@ def test_exact_model_transition_migration_is_redacted_and_retires_v2_mutations()
     assert "exact Model transition did not append" in behavior
     assert "exact Model transition replay was not idempotent" in behavior
     assert "forged exact Model transition unexpectedly succeeded" in behavior
+
+
+def test_model_transition_custody_migration_binds_artifact_and_serializes_conflicts():
+    sql = CUSTODY_MIGRATION.read_text()
+    assert "leadpoet.research_lab.model_transition.v2" in sql
+    assert "artifact_key" in sql
+    assert ") <> 14" in sql
+    assert "OR NOT (p_event_doc ?& ARRAY[" in sql
+    assert "COALESCE(p_event_doc->>'artifact_key', '')" in sql
+    assert "pg_catalog.coalesce" not in sql
+    assert "pg_advisory_xact_lock" in sql
+    logical_lookup = sql.index(
+        "Do not include artifact_key in this lookup"
+    )
+    artifact_compare = sql.index(
+        "research_lab_routing_model_transition_artifact_conflict"
+    )
+    insert = sql.index(
+        "INSERT INTO public.research_lab_routing_experiment_events_v2"
+    )
+    assert logical_lookup < artifact_compare < insert
+    assert "research_lab_routing_model_transition_logical_conflict" in sql
+    assert "research_lab_routing_exact_model_transition_contract_v2" in sql
+    assert "leadpoet.research_lab.exact_model_transition_contract.v2" in sql
+    assert "'legacy_v1_eligible',\n        FALSE" in sql
+    assert "provider_response'" not in sql
+
+    behavior = BEHAVIOR.read_text()
+    for marker in (
+        "artifact-conflicted Model transition unexpectedly succeeded",
+        "racing logical Model transition unexpectedly succeeded",
+        "legacy identityless Model transition unexpectedly succeeded",
+        "null-artifact Model transition unexpectedly succeeded",
+        "unknown-key Model transition unexpectedly succeeded",
+    ):
+        assert marker in behavior
 
 
 @pytest.mark.skipif(

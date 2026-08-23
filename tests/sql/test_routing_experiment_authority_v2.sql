@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run only against a disposable PostgreSQL database after migrations 157-161.
+-- Run only against a disposable PostgreSQL database after migrations 157-163.
 BEGIN;
 
 CREATE OR REPLACE FUNCTION pg_temp.routing_test_spec(
@@ -1312,9 +1312,11 @@ BEGIN
 
     transition_doc := pg_catalog.jsonb_build_object(
         'schema_version', 'leadpoet.research_lab.routing_event.v2',
-        'event_schema_version', 'leadpoet.research_lab.model_transition.v1',
+        'event_schema_version', 'leadpoet.research_lab.model_transition.v2',
         'variant_id', 'candidate',
         'unit_ref', 'unit-one',
+        'artifact_key', repeat('1', 40) || ':sha256:' || repeat('2', 64)
+            || ':sha256:' || repeat('3', 64),
         'idempotency_key', repeat('7', 64),
         'action_sha256', repeat('8', 64),
         'continuation_sha256', 'sha256:' || repeat('9', 64),
@@ -1341,6 +1343,79 @@ BEGIN
     IF (transition_result->>'idempotent')::BOOLEAN IS NOT TRUE THEN
         RAISE EXCEPTION 'exact Model transition replay was not idempotent: %', transition_result;
     END IF;
+
+    bad_doc := pg_catalog.jsonb_set(
+        transition_doc, '{artifact_key}',
+        pg_catalog.to_jsonb(
+            repeat('9', 40) || ':sha256:' || repeat('2', 64)
+            || ':sha256:' || repeat('3', 64)
+        )
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'artifact-conflicted Model transition unexpectedly succeeded';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    bad_doc := pg_catalog.jsonb_set(
+        transition_doc, '{continuation_sha256}',
+        pg_catalog.to_jsonb(('sha256:' || repeat('0', 64))::TEXT)
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'racing logical Model transition unexpectedly succeeded';
+    EXCEPTION WHEN unique_violation THEN NULL;
+    END;
+
+    bad_doc := pg_catalog.jsonb_set(
+        transition_doc - 'artifact_key', '{event_schema_version}',
+        pg_catalog.to_jsonb(
+            'leadpoet.research_lab.model_transition.v1'::TEXT
+        )
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'legacy identityless Model transition unexpectedly succeeded';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    bad_doc := pg_catalog.jsonb_set(
+        transition_doc, '{artifact_key}', 'null'::JSONB
+    );
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'null-artifact Model transition unexpectedly succeeded';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    bad_doc := (transition_doc - 'artifact_key') ||
+        pg_catalog.jsonb_build_object('unknown_marker_key', 'replacement');
+    BEGIN
+        PERFORM public.research_lab_routing_append_fenced_event_v3(
+            public.research_lab_routing_jsonb_hash_v2(bad_doc),
+            experiment_hash, 'model_transition_completed', claim_key, 1,
+            bad_doc
+        );
+        RAISE EXCEPTION 'unknown-key Model transition unexpectedly succeeded';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
     bad_doc := pg_catalog.jsonb_set(
         transition_doc, '{provider_response_sha256}',
         pg_catalog.to_jsonb(('sha256:' || repeat('0', 64))::TEXT)

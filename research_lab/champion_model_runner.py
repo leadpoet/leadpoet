@@ -11,6 +11,7 @@ from .common_model_runner_host import (
     HostActionBinding,
     LoadCompletion,
     PersistTransition,
+    ProviderReceiptCustody,
 )
 from .docker_model_runner_transport import DockerModelRunnerTransport
 from .model_runner_protocol import ResearchLabModelRunnerProtocol
@@ -28,6 +29,7 @@ def run_common_champion(
     release_identity: Mapping[str, Any],
     bindings: Sequence[HostActionBinding],
     persist_transition: PersistTransition,
+    provider_receipt_custody: ProviderReceiptCustody,
     load_completion: LoadCompletion | None = None,
     continuation: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
@@ -40,6 +42,7 @@ def run_common_champion(
     )
     protocol.preflight(
         host_capability_manifest=host_capability_manifest,
+        execution_mode=execution_mode,
     )
     start_request = protocol.build_start(
         input=input,
@@ -53,6 +56,7 @@ def run_common_champion(
         protocol=protocol,
         bindings=bindings,
         persist_transition=persist_transition,
+        provider_receipt_custody=provider_receipt_custody,
         load_completion=load_completion,
     )
     result = host.run(start_request, continuation=continuation)
@@ -68,6 +72,7 @@ def run_registered_model_unit(
     evaluated_on: str,
     bindings: Sequence[HostActionBinding],
     persist_transition: PersistTransition,
+    provider_receipt_custody: ProviderReceiptCustody,
     load_completion: LoadCompletion | None = None,
     continuation: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
@@ -80,11 +85,8 @@ def run_registered_model_unit(
 
     if not isinstance(registration, ExactModelRunnerRegistration):
         raise ValueError("exact Model runner registration is required")
-    registration.preflight()
+    registration.preflight(execution_mode=execution_mode)
     protocol = registration.protocol
-    protocol.preflight(
-        host_capability_manifest=registration.host_capability_manifest,
-    )
     start_request = protocol.build_start(
         input=input,
         execution_mode=execution_mode,
@@ -97,6 +99,7 @@ def run_registered_model_unit(
         protocol=protocol,
         bindings=bindings,
         persist_transition=persist_transition,
+        provider_receipt_custody=provider_receipt_custody,
         load_completion=load_completion,
     )
     result = host.run(start_request, continuation=continuation)

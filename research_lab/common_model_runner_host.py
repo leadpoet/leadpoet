@@ -6,20 +6,28 @@ dispatches only the exact action emitted by the immutable model artifact.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
+import re
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 
-HOST_EXECUTION_RECEIPT_SCHEMA_VERSION = "model-runner-host-receipt:v1"
+HOST_EXECUTION_RECEIPT_SCHEMA_VERSION = "model-runner-host-receipt:v2"
 _ACTION_TYPES = frozenset({
+    "normalize_icp",
     "execute_candidate_tool",
     "verify_company",
     "execute_intent_tool",
     "verify_intent",
     "execute_contact_tool",
     "verify_contact",
+})
+_PROVIDER_ACTION_TYPES = frozenset({
+    "normalize_icp",
+    "execute_candidate_tool",
+    "execute_intent_tool",
+    "execute_contact_tool",
 })
 _OUTCOMES = frozenset({
     "succeeded",
@@ -28,6 +36,8 @@ _OUTCOMES = frozenset({
     "timeout",
     "failed",
 })
+_PROVIDER_RECEIPT_RE = re.compile(r"provider_receipt:[0-9a-f]{16,64}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class ModelRunnerHostError(RuntimeError):
@@ -46,6 +56,8 @@ class HostActionResult:
     latency_ms: float
     provider_request_id: str | None = None
     provider_receipt_ref: str | None = None
+    provider_receipt_sha256: str | None = None
+    provider_identity_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,26 @@ class HostActionBinding:
     tool_id: str
     binding_contract_sha256: str
     dispatch: Callable[[Mapping[str, Any]], HostActionResult]
+
+
+@dataclass(frozen=True)
+class ProviderReceiptCustodyRecord:
+    """Sanitized hashes resolved from one server-owned durable receipt."""
+
+    provider_receipt_ref: str
+    provider_receipt_sha256: str
+    provider_identity_sha256: str
+
+
+class ProviderReceiptCustody(Protocol):
+    """Host-owned lookup for already-persisted provider receipt bindings."""
+
+    durable: bool
+
+    def resolve_provider_receipt(
+        self,
+        provider_receipt_ref: str,
+    ) -> ProviderReceiptCustodyRecord | None: ...
 
 
 class ModelRunnerProtocol(Protocol):
@@ -74,6 +106,15 @@ class ModelRunnerProtocol(Protocol):
         action: Mapping[str, Any],
         result: HostActionResult,
     ) -> Mapping[str, Any]: ...
+
+    def build_provider_receipt_binding(
+        self,
+        action: Mapping[str, Any],
+        result: HostActionResult,
+    ) -> Mapping[str, Any]: ...
+
+    @property
+    def artifact_provider_receipt_binding_required(self) -> bool: ...
 
 
 PersistTransition = Callable[..., None]
@@ -142,6 +183,186 @@ def _binding_index(
     return indexed
 
 
+def validate_host_action_bindings(
+    start_request: Mapping[str, Any],
+    bindings: Sequence[HostActionBinding],
+) -> None:
+    """Apply the exact binding equality check used by the host run loop."""
+
+    expected = _available_manifest_bindings(start_request)
+    actual = {
+        key: binding.binding_contract_sha256
+        for key, binding in _binding_index(bindings).items()
+    }
+    if actual != expected:
+        raise ModelRunnerHostError(
+            "executable bindings differ from the capability manifest"
+        )
+
+
+def _receipt_custody_values(value: Any) -> tuple[str, str, str]:
+    if isinstance(value, Mapping):
+        getter = value.get
+    else:
+        getter = lambda name: getattr(value, name, None)
+    return (
+        str(getter("provider_receipt_ref") or "").strip(),
+        str(getter("provider_receipt_sha256") or "").strip(),
+        str(getter("provider_identity_sha256") or "").strip(),
+    )
+
+
+def _require_durable_provider_receipt_custody(
+    *,
+    action: Mapping[str, Any],
+    custody: ProviderReceiptCustody | None,
+) -> None:
+    if str(action.get("action_type") or "") not in _PROVIDER_ACTION_TYPES:
+        return
+    if (
+        custody is None
+        or getattr(custody, "durable", None) is not True
+        or not callable(
+            getattr(custody, "resolve_provider_receipt", None)
+        )
+    ):
+        raise ModelRunnerHostError(
+            "durable provider receipt custody is required"
+        )
+
+
+def _resolve_provider_receipt_custody(
+    *,
+    action: Mapping[str, Any],
+    value: Any,
+    custody: ProviderReceiptCustody | None,
+) -> ProviderReceiptCustodyRecord | None:
+    action_type = str(action.get("action_type") or "")
+    (
+        receipt_ref,
+        receipt_sha256,
+        provider_identity_sha256,
+    ) = _receipt_custody_values(value)
+    if action_type not in _PROVIDER_ACTION_TYPES:
+        if receipt_ref or receipt_sha256 or provider_identity_sha256:
+            raise ModelRunnerHostError(
+                "verifier action cannot carry provider receipt custody"
+            )
+        return None
+    if (
+        not _PROVIDER_RECEIPT_RE.fullmatch(receipt_ref)
+        or not _SHA256_RE.fullmatch(receipt_sha256)
+        or not _SHA256_RE.fullmatch(provider_identity_sha256)
+    ):
+        raise ModelRunnerHostError(
+            "provider action receipt custody fields are invalid"
+        )
+    _require_durable_provider_receipt_custody(
+        action=action,
+        custody=custody,
+    )
+    resolver = getattr(custody, "resolve_provider_receipt")
+    try:
+        record = resolver(receipt_ref)
+    except Exception as exc:
+        raise ModelRunnerHostError(
+            "durable provider receipt custody lookup failed"
+        ) from exc
+    if not isinstance(record, ProviderReceiptCustodyRecord):
+        raise ModelRunnerHostError(
+            "durable provider receipt custody record is unavailable"
+        )
+    if (
+        record.provider_receipt_ref != receipt_ref
+        or record.provider_receipt_sha256 != receipt_sha256
+        or record.provider_identity_sha256 != provider_identity_sha256
+    ):
+        raise ModelRunnerHostError(
+            "provider receipt custody differs from the host result"
+        )
+    return record
+
+
+def _bind_provider_receipt(
+    *,
+    action: Mapping[str, Any],
+    host_result: HostActionResult,
+    protocol: ModelRunnerProtocol,
+) -> HostActionResult:
+    if str(action.get("action_type") or "") not in _PROVIDER_ACTION_TYPES:
+        return host_result
+    if getattr(
+        protocol,
+        "artifact_provider_receipt_binding_required",
+        True,
+    ) is not True:
+        # Exact v2 registrations drain under their original custody contract.
+        # Only v3 declares the artifact-owned provider receipt member.
+        return host_result
+    try:
+        binding = protocol.build_provider_receipt_binding(
+            action, host_result
+        )
+    except Exception as exc:
+        raise ModelRunnerHostError(
+            "artifact provider receipt binding failed"
+        ) from exc
+    if not isinstance(binding, Mapping):
+        raise ModelRunnerHostError(
+            "artifact provider receipt binding is invalid"
+        )
+    receipt_ref = str(binding.get("provider_receipt_ref") or "")
+    receipt_sha256 = str(binding.get("receipt_sha256") or "")
+    provider_identity_sha256 = str(
+        binding.get("provider_identity_sha256") or ""
+    )
+    if (
+        receipt_ref != str(host_result.provider_receipt_ref or "")
+        or not _SHA256_RE.fullmatch(receipt_sha256)
+        or not _SHA256_RE.fullmatch(provider_identity_sha256)
+        or (
+            host_result.provider_receipt_sha256 is not None
+            and host_result.provider_receipt_sha256 != receipt_sha256
+        )
+        or (
+            host_result.provider_identity_sha256 is not None
+            and host_result.provider_identity_sha256
+            != provider_identity_sha256
+        )
+    ):
+        raise ModelRunnerHostError(
+            "artifact provider receipt binding differs from host result"
+        )
+    return replace(
+        host_result,
+        provider_receipt_sha256=receipt_sha256,
+        provider_identity_sha256=provider_identity_sha256,
+    )
+
+
+def _validate_completion_receipt_custody(
+    *,
+    action: Mapping[str, Any],
+    completion: Mapping[str, Any],
+    custody_record: ProviderReceiptCustodyRecord | None,
+) -> None:
+    values = _receipt_custody_values(completion)
+    if custody_record is None:
+        if any(values):
+            raise ModelRunnerHostError(
+                "verifier completion cannot carry provider receipt custody"
+            )
+        return
+    if values != (
+        custody_record.provider_receipt_ref,
+        custody_record.provider_receipt_sha256,
+        custody_record.provider_identity_sha256,
+    ):
+        raise ModelRunnerHostError(
+            "model completion changed provider receipt custody"
+        )
+
+
 def _host_receipt(
     *,
     consumer_id: str,
@@ -170,6 +391,12 @@ def _host_receipt(
         "provider_receipt_ref": str(
             completion.get("provider_receipt_ref") or ""
         ),
+        "provider_receipt_sha256": str(
+            completion.get("provider_receipt_sha256") or ""
+        ),
+        "provider_identity_sha256": str(
+            completion.get("provider_identity_sha256") or ""
+        ),
         "completion_sha256": str(completion.get("completion_sha256") or ""),
         "outcome": str(completion.get("outcome") or ""),
         "calls": completion.get("calls"),
@@ -190,6 +417,7 @@ class CommonModelRunnerHost:
         protocol: ModelRunnerProtocol,
         bindings: Sequence[HostActionBinding],
         persist_transition: PersistTransition,
+        provider_receipt_custody: ProviderReceiptCustody | None = None,
         load_completion: LoadCompletion | None = None,
         max_actions: int = 10_000,
     ) -> None:
@@ -203,6 +431,7 @@ class CommonModelRunnerHost:
         self._protocol = protocol
         self._bindings = _binding_index(bindings)
         self._persist_transition = persist_transition
+        self._provider_receipt_custody = provider_receipt_custody
         self._load_completion = load_completion
         self._max_actions = max_actions
 
@@ -212,15 +441,10 @@ class CommonModelRunnerHost:
         *,
         continuation: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        expected = _available_manifest_bindings(start_request)
-        actual = {
-            key: binding.binding_contract_sha256
-            for key, binding in self._bindings.items()
-        }
-        if actual != expected:
-            raise ModelRunnerHostError(
-                "executable bindings differ from the capability manifest"
-            )
+        validate_host_action_bindings(
+            start_request,
+            tuple(self._bindings.values()),
+        )
 
         state = self._protocol.advance(
             start_request,
@@ -252,6 +476,11 @@ class CommonModelRunnerHost:
             if not idempotency_key:
                 raise ModelRunnerHostError("model action has no idempotency key")
 
+            _require_durable_provider_receipt_custody(
+                action=action,
+                custody=self._provider_receipt_custody,
+            )
+
             cached = (
                 self._load_completion(idempotency_key)
                 if self._load_completion is not None
@@ -265,14 +494,39 @@ class CommonModelRunnerHost:
                     )
                 if host_result.outcome not in _OUTCOMES:
                     raise ModelRunnerHostError("host binding outcome is invalid")
+                host_result = _bind_provider_receipt(
+                    action=action,
+                    host_result=host_result,
+                    protocol=self._protocol,
+                )
+                custody_record = _resolve_provider_receipt_custody(
+                    action=action,
+                    value=host_result,
+                    custody=self._provider_receipt_custody,
+                )
                 completion = self._protocol.build_completion(
                     action,
                     host_result,
+                )
+                _validate_completion_receipt_custody(
+                    action=action,
+                    completion=completion,
+                    custody_record=custody_record,
                 )
                 provider_request_id = host_result.provider_request_id
                 replayed = False
             else:
                 completion = cached
+                custody_record = _resolve_provider_receipt_custody(
+                    action=action,
+                    value=completion,
+                    custody=self._provider_receipt_custody,
+                )
+                _validate_completion_receipt_custody(
+                    action=action,
+                    completion=completion,
+                    custody_record=custody_record,
+                )
                 provider_request_id = None
                 replayed = True
 
@@ -318,4 +572,7 @@ __all__ = [
     "HostActionResult",
     "ModelRunnerHostError",
     "ModelRunnerProtocol",
+    "ProviderReceiptCustody",
+    "ProviderReceiptCustodyRecord",
+    "validate_host_action_bindings",
 ]

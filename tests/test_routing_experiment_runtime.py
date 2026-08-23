@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,10 +10,23 @@ from gateway.research_lab.routing_experiment_runtime import (
     KmsRoutingExperimentArtifactAuthority,
     ProviderBrokerV2RoutingExecutor,
     ProviderBrokerRoutingRunner,
+    ReviewedProviderBrokerRoutingRunner,
     RoutingExperimentDeferredRecoveryError,
     RoutingExperimentRuntimeConfig,
     RoutingExperimentRuntimeError,
     RoutingExperimentService,
+    RoutingExperimentTerminalRecoveryError,
+    _provider_attempt_replay_ref,
+)
+from gateway.research_lab.routing_admission import RoutingAdmissionBundleV2
+from gateway.research_lab.routing_execution_authorization import (
+    RoutingProviderCallAuthorizationV2,
+)
+from gateway.research_lab.routing_experiment_artifacts import (
+    VerifiedRoutingArtifactLineage,
+)
+from gateway.research_lab.routing_provider_terminal_protected import (
+    build_routing_model_completion_contract_v1,
 )
 from gateway.research_lab.routing_experiment_store import (
     RoutingExperimentExecutionClaim,
@@ -25,6 +40,7 @@ from research_lab.routing_experiments import (
     ReceiptExecutionMode,
     RoutingCallAuthorization,
 )
+from tests.routing_experiment_authority_fixture import authority_fixture
 
 
 def _hash(char: str) -> str:
@@ -514,3 +530,212 @@ def test_service_does_not_resume_or_mark_budget_after_terminal_recovery():
     assert len(store.claim_calls) == 1
     assert len(store.recovery_calls) == 1
     assert store.uncertain_calls == []
+
+
+def _durable_model_attempt_fixture():
+    fixture = authority_fixture()
+    row = deepcopy(fixture["attempts"][0])
+    document = deepcopy(row["attempt_doc"])
+    grant = RoutingProviderCallAuthorizationV2.from_mapping(
+        document["call_grant"]
+    )
+    admission = RoutingAdmissionBundleV2.from_mapping(
+        document["admission_bundle"]
+    )
+    lineage = VerifiedRoutingArtifactLineage(**fixture["lineage"])
+    action = {
+        "action_sha256": "a" * 64,
+        "response_schema_version": "model-provider-response:v1",
+        "max_response_bytes": 1_000_000,
+    }
+    response = {
+        "schema_version": "host-provider-response:v1",
+        "provider": "fixture",
+        "status_code": 200,
+        "body": {},
+    }
+    terminal_result = {
+        "provider_receipt": document["provider_receipt"],
+        "model_provider_response": response,
+        "model_provider_response_sha256": sha256_json(response),
+        "model_completion_contract_hash": sha256_json(
+            build_routing_model_completion_contract_v1(action)
+        ),
+    }
+    terminal_receipt = {
+        "job_id": "routing-dispatch:" + "1" * 32,
+        "receipt_hash": _hash("2"),
+        "input_root": _hash("3"),
+    }
+    document.pop("legacy_fixture", None)
+    document.update(
+        {
+            "schema_version": (
+                "leadpoet.research_lab.routing_provider_attempt.v3"
+            ),
+            "terminal_result": terminal_result,
+            "terminal_execution_receipt": terminal_receipt,
+            "terminal_request_hash": terminal_receipt["input_root"],
+        }
+    )
+    row.update(
+        {
+            "attempt_doc": document,
+            "terminal_result_hash": sha256_json(terminal_result),
+            "terminal_receipt_hash": terminal_receipt["receipt_hash"],
+        }
+    )
+    authorization = RoutingCallAuthorization(
+        experiment_id=grant.experiment_id,
+        variant_id=grant.variant_id,
+        artifact_key=_hash("5"),
+        stage=grant.stage,
+        unit_ref=grant.unit_ref,
+        tool_id=grant.binding.tool_id,
+        attempt=grant.attempt,
+        request_fingerprint=grant.core_request_fingerprint,
+        remaining_credit_microunits=grant.credit_cap_microunits,
+        timeout_ceiling_ms=grant.timeout_ms,
+        execution_mode=ReceiptExecutionMode.MEASURED_LAB.value,
+    )
+    return {
+        "row": row,
+        "document": document,
+        "grant": grant,
+        "admission": admission,
+        "lineage": lineage,
+        "action": action,
+        "authorization": authorization,
+    }
+
+
+def _resolve_durable_model_attempt(values):
+    grant = values["grant"]
+    return _provider_attempt_replay_ref(
+        values["row"],
+        attempt_key=values["row"]["attempt_key"],
+        experiment_hash=values["row"]["experiment_hash"],
+        experiment_id=grant.experiment_id,
+        authorization=values["authorization"],
+        binding=grant.binding,
+        artifact_lineage=values["lineage"],
+        unit_ref=grant.unit_ref,
+        request_fingerprint=grant.core_request_fingerprint,
+        action=values["action"],
+        admission=values["admission"],
+        protected_release_receipt=values["document"][
+            "protected_release_receipt"
+        ],
+    )
+
+
+def test_durable_model_attempt_derives_the_exact_protected_replay_reference():
+    values = _durable_model_attempt_fixture()
+
+    assert _resolve_durable_model_attempt(values) == {
+        "schema_version": (
+            "leadpoet.research_lab.protected_model_replay_ref.v1"
+        ),
+        "protected_dispatch_job_id": "routing-dispatch:" + "1" * 32,
+        "terminal_receipt_hash": _hash("2"),
+        "model_provider_response_sha256": values["document"][
+            "terminal_result"
+        ]["model_provider_response_sha256"],
+        "model_completion_contract_hash": values["document"][
+            "terminal_result"
+        ]["model_completion_contract_hash"],
+    }
+
+
+@pytest.mark.parametrize("tamper", ["receipt", "hash", "identity"])
+def test_durable_model_attempt_replay_rejects_receipt_hash_or_identity_tampering(
+    tamper,
+):
+    values = _durable_model_attempt_fixture()
+    if tamper == "receipt":
+        values["document"]["provider_receipt"]["evidence_hash"] = _hash("f")
+    elif tamper == "hash":
+        values["document"]["terminal_result"][
+            "model_provider_response_sha256"
+        ] = _hash("f")
+        values["row"]["terminal_result_hash"] = sha256_json(
+            values["document"]["terminal_result"]
+        )
+    else:
+        values["row"]["unit_ref"] = "forged-unit"
+
+    with pytest.raises(
+        RoutingExperimentTerminalRecoveryError,
+        match="durable Model provider attempt",
+    ):
+        _resolve_durable_model_attempt(values)
+
+
+def test_existing_model_attempt_replays_before_authorization_or_reservation():
+    values = _durable_model_attempt_fixture()
+    calls = []
+
+    class _Config:
+        def assert_live_enabled(self):
+            calls.append("config")
+
+    class _AttemptStore:
+        def provider_attempt_row(self, key):
+            calls.append(("attempt_lookup", key))
+            return values["row"]
+
+        def reserve_budget(self, **_values):
+            raise AssertionError("durable replay must precede reservation")
+
+    class _UnavailableCompiler:
+        def prepare(self, **_values):
+            raise AssertionError("durable replay must precede compilation")
+
+    class _UnavailableAuthorization:
+        def authorize_call(self, **_values):
+            raise AssertionError("durable replay must precede authorization")
+
+    runner = object.__new__(ReviewedProviderBrokerRoutingRunner)
+    runner.config = _Config()
+    runner.store = _AttemptStore()
+    runner.artifact_lineage = values["lineage"]
+    runner.artifact_lineages = {}
+    runner.compiler = _UnavailableCompiler()
+    runner.model_binding_requirements = object()
+    runner.authorization_authority = _UnavailableAuthorization()
+    runner.dispatch_authority = object()
+    runner.execution_envelope = SimpleNamespace(
+        envelope_hash=lambda: values["admission"].envelope_hash,
+        experiment_hash=values["row"]["experiment_hash"],
+    )
+    runner.admission_bundle = values["admission"]
+    runner.protected_release_receipt = values["document"][
+        "protected_release_receipt"
+    ]
+    runner.authorization_parent_receipt_graphs = ()
+    runner.dispatch_parent_receipt_graphs = ()
+    runner.admission_validator = lambda *_values: None
+    runner._execution = SimpleNamespace(
+        experiment_hash=values["row"]["experiment_hash"],
+        experiment_id=values["grant"].experiment_id,
+        claim=object(),
+        deadline_monotonic=0.0,
+        deadline_supplier=None,
+    )
+
+    def replay_model_action(**kwargs):
+        calls.append(("replay", kwargs["replay_ref"]))
+        return {"replayed": True}
+
+    runner.replay_model_action = replay_model_action
+
+    assert runner._dispatch_call(
+        values["grant"].binding,
+        values["grant"].unit_ref,
+        values["grant"].core_request_fingerprint,
+        values["authorization"],
+        model_action=values["action"],
+    ) == {"replayed": True}
+    assert [
+        item if isinstance(item, str) else item[0] for item in calls
+    ] == ["config", "attempt_lookup", "replay"]

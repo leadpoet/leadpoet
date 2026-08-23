@@ -259,10 +259,13 @@ class _ModelRunnerRegistry(ExactModelRunnerRegistry):
     def __init__(self):
         pass
 
-    def preflight_all(self):
+    def validate_all(self):
+        return None
+
+    def preflight_all(self, *, execution_mode):
         return {"reviewed": {"preflight_sha256": "9" * 64}}
 
-    def resolve(self, artifact):
+    def resolve_identity(self, artifact):
         artifact_identity = (
             artifact.to_dict()
             if callable(getattr(artifact, "to_dict", None))
@@ -270,7 +273,10 @@ class _ModelRunnerRegistry(ExactModelRunnerRegistry):
         )
         return SimpleNamespace(
             key="reviewed",
-            preflight=lambda: {"preflight_sha256": "9" * 64},
+            preflight=lambda *, execution_mode: {
+                "execution_mode": execution_mode,
+                "preflight_sha256": "9" * 64,
+            },
             host_capability_manifest={"bindings": []},
             artifact_identity=artifact_identity,
             protocol=SimpleNamespace(

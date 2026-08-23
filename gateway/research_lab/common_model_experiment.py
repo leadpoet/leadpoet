@@ -7,9 +7,10 @@ emitted and validated by the exact immutable Model artifact.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
+import re
 from typing import Any, Mapping, Protocol
 
 from gateway.research_lab.routing_experiment_runtime import (
@@ -18,7 +19,10 @@ from gateway.research_lab.routing_experiment_runtime import (
 from gateway.research_lab.routing_provider_terminal_protected import (
     build_routing_model_completion_contract_v1,
 )
-from research_lab.common_model_runner_host import HostActionResult
+from research_lab.common_model_runner_host import (
+    HostActionResult,
+    ModelRunnerHostError,
+)
 from research_lab.model_runner_protocol import ExactModelRunnerRegistration
 from research_lab.routing_experiments import (
     ProviderBindingIdentity,
@@ -63,6 +67,14 @@ class ExactModelActionDispatcher(Protocol):
         self, *, action: Mapping[str, Any], unit_ref: str
     ) -> HostActionResult: ...
 
+    def verify_intent_action(
+        self, *, action: Mapping[str, Any], unit_ref: str
+    ) -> HostActionResult: ...
+
+    def verify_contact_action(
+        self, *, action: Mapping[str, Any], unit_ref: str
+    ) -> HostActionResult: ...
+
     def replay_provider_action(
         self,
         *,
@@ -100,13 +112,49 @@ def _artifact_hash(variant: Any) -> str:
     )
 
 
-def _action_budget(action: Mapping[str, Any]) -> tuple[int, int]:
+def _action_budget(
+    action: Mapping[str, Any],
+    *,
+    normalization_identity: Mapping[str, Any] | None = None,
+) -> tuple[int, int]:
     arguments = action.get("arguments")
-    step = arguments.get("step") if isinstance(arguments, Mapping) else None
-    if not isinstance(step, Mapping):
+    if not isinstance(arguments, Mapping):
         raise CommonModelExperimentError("Model provider action budget is missing")
-    credit = step.get("credit_cap")
-    timeout = step.get("timeout_seconds")
+    if action.get("action_type") == "normalize_icp":
+        # V3 normalization owns these bounds directly because it is outside
+        # the company-first orchestration step document.  Never substitute a
+        # catalog, environment, or host default for either value.
+        credit = arguments.get("credit_cap")
+        timeout = arguments.get("timeout_seconds")
+        call_cap = arguments.get("call_cap")
+        if not isinstance(normalization_identity, Mapping):
+            raise CommonModelExperimentError(
+                "normalization budget differs from artifact-owned top-level bounds"
+            )
+        expected_call_cap = normalization_identity.get("call_cap")
+        expected_credit = normalization_identity.get("credit_cap")
+        expected_timeout = normalization_identity.get("timeout_seconds")
+        if (
+            "step" in arguments
+            or type(call_cap) is not int
+            or type(call_cap) is not type(expected_call_cap)
+            or call_cap != expected_call_cap
+            or type(credit) is not type(expected_credit)
+            or credit != expected_credit
+            or type(timeout) is not type(expected_timeout)
+            or timeout != expected_timeout
+        ):
+            raise CommonModelExperimentError(
+                "normalization budget differs from artifact-owned top-level bounds"
+            )
+    else:
+        step = arguments.get("step")
+        if not isinstance(step, Mapping):
+            raise CommonModelExperimentError(
+                "Model provider action budget is missing"
+            )
+        credit = step.get("credit_cap")
+        timeout = step.get("timeout_seconds")
     if (
         isinstance(credit, bool)
         or not isinstance(credit, (int, float))
@@ -201,7 +249,24 @@ class ReviewedProtectedModelActionDispatcher:
             raise CommonModelExperimentError(
                 "Model action binding contract differs"
             )
-        credit, timeout_ms = _action_budget(action)
+        normalization_identity = None
+        if action.get("action_type") == "normalize_icp":
+            registration = self._registrations[variant_id]
+            registration.protocol.validate_normalization_action(
+                action,
+                host_capability_manifest=(
+                    registration.host_capability_manifest
+                ),
+            )
+            normalization_identity = (
+                registration.protocol_generation.champion_execution[
+                    "normalization_action"
+                ]
+            )
+        credit, timeout_ms = _action_budget(
+            action,
+            normalization_identity=normalization_identity,
+        )
         provider_ceiling = self._spec.credit_budget.provider_credit_ceilings.get(
             binding.binding_id
         )
@@ -238,10 +303,35 @@ class ReviewedProtectedModelActionDispatcher:
             authorization=authorization,
             action=action,
         )
-        return self._protected_action_result(
+        initial = self._protected_action_result(
             action=action,
+            binding=binding,
             protected=protected,
         )
+        if not isinstance(initial.replay_ref, Mapping):
+            raise CommonModelExperimentError(
+                "protected Model action has no durable replay reference"
+            )
+        # The protected operation persists the exact provider attempt before
+        # returning.  Reopen it immediately through the read-only replay path
+        # so completion custody is derived only from durable attempt state,
+        # never from an uncommitted response in this process.
+        replayed = self._runner.replay_model_action(
+            binding=binding,
+            unit_ref=unit_ref,
+            action=action,
+            replay_ref=initial.replay_ref,
+        )
+        durable = self._protected_action_result(
+            action=action,
+            binding=binding,
+            protected=replayed,
+        )
+        if durable != initial:
+            raise CommonModelExperimentError(
+                "durable provider attempt differs from dispatch result"
+            )
+        return durable
 
     def replay_provider_action(
         self,
@@ -271,6 +361,7 @@ class ReviewedProtectedModelActionDispatcher:
         )
         return self._protected_action_result(
             action=action,
+            binding=binding,
             protected=protected,
         )
 
@@ -278,6 +369,7 @@ class ReviewedProtectedModelActionDispatcher:
     def _protected_action_result(
         *,
         action: Mapping[str, Any],
+        binding: ProviderBindingIdentity,
         protected: Mapping[str, Any],
     ) -> ProtectedModelActionResult:
         if not isinstance(protected, Mapping) or set(protected) != {
@@ -349,6 +441,9 @@ class ReviewedProtectedModelActionDispatcher:
                 cost_credits=receipt.credit_microunits / 1_000_000,
                 latency_ms=receipt.latency_ms,
                 provider_receipt_ref=receipt.receipt_ref,
+                provider_identity_sha256=hashlib.sha256(
+                    binding.provider_id.encode("utf-8")
+                ).hexdigest(),
             ),
             provider_receipt=receipt,
             replay_ref={
@@ -389,6 +484,14 @@ class ReviewedProtectedModelActionDispatcher:
 class ModelTransitionRepository(Protocol):
     """Append-only recovery seam keyed by the Model idempotency key."""
 
+    def resolve_run_protocol_generation(
+        self,
+        *,
+        experiment_hash: str,
+        variant_id: str,
+        artifact_key: str,
+    ) -> str: ...
+
     def load_model_transition(
         self,
         *,
@@ -408,6 +511,7 @@ class ModelTransitionRepository(Protocol):
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
         provider_receipt: Mapping[str, Any] | None,
+        protocol_generation_sha256: str,
         replay_ref: Mapping[str, Any] | None = None,
     ) -> None: ...
 
@@ -421,6 +525,7 @@ class ExactModelUnitResult:
     provider_receipts: tuple[ProviderReceipt, ...]
     replayed_transition_count: int
     target_verified_qualified_count: int
+    protocol_generation_sha256: str
 
 
 def _sha256(value: Any) -> str:
@@ -434,6 +539,27 @@ def _sha256(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _generation_bound_continuation_sha256(
+    continuation: Mapping[str, Any],
+    *,
+    protocol_generation_sha256: str,
+) -> str:
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(protocol_generation_sha256 or ""),
+    ):
+        raise CommonModelExperimentError(
+            "Model protocol generation hash is invalid"
+        )
+    return _sha256({
+        "schema_version": (
+            "leadpoet.research_lab.generation_bound_continuation.v1"
+        ),
+        "protocol_generation_sha256": protocol_generation_sha256,
+        "continuation": dict(continuation),
+    })
+
+
 class FencedModelTransitionRepository:
     """Store only redacted hashes under one active V3 claim.
 
@@ -445,12 +571,54 @@ class FencedModelTransitionRepository:
     def __init__(self, *, store: Any, claim: Any) -> None:
         if not callable(getattr(store, "append_event", None)) or not callable(
             getattr(store, "load_model_transition_marker", None)
+        ) or not callable(
+            getattr(store, "load_exact_model_run_registration", None)
         ):
             raise CommonModelExperimentError(
                 "durable Model transition store is unavailable"
             )
         self._store = store
         self._claim = claim
+
+    def resolve_run_protocol_generation(
+        self,
+        *,
+        experiment_hash: str,
+        variant_id: str,
+        artifact_key: str,
+    ) -> str:
+        """Resolve the exact durable run tuple before marker or OCI access."""
+
+        try:
+            registration = self._store.load_exact_model_run_registration(
+                experiment_hash=experiment_hash
+            )
+        except Exception as exc:
+            raise CommonModelExperimentRecoveryError(
+                "exact Model run registration could not be resolved"
+            ) from exc
+        if not isinstance(registration, Mapping):
+            raise CommonModelExperimentRecoveryError(
+                "exact Model run registration is missing"
+            )
+        artifact_keys = registration.get("artifact_keys")
+        generations = registration.get("protocol_generations")
+        generation = (
+            generations.get(variant_id)
+            if isinstance(generations, Mapping)
+            else None
+        )
+        if (
+            not isinstance(artifact_keys, Mapping)
+            or artifact_keys.get(variant_id) != artifact_key
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(generation or "")
+            )
+        ):
+            raise CommonModelExperimentRecoveryError(
+                "exact Model run artifact or generation differs"
+            )
+        return str(generation)
 
     def load_model_transition(self, **identity: Any) -> Mapping[str, Any] | None:
         return self._store.load_model_transition_marker(**identity)
@@ -465,6 +633,7 @@ class FencedModelTransitionRepository:
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
         provider_receipt: Mapping[str, Any] | None,
+        protocol_generation_sha256: str,
         replay_ref: Mapping[str, Any] | None = None,
     ) -> None:
         provider_response = completion.get("provider_response")
@@ -519,7 +688,10 @@ class FencedModelTransitionRepository:
                 "unit_ref": unit_ref,
                 "idempotency_key": action.get("idempotency_key"),
                 "action_sha256": action.get("action_sha256"),
-                "continuation_sha256": _sha256(continuation),
+                "continuation_sha256": _generation_bound_continuation_sha256(
+                    continuation,
+                    protocol_generation_sha256=protocol_generation_sha256,
+                ),
                 "completion_sha256": completion.get("completion_sha256"),
                 "provider_response_sha256": _sha256(provider_response),
                 "provider_receipt": (
@@ -539,6 +711,7 @@ class FencedModelTransitionRepository:
 
 _PROVIDER_ACTION_TYPES = frozenset(
     {
+        "normalize_icp",
         "execute_candidate_tool",
         "execute_intent_tool",
         "execute_contact_tool",
@@ -597,9 +770,22 @@ def _completion_from_transition(
     transition: Mapping[str, Any],
     *,
     action: Mapping[str, Any],
+    protocol_generation_sha256: str,
 ) -> tuple[Mapping[str, Any], ProviderReceipt | None]:
-    if set(transition) != {"action", "continuation", "completion", "provider_receipt"}:
+    if set(transition) != {
+        "action",
+        "continuation",
+        "completion",
+        "provider_receipt",
+        "protocol_generation_sha256",
+    }:
         raise CommonModelExperimentError("stored Model transition is malformed")
+    if transition.get("protocol_generation_sha256") != (
+        protocol_generation_sha256
+    ):
+        raise CommonModelExperimentError(
+            "stored Model transition protocol generation differs"
+        )
     if transition.get("action") != dict(action):
         raise CommonModelExperimentError("stored Model transition action differs")
     completion = transition.get("completion")
@@ -621,13 +807,19 @@ def _protected_replay_ref_from_marker(
     *,
     action: Mapping[str, Any],
     continuation: Mapping[str, Any],
+    protocol_generation_sha256: str,
 ) -> Mapping[str, Any] | None:
     """Validate one SQL marker before any protected replay or verifier work."""
 
+    generation_bound = _generation_bound_continuation_sha256(
+        continuation,
+        protocol_generation_sha256=protocol_generation_sha256,
+    )
+    stored_continuation_hash = marker.get("continuation_sha256")
     if (
         marker.get("action_sha256") != action.get("action_sha256")
         or marker.get("idempotency_key") != action.get("idempotency_key")
-        or marker.get("continuation_sha256") != _sha256(continuation)
+        or stored_continuation_hash != generation_bound
     ):
         raise CommonModelExperimentError(
             "durable Model transition identity differs"
@@ -665,6 +857,54 @@ def _protected_replay_ref_from_marker(
     }
 
 
+def _bind_durable_provider_result(
+    *,
+    protocol: Any,
+    action: Mapping[str, Any],
+    protected: ProtectedModelActionResult,
+) -> HostActionResult:
+    """Build custody only after protected dispatch has passed readback."""
+
+    host_result = protected.host_result
+    receipt = protected.provider_receipt
+    if receipt is None or not isinstance(host_result, HostActionResult):
+        raise CommonModelExperimentError(
+            "durable provider result is incomplete"
+        )
+    try:
+        binding = protocol.build_provider_receipt_binding(
+            action, host_result
+        )
+    except ModelRunnerHostError as exc:
+        raise CommonModelExperimentError(
+            "artifact provider receipt custody differs from durable attempt"
+        ) from exc
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("provider_receipt_ref") != receipt.receipt_ref
+        or binding.get("provider_receipt_ref")
+        != host_result.provider_receipt_ref
+        or binding.get("provider_identity_sha256")
+        != host_result.provider_identity_sha256
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(binding.get("receipt_sha256") or "")
+        )
+        or (
+            host_result.provider_receipt_sha256 is not None
+            and host_result.provider_receipt_sha256
+            != binding.get("receipt_sha256")
+        )
+    ):
+        raise CommonModelExperimentError(
+            "artifact provider receipt custody differs from durable attempt"
+        )
+    return replace(
+        host_result,
+        provider_receipt_sha256=str(binding["receipt_sha256"]),
+        provider_identity_sha256=str(binding["provider_identity_sha256"]),
+    )
+
+
 class ExactModelExperimentCoordinator:
     """Advance one registered PR274 artifact with durable Lab transitions."""
 
@@ -699,7 +939,20 @@ class ExactModelExperimentCoordinator:
         target_count: int,
         evaluated_on: str,
     ) -> ExactModelUnitResult:
-        self._registration.preflight()
+        pinned_generation_sha256 = (
+            self._transitions.resolve_run_protocol_generation(
+                experiment_hash=self._experiment_hash,
+                variant_id=variant_id,
+                artifact_key=self._registration.key,
+            )
+        )
+        generation = self._registration.protocol_generation
+        generation_sha256 = generation.protocol_generation_sha256
+        if generation_sha256 != pinned_generation_sha256:
+            raise CommonModelExperimentRecoveryError(
+                "active Model protocol generation differs from run registration"
+            )
+        self._registration.preflight(execution_mode=execution_mode)
         protocol = self._registration.protocol
         start = protocol.build_start(
             input=model_input,
@@ -712,6 +965,28 @@ class ExactModelExperimentCoordinator:
         )
         state = protocol.advance(start, continuation=None, completion=None)
         state = protocol.validate_result(state, start_request=start)
+        if generation.supports_raw_icp and execution_mode != "intent_refresh":
+            if model_input.get("kind") != "raw_icp":
+                raise CommonModelExperimentError(
+                    "v3 full execution requires an artifact-owned raw ICP"
+                )
+            # Normalization is conditional and entirely model-owned.  An
+            # explicit raw ICP may normalize deterministically and advance
+            # directly to acquisition, while an ambiguous ICP emits the
+            # artifact-declared provider action.  Validate that action when it
+            # exists, but never require the host to predict which path the
+            # artifact will select.
+            initial_action = state.get("action")
+            if (
+                isinstance(initial_action, Mapping)
+                and initial_action.get("action_type") == "normalize_icp"
+            ):
+                protocol.validate_normalization_action(
+                    initial_action,
+                    host_capability_manifest=(
+                        self._registration.host_capability_manifest
+                    ),
+                )
         receipts: list[ProviderReceipt] = []
         replayed = 0
         action_count = 0
@@ -738,7 +1013,9 @@ class ExactModelExperimentCoordinator:
             if stored is not None:
                 if "action" in stored:
                     completion, receipt = _completion_from_transition(
-                        stored, action=action
+                        stored,
+                        action=action,
+                        protocol_generation_sha256=generation_sha256,
                     )
                     if stored.get("continuation") != dict(continuation):
                         raise CommonModelExperimentError(
@@ -749,6 +1026,7 @@ class ExactModelExperimentCoordinator:
                         stored,
                         action=action,
                         continuation=continuation,
+                        protocol_generation_sha256=generation_sha256,
                     )
                     action_type = str(action.get("action_type") or "")
                     receipt = None
@@ -791,9 +1069,15 @@ class ExactModelExperimentCoordinator:
                         raise CommonModelExperimentError(
                             "replayed host action result is invalid"
                         )
-                    completion = protocol.build_completion(
-                        action, host_result
-                    )
+                    if action_type in _PROVIDER_ACTION_TYPES and (
+                        generation.supports_provider_receipt_binding
+                    ):
+                        host_result = _bind_durable_provider_result(
+                            protocol=protocol,
+                            action=action,
+                            protected=protected,
+                        )
+                    completion = protocol.build_completion(action, host_result)
                     if (
                         completion.get("completion_sha256")
                         != stored.get("completion_sha256")
@@ -847,6 +1131,14 @@ class ExactModelExperimentCoordinator:
                     )
                 if not isinstance(host_result, HostActionResult):
                     raise CommonModelExperimentError("host action result is invalid")
+                if action_type in _PROVIDER_ACTION_TYPES and (
+                    generation.supports_provider_receipt_binding
+                ):
+                    host_result = _bind_durable_provider_result(
+                        protocol=protocol,
+                        action=action,
+                        protected=protected,
+                    )
                 completion = protocol.build_completion(action, host_result)
                 self._transitions.append_model_transition(
                     experiment_hash=self._experiment_hash,
@@ -858,6 +1150,7 @@ class ExactModelExperimentCoordinator:
                     provider_receipt=(
                         None if receipt is None else receipt.to_dict()
                     ),
+                    protocol_generation_sha256=generation_sha256,
                     replay_ref=(
                         protected.replay_ref
                         if action_type in _PROVIDER_ACTION_TYPES
@@ -883,6 +1176,7 @@ class ExactModelExperimentCoordinator:
             provider_receipts=tuple(receipts),
             replayed_transition_count=replayed,
             target_verified_qualified_count=target_count,
+            protocol_generation_sha256=generation_sha256,
         )
 
 

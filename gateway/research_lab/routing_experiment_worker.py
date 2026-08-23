@@ -572,6 +572,66 @@ class ExactModelRoutingRunInputs:
     evaluation_adapter: ExactModelEvaluationAdapter
     execution_envelope: RoutingExperimentExecutionEnvelopeV2
     authoritative_billing_rollup: Callable[..., Mapping[str, Any]]
+    unit_model_inputs: Mapping[
+        str, Mapping[str, Mapping[str, Any]]
+    ]
+    run_registration_pin: Mapping[str, Any] | None = None
+
+
+def _validate_exact_model_run_registration_pin(
+    value: Mapping[str, Any],
+    *,
+    expected_artifact_keys: Mapping[str, str],
+    expected_protocol_generations: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Validate the single durable artifact/generation tuple for a run."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "worker_ref",
+        "runner_contract",
+        "artifact_keys",
+        "protocol_generations",
+    }:
+        raise RoutingExperimentWorkerError(
+            "exact Model run registration is malformed"
+        )
+    worker_ref = str(value.get("worker_ref") or "")
+    artifact_keys = value.get("artifact_keys")
+    generations = value.get("protocol_generations")
+    if (
+        value.get("schema_version")
+        != "leadpoet.research_lab.routing_worker_event.v2"
+        or value.get("runner_contract")
+        != "exact_model_runner_generation_pinned_v1"
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}", worker_ref
+        )
+        or not isinstance(artifact_keys, Mapping)
+        or not isinstance(generations, Mapping)
+        or dict(artifact_keys) != dict(expected_artifact_keys)
+        or set(generations) != set(expected_artifact_keys)
+        or any(
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or ""))
+            for item in generations.values()
+        )
+    ):
+        raise RoutingExperimentWorkerError(
+            "exact Model run registration identity differs"
+        )
+    if expected_protocol_generations is not None and dict(generations) != dict(
+        expected_protocol_generations
+    ):
+        raise RoutingExperimentWorkerError(
+            "exact Model run protocol generation differs"
+        )
+    return {
+        "schema_version": value["schema_version"],
+        "worker_ref": worker_ref,
+        "runner_contract": value["runner_contract"],
+        "artifact_keys": dict(artifact_keys),
+        "protocol_generations": dict(generations),
+    }
 
 
 def _validate_exact_unit_and_label_identity(
@@ -625,6 +685,154 @@ def _validate_exact_unit_and_label_identity(
     return normalized
 
 
+def exact_model_execution_modes(
+    *,
+    spec: RoutingExperimentV2Spec,
+    unit_dataset: VerifiedRoutingUnitDataset,
+) -> tuple[str, ...]:
+    modes = set()
+    for unit_ref in (
+        *spec.input.calibration_unit_refs,
+        *spec.input.holdout_unit_refs,
+    ):
+        unit_input, _unit_hash = unit_dataset.resolve(unit_ref)
+        mode = str(unit_input.get("execution_mode") or "")
+        if mode not in {
+            "full_company",
+            "full_contact_optional",
+            "full_contact_required",
+            "intent_refresh",
+        }:
+            raise RoutingExperimentWorkerError(
+                "signed Model unit execution mode is invalid"
+            )
+        modes.add(mode)
+    if not modes:
+        raise RoutingExperimentWorkerError(
+            "signed Model unit execution mode is unavailable"
+        )
+    return tuple(sorted(modes))
+
+
+def _exact_model_execution_mode(unit_input: Mapping[str, Any]) -> str:
+    """Return one closed signed-unit mode for generation-specific preflight."""
+
+    if not isinstance(unit_input, Mapping):
+        raise RoutingExperimentWorkerError(
+            "signed Model unit input is invalid"
+        )
+    mode = str(unit_input.get("execution_mode") or "")
+    if mode not in {
+        "full_company",
+        "full_contact_optional",
+        "full_contact_required",
+        "intent_refresh",
+    }:
+        raise RoutingExperimentWorkerError(
+            "signed Model unit execution mode is invalid"
+        )
+    return mode
+
+
+def exact_model_unit_input_for_registration(
+    *,
+    registration: ExactModelRunnerRegistration,
+    unit_input: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Build one generation-specific input only through the artifact."""
+
+    if not isinstance(registration, ExactModelRunnerRegistration) or not isinstance(
+        unit_input, Mapping
+    ):
+        raise RoutingExperimentWorkerError(
+            "exact Model unit registration/input is invalid"
+        )
+    execution_mode = _exact_model_execution_mode(unit_input)
+    generation = registration.protocol_generation
+    if generation.supports_raw_icp and execution_mode != "intent_refresh":
+        if "model_input" in unit_input or "raw_icp" in unit_input:
+            raise RoutingExperimentWorkerError(
+                "v3 signed unit must not persist a host-built Model input"
+            )
+        payload = unit_input.get("raw_icp_payload")
+        source_schema = str(
+            unit_input.get("raw_icp_source_schema") or ""
+        )
+        if not isinstance(payload, Mapping):
+            raise RoutingExperimentWorkerError(
+                "v3 signed unit raw ICP payload is unavailable"
+            )
+        try:
+            return registration.protocol.build_raw_input(
+                payload,
+                source_schema=source_schema,
+            )
+        except Exception as exc:
+            raise RoutingExperimentWorkerError(
+                "artifact-owned raw ICP input construction failed"
+            ) from exc
+    model_input = unit_input.get("model_input")
+    if not isinstance(model_input, Mapping):
+        raise RoutingExperimentWorkerError(
+            "generation-pinned signed Model input is unavailable"
+        )
+    return dict(model_input)
+
+
+def preflight_exact_model_unit(
+    *,
+    registration: ExactModelRunnerRegistration,
+    unit_input: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Recheck raw input and the first v3 action before any queue claim."""
+
+    execution_mode = _exact_model_execution_mode(unit_input)
+    target_count = unit_input.get("target_count")
+    evaluated_on = str(unit_input.get("evaluated_on") or "")
+    if (
+        type(target_count) is not int
+        or not 1 <= target_count <= 50
+        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", evaluated_on)
+    ):
+        raise RoutingExperimentWorkerError(
+            "signed Model unit execution bounds are invalid"
+        )
+    registration.preflight(execution_mode=execution_mode)
+    model_input = exact_model_unit_input_for_registration(
+        registration=registration,
+        unit_input=unit_input,
+    )
+    generation = registration.protocol_generation
+    if generation.supports_raw_icp and execution_mode != "intent_refresh":
+        protocol = registration.protocol
+        start = protocol.build_start(
+            input=model_input,
+            execution_mode=execution_mode,
+            target_count=target_count,
+            evaluated_on=evaluated_on,
+            host_capability_manifest=registration.host_capability_manifest,
+        )
+        state = protocol.advance(
+            start, continuation=None, completion=None
+        )
+        state = protocol.validate_result(state, start_request=start)
+        action = state.get("action") if isinstance(state, Mapping) else None
+        # The artifact, not the host, decides whether the raw envelope needs
+        # an LLM normalization phase.  A fully explicit ICP may immediately
+        # emit an orchestration action (or complete); only an actual
+        # normalization action enters the additional binding validator.
+        if (
+            state.get("status") == "action_required"
+            and isinstance(action, Mapping)
+            and action.get("action_type") == "normalize_icp"
+        ):
+            protocol.validate_normalization_action(
+                action,
+                host_capability_manifest=registration.host_capability_manifest,
+            )
+    return model_input
+
+
 class RoutingExperimentRunFactory(Protocol):
     """A reviewed, named factory; never a user-supplied import path."""
 
@@ -660,12 +868,12 @@ class ExactModelRoutingRunFactory:
     artifact_lineages: tuple[Any, ...] = ()
     name: str = REVIEWED_ROUTING_FACTORY_NAME
 
-    def validate_readiness(self) -> None:
+    def _validate_dependencies(self) -> None:
         if not isinstance(self.registry, ExactModelRunnerRegistry):
             raise RoutingExperimentWorkerError(
                 "exact Model runner registry is unavailable"
             )
-        self.registry.preflight_all()
+        self.registry.validate_all()
         if not isinstance(self.unit_dataset, VerifiedRoutingUnitDataset):
             raise RoutingExperimentWorkerError(
                 "reviewed routing unit dataset is unavailable"
@@ -693,18 +901,53 @@ class ExactModelRoutingRunFactory:
                     f"reviewed routing {label} is unavailable"
                 )
 
-    def build(self, spec: RoutingExperimentV2Spec) -> ExactModelRoutingRunInputs:
-        self.validate_readiness()
+    def validate_readiness(self) -> None:
+        self._validate_dependencies()
+        # Exercise every exact registration against every signed dataset unit
+        # before the consumer exists and can claim a durable queue lease. For
+        # v3 this includes artifact-owned raw-input construction and the first
+        # normalization action/binding. ``build`` repeats the spec-bound subset.
+        for registration in self.registry.registrations():
+            for unit_ref in sorted(self.unit_dataset.units):
+                unit_input, _unit_hash = self.unit_dataset.resolve(unit_ref)
+                preflight_exact_model_unit(
+                    registration=registration,
+                    unit_input=unit_input,
+                )
+
+    def build(
+        self,
+        spec: RoutingExperimentV2Spec,
+        *,
+        run_registration_pin: Mapping[str, Any] | None = None,
+    ) -> ExactModelRoutingRunInputs:
+        if run_registration_pin is None:
+            self.validate_readiness()
+        else:
+            # A recovery must resolve its durable artifact tuple before any
+            # run-specific OCI call. Static dependencies remain cheap here;
+            # the generation and per-spec OCI checks occur only after the pin.
+            self._validate_dependencies()
         if len(spec.variants) < 2:
             raise RoutingExperimentWorkerError(
                 "exact baseline and challenger artifacts are required"
             )
         registrations = {
-            variant.variant_id: self.registry.resolve(
+            variant.variant_id: self.registry.resolve_identity(
                 variant.artifact.to_dict()
             )
             for variant in spec.variants
         }
+        artifact_keys_by_variant = {
+            variant_id: registration.key
+            for variant_id, registration in sorted(registrations.items())
+        }
+        normalized_run_pin = None
+        if run_registration_pin is not None:
+            normalized_run_pin = _validate_exact_model_run_registration_pin(
+                run_registration_pin,
+                expected_artifact_keys=artifact_keys_by_variant,
+            )
         baseline = registrations.get(spec.baseline_variant_id)
         if baseline is None:
             raise RoutingExperimentWorkerError(
@@ -724,9 +967,6 @@ class ExactModelRoutingRunFactory:
         artifact_keys: set[str] = set()
         for variant in spec.variants:
             registration = registrations[variant.variant_id]
-            registration.validate_variant_audit_payload(
-                variant.routing_payload
-            )
             if (
                 variant.variant_id != spec.baseline_variant_id
                 and registration.artifact_identity.get("branch")
@@ -747,11 +987,47 @@ class ExactModelRoutingRunFactory:
                     "exact Model artifact is duplicated across variants"
                 )
             artifact_keys.add(registration.key)
+        protocol_generations = {
+            variant_id: registration.protocol_generation.protocol_generation_sha256
+            for variant_id, registration in sorted(registrations.items())
+        }
+        if normalized_run_pin is not None:
+            normalized_run_pin = _validate_exact_model_run_registration_pin(
+                normalized_run_pin,
+                expected_artifact_keys=artifact_keys_by_variant,
+                expected_protocol_generations=protocol_generations,
+            )
+        for variant in spec.variants:
+            registrations[variant.variant_id].validate_variant_audit_payload(
+                variant.routing_payload
+            )
         labels = _validate_exact_unit_and_label_identity(
             spec=spec,
             unit_dataset=self.unit_dataset,
             gold_labels=self.gold_labels,
         )
+        execution_modes = exact_model_execution_modes(
+            spec=spec,
+            unit_dataset=self.unit_dataset,
+        )
+        for registration in registrations.values():
+            for execution_mode in execution_modes:
+                registration.preflight(execution_mode=execution_mode)
+        ordered_units = tuple(spec.input.calibration_unit_refs) + tuple(
+            spec.input.holdout_unit_refs
+        )
+        unit_model_inputs: dict[
+            str, dict[str, Mapping[str, Any]]
+        ] = {}
+        for variant_id, registration in sorted(registrations.items()):
+            per_unit: dict[str, Mapping[str, Any]] = {}
+            for unit_ref in ordered_units:
+                unit_input, _unit_hash = self.unit_dataset.resolve(unit_ref)
+                per_unit[unit_ref] = preflight_exact_model_unit(
+                    registration=registration,
+                    unit_input=unit_input,
+                )
+            unit_model_inputs[variant_id] = per_unit
         runner = self.reviewed_runner_factory(spec)
         if not isinstance(runner, ReviewedProviderBrokerRoutingRunner):
             raise RoutingExperimentWorkerError(
@@ -810,6 +1086,8 @@ class ExactModelRoutingRunFactory:
             evaluation_adapter=self.evaluation_adapter,
             execution_envelope=envelope,
             authoritative_billing_rollup=rollup,
+            unit_model_inputs=unit_model_inputs,
+            run_registration_pin=normalized_run_pin,
         )
 
 
@@ -1056,15 +1334,40 @@ class RoutingExperimentWorker:
         heartbeat.start()
         try:
             heartbeat.ensure_held()
-            self._append_execution_event(
-                spec=spec,
-                claim=claim,
-                event_type="run_started",
-                event_doc={
-                    "worker_ref": self.worker_ref,
-                    "runner_contract": "pr274_model_runner",
-                },
+            artifact_keys = {
+                variant_id: registration.key
+                for variant_id, registration in sorted(
+                    inputs.registry_registrations.items()
+                )
+            }
+            protocol_generations = {
+                variant_id: registration.protocol_generation.protocol_generation_sha256
+                for variant_id, registration in sorted(
+                    inputs.registry_registrations.items()
+                )
+            }
+            run_registration_pin = getattr(
+                inputs, "run_registration_pin", None
             )
+            if run_registration_pin is None:
+                self._append_execution_event(
+                    spec=spec,
+                    claim=claim,
+                    event_type="run_started",
+                    event_doc={
+                        "runner_contract": (
+                            "exact_model_runner_generation_pinned_v1"
+                        ),
+                        "artifact_keys": artifact_keys,
+                        "protocol_generations": protocol_generations,
+                    },
+                )
+            else:
+                _validate_exact_model_run_registration_pin(
+                    run_registration_pin,
+                    expected_artifact_keys=artifact_keys,
+                    expected_protocol_generations=protocol_generations,
+                )
             dispatcher = ReviewedProtectedModelActionDispatcher(
                 spec=spec,
                 registrations=inputs.registry_registrations,
@@ -1082,14 +1385,16 @@ class RoutingExperimentWorker:
             )
             unit_results: dict[str, dict[str, ExactModelUnitResult]] = {}
             for variant in spec.variants:
-                registration = inputs.registry.resolve(
+                registration = inputs.registry.resolve_identity(
                     variant.artifact.to_dict()
                 )
                 per_unit: dict[str, ExactModelUnitResult] = {}
                 for unit_ref in ordered_units:
                     heartbeat.ensure_held()
                     unit_input, _unit_hash = inputs.unit_dataset.resolve(unit_ref)
-                    model_input = unit_input.get("model_input")
+                    model_input = inputs.unit_model_inputs.get(
+                        variant.variant_id, {}
+                    ).get(unit_ref)
                     execution_mode = unit_input.get("execution_mode")
                     target_count = unit_input.get("target_count")
                     evaluated_on = unit_input.get("evaluated_on")
@@ -1198,7 +1503,9 @@ class RoutingExperimentWorker:
             candidate_terminals: dict[tuple[str, str], CandidateModelUnitTerminalReceipt] = {}
             candidate_provider_receipts = []
             for variant in spec.variants:
-                registration = inputs.registry.resolve(variant.artifact.to_dict())
+                registration = inputs.registry.resolve_identity(
+                    variant.artifact.to_dict()
+                )
                 release_identity = registration.protocol.release_identity
                 release_identity_sha256 = str(
                     release_identity.get("release_identity_sha256") or ""
@@ -1247,7 +1554,9 @@ class RoutingExperimentWorker:
                     )
                     candidate_terminals[(variant.variant_id, unit_ref)] = terminal
             for variant in spec.variants:
-                registration = inputs.registry.resolve(variant.artifact.to_dict())
+                registration = inputs.registry.resolve_identity(
+                    variant.artifact.to_dict()
+                )
                 release_identity = registration.protocol.release_identity
                 release_identity_sha256 = str(
                     release_identity.get("release_identity_sha256") or ""
@@ -1492,6 +1801,35 @@ class RoutingExperimentCoordinator:
         factory = self._factories.get(factory_name)
         if factory is None:
             raise RoutingExperimentWorkerError("reviewed routing runtime factory is unavailable")
+        if isinstance(factory, ExactModelRoutingRunFactory):
+            spec = self.worker.service.store.load_spec(experiment_hash)
+            if spec is None:
+                raise RoutingExperimentWorkerError(
+                    "routing experiment was not found"
+                )
+            load_pin = getattr(
+                self.worker.service.store,
+                "load_exact_model_run_registration",
+                None,
+            )
+            if not callable(load_pin):
+                raise RoutingExperimentWorkerError(
+                    "exact Model run registration store is unavailable"
+                )
+            run_pin = load_pin(experiment_hash=experiment_hash)
+            if (
+                run_pin is None
+                and lease is not None
+                and lease.lease_generation > 1
+            ):
+                raise RoutingExperimentWorkerError(
+                    "recovering exact Model run has no generation registration"
+                )
+            inputs = factory.build(
+                spec,
+                run_registration_pin=run_pin,
+            )
+            return self.worker.run(spec=spec, inputs=inputs, lease=lease)
         return self.worker.resume(
             experiment_hash=experiment_hash,
             input_factory=factory.build,
@@ -1614,6 +1952,7 @@ __all__ = [
     "assert_reviewed_routing_runtime_registered",
     "assert_reviewed_routing_factory_ready",
     "build_reviewed_routing_experiment_worker",
+    "exact_model_execution_modes",
     "RoutingExperimentRunInputs",
     "RoutingExperimentRunFactory",
     "AttestedProviderBrokerRoutingRunFactory",

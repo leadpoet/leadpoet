@@ -81,6 +81,7 @@ from research_lab.routing_experiments import (
     RoutingExperimentV2Spec,
     evaluate_routing_experiment_v2,
     provider_receipt_key,
+    validate_provider_receipt,
 )
 from leadpoet_canonical.attested_v2 import validate_signed_execution_receipt
 
@@ -169,6 +170,157 @@ def _validate_routing_provider_authorization_parent_graphs(
 
 class RoutingExperimentTerminalRecoveryError(RoutingExperimentRuntimeError):
     """A durable recovery fact requires a new immutable experiment."""
+
+
+def _provider_attempt_replay_ref(
+    row: Mapping[str, Any],
+    *,
+    attempt_key: str,
+    experiment_hash: str,
+    experiment_id: str,
+    authorization: RoutingCallAuthorization,
+    binding: ProviderBindingIdentity,
+    artifact_lineage: VerifiedRoutingArtifactLineage,
+    unit_ref: str,
+    request_fingerprint: str,
+    action: Mapping[str, Any],
+    admission: RoutingAdmissionBundleV2,
+    protected_release_receipt: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Derive a replay ref only from one exact durable protected attempt."""
+
+    document = row.get("attempt_doc") if isinstance(row, Mapping) else None
+    if not isinstance(document, Mapping) or document.get(
+        "schema_version"
+    ) != "leadpoet.research_lab.routing_provider_attempt.v3":
+        raise RoutingExperimentTerminalRecoveryError(
+            "durable Model provider attempt is malformed"
+        )
+    raw_receipt = document.get("provider_receipt")
+    raw_grant = document.get("call_grant")
+    terminal_result = document.get("terminal_result")
+    terminal_receipt = document.get("terminal_execution_receipt")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (
+            raw_receipt,
+            raw_grant,
+            terminal_result,
+            terminal_receipt,
+        )
+    ):
+        raise RoutingExperimentTerminalRecoveryError(
+            "durable Model provider attempt proof is incomplete"
+        )
+    try:
+        receipt = ProviderReceipt.from_mapping(raw_receipt)
+        grant = RoutingProviderCallAuthorizationV2.from_mapping(raw_grant)
+    except Exception as exc:
+        raise RoutingExperimentTerminalRecoveryError(
+            "durable Model provider attempt identity is invalid"
+        ) from exc
+    response = terminal_result.get("model_provider_response")
+    response_sha256 = terminal_result.get(
+        "model_provider_response_sha256"
+    )
+    completion_contract_sha256 = terminal_result.get(
+        "model_completion_contract_hash"
+    )
+    expected_lineage = {
+        "artifact_lineage_hash": artifact_lineage.identity_hash(),
+        "pointer_document_hash": artifact_lineage.pointer_document_hash,
+        "model_artifact_hash": artifact_lineage.model_artifact_hash,
+        "manifest_hash": artifact_lineage.manifest_hash,
+        "image_digest": artifact_lineage.image_digest,
+        "commit_sha": artifact_lineage.commit_sha,
+        "build_id": artifact_lineage.build_id,
+        "routing_contract_hash": artifact_lineage.routing_contract_hash,
+        "routing_catalog_hash": artifact_lineage.routing_catalog_hash,
+        "routing_policy_hash": artifact_lineage.routing_policy_hash,
+        "feature_schema_hash": artifact_lineage.feature_schema_hash,
+        "verifier_contract_hash": artifact_lineage.verifier_contract_hash,
+    }
+    if (
+        validate_provider_receipt(receipt)
+        or row.get("attempt_key") != attempt_key
+        or row.get("experiment_hash") != experiment_hash
+        or row.get("provider_receipt_ref") != receipt.receipt_ref
+        or row.get("binding_id") != binding.binding_id
+        or row.get("tool_id") != binding.tool_id
+        or row.get("variant_id") != authorization.variant_id
+        or row.get("unit_ref") != unit_ref
+        or row.get("request_fingerprint") != request_fingerprint
+        or row.get("execution_mode")
+        != ReceiptExecutionMode.MEASURED_LAB.value
+        or receipt.binding_id != binding.binding_id
+        or receipt.tool_id != binding.tool_id
+        or receipt.unit_ref != unit_ref
+        or receipt.request_fingerprint != request_fingerprint
+        or provider_receipt_key(
+            tool_id=receipt.tool_id,
+            binding_version=receipt.binding_version,
+            request_fingerprint=receipt.request_fingerprint,
+        )
+        != attempt_key
+        or document.get("binding_id") != binding.binding_id
+        or document.get("tool_id") != binding.tool_id
+        or document.get("variant_id") != authorization.variant_id
+        or document.get("unit_ref") != unit_ref
+        or document.get("request_fingerprint") != request_fingerprint
+        or document.get("execution_mode")
+        != ReceiptExecutionMode.MEASURED_LAB.value
+        or grant.experiment_hash != experiment_hash
+        or grant.experiment_id != experiment_id
+        or grant.variant_id != authorization.variant_id
+        or grant.stage != authorization.stage
+        or grant.attempt != authorization.attempt
+        or grant.unit_ref != unit_ref
+        or grant.core_request_fingerprint != request_fingerprint
+        or grant.binding.to_dict() != binding.to_dict()
+        or any(
+            getattr(grant, name) != expected
+            for name, expected in expected_lineage.items()
+        )
+        or document.get("call_grant_hash") != grant.authorization_hash()
+        or row.get("authorization_hash") != grant.authorization_hash()
+        or document.get("request_body_hash") != grant.request_body_hash
+        or row.get("request_body_hash") != grant.request_body_hash
+        or document.get("provider_receipt") != receipt.to_dict()
+        or terminal_result.get("provider_receipt") != receipt.to_dict()
+        or document.get("admission_bundle") != admission.to_dict()
+        or document.get("protected_release_receipt")
+        != dict(protected_release_receipt)
+        or not isinstance(response, Mapping)
+        or response_sha256 != sha256_json(dict(response))
+        or completion_contract_sha256
+        != sha256_json(build_routing_model_completion_contract_v1(action))
+        or row.get("terminal_result_hash")
+        != sha256_json(dict(terminal_result))
+        or row.get("terminal_receipt_hash")
+        != terminal_receipt.get("receipt_hash")
+        or document.get("terminal_request_hash")
+        != terminal_receipt.get("input_root")
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}",
+            str(terminal_receipt.get("job_id") or ""),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(terminal_receipt.get("receipt_hash") or ""),
+        )
+    ):
+        raise RoutingExperimentTerminalRecoveryError(
+            "durable Model provider attempt identity differs"
+        )
+    return {
+        "schema_version": (
+            "leadpoet.research_lab.protected_model_replay_ref.v1"
+        ),
+        "protected_dispatch_job_id": terminal_receipt["job_id"],
+        "terminal_receipt_hash": terminal_receipt["receipt_hash"],
+        "model_provider_response_sha256": response_sha256,
+        "model_completion_contract_hash": completion_contract_sha256,
+    }
 
 
 class RoutingExperimentDeferredRecoveryError(
@@ -2103,6 +2255,46 @@ class ReviewedProviderBrokerRoutingRunner:
                 "routing provider protected release identity differs"
             )
         artifact_lineage = self._lineage_for_variant(authorization.variant_id)
+        if model_action is not None:
+            attempt_reader = getattr(self.store, "provider_attempt_row", None)
+            if not callable(attempt_reader):
+                raise RoutingExperimentRuntimeError(
+                    "routing provider durable attempt lookup is unavailable"
+                )
+            attempt_key = provider_receipt_key(
+                tool_id=binding.tool_id,
+                binding_version=binding.adapter_version,
+                request_fingerprint=request_fingerprint,
+            )
+            try:
+                existing_attempt = attempt_reader(attempt_key)
+            except Exception as exc:
+                raise RoutingExperimentRuntimeError(
+                    "routing provider durable attempt lookup failed"
+                ) from exc
+            if existing_attempt is not None:
+                replay_ref = _provider_attempt_replay_ref(
+                    existing_attempt,
+                    attempt_key=attempt_key,
+                    experiment_hash=execution.experiment_hash,
+                    experiment_id=execution.experiment_id,
+                    authorization=authorization,
+                    binding=binding,
+                    artifact_lineage=artifact_lineage,
+                    unit_ref=unit_ref,
+                    request_fingerprint=request_fingerprint,
+                    action=model_action,
+                    admission=admission,
+                    protected_release_receipt=(
+                        self.protected_release_receipt
+                    ),
+                )
+                return self.replay_model_action(
+                    binding=binding,
+                    unit_ref=unit_ref,
+                    action=model_action,
+                    replay_ref=replay_ref,
+                )
         deadline = (
             execution.deadline_supplier()
             if execution.deadline_supplier is not None
@@ -2548,6 +2740,16 @@ class ReviewedProviderBrokerRoutingRunner:
         if (
             not isinstance(action, Mapping)
             or str(action.get("tool_id") or "") != binding.tool_id
+            or not isinstance(replay_ref, Mapping)
+            or set(replay_ref) != {
+                "schema_version",
+                "protected_dispatch_job_id",
+                "terminal_receipt_hash",
+                "model_provider_response_sha256",
+                "model_completion_contract_hash",
+            }
+            or replay_ref.get("schema_version")
+            != "leadpoet.research_lab.protected_model_replay_ref.v1"
         ):
             raise RoutingExperimentRuntimeError(
                 "routing Model replay action differs"
@@ -2582,8 +2784,12 @@ class ReviewedProviderBrokerRoutingRunner:
             or receipt.request_fingerprint != request_fingerprint
             or result.get("model_completion_contract_hash")
             != sha256_json(build_routing_model_completion_contract_v1(action))
+            or result.get("model_completion_contract_hash")
+            != replay_ref.get("model_completion_contract_hash")
             or result.get("model_provider_response_sha256")
             != replay_ref.get("model_provider_response_sha256")
+            or terminal_receipt.get("job_id")
+            != replay_ref.get("protected_dispatch_job_id")
             or terminal_receipt.get("receipt_hash")
             != replay_ref.get("terminal_receipt_hash")
         ):

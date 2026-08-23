@@ -744,6 +744,88 @@ class SupabaseRoutingExperimentStore:
             )
         return marker
 
+    def load_exact_model_run_registration(
+        self,
+        *,
+        experiment_hash: str,
+    ) -> Mapping[str, Any] | None:
+        """Read the single exact artifact/generation pin for one active run."""
+
+        normalized_experiment_hash = _require_hash(
+            experiment_hash, "experiment_hash"
+        )
+        matches: list[Mapping[str, Any]] = []
+        for row in self._select_rows(
+            "research_lab_routing_experiment_events_v2",
+            experiment_hash=normalized_experiment_hash,
+            order_column="created_at",
+        ):
+            if row.get("event_type") != "run_started":
+                continue
+            document = row.get("event_doc")
+            if not isinstance(document, Mapping):
+                raise RoutingExperimentStoreError(
+                    "exact Model run registration is malformed"
+                )
+            matches.append(dict(document))
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RoutingExperimentStoreError(
+                "exact Model run registration is duplicated"
+            )
+        registration = matches[0]
+        if set(registration) != {
+            "schema_version",
+            "worker_ref",
+            "runner_contract",
+            "artifact_keys",
+            "protocol_generations",
+        } or registration.get("schema_version") != (
+            "leadpoet.research_lab.routing_worker_event.v2"
+        ) or registration.get("runner_contract") != (
+            "exact_model_runner_generation_pinned_v1"
+        ):
+            raise RoutingExperimentStoreError(
+                "exact Model run registration fields are malformed"
+            )
+        worker_ref = str(registration.get("worker_ref") or "")
+        artifact_keys = registration.get("artifact_keys")
+        generations = registration.get("protocol_generations")
+        if (
+            not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}", worker_ref
+            )
+            or not isinstance(artifact_keys, Mapping)
+            or not isinstance(generations, Mapping)
+            or not artifact_keys
+            or set(artifact_keys) != set(generations)
+        ):
+            raise RoutingExperimentStoreError(
+                "exact Model run registration identity is malformed"
+            )
+        for variant_id, artifact_key in artifact_keys.items():
+            if (
+                not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}",
+                    str(variant_id or ""),
+                )
+                or not isinstance(artifact_key, str)
+                or len(artifact_key) > 512
+                or not re.fullmatch(
+                    r"[0-9a-f]{40}:(?:sha256:)?[0-9a-f]{64}:(?:sha256:)?[0-9a-f]{64}",
+                    artifact_key,
+                )
+                or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(generations.get(variant_id) or ""),
+                )
+            ):
+                raise RoutingExperimentStoreError(
+                    "exact Model run registration identity is malformed"
+                )
+        return registration
+
     def append_adapter_failure(
         self,
         *,

@@ -78,6 +78,91 @@ class _Client:
         raise AssertionError("reconcile must not write")
 
 
+def _exact_run_pin(*, generation: str | None = None) -> dict:
+    return {
+        "schema_version": "leadpoet.research_lab.routing_worker_event.v2",
+        "worker_ref": "worker-1",
+        "runner_contract": "exact_model_runner_generation_pinned_v1",
+        "artifact_keys": {
+            "baseline": (
+                "1" * 40
+                + ":sha256:"
+                + "2" * 64
+                + ":sha256:"
+                + "3" * 64
+            )
+        },
+        "protocol_generations": {
+            "baseline": generation or _hash("4")
+        },
+    }
+
+
+def test_exact_model_run_registration_is_single_closed_tuple():
+    experiment_hash = _hash("a")
+    row = {
+        "experiment_hash": experiment_hash,
+        "event_type": "run_started",
+        "event_doc": _exact_run_pin(),
+        "created_at": "2026-08-23T00:00:00Z",
+    }
+    store = SupabaseRoutingExperimentStore(
+        _Client({"research_lab_routing_experiment_events_v2": [row]})
+    )
+
+    assert store.load_exact_model_run_registration(
+        experiment_hash=experiment_hash
+    ) == _exact_run_pin()
+
+    duplicate = SupabaseRoutingExperimentStore(
+        _Client(
+            {
+                "research_lab_routing_experiment_events_v2": [
+                    row,
+                    {**row, "created_at": "2026-08-23T00:00:01Z"},
+                ]
+            }
+        )
+    )
+    with pytest.raises(RoutingExperimentStoreError, match="duplicated"):
+        duplicate.load_exact_model_run_registration(
+            experiment_hash=experiment_hash
+        )
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {**_exact_run_pin(), "unexpected": True},
+        _exact_run_pin(generation="sha256:" + "z" * 64),
+        {
+            **_exact_run_pin(),
+            "artifact_keys": {"baseline": "forged"},
+        },
+    ],
+)
+def test_exact_model_run_registration_rejects_tampering(document):
+    experiment_hash = _hash("a")
+    store = SupabaseRoutingExperimentStore(
+        _Client(
+            {
+                "research_lab_routing_experiment_events_v2": [
+                    {
+                        "experiment_hash": experiment_hash,
+                        "event_type": "run_started",
+                        "event_doc": document,
+                        "created_at": "2026-08-23T00:00:00Z",
+                    }
+                ]
+            }
+        )
+    )
+    with pytest.raises(RoutingExperimentStoreError, match="malformed"):
+        store.load_exact_model_run_registration(
+            experiment_hash=experiment_hash
+        )
+
+
 @dataclass(frozen=True)
 class _Spec:
     experiment: str = _hash("a")

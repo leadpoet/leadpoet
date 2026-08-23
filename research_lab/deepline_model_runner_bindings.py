@@ -52,6 +52,8 @@ class DeeplineCallReceipt:
     latency_ms: float
     provider_request_id: str | None = None
     provider_receipt_ref: str | None = None
+    provider_receipt_sha256: str | None = None
+    provider_identity_sha256: str | None = None
 
 
 class DeeplineRunnerClient(Protocol):
@@ -113,6 +115,8 @@ def _execute_deepline_action(
             latency_ms=receipt.latency_ms,
             provider_request_id=receipt.provider_request_id,
             provider_receipt_ref=receipt.provider_receipt_ref,
+            provider_receipt_sha256=receipt.provider_receipt_sha256,
+            provider_identity_sha256=receipt.provider_identity_sha256,
         )
     return HostActionResult(
         outcome="succeeded",
@@ -128,6 +132,8 @@ def _execute_deepline_action(
         latency_ms=receipt.latency_ms,
         provider_request_id=receipt.provider_request_id,
         provider_receipt_ref=receipt.provider_receipt_ref,
+        provider_receipt_sha256=receipt.provider_receipt_sha256,
+        provider_identity_sha256=receipt.provider_identity_sha256,
     )
 
 

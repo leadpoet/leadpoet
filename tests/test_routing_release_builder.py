@@ -31,6 +31,7 @@ from tests.test_routing_product_composition import (
     _env,
 )
 from tests.routing_experiment_authority_fixture import authority_fixture
+from tests.model_runner_protocol_fixtures import runner_declaration
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,8 +50,27 @@ class _RegistrationTransport:
     def __init__(self, host_manifest):
         self.host_manifest = host_manifest
 
-    def runner_preflight(self, *, host_capability_manifest, release_identity):
+    def runner_protocol_generation(self, *, release_identity):
+        return runner_declaration(
+            "v2",
+            contract_hash=release_identity["consumer_contract_sha256"],
+        )
+
+    def build_raw_runner_input(self, *_args, **_values):
+        raise AssertionError("v2 has no raw ICP entrypoint")
+
+    def runner_preflight(
+        self,
+        *,
+        host_capability_manifest,
+        release_identity,
+        execution_mode,
+        member_name,
+    ):
+        assert member_name == "runner_preflight"
         return {
+            "schema_version": "model-runner-preflight:v2",
+            "execution_mode": execution_mode,
             "release_identity_sha256": release_identity["release_identity_sha256"],
             "source_commit": release_identity["source_commit"],
             "consumer_contract_sha256": release_identity["consumer_contract_sha256"],
@@ -70,14 +90,23 @@ class _RegistrationTransport:
             ],
         }
 
+    def validate_runner_preflight(
+        self, value, *, member_name, **_values
+    ):
+        assert member_name == "validate_runner_preflight"
+        return value
+
     def build_runner_start(self, **_values):
         return {"status": "action_required"}
 
     def continue_runner(self, **_values):
         return {"status": "completed"}
 
-    def build_runner_completion(self, _action, _result):
+    def build_runner_completion(self, _action, _result, **_values):
         return {}
+
+    def build_runner_provider_receipt_binding(self, *_args, **_values):
+        raise AssertionError("v2 has no provider receipt binding entrypoint")
 
     def validate_runner_result(self, value, **_values):
         return value

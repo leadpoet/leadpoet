@@ -46,6 +46,8 @@ from gateway.research_lab.routing_experiment_worker import (
     ExactModelEvaluationAdapter,
     ExactModelRoutingRunFactory,
     RoutingExperimentRunFactory,
+    exact_model_execution_modes,
+    preflight_exact_model_unit,
 )
 from gateway.research_lab.common_model_experiment import (
     ReviewedModelVerificationAuthority,
@@ -745,10 +747,10 @@ def _require_exact_model_authorities(inputs: ReviewedRoutingReleaseInputs) -> No
             "exact Model runner registry is unavailable"
         )
     try:
-        inputs.model_runner_registry.preflight_all()
+        inputs.model_runner_registry.validate_all()
     except Exception as exc:
         raise RoutingProductCompositionError(
-            "exact Model runner preflight failed"
+            "exact Model runner identity validation failed"
         ) from exc
     for method in ("verify_company", "verify_intent", "verify_contact"):
         if not callable(getattr(inputs.model_verifier, method, None)):
@@ -964,12 +966,19 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
                 raise RoutingProductCompositionError(
                     "exact baseline and challenger artifacts are required"
                 )
+            execution_modes = exact_model_execution_modes(
+                spec=spec,
+                unit_dataset=self.inputs.unit_dataset,
+            )
             registrations = {}
             for variant in spec.variants:
-                registration = self.inputs.model_runner_registry.resolve(
+                registration = self.inputs.model_runner_registry.resolve_identity(
                     variant.artifact.to_dict()
                 )
-                registration.preflight()
+                for execution_mode in sorted(execution_modes):
+                    registration.preflight(
+                        execution_mode=execution_mode
+                    )
                 registration.validate_variant_audit_payload(
                     variant.routing_payload
                 )
@@ -987,6 +996,7 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
                         or model_binding.get("available") is not True
                         or model_binding.get("action_type")
                         not in {
+                            "normalize_icp",
                             "execute_candidate_tool",
                             "execute_intent_tool",
                             "execute_contact_tool",
@@ -1005,6 +1015,18 @@ class ReviewedRoutingAdmissionAuthority(RoutingExperimentSpecAdmissionAuthority)
                         raise RoutingProductCompositionError(
                             "Model provider binding registration differs"
                         )
+            for registration in registrations.values():
+                for unit_ref in (
+                    *spec.input.calibration_unit_refs,
+                    *spec.input.holdout_unit_refs,
+                ):
+                    unit_input, _unit_hash = self.inputs.unit_dataset.resolve(
+                        unit_ref
+                    )
+                    preflight_exact_model_unit(
+                        registration=registration,
+                        unit_input=unit_input,
+                    )
             baseline = registrations.get(spec.baseline_variant_id)
             if baseline is None:
                 raise RoutingProductCompositionError(

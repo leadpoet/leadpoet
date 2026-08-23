@@ -444,13 +444,11 @@ def _artifact_runner_registration(
         raise RoutingReleaseDependencyError(
             f"routing release {variant} signed OCI runner registration failed"
         ) from exc
-    registrations = (result,)
     try:
-        for registration in registrations:
-            registration.preflight()
+        result.validate_identity()
     except Exception as exc:  # noqa: BLE001 - exact registration is fail closed
         raise RoutingReleaseDependencyError(
-            "routing release exact model runner registration preflight failed"
+            "routing release exact model runner registration identity failed"
         ) from exc
     return result
 

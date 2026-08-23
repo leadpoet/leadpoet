@@ -30,6 +30,7 @@ from gateway.research_lab.routing_experiment_store import (
 )
 from gateway.research_lab.routing_experiment_worker import (
     AttestedProviderBrokerRoutingRunFactory,
+    ExactModelRoutingRunFactory,
     RoutingExperimentCoordinator,
     RoutingExperimentRunInputs,
     RoutingExperimentWorker,
@@ -37,6 +38,10 @@ from gateway.research_lab.routing_experiment_worker import (
     _RoutingClaimHeartbeat,
     main,
 )
+from gateway.research_lab.routing_provider_bindings import (
+    VerifiedRoutingUnitDataset,
+)
+from research_lab.model_runner_protocol import ExactModelRunnerRegistry
 from research_lab.routing_experiments import (
     RoutingDecisionReceiptV2,
     RoutingExperimentV2Evaluation,
@@ -44,6 +49,10 @@ from research_lab.routing_experiments import (
     finalize_routing_decision_receipt_v2,
 )
 from tests.routing_experiment_authority_fixture import authority_fixture
+from tests.test_common_model_experiment import (
+    _registration as _v2_model_registration,
+    _v3_registration as _v3_model_registration,
+)
 
 
 def _hash(char: str) -> str:
@@ -296,7 +305,21 @@ def test_worker_does_not_close_claim_when_recovery_is_deferred():
 def test_exact_model_worker_passes_variant_registrations_to_dispatcher(monkeypatch):
     service = _Service()
     worker = RoutingExperimentWorker(service=service, worker_ref="worker-1")
-    registrations = {"baseline": object(), "challenger": object()}
+    registrations = {
+        variant_id: SimpleNamespace(
+            key=(
+                char * 40
+                + ":sha256:"
+                + char * 64
+                + ":sha256:"
+                + char * 64
+            ),
+            protocol_generation=SimpleNamespace(
+                protocol_generation_sha256=_hash(char)
+            )
+        )
+        for variant_id, char in (("baseline", "8"), ("challenger", "9"))
+    }
     observed = {}
 
     class _StopAfterConstruction(Exception):
@@ -341,6 +364,230 @@ def test_exact_model_worker_passes_variant_registrations_to_dispatcher(monkeypat
         worker._run_exact_model(spec=_Spec(), inputs=inputs, lease=service.lease)
 
     assert observed["registrations"] is registrations
+
+
+def test_exact_model_factory_preflights_every_registration_and_dataset_unit_before_runner(
+    monkeypatch,
+):
+    registrations = (
+        _v2_model_registration(),
+        _v3_model_registration(),
+    )
+    registry = ExactModelRunnerRegistry(registrations)
+    dataset = VerifiedRoutingUnitDataset(
+        manifest_uri="s3://routing-units/releases/units.json",
+        manifest_hash=_hash("1"),
+        signature_ref="s3://routing-units/releases/units.sig",
+        signing_key_id="unit-key",
+        unit_set_hash=_hash("2"),
+        provenance_hash=_hash("3"),
+        units={
+            "unit-a": {"unit": "a"},
+            "unit-b": {"unit": "b"},
+        },
+    )
+    calls = []
+
+    def preflight(*, registration, unit_input):
+        calls.append((registration.key, unit_input["unit"]))
+        return {"preflight": True}
+
+    def runner_factory(_spec):
+        raise AssertionError(
+            "dataset-wide preflight must not construct a claimable runner"
+        )
+
+    monkeypatch.setattr(
+        worker_module, "preflight_exact_model_unit", preflight
+    )
+    factory = ExactModelRoutingRunFactory(
+        registry=registry,
+        gold_labels={},
+        unit_dataset=dataset,
+        reviewed_runner_factory=runner_factory,
+        verifier=SimpleNamespace(
+            verify_company=lambda **_values: None,
+            verify_intent=lambda **_values: None,
+            verify_contact=lambda **_values: None,
+        ),
+        evaluation_adapter=SimpleNamespace(
+            build_decision_receipts=lambda **_values: (),
+            build_evaluation=lambda **_values: None,
+        ),
+        execution_envelope_factory=lambda _spec: None,
+        billing_rollup_factory=lambda _spec: (lambda _receipts: {}),
+    )
+
+    factory.validate_readiness()
+
+    assert calls == [
+        (registration.key, unit)
+        for registration in sorted(registrations, key=lambda item: item.key)
+        for unit in ("a", "b")
+    ]
+
+
+def test_exact_model_recovery_pin_precedes_per_spec_oci_recheck_and_runner(
+    monkeypatch,
+):
+    class _FakeRegistry:
+        def __init__(self, registrations):
+            self._registrations = registrations
+
+        def validate_all(self):
+            calls.append("dependencies")
+
+        def resolve_identity(self, identity):
+            return self._registrations[identity["variant_id"]]
+
+    class _FakeDataset:
+        units = {"unit-a": {}, "unselected-unit": {}}
+
+        def resolve(self, unit_ref):
+            return {
+                "unit_ref": unit_ref,
+                "execution_mode": "full_company",
+                "target_count": 1,
+                "evaluated_on": "2026-08-23",
+            }, _hash("4")
+
+    class _FakeRunner:
+        def validate_composition(self):
+            calls.append("runner_validate")
+
+    class _FakeEnvelope:
+        pass
+
+    class _Registration:
+        def __init__(self, variant_id, branch, char):
+            self.variant_id = variant_id
+            self.key = (
+                char * 40
+                + ":sha256:"
+                + char * 64
+                + ":sha256:"
+                + char * 64
+            )
+            self.artifact_identity = {"branch": branch}
+            self.protocol_generation = SimpleNamespace(
+                protocol_generation_sha256=_hash(char)
+            )
+            self.protocol = SimpleNamespace(release_identity={})
+
+        def validate_variant_audit_payload(self, payload):
+            assert payload == {"variant_id": self.variant_id}
+
+        def preflight(self, *, execution_mode):
+            calls.append(("registration_preflight", self.variant_id, execution_mode))
+
+    calls = []
+    registrations = {
+        "baseline": _Registration("baseline", "main", "8"),
+        "challenger": _Registration(
+            "challenger", "leadpoet-lab", "9"
+        ),
+    }
+    registry = _FakeRegistry(registrations)
+    dataset = _FakeDataset()
+    variants = tuple(
+        SimpleNamespace(
+            variant_id=variant_id,
+            artifact=SimpleNamespace(
+                to_dict=lambda variant_id=variant_id: {
+                    "variant_id": variant_id
+                }
+            ),
+            routing_payload={"variant_id": variant_id},
+        )
+        for variant_id in ("baseline", "challenger")
+    )
+    spec = SimpleNamespace(
+        variants=variants,
+        baseline_variant_id="baseline",
+        input=SimpleNamespace(
+            calibration_unit_refs=("unit-a",),
+            holdout_unit_refs=(),
+        ),
+    )
+    run_pin = {
+        "schema_version": "leadpoet.research_lab.routing_worker_event.v2",
+        "worker_ref": "worker-1",
+        "runner_contract": "exact_model_runner_generation_pinned_v1",
+        "artifact_keys": {
+            name: registration.key
+            for name, registration in registrations.items()
+        },
+        "protocol_generations": {
+            name: registration.protocol_generation.protocol_generation_sha256
+            for name, registration in registrations.items()
+        },
+    }
+
+    monkeypatch.setattr(
+        worker_module, "ExactModelRunnerRegistry", _FakeRegistry
+    )
+    monkeypatch.setattr(
+        worker_module, "VerifiedRoutingUnitDataset", _FakeDataset
+    )
+    monkeypatch.setattr(
+        worker_module, "ReviewedProviderBrokerRoutingRunner", _FakeRunner
+    )
+    monkeypatch.setattr(
+        worker_module, "RoutingExperimentExecutionEnvelopeV2", _FakeEnvelope
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_validate_exact_unit_and_label_identity",
+        lambda **_values: {},
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "exact_model_execution_modes",
+        lambda **_values: ("full_company",),
+    )
+
+    def fail_per_spec_preflight(*, registration, unit_input):
+        calls.append(
+            ("unit_preflight", registration.variant_id, unit_input["unit_ref"])
+        )
+        raise RoutingExperimentWorkerError("per-spec OCI mismatch")
+
+    monkeypatch.setattr(
+        worker_module,
+        "preflight_exact_model_unit",
+        fail_per_spec_preflight,
+    )
+
+    def runner_factory(_spec):
+        raise AssertionError("per-spec OCI failure must precede runner/claim")
+
+    factory = ExactModelRoutingRunFactory(
+        registry=registry,
+        gold_labels={},
+        unit_dataset=dataset,
+        reviewed_runner_factory=runner_factory,
+        verifier=SimpleNamespace(
+            verify_company=lambda **_values: None,
+            verify_intent=lambda **_values: None,
+            verify_contact=lambda **_values: None,
+        ),
+        evaluation_adapter=SimpleNamespace(
+            build_decision_receipts=lambda **_values: (),
+            build_evaluation=lambda **_values: None,
+        ),
+        execution_envelope_factory=lambda _spec: _FakeEnvelope(),
+        billing_rollup_factory=lambda _spec: (lambda _receipts: {}),
+    )
+
+    with pytest.raises(RoutingExperimentWorkerError, match="per-spec OCI"):
+        factory.build(spec, run_registration_pin=run_pin)
+
+    assert calls == [
+        "dependencies",
+        ("registration_preflight", "baseline", "full_company"),
+        ("registration_preflight", "challenger", "full_company"),
+        ("unit_preflight", "baseline", "unit-a"),
+    ]
 
 
 def test_exact_intent_run_never_enters_candidate_terminal_path(monkeypatch):
@@ -442,12 +689,26 @@ def test_exact_intent_run_never_enters_candidate_terminal_path(monkeypatch):
         variants=(variant,),
         experiment_hash=lambda: _hash("a"),
     )
+    registration = SimpleNamespace(
+        key=(
+            "1" * 40
+            + ":sha256:"
+            + "2" * 64
+            + ":sha256:"
+            + "3" * 64
+        ),
+        protocol_generation=SimpleNamespace(
+            protocol_generation_sha256=_hash("9")
+        )
+    )
     inputs = SimpleNamespace(
         execution_envelope=None,
-        registry_registrations={"baseline": object()},
+        registry_registrations={"baseline": registration},
         reviewed_runner=object(),
         verifier=object(),
-        registry=SimpleNamespace(resolve=lambda _identity: object()),
+        registry=SimpleNamespace(
+            resolve_identity=lambda _identity: registration
+        ),
         unit_dataset=SimpleNamespace(
             resolve=lambda _unit_ref: (
                 {
@@ -459,6 +720,11 @@ def test_exact_intent_run_never_enters_candidate_terminal_path(monkeypatch):
                 _hash("f"),
             )
         ),
+        unit_model_inputs={
+            "baseline": {
+                "unit-1": {"kind": "normalized_icp"},
+            }
+        },
         evaluation_adapter=_EvaluationAdapter(),
         gold_labels={},
         authoritative_billing_rollup=None,
@@ -790,6 +1056,53 @@ def test_coordinator_only_accepts_a_reviewed_named_factory():
     coordinator = RoutingExperimentCoordinator(worker=worker, factories={})
     with pytest.raises(RoutingExperimentWorkerError, match="factory is unavailable"):
         coordinator.resume(experiment_hash=_hash("a"), factory_name="attested_provider_broker_v2")
+
+
+def test_exact_model_retry_refuses_a_missing_run_generation_before_factory_build():
+    class _RecoveryStore(_Store):
+        def load_spec(self, experiment_hash):
+            assert experiment_hash == _hash("a")
+            return _Spec()
+
+        def load_exact_model_run_registration(self, *, experiment_hash):
+            assert experiment_hash == _hash("a")
+            return None
+
+    service = _Service()
+    service.store = _RecoveryStore(_Spec())
+    worker = RoutingExperimentWorker(service=service, worker_ref="worker-1")
+    factory = ExactModelRoutingRunFactory(
+        registry=object(),
+        gold_labels={},
+        unit_dataset=object(),
+        reviewed_runner_factory=lambda _spec: None,
+        verifier=object(),
+        evaluation_adapter=object(),
+        execution_envelope_factory=lambda _spec: None,
+        billing_rollup_factory=lambda _spec: None,
+    )
+    coordinator = RoutingExperimentCoordinator(
+        worker=worker,
+        factories={factory.name: factory},
+    )
+    lease = RoutingExecutionRequestLease(
+        request_hash=_hash("d"),
+        experiment_hash=_hash("a"),
+        lease_hash=_hash("e"),
+        worker_ref="worker-1",
+        lease_generation=2,
+        lease_expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+    with pytest.raises(
+        RoutingExperimentWorkerError,
+        match="no generation registration",
+    ):
+        coordinator.resume(
+            experiment_hash=_hash("a"),
+            factory_name=factory.name,
+            lease=lease,
+        )
 
 
 def test_named_factory_accepts_only_exact_variant_adapters_and_a_real_reviewed_runner():

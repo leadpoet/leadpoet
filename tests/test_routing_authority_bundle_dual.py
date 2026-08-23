@@ -47,7 +47,7 @@ def _artifact_documents(
         }
     )
     private["model_release_identity"] = {
-        "schema_version": "model-release-identity:v1",
+        "schema_version": "model-release-identity:v2",
         "source_commit": commit,
         "model_artifact_digest": model_hash.removeprefix("sha256:"),
         "dependency_lock_sha256": "3" * 64,

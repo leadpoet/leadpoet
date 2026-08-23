@@ -20,12 +20,21 @@ from leadpoet_verifier.research_evaluation import (
     score_bundle_hash,
 )
 from research_lab.canonical import canonical_json, sha256_json
-from research_lab.employee_buckets import normalize_employee_count_bucket
+from research_lab.employee_buckets import (
+    normalize_employee_count_bucket,
+    normalize_observed_employee_count_bucket,
+)
+from research_lab.sourcing_model_contract_check import (
+    QUALIFICATION_SCORING_ADAPTER_VERSION_V1,
+    QUALIFICATION_SCORING_ADAPTER_VERSION_V2,
+    QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
+)
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_DECISION_CONTRACT_ID,
     COMPANY_FIT_DECISION_VERSION,
     COMPANY_FIT_DECISIONS,
     COMPANY_FIT_DIMENSIONS,
+    COMPANY_FIT_UNAVAILABLE,
 )
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
@@ -50,6 +59,10 @@ from .provider_costs import summarize_provider_cost_trace_entries
 from .promotion_metric import PAIRED_LCB_PROMOTION_METRIC_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+class QualificationCompanyScorerInputError(ValueError):
+    """A candidate company cannot satisfy the measured scorer input schema."""
 
 ModelRunner = Callable[
     [Mapping[str, Any], Mapping[str, Any]],
@@ -312,6 +325,7 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
 
     if not isinstance(breakdown, Mapping):
         return False
+    model_contract_incompatible = False
     gate_receipts = breakdown.get("verifier_gate_receipts")
     if isinstance(gate_receipts, Sequence) and not isinstance(
         gate_receipts, (str, bytes)
@@ -328,6 +342,12 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 == "company-fit-decision:v1"
                 and str(receipt.get("decision") or "") == "unavailable"
             ):
+                if (
+                    str(receipt.get("failure_class") or "")
+                    == "model_contract_incompatible"
+                ):
+                    model_contract_incompatible = True
+                    continue
                 return True
     details = breakdown.get("intent_signals_detail")
     if isinstance(details, Sequence) and not isinstance(details, (str, bytes)):
@@ -343,6 +363,8 @@ def scorer_breakdown_has_retryable_infrastructure_failure(
                 or str(verdict.get("pipeline_decision") or "") == "unavailable"
             ):
                 return True
+    if model_contract_incompatible:
+        return False
     reason = str(breakdown.get("failure_reason") or "").strip().lower()
     return bool(reason) and any(
         marker in reason
@@ -438,6 +460,28 @@ def scorer_breakdown_has_structured_company_fit_mismatch(
     )
 
 
+def scorer_breakdown_has_model_contract_incompatibility(
+    breakdown: Mapping[str, Any],
+) -> bool:
+    """True for a deterministic v2 model proof-contract violation."""
+
+    if not isinstance(breakdown, Mapping):
+        return False
+    receipts = breakdown.get("verifier_gate_receipts")
+    if not isinstance(receipts, Sequence) or isinstance(
+        receipts, (str, bytes)
+    ):
+        return False
+    return any(
+        isinstance(receipt, Mapping)
+        and receipt.get("gate") == "company_fit"
+        and receipt.get("contract_id") == COMPANY_FIT_DECISION_CONTRACT_ID
+        and receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and receipt.get("failure_class") == "model_contract_incompatible"
+        for receipt in receipts
+    )
+
+
 def _failure_reason_is_penalizable(reason: Any) -> bool:
     text = str(reason or "").strip().lower()
     if not text:
@@ -467,6 +511,9 @@ def count_penalizable_false_positives(
         if not isinstance(row, Mapping):
             continue
         if scorer_breakdown_has_retryable_infrastructure_failure(row):
+            continue
+        if scorer_breakdown_has_model_contract_incompatibility(row):
+            gate_fps += 1
             continue
         # The v1 receipt is authoritative. A mismatch is a structural
         # company-fit false positive even when a wrapper changes or removes
@@ -676,7 +723,14 @@ async def evaluate_private_model_pair(
     if not benchmark_items:
         raise RealEvaluatorRequired("sealed benchmark items are required")
 
-    scorer = company_scorer or QualificationStyleCompanyScorer()
+    scorer = company_scorer or QualificationStyleCompanyScorer(
+        reference_scoring_adapter_version=artifact.scoring_adapter_version,
+        candidate_scoring_adapter_version=(
+            candidate_artifact.scoring_adapter_version
+            if candidate_artifact is not None
+            else artifact.scoring_adapter_version
+        ),
+    )
     runtime_patch = None if image_candidate else runtime_compatible_candidate_patch_manifest(patch)
     # Resolve the trace sink once so the holdout gate's two scoring passes
     # share one sink instance (and one log-once drop notice).
@@ -3049,7 +3103,24 @@ class QualificationStyleCompanyScorer:
         attested_epoch_id: int | None = None,
         attested_purpose: str = "",
         attested_provider_profile: str = "default",
+        reference_scoring_adapter_version: str = (
+            QUALIFICATION_SCORING_ADAPTER_VERSION_V1
+        ),
+        candidate_scoring_adapter_version: str = (
+            QUALIFICATION_SCORING_ADAPTER_VERSION_V1
+        ),
     ) -> None:
+        reference_version = str(reference_scoring_adapter_version or "")
+        candidate_version = str(candidate_scoring_adapter_version or "")
+        if (
+            reference_version
+            not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+            or candidate_version
+            not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+        ):
+            raise ValueError(
+                "qualification scorer adapter version is unsupported"
+            )
         self._attested_epoch_id = (
             int(attested_epoch_id) if attested_epoch_id is not None else None
         )
@@ -3057,6 +3128,8 @@ class QualificationStyleCompanyScorer:
         self._attested_provider_profile = str(
             attested_provider_profile or "default"
         )
+        self._reference_scoring_adapter_version = reference_version
+        self._candidate_scoring_adapter_version = candidate_version
         self._attested_receipts: list[dict[str, Any]] = []
         self._attested_outcome_count = 0
         self._last_attested_receipt_hash = ""
@@ -3126,6 +3199,11 @@ class QualificationStyleCompanyScorer:
             or sequence < 0
         ):
             raise ValueError("attested scoring sequence must be a non-negative integer")
+        scoring_adapter_version = (
+            self._reference_scoring_adapter_version
+            if is_reference_model
+            else self._candidate_scoring_adapter_version
+        )
         # Gateway legacy compatibility keeps the established host scorer while
         # current main is deployed before the multi-enclave V2 runtime is
         # ready. Import lazily so this shared package remains gateway-optional.
@@ -3145,6 +3223,7 @@ class QualificationStyleCompanyScorer:
                 companies,
                 icp,
                 is_reference_model,
+                scoring_adapter_version=scoring_adapter_version,
             )
         from gateway.research_lab.attested_scoring import (
             execute_required_qualification_company_scores,
@@ -3158,6 +3237,7 @@ class QualificationStyleCompanyScorer:
             companies=[dict(item) for item in companies],
             icp=dict(icp),
             is_reference_model=bool(is_reference_model),
+            scoring_adapter_version=scoring_adapter_version,
             provider_credential_profile=self._attested_provider_profile,
             attestation_out=attestation,
         )
@@ -3169,6 +3249,8 @@ class QualificationStyleCompanyScorer:
         companies: Sequence[Mapping[str, Any]],
         icp: Mapping[str, Any],
         is_reference_model: bool,
+        *,
+        scoring_adapter_version: str,
     ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
@@ -3189,7 +3271,12 @@ class QualificationStyleCompanyScorer:
 
             scoring_cache = get_scored_evidence_cache()
             if scoring_cache is not None:
-                cache_key = scoring_cache_key(icp, companies, is_reference_model)
+                cache_key = scoring_cache_key(
+                    icp,
+                    companies,
+                    is_reference_model,
+                    scoring_adapter_version,
+                )
                 cached = scoring_cache.get(cache_key)
                 if (
                     cached
@@ -3218,19 +3305,33 @@ class QualificationStyleCompanyScorer:
             if len(breakdowns) >= scoring_cap:
                 break
             scoring_icp = dict(icp)
+            raw_employee_count = (company or {}).get("employee_count")
             company_bucket = normalize_employee_count_bucket(
-                (company or {}).get("employee_count"),
+                raw_employee_count,
+                default="",
+            ) or normalize_observed_employee_count_bucket(
+                raw_employee_count,
                 default="",
             )
             if not company_bucket or company_bucket not in allowed_buckets:
                 continue
             scoring_icp["employee_count"] = company_bucket
-            normalized_company, normalized_icp = prepare_autoresearch_scoring_payload(
-                company,
-                scoring_icp,
-            )
-            icp_obj = ICPPrompt(**normalized_icp)
-            company_obj = CompanyOutput(**normalized_company)
+            try:
+                normalized_company, normalized_icp = prepare_autoresearch_scoring_payload(
+                    company,
+                    scoring_icp,
+                )
+                icp_obj = ICPPrompt(**normalized_icp)
+                company_obj = CompanyOutput(**normalized_company)
+            except (TypeError, ValueError) as exc:
+                # This error crosses the measured enclave boundary as the
+                # signed, bounded exception-class failure code.  Keep it
+                # distinct from provider/transport outages so a malformed or
+                # prompt-unsafe candidate output is never requeued to the
+                # claim cap.
+                raise QualificationCompanyScorerInputError(
+                    "qualification company scorer input contract is invalid"
+                ) from exc
             result = await score_company(
                 company=company_obj,
                 icp=icp_obj,
@@ -3238,6 +3339,10 @@ class QualificationStyleCompanyScorer:
                 run_time_seconds=0.0,
                 seen_companies=seen_companies,
                 is_reference_model=is_reference_model,
+                require_company_fit_proof_receipt=(
+                    scoring_adapter_version
+                    == QUALIFICATION_SCORING_ADAPTER_VERSION_V2
+                ),
             )
             if hasattr(result, "model_dump"):
                 item = result.model_dump(mode="json")
@@ -3435,7 +3540,17 @@ def _normalize_company_output(
         "description": row.get("description", ""),
         "intent_signals": signals,
         "required_attribute": _required_attribute_claim(row),
+        "company_fit_proof_receipt": _company_fit_proof_receipt(row),
     }
+
+
+def _company_fit_proof_receipt(
+    row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Preserve an opaque optional mapping until the versioned scorer gate."""
+
+    raw = row.get("company_fit_proof_receipt")
+    return dict(raw) if isinstance(raw, Mapping) else None
 
 
 def _required_attribute_claim(row: Mapping[str, Any]) -> dict[str, Any] | None:

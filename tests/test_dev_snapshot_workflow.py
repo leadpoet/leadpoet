@@ -65,6 +65,18 @@ _PASS_PREDICATES = (
 )
 
 
+def test_dev_snapshot_v2_receipt_binds_signed_scoring_adapter() -> None:
+    artifact = dev_snapshot_artifact_fixture("a" * 40)
+    compatibility_receipt = _qualification_compatibility_receipt(artifact)
+
+    assert compatibility_receipt["bindings"] == {
+        "scoring_adapter_version": artifact["scoring_adapter_version"],
+    }
+    assert set(
+        expected_docker_bootstrap_hashes(artifact, compatibility_receipt)
+    ) == {"record", "replay"}
+
+
 def test_exact_dev_snapshot_downstream_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

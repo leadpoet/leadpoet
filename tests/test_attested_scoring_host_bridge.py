@@ -67,6 +67,7 @@ async def test_company_facade_routes_only_to_v2(monkeypatch):
         companies=[{"company_name": "Example"}],
         icp={"industry": "Software"},
         is_reference_model=False,
+        scoring_adapter_version="qualification-company-scorer:v1",
         attestation_out=sidecar,
     )
     assert result == [{"final_score": 4.5}]
@@ -137,6 +138,7 @@ async def test_company_facade_preserves_verified_retryable_transport_evidence(
             companies=[{"company_name": "Example"}],
             icp={"industry": "Software"},
             is_reference_model=True,
+            scoring_adapter_version="qualification-company-scorer:v1",
         )
 
     assert RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER in str(raised.value)
@@ -171,9 +173,46 @@ async def test_company_facade_does_not_retry_authenticated_terminal_failures(
             companies=[{"company_name": "Example"}],
             icp={"industry": "Software"},
             is_reference_model=True,
+            scoring_adapter_version="qualification-company-scorer:v1",
         )
 
     assert RETRYABLE_ATTESTED_PROVIDER_TRANSPORT_MARKER not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_company_facade_preserves_signed_nonretryable_input_failure(
+    monkeypatch,
+):
+    async def execute(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: "
+            "execution_qualificationcompanyscorerinputerror",
+            authority={
+                "result": {
+                    "status": "failed",
+                    "failure_code": (
+                        "execution_qualificationcompanyscorerinputerror"
+                    ),
+                },
+                "transport_attempts": [],
+            },
+        )
+
+    monkeypatch.setattr(v2_authority, "execute_company_scores_v2", execute)
+    with pytest.raises(
+        attested_scoring.AttestedScorerInputContractError,
+        match=attested_scoring.SCORER_INPUT_CONTRACT_INCOMPATIBLE_MARKER,
+    ) as raised:
+        await attested_scoring.execute_required_qualification_company_scores(
+            epoch_id=9,
+            purpose="research_lab.candidate_score.v1",
+            companies=[{"company_name": "unsafe"}],
+            icp={"industry": "Software"},
+            is_reference_model=False,
+            scoring_adapter_version="qualification-company-scorer:v2",
+        )
+
+    assert isinstance(raised.value.__cause__, AttestedScoringV2Error)
 
 
 @pytest.mark.asyncio

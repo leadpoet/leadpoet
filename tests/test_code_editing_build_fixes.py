@@ -1602,6 +1602,34 @@ def test_built_legacy_candidate_requires_the_exact_signed_release_identity(
         )
 
 
+def test_build_scaffold_binds_v2_metadata_to_signed_source_constant(
+    tmp_path,
+) -> None:
+    from gateway.research_lab import code_build
+
+    code_build._write_research_lab_build_scaffold(
+        tmp_path,
+        base_image_ref=(
+            "public.ecr.aws/docker/library/python@sha256:" + "a" * 64
+        ),
+    )
+    dockerfile = (tmp_path / "Dockerfile.research-lab").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "scoring_adapter_version == "
+        "research_lab_adapter.SCORING_ADAPTER_VERSION"
+        in dockerfile
+    )
+    assert "signed_scoring_adapter_version" in dockerfile
+    assert "company_fit_proof_receipt_contract_identity" in dockerfile
+    assert (
+        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        in dockerfile
+    )
+
+
 def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
     source = (
         Path(__file__).resolve().parents[1]

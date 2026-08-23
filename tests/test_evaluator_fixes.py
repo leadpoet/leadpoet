@@ -896,8 +896,10 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     class FakeLeadScorer:
         @staticmethod
         async def score_company_autoresearch_intent_v2(
-            *, company, icp, run_cost_usd, run_time_seconds, seen_companies, is_reference_model
+            *, company, icp, run_cost_usd, run_time_seconds, seen_companies,
+            is_reference_model, require_company_fit_proof_receipt,
         ):
+            assert require_company_fit_proof_receipt is True
             scored_calls.append(company)
             return {"final_score": 10.0}
 
@@ -917,7 +919,9 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     companies = [
         {"company_name": f"co-{index}", "employee_count": "51-200"} for index in range(6)
     ]
-    scorer = evaluator.QualificationStyleCompanyScorer()
+    scorer = evaluator.QualificationStyleCompanyScorer(
+        candidate_scoring_adapter_version="qualification-company-scorer:v2"
+    )
 
     monkeypatch.setenv("RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES", "2")
     capped = await scorer(companies, icp, False)
@@ -939,6 +943,83 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     # penalty, and cost nothing to score.
     assert len(goal3) == 3
     assert len(scored_calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("observed", "expected_bucket"),
+    [
+        ("1", "0-1"),
+        ("10", "2-10"),
+        ("50", "11-50"),
+        ("137", "51-200"),
+        ("200", "51-200"),
+        ("500", "201-500"),
+        ("1000", "501-1,000"),
+        ("5000", "1,001-5,000"),
+        ("10000", "5,001-10,000"),
+        ("10001", "10,001+"),
+    ],
+)
+async def test_exact_employee_count_is_bucketed_without_rewriting_company(
+    monkeypatch,
+    observed,
+    expected_bucket,
+):
+    from importlib import import_module as real_import
+
+    class FakeModels:
+        class CompanyOutput:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class ICPPrompt:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+    scored_calls = []
+
+    class FakeLeadScorer:
+        @staticmethod
+        async def score_company_autoresearch_intent_v2(**kwargs):
+            scored_calls.append(kwargs)
+            return {"final_score": 10.0}
+
+    def fake_import(name):
+        if name == "gateway.qualification.models":
+            return FakeModels
+        if name == "qualification.scoring.lead_scorer":
+            return FakeLeadScorer
+        return real_import(name)
+
+    monkeypatch.setattr(evaluator, "import_module", fake_import)
+    scorer = evaluator.QualificationStyleCompanyScorer()
+    results = await scorer.score_with_breakdowns(
+        [{"company_name": "Acme", "employee_count": observed}],
+        {
+            "industry": "Software",
+            "employee_count": list(
+                (
+                    "0-1",
+                    "2-10",
+                    "11-50",
+                    "51-200",
+                    "201-500",
+                    "501-1,000",
+                    "1,001-5,000",
+                    "5,001-10,000",
+                    "10,001+",
+                )
+            ),
+            "intent_signals": ["hiring"],
+            "max_companies": 1,
+        },
+        True,
+    )
+
+    assert results == [{"final_score": 10.0}]
+    assert len(scored_calls) == 1
+    assert scored_calls[0]["company"].kwargs["employee_count"] == observed
+    assert scored_calls[0]["icp"].kwargs["employee_count"] == expected_bucket
 
 
 async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):

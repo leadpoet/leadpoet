@@ -21,6 +21,11 @@ import research_lab.sourcing_model_contract_check as contract_check
 import gateway.tee.model_sandbox_v2 as model_sandbox_module
 
 from gateway.research_lab import scoring_worker as sw
+from gateway.qualification.company_fit_proof_receipt import (
+    CompanyFitProofReceipt,
+    company_fit_proof_receipt_contract_identity,
+    validate_company_fit_proof_receipt_binding,
+)
 from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
 from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
@@ -287,14 +292,201 @@ def _rehash_receipt(envelope: dict) -> dict:
     return envelope
 
 
+def _bind_company_hash_and_rehash(envelope: dict) -> dict:
+    receipt = envelope["route_completion_receipt"]
+    receipt.setdefault("extensions", {})["leadpoet.sourcing-model"] = {
+        "companies_sha256": _plain_hash(envelope["companies"]),
+    }
+    return _rehash_receipt(envelope)
+
+
+def _production_company_envelope(companies: list[dict]) -> dict:
+    envelope = _envelope(
+        "complete_confirmed_empty",
+        "complete-probe-nonce-0001",
+    )
+    envelope["companies"] = deepcopy(companies)
+    receipt = envelope["route_completion_receipt"]
+    nonempty = bool(companies)
+    receipt.update(
+        {
+            "probe": None,
+            "disposition": (
+                "complete_nonempty" if nonempty else "complete_confirmed_empty"
+            ),
+            "returned_count": len(companies),
+            "route_summary": {
+                "attempted": 1,
+                "completed": int(nonempty),
+                "confirmed_empty": int(not nonempty),
+                "retryable_failed": 0,
+                "terminal_failed": 0,
+                "skipped": 0,
+                "retried": 0,
+            },
+            "extensions": {
+                QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2: (
+                    _required_route_outcomes(
+                        ["a" * 64],
+                        "completed" if nonempty else "confirmed_empty",
+                    )
+                )
+            },
+        }
+    )
+    return _bind_company_hash_and_rehash(envelope)
+
+
+def test_production_company_hash_joins_exact_raw_ordered_payload() -> None:
+    companies = [
+        {
+            "company_name": "Acme",
+            "company_fit_proof_receipt": {
+                "receipt_sha256": "b" * 64,
+                "stage_proof": {"evidence_quote": "Series B"},
+            },
+        },
+        {"company_name": "Beta"},
+    ]
+    envelope = _production_company_envelope(companies)
+    assert validate_qualification_outcome_envelope_v2(envelope)[
+        "companies"
+    ] == companies
+
+    mutations = []
+    nested_receipt = deepcopy(envelope)
+    nested_receipt["companies"][0]["company_fit_proof_receipt"][
+        "stage_proof"
+    ]["evidence_quote"] = "Series C"
+    mutations.append(nested_receipt)
+    company_field = deepcopy(envelope)
+    company_field["companies"][0]["company_name"] = "Changed"
+    mutations.append(company_field)
+    reordered = deepcopy(envelope)
+    reordered["companies"].reverse()
+    mutations.append(reordered)
+
+    for tampered in mutations:
+        with pytest.raises(PrivateModelRuntimeError, match="company hash differs"):
+            validate_qualification_outcome_envelope_v2(tampered)
+
+
+def test_segmented_model_parity_fixture_joins_outer_and_nested_proofs() -> None:
+    receipt = {
+        "schema_version": "company-fit-proof-receipt:v1",
+        "contract_sha256": (
+            "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        ),
+        "outcome_binding": (
+            "qualification_outcome.route_completion_receipt.extensions."
+            "leadpoet.sourcing-model.companies_sha256"
+        ),
+        "decision": "match",
+        "company_binding": {
+            "company_name": "Carrier Example",
+            "company_website": "https://carrier-insurance.co.uk",
+            "company_linkedin": (
+                "https://linkedin.com/company/carrier-insurance"
+            ),
+        },
+        "icp_binding": {
+            "employee_count": "201-500|501-1,000",
+            "employee_count_required": True,
+            "company_stage": "",
+            "stage_required": False,
+        },
+        "dimensions": {
+            "identity": "match",
+            "employee_size": "match",
+            "industry": "match",
+            "geography": "match",
+            "stage": "match",
+        },
+        "employee_size_proof": {
+            "decision": "match",
+            "observed_employee_count": "201-500",
+            "evidence_source": "scrapingdog_linkedin_company_profile",
+            "evidence_url": (
+                "https://linkedin.com/company/carrier-insurance"
+            ),
+        },
+        "stage_proof": {
+            "decision": "not_required",
+            "observed_company_stage": "",
+            "evidence_url": "",
+            "evidence_quote": "",
+        },
+        "receipt_sha256": (
+            "e9e510776515657771d1d49b3c06c03e5666c04b871653beaf8c8aca53b58bf4"
+        ),
+    }
+    companies = [
+        {
+            "company_name": "Carrier Example",
+            "company_website": "https://carrier-insurance.co.uk",
+            "company_linkedin": (
+                "https://linkedin.com/company/carrier-insurance"
+            ),
+            "employee_count": "201-500",
+            "company_stage": "",
+            "company_fit_proof_receipt": receipt,
+        }
+    ]
+    assert _plain_hash(companies) == (
+        "296d55a78ca34b8cfa557d5aef7f5e5785f19071f25531c9db5ebd2971d9ed56"
+    )
+    envelope = _production_company_envelope(companies)
+    envelope["route_completion_receipt"]["invocation_sha256"] = (
+        "6ad80b595a90e76a42427bccf0d9ea0ec2572c50b80e100dc78a84a53a3c27fe"
+    )
+    _rehash_receipt(envelope)
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+    company = validated["companies"][0]
+    parsed = CompanyFitProofReceipt.model_validate(
+        company["company_fit_proof_receipt"]
+    )
+    assert validate_company_fit_proof_receipt_binding(
+        parsed,
+        company=company,
+    ) == (True, "")
+    assert parsed.icp_binding.employee_count == "201-500|501-1,000"
+    assert parsed.icp_binding.stage_required is False
+
+
+@pytest.mark.parametrize("mutation", ["count", "missing_hash", "wrong_hash"])
+def test_production_company_hash_missing_wrong_or_count_mismatch_rejects(
+    mutation,
+) -> None:
+    envelope = _production_company_envelope([{"company_name": "Acme"}])
+    receipt = envelope["route_completion_receipt"]
+    if mutation == "count":
+        receipt["returned_count"] = 0
+    elif mutation == "missing_hash":
+        del receipt["extensions"]["leadpoet.sourcing-model"][
+            "companies_sha256"
+        ]
+    else:
+        receipt["extensions"]["leadpoet.sourcing-model"][
+            "companies_sha256"
+        ] = "0" * 64
+    _rehash_receipt(envelope)
+
+    with pytest.raises(PrivateModelRuntimeError):
+        validate_qualification_outcome_envelope_v2(envelope)
+
+
 def _write_protocol_tree(
     root: Path,
     *,
     harmless_revision: str,
     outcome_signature: str = "icp, context=None",
+    scoring_adapter_version: str = "qualification-company-scorer:v1",
+    freeze_scoring_adapter: bool = False,
 ) -> tuple[str, dict]:
     root.mkdir()
     (root / "research_lab_adapter.py").write_text(
+        f"SCORING_ADAPTER_VERSION = {scoring_adapter_version!r}\n\n"
         "def adapter_metadata():\n"
         "    return {}\n\n"
         f"def run_icp_outcome({outcome_signature}):\n"
@@ -314,8 +506,19 @@ def _write_protocol_tree(
     )
     contract_path = root / "consumer-contract.json"
     parity_path = root / "consumer-parity.json"
+    contract = {
+        "contract_id": "model-contract:v-next",
+        "canonical_path": contract_path.name,
+        "parity_fixture_path": parity_path.name,
+    }
+    if freeze_scoring_adapter:
+        contract["exact_constants"] = {
+            "research_lab_adapter.py": {
+                "SCORING_ADAPTER_VERSION": scoring_adapter_version,
+            }
+        }
     contract_path.write_text(
-        json.dumps({"contract_id": "model-contract:v-next"}),
+        json.dumps(contract),
         encoding="utf-8",
     )
     parity_path.write_text(json.dumps({"cases": []}), encoding="utf-8")
@@ -329,6 +532,7 @@ def _write_protocol_tree(
         "image_digest": "example.invalid/model@sha256:" + hashlib.sha256(
             ("image:" + harmless_revision).encode()
         ).hexdigest(),
+        "scoring_adapter_version": scoring_adapter_version,
         "compatibility_contract": {
             "contract_id": "model-contract:v-next",
             "path": contract_path.name,
@@ -467,6 +671,51 @@ def test_same_major_metadata_allows_harmless_additive_capability() -> None:
     }
 
     assert validate_qualification_outcome_protocol_metadata_v2(document) == document
+
+
+def test_measured_metadata_requires_exact_v2_proof_identity() -> None:
+    v1 = _ready_v2_adapter_metadata()
+    assert validate_sourcing_adapter_metadata(
+        v1,
+        expected_semantic_bindings={},
+        expected_scoring_adapter_version="qualification-company-scorer:v1",
+    )["scoring_adapter_version"] == "qualification-company-scorer:v1"
+
+    v2 = deepcopy(v1)
+    v2["scoring_adapter_version"] = "qualification-company-scorer:v2"
+    v2["company_fit_proof_receipt"] = (
+        company_fit_proof_receipt_contract_identity()
+    )
+    assert validate_sourcing_adapter_metadata(
+        v2,
+        expected_semantic_bindings={},
+        expected_scoring_adapter_version="qualification-company-scorer:v2",
+    )["company_fit_proof_receipt"] == (
+        company_fit_proof_receipt_contract_identity()
+    )
+
+    for invalid in (
+        {key: value for key, value in v2.items() if key != "company_fit_proof_receipt"},
+        {**v2, "scoring_adapter_version": "qualification-company-scorer:v1"},
+        {**v2, "company_fit_proof_receipt": {"contract_id": "tampered"}},
+    ):
+        with pytest.raises(PrivateModelRuntimeError):
+            validate_sourcing_adapter_metadata(
+                invalid,
+                expected_semantic_bindings={},
+                expected_scoring_adapter_version=(
+                    "qualification-company-scorer:v2"
+                ),
+            )
+
+    with pytest.raises(PrivateModelRuntimeError, match="unsupported"):
+        validate_sourcing_adapter_metadata(
+            v2,
+            expected_semantic_bindings={},
+            expected_scoring_adapter_version=(
+                "qualification-company-scorer:v3"
+            ),
+        )
 
 
 def test_extension_limits_are_contract_derived_and_route_specific() -> None:
@@ -765,6 +1014,64 @@ def test_candidate_build_gate_admits_protocol_v2_after_manifest_exists(
     assert receipt["source_tree_hash"] == source_hash
 
 
+def test_protocol_v2_admits_exact_frozen_v2_scoring_adapter(tmp_path) -> None:
+    root = tmp_path / "scoring-v2"
+    source_hash, manifest = _write_protocol_tree(
+        root,
+        harmless_revision="scoring-v2",
+        scoring_adapter_version="qualification-company-scorer:v2",
+        freeze_scoring_adapter=True,
+    )
+
+    receipt = source_tree_compatibility_admission(
+        root,
+        manifest=manifest,
+        source_tree_hash=source_hash,
+    )
+
+    assert receipt["admission_mode"] == "qualification_protocol_v2"
+    assert receipt["bindings"] == {
+        "scoring_adapter_version": "qualification-company-scorer:v2"
+    }
+
+
+@pytest.mark.parametrize(
+    ("source_version", "freeze_version", "manifest_version"),
+    [
+        ("qualification-company-scorer:v2", False, None),
+        ("qualification-company-scorer:v3", True, None),
+        (
+            "qualification-company-scorer:v2",
+            True,
+            "qualification-company-scorer:v1",
+        ),
+    ],
+    ids=["v2-unfrozen", "unknown-version", "v2-metadata-downgrade"],
+)
+def test_protocol_v2_rejects_unbound_or_downgraded_scoring_adapter(
+    tmp_path,
+    source_version,
+    freeze_version,
+    manifest_version,
+) -> None:
+    root = tmp_path / source_version.rsplit(":", 1)[-1]
+    source_hash, manifest = _write_protocol_tree(
+        root,
+        harmless_revision=source_version,
+        scoring_adapter_version=source_version,
+        freeze_scoring_adapter=freeze_version,
+    )
+    if manifest_version is not None:
+        manifest["scoring_adapter_version"] = manifest_version
+
+    with pytest.raises(ValueError, match="signed consumer"):
+        source_tree_compatibility_admission(
+            root,
+            manifest=manifest,
+            source_tree_hash=source_hash,
+        )
+
+
 def test_protocol_v2_manifest_builder_defers_trust_until_exact_admission(
     tmp_path,
 ) -> None:
@@ -811,6 +1118,59 @@ def test_protocol_v2_manifest_builder_defers_trust_until_exact_admission(
     assert receipt["manifest_hash"] == manifest["manifest_hash"]
 
 
+def test_protocol_v2_manifest_builder_binds_exact_v2_adapter(tmp_path) -> None:
+    from research_lab.eval import build_local_private_artifact_manifest
+
+    root = tmp_path / "candidate-manifest-v2"
+    _write_protocol_tree(
+        root,
+        harmless_revision="candidate-manifest-scoring-v2",
+        scoring_adapter_version="qualification-company-scorer:v2",
+        freeze_scoring_adapter=True,
+    )
+    contract_path = root / "sourcing_model" / "consumer_contract.json"
+    parity_path = root / "sourcing_model" / "consumer_parity_fixtures.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "contract_id": "model-contract:v-next",
+                "canonical_path": "sourcing_model/consumer_contract.json",
+                "parity_fixture_path": (
+                    "sourcing_model/consumer_parity_fixtures.json"
+                ),
+                "exact_constants": {
+                    "research_lab_adapter.py": {
+                        "SCORING_ADAPTER_VERSION": (
+                            "qualification-company-scorer:v2"
+                        )
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    parity_path.write_text(json.dumps({"cases": []}), encoding="utf-8")
+
+    manifest = build_local_private_artifact_manifest(
+        source_path=root,
+        git_commit_sha="a" * 40,
+        image_digest="registry.invalid/model@sha256:" + "b" * 64,
+        manifest_uri="s3://private/model.json",
+        signature_ref="s3://private/model.sig.b64",
+        component_registry_version="sourcing-model-components:v2",
+        scoring_adapter_version="qualification-company-scorer:v2",
+    )
+
+    assert manifest["scoring_adapter_version"] == (
+        "qualification-company-scorer:v2"
+    )
+    source_tree_compatibility_admission(
+        root,
+        manifest=manifest,
+        source_tree_hash=manifest["model_artifact_hash"],
+    )
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -838,13 +1198,12 @@ def test_dynamic_or_metadata_v2_declaration_cannot_fallback(
     source_hash = compute_compatibility_source_tree_hash_v1(root)
     manifest["model_artifact_hash"] = source_hash
 
-    admission = source_tree_compatibility_admission(
-        root,
-        manifest=manifest,
-        source_tree_hash=source_hash,
-    )
-
-    assert admission["admission_mode"] == "qualification_protocol_v2"
+    with pytest.raises(ValueError, match="signed consumer contract"):
+        source_tree_compatibility_admission(
+            root,
+            manifest=manifest,
+            source_tree_hash=source_hash,
+        )
 
 
 @pytest.mark.asyncio
@@ -860,6 +1219,7 @@ async def test_hermetic_v2_incomplete_to_complete_transition(
     (root / "research_lab_adapter.py").write_text(
         "import hashlib\n"
         "import json\n\n"
+        "SCORING_ADAPTER_VERSION = 'qualification-company-scorer:v1'\n\n"
         f"_METADATA = {repr(_metadata())}\n\n"
         "def adapter_metadata():\n"
         "    return _METADATA\n\n"
@@ -986,6 +1346,9 @@ async def test_hermetic_v2_incomplete_to_complete_transition(
                     _required_route_outcomes(commitments, state)
                 )
             }
+        receipt["extensions"]["leadpoet.sourcing-model"] = {
+            "companies_sha256": _plain_hash(envelope["companies"]),
+        }
         receipt["receipt_sha256"] = _plain_hash(
             {
                 key: value
@@ -1495,6 +1858,7 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
         "import json\n"
         "import urllib.request\n\n"
         "from sourcing_model import runtime_capabilities\n\n"
+        "SCORING_ADAPTER_VERSION = 'qualification-company-scorer:v1'\n"
         f"_METADATA = {adapter_metadata!r}\n"
         f"_ROUTE_COMMITMENT = {route_commitment!r}\n\n"
         "def _hash(value):\n"
@@ -1539,7 +1903,7 @@ async def test_production_path_hermetic_v2_transition_emits_stage_ledger(
         "        if set(after) != set(before) or any(after[name] is not before[name] for name in before):\n"
         "            raise RuntimeError('host runtime capability scope was not restored')\n"
         "        route_state = 'confirmed_empty' if complete else 'retryable_failed'\n"
-        "        extensions = {'com.leadpoet.required-route-outcomes': [{'commitment': _ROUTE_COMMITMENT, 'state': route_state}]}\n"
+        "        extensions = {'com.leadpoet.required-route-outcomes': [{'commitment': _ROUTE_COMMITMENT, 'state': route_state}], 'leadpoet.sourcing-model': {'companies_sha256': _hash([])}}\n"
         "        envelope_extensions = {'com.leadpoet.capability-scope-proof': {'preserved': True, 'restored': True}}\n"
         "    receipt = {\n"
         "        'schema_version': 'sourcing-model.route-completion-receipt.v1',\n"
@@ -2518,7 +2882,7 @@ def test_complete_route_join_is_model_state_and_status_aware(
             _required_route_outcomes([commitment], state)
         )
     }
-    _rehash_receipt(envelope)
+    _bind_company_hash_and_rehash(envelope)
 
     if accepted:
         _validate_qualification_terminal_observation_v1(
@@ -2789,7 +3153,7 @@ def test_complete_nonempty_requires_every_bound_route_success(
             },
         }
     )
-    _rehash_receipt(envelope)
+    _bind_company_hash_and_rehash(envelope)
     validate_qualification_outcome_envelope_v2(envelope)
     observation = scope.completion_observation()
 
@@ -2870,7 +3234,7 @@ def test_complete_authority_cannot_hide_one_failed_required_slot() -> None:
             },
         }
     )
-    _rehash_receipt(envelope)
+    _bind_company_hash_and_rehash(envelope)
     observation = scope.completion_observation()
     with pytest.raises(
         ModelSandboxV2Error,
@@ -2940,7 +3304,7 @@ def test_production_outcome_requires_exact_route_extension() -> None:
         "complete_confirmed_empty", "complete-probe-nonce-0001"
     )
     envelope["route_completion_receipt"]["probe"] = None
-    _rehash_receipt(envelope)
+    _bind_company_hash_and_rehash(envelope)
 
     with pytest.raises(ModelSandboxV2Error, match="required routes"):
         _validate_qualification_terminal_observation_v1(
@@ -2976,7 +3340,7 @@ def test_incomplete_semantics_may_have_successful_required_transport() -> None:
             _required_route_outcomes([commitment], "retryable_failed")
         )
     }
-    _rehash_receipt(envelope)
+    _bind_company_hash_and_rehash(envelope)
 
     _validate_qualification_terminal_observation_v1(
         envelope,

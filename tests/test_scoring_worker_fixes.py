@@ -1471,6 +1471,24 @@ def test_failure_class_validation_errors_terminal():
     assert retryable is False
 
 
+def test_signed_scorer_input_contract_failure_is_terminal_without_requeue():
+    error = sw.AttestedScorerInputContractError(
+        "required V2 company scoring failed; "
+        "scorer_input_contract_incompatible"
+    )
+
+    category, retryable = sw._candidate_scoring_failure_class(error)
+
+    assert category == "scorer_input_contract_incompatible"
+    assert retryable is False
+    assert sw._candidate_scoring_should_requeue(
+        failure_class=category,
+        retryable=retryable,
+        claim_attempts=0,
+        max_attempts=5,
+    ) is False
+
+
 def test_failure_class_timeout_retryable():
     category, retryable = sw._candidate_scoring_failure_class(TimeoutError("timed out"))
     assert category == "adapter_timeout"

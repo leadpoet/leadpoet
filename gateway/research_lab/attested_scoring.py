@@ -18,6 +18,28 @@ class AttestedScoringError(RuntimeError):
     """An authoritative V2 result or its complete ancestry is unavailable."""
 
 
+class AttestedScorerInputContractError(AttestedScoringError):
+    """A signed V2 failure proves the candidate scorer input is invalid."""
+
+
+SCORER_INPUT_CONTRACT_INCOMPATIBLE_MARKER = (
+    "scorer_input_contract_incompatible"
+)
+_QUALIFICATION_SCORER_INPUT_FAILURE_CODE = (
+    "execution_qualificationcompanyscorerinputerror"
+)
+
+
+def _attested_v2_failure_code(exc: BaseException) -> str:
+    authority = getattr(exc, "authority", None)
+    if not isinstance(authority, Mapping):
+        return ""
+    result = authority.get("result")
+    if not isinstance(result, Mapping):
+        return ""
+    return str(result.get("failure_code") or "")
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value,
@@ -84,6 +106,7 @@ async def execute_required_qualification_company_scores(
     companies: list[Mapping[str, Any]],
     icp: Mapping[str, Any],
     is_reference_model: bool,
+    scoring_adapter_version: str,
     provider_credential_profile: str = "default",
     attestation_out: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -101,6 +124,7 @@ async def execute_required_qualification_company_scores(
             companies=companies,
             icp=icp,
             is_reference_model=bool(is_reference_model),
+            scoring_adapter_version=str(scoring_adapter_version),
             provider_credential_profile=provider_credential_profile,
             attestation_out=attestation_out,
         )
@@ -114,6 +138,15 @@ async def execute_required_qualification_company_scores(
             has_retryable_attested_provider_transport_failure,
         )
 
+        if (
+            isinstance(exc, AttestedScoringV2Error)
+            and _attested_v2_failure_code(exc)
+            == _QUALIFICATION_SCORER_INPUT_FAILURE_CODE
+        ):
+            raise AttestedScorerInputContractError(
+                "%s; %s"
+                % (message, SCORER_INPUT_CONTRACT_INCOMPATIBLE_MARKER)
+            ) from exc
         if isinstance(
             exc, AttestedScoringV2Error
         ) and has_retryable_attested_provider_transport_failure(exc):

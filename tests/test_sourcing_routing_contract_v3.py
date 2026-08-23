@@ -28,6 +28,20 @@ def test_private_model_commands_require_reviewed_routing_adapters() -> None:
     assert "routing-compiler-v2" not in DEFAULT_PRIVATE_TEST_CMD
     assert "routing-compiler-v3" not in DEFAULT_PRIVATE_TEST_CMD
     assert "qualification-company-scorer:v1" in DEFAULT_PRIVATE_TEST_CMD
+    assert "qualification-company-scorer:v2" in DEFAULT_PRIVATE_TEST_CMD
+    assert (
+        "scoring_adapter_version == "
+        "research_lab_adapter.SCORING_ADAPTER_VERSION"
+        in DEFAULT_PRIVATE_TEST_CMD
+    )
+    assert "signed_scoring_adapter_version" in DEFAULT_PRIVATE_TEST_CMD
+    assert "company_fit_proof_receipt_contract_identity" in (
+        DEFAULT_PRIVATE_TEST_CMD
+    )
+    assert (
+        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        in DEFAULT_PRIVATE_TEST_CMD
+    )
     assert "sourcing-model-runtime-capabilities:v2" in DEFAULT_PRIVATE_TEST_CMD
     assert "sourcing-model-runtime-capabilities:v3" in DEFAULT_PRIVATE_TEST_CMD
     assert "remaining_non_cleanup_physical_exchanges" in DEFAULT_PRIVATE_TEST_CMD

@@ -23,6 +23,7 @@ from gateway.research_lab.code_build import (
     CodeEditPrivateTestError,
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
+    _source_add_registration_changed,
     attach_git_tree_lineage,
     resolve_source_inspection_requests,
 )
@@ -6211,7 +6212,25 @@ class CodeEditLoopEngine:
                     available_build_seconds,
                 )
                 try:
-                    incremental_draft = candidate_draft
+                    materialize_source_add = getattr(
+                        self.builder,
+                        "materialize_source_add_derived_artifacts",
+                        None,
+                    )
+                    if callable(materialize_source_add):
+                        incremental_draft = materialize_source_add(
+                            draft=candidate_draft,
+                            source_context=source_context,
+                        )
+                    elif _source_add_registration_changed(
+                        candidate_draft.unified_diff
+                    ):
+                        raise CodeEditPrivateTestError(
+                            "SOURCE_ADD candidate builder cannot materialize parity",
+                            failure_stage="candidate_derived_artifact_failed",
+                        )
+                    else:
+                        incremental_draft = candidate_draft
                     drafted_incremental_hash = sha256_json(
                         {"unified_diff": incremental_draft.unified_diff}
                     )

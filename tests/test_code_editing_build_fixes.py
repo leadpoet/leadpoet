@@ -21,6 +21,8 @@ import pytest
 from gateway.research_lab import code_build
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
+    CodeEditPrivateTestError,
+    ParentImageSourceContext,
     validate_private_code_edit_diff_artifact,
 )
 from research_lab import code_editing
@@ -43,6 +45,168 @@ def _draft(**overrides):
     )
     payload.update(overrides)
     return CodeEditDraft(**payload)
+
+
+class _SourceAddMaterializationConfig:
+    def code_edit_allowed_path_prefixes(self):
+        return ("sourcing_model/",)
+
+    def code_edit_allowed_exact_paths(self):
+        return ()
+
+    def code_edit_allowed_suffixes(self):
+        return (".py", ".json")
+
+
+def _source_add_materialization_fixture(tmp_path: Path, *, omit_evaluator: str = ""):
+    source_root = tmp_path / "source"
+    routing_dir = source_root / "sourcing_model" / "routing"
+    routing_dir.mkdir(parents=True)
+    (source_root / "sourcing_model" / "__init__.py").write_text("", encoding="utf-8")
+    (routing_dir / "__init__.py").write_text("", encoding="utf-8")
+    runtime_path = routing_dir / "runtime.py"
+    runtime_path.write_text(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n",
+        encoding="utf-8",
+    )
+    fixture_path = source_root / code_build._SOURCE_ADD_PARITY_FIXTURE_PATH
+    fixture_path.write_text('{"fixture_id": "source-add"}\n', encoding="utf-8")
+    evaluator_names = [
+        evaluator
+        for _, evaluator in code_build._SOURCE_ADD_PARITY_PROJECTION_EVALUATORS
+        if evaluator != omit_evaluator
+    ]
+    expected_pairs = list(code_build._SOURCE_ADD_PARITY_PROJECTION_EVALUATORS)
+    (source_root / "sourcing_model" / "consumer_parity.py").write_text(
+        """
+import hashlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+def _projection(name, fixtures):
+    runtime = (ROOT / "routing" / "runtime.py").read_text(encoding="utf-8")
+    return {"evaluator": name, "has_builtwith": "builtwith_trends" in runtime}
+
+def _runtime_identity_sha256():
+    runtime = (ROOT / "routing" / "runtime.py").read_bytes()
+    return hashlib.sha256(runtime).hexdigest()
+
+def _evaluate_intent_source_parity_cases(fixtures):
+    return [_projection("intent_source", fixtures)]
+
+"""
+        + "\n".join(
+            f"def {name}(fixtures):\n    return _projection({name!r}, fixtures)\n"
+            for name in evaluator_names
+        )
+        + f"""
+def verify_expected_projections(fixtures):
+    for expected_key, evaluator_name in {expected_pairs!r}:
+        evaluator = globals()[evaluator_name]
+        if fixtures.get(expected_key) != evaluator(fixtures):
+            raise ValueError("projection differs: " + expected_key)
+    expected_source = {{
+        "contract_sha256": "fixture-contract",
+        "runtime_intent_routing_release_identity_sha256": _runtime_identity_sha256(),
+        "cases": _evaluate_intent_source_parity_cases(fixtures),
+    }}
+    if fixtures.get("expected_intent_source_evaluation_projection") != expected_source:
+        raise ValueError("intent source projection differs")
+    return fixtures["expected_projections"]
+""",
+        encoding="utf-8",
+    )
+    (source_root / "sourcing_model" / "intent_source_evaluation.py").write_text(
+        "def intent_source_evaluation_contract_identity():\n"
+        "    return {'contract_sha256': 'fixture-contract'}\n",
+        encoding="utf-8",
+    )
+    source_context = ParentImageSourceContext(
+        source_root=source_root,
+        source_mode="test",
+        parent_image_digest_hash="sha256:" + "1" * 64,
+        source_tree_hash="sha256:" + "2" * 64,
+        top_level_paths=("sourcing_model",),
+        editable_files=(
+            code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
+            code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
+        ),
+        file_previews=(),
+    )
+    unified_diff = (
+        "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
+        "--- a/sourcing_model/routing/runtime.py\n"
+        "+++ b/sourcing_model/routing/runtime.py\n"
+        "@@ -1 +1,4 @@\n"
+        "-SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+        "+SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "+    SourceAddRoutingRegistration(provider_id='builtwith_trends'),\n"
+        "+)\n"
+    )
+    draft = _draft(
+        target_files=(code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,),
+        unified_diff=unified_diff,
+    )
+    return source_context, draft
+
+
+def test_source_add_materialization_binds_verified_parity_fixture(
+    tmp_path,
+    monkeypatch,
+):
+    source_context, draft = _source_add_materialization_fixture(tmp_path)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "must-not-reach-candidate-tool")
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    materialized = builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    )
+
+    assert materialized.target_files == (
+        code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
+        code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
+    )
+    assert code_build._SOURCE_ADD_PARITY_FIXTURE_PATH in materialized.unified_diff
+    assert "builtwith_trends" in materialized.unified_diff
+    assert materialized == builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    )
+
+
+def test_source_add_materialization_fails_closed_when_projection_api_differs(
+    tmp_path,
+):
+    missing = code_build._SOURCE_ADD_PARITY_PROJECTION_EVALUATORS[0][1]
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        omit_evaluator=missing,
+    )
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="parity projection materialization failed",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
+
+
+def test_non_source_add_draft_does_not_materialize_parity(tmp_path):
+    source_context, _ = _source_add_materialization_fixture(tmp_path)
+    draft = _draft()
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    assert builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    ) is draft
 
 
 def _private_source_diff_fixture():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import logging
 import os
@@ -86,6 +86,85 @@ _PRIVATE_BUILD_DOC_UNHASHED_ANNOTATION_FIELDS = frozenset(
     }
 )
 _SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+_SOURCE_ADD_ROUTING_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
+_SOURCE_ADD_PARITY_FIXTURE_PATH = "sourcing_model/consumer_parity_fixtures.json"
+_SOURCE_ADD_PARITY_PROJECTION_EVALUATORS = (
+    ("expected_account_evidence_contract_projections", "evaluate_account_evidence_contract_parity_cases"),
+    ("expected_segmented_discovery_plan_projections", "evaluate_segmented_discovery_plan_parity_cases"),
+    ("expected_signal_intent_route_projections", "evaluate_signal_intent_route_parity_cases"),
+    ("expected_routing_profile_projections", "evaluate_routing_profile_parity_cases"),
+    ("expected_profiled_signal_admission_projections", "evaluate_profiled_signal_admission_parity_cases"),
+    ("expected_candidate_routing_projections", "evaluate_candidate_routing_parity_cases"),
+    ("expected_corporate_filing_route_projections", "evaluate_corporate_filing_route_parity_cases"),
+    ("expected_regulatory_registry_route_projections", "evaluate_regulatory_registry_route_parity_cases"),
+    ("expected_regulatory_registry_transport_plan_projections", "evaluate_regulatory_registry_transport_plan_parity_cases"),
+    ("expected_regulatory_registry_openfda_response_projections", "evaluate_regulatory_registry_openfda_response_parity_cases"),
+    ("expected_signal_catalog_projection", "evaluate_signal_catalog_parity"),
+    ("expected_social_tool_evaluation_projection", "_evaluate_social_tool_evaluation_parity"),
+    ("expected_social_replacement_intent_projection", "_evaluate_social_replacement_intent_parity"),
+    ("expected_social_technology_problem_projection", "_evaluate_social_technology_problem_parity"),
+    ("expected_social_buyer_execution_projection", "_evaluate_social_buyer_execution_parity"),
+    ("expected_social_buyer_execution_batch_projection", "_evaluate_social_buyer_execution_batch_parity"),
+    ("expected_intent_evidence_outcome_projections", "evaluate_intent_evidence_outcome_parity_cases"),
+    ("expected_intent_source_evidence_parity_projections", "evaluate_intent_source_evidence_parity_cases"),
+    ("expected_social_buyer_event_acceptance_projections", "evaluate_social_buyer_event_acceptance_parity_cases"),
+    ("expected_social_buyer_event_acceptance_v2_projection", "evaluate_social_buyer_event_acceptance_v2_parity_cases"),
+    ("expected_icp_signal_profile_projection", "evaluate_icp_signal_profile_parity"),
+    ("expected_research_lab_icp_projection", "evaluate_research_lab_icp_projection_parity"),
+    ("expected_company_fit_decision_projection", "evaluate_company_fit_decision_parity"),
+    ("expected_projections", "evaluate_all"),
+    ("expected_source_add_projections", "evaluate_source_add_parity_cases"),
+    ("expected_candidate_enrichment_projections", "evaluate_candidate_enrichment_parity_cases"),
+    ("expected_contact_acquisition_projections", "evaluate_contact_acquisition_parity_cases"),
+    ("expected_contact_verification_projections", "evaluate_contact_verification_parity_cases"),
+    ("expected_contact_timing_projections", "evaluate_contact_timing_parity_cases"),
+    ("expected_employee_count_evidence_projections", "evaluate_employee_count_evidence_parity_cases"),
+)
+
+
+def _source_add_registration_changed(unified_diff: str) -> bool:
+    if _SOURCE_ADD_ROUTING_RUNTIME_PATH not in extract_unified_diff_paths(unified_diff):
+        return False
+    added_lines = "\n".join(
+        line[1:]
+        for line in str(unified_diff or "").splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    return (
+        "SourceAddRoutingRegistration(" in added_lines
+        and "SOURCE_ADD_ROUTING_REGISTRATIONS" in str(unified_diff or "")
+    )
+
+
+def _source_add_parity_refresh_script() -> str:
+    evaluators = json.dumps(_SOURCE_ADD_PARITY_PROJECTION_EVALUATORS)
+    return f"""\
+import json
+from pathlib import Path
+
+from sourcing_model import consumer_parity as parity
+import sourcing_model.intent_source_evaluation as intent_source
+
+fixture_path = Path({json.dumps(_SOURCE_ADD_PARITY_FIXTURE_PATH)})
+fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
+updates = {{}}
+for expected_key, evaluator_name in {evaluators}:
+    evaluator = getattr(parity, evaluator_name)
+    updates[expected_key] = evaluator(fixtures)
+updates["expected_intent_source_evaluation_projection"] = {{
+    "contract_sha256": intent_source.intent_source_evaluation_contract_identity()["contract_sha256"],
+    "runtime_intent_routing_release_identity_sha256": parity._runtime_identity_sha256(),
+    "cases": parity._evaluate_intent_source_parity_cases(fixtures),
+}}
+fixtures.update(updates)
+fixture_path.write_text(
+    json.dumps(fixtures, indent=2, ensure_ascii=True) + "\\n",
+    encoding="utf-8",
+)
+parity.verify_expected_projections(fixtures)
+print(json.dumps({{"status": "verified", "projection_count": len(updates)}}))
+"""
 
 
 def _legacy_git_tree_incremental_target_projection(
@@ -903,6 +982,115 @@ class CodeEditCandidateBuilder:
             if require_read and path not in read:
                 errors.append(f"code_edit_unread_source_file:{path}")
         return errors
+
+    def materialize_source_add_derived_artifacts(
+        self,
+        *,
+        draft: CodeEditDraft,
+        source_context: ParentImageSourceContext,
+    ) -> CodeEditDraft:
+        """Bind model-derived parity expectations to a SOURCE_ADD route edit.
+
+        The model proposes only the semantic routing registration. The parity
+        fixture is a deterministic model-owned projection and must be part of
+        the exact candidate Git tree before any build or scoring step begins.
+        """
+
+        if not _source_add_registration_changed(draft.unified_diff):
+            return draft
+        if _SOURCE_ADD_PARITY_FIXTURE_PATH not in set(source_context.editable_files):
+            raise CodeEditPrivateTestError(
+                "SOURCE_ADD parity fixture is unavailable in the measured source tree",
+                failure_stage="candidate_derived_artifact_failed",
+            )
+        try:
+            validate_code_edit_draft(
+                draft,
+                allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+                allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+                allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+            )
+        except ValueError as exc:
+            raise CodeEditPatchApplyError(str(exc)) from exc
+
+        with tempfile.TemporaryDirectory(
+            prefix="research-lab-source-add-derived-"
+        ) as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            _copy_source_tree(source_context.source_root, repo_dir)
+            _initialize_temporary_git_repo(repo_dir)
+            diff_path = tmp_dir / "candidate.diff"
+            diff_path.write_text(draft.unified_diff, encoding="utf-8")
+            try:
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=False,
+                )
+                refresh_path = tmp_dir / "refresh_source_add_parity.py"
+                refresh_path.write_text(
+                    _source_add_parity_refresh_script(),
+                    encoding="utf-8",
+                )
+                _run_candidate_derived_artifact_tool(
+                    [sys.executable, str(refresh_path)],
+                    cwd=repo_dir,
+                    timeout_seconds=240,
+                )
+            except CodeEditBuildError as exc:
+                raise CodeEditPrivateTestError(
+                    "SOURCE_ADD parity projection materialization failed",
+                    failure_stage="candidate_derived_artifact_failed",
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                    exit_code=exc.exit_code,
+                ) from exc
+
+            changed_files = _changed_files(repo_dir)
+            allowed_changed = set(extract_unified_diff_paths(draft.unified_diff))
+            allowed_changed.add(_SOURCE_ADD_PARITY_FIXTURE_PATH)
+            unexpected = sorted(set(changed_files) - allowed_changed)
+            if unexpected:
+                raise CodeEditPrivateTestError(
+                    "SOURCE_ADD parity materialization changed unexpected paths: "
+                    + ", ".join(unexpected),
+                    failure_stage="candidate_derived_artifact_failed",
+                )
+            if _SOURCE_ADD_PARITY_FIXTURE_PATH not in changed_files:
+                raise CodeEditPrivateTestError(
+                    "SOURCE_ADD routing edit did not produce a parity fixture update",
+                    failure_stage="candidate_derived_artifact_failed",
+                )
+            materialized_diff = _run(
+                ["git", "diff", "--no-ext-diff", "--no-color", "--"],
+                cwd=repo_dir,
+                timeout_seconds=120,
+            )
+            materialized = replace(
+                draft.with_unified_diff(materialized_diff),
+                target_files=tuple(changed_files),
+            )
+            try:
+                validate_code_edit_draft(
+                    materialized,
+                    allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+                    allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+                    allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+                )
+            except ValueError as exc:
+                raise CodeEditPrivateTestError(
+                    "SOURCE_ADD materialized candidate is invalid: " + str(exc),
+                    failure_stage="candidate_derived_artifact_failed",
+                ) from exc
+            return materialized
 
     def check_patch_applies(
         self,
@@ -2563,6 +2751,46 @@ def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:
     except subprocess.CalledProcessError as exc:
         raise CodeEditBuildError(
             f"command failed exit={exc.returncode}: {_safe_cmd(cmd)} stderr={_safe_text(exc.stderr)}",
+            stderr=_safe_text(exc.stderr, limit=12000),
+            stdout=_safe_text(exc.stdout, limit=12000),
+            exit_code=int(exc.returncode),
+        ) from exc
+
+
+def _run_candidate_derived_artifact_tool(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> str:
+    """Run deterministic candidate tooling without gateway/provider secrets."""
+
+    env = {
+        "PATH": str(os.environ.get("PATH") or ""),
+        "PYTHONPATH": str(cwd.resolve()),
+        "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": "C",
+    }
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=max(1, int(_bounded_command_timeout(timeout_seconds))),
+        )
+        return completed.stdout.strip()
+    except subprocess.TimeoutExpired as exc:
+        raise CodeEditBuildError(
+            f"candidate derived-artifact command timed out: {_safe_cmd(cmd)}"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise CodeEditBuildError(
+            "candidate derived-artifact command failed "
+            f"exit={exc.returncode}: {_safe_cmd(cmd)} stderr={_safe_text(exc.stderr)}",
             stderr=_safe_text(exc.stderr, limit=12000),
             stdout=_safe_text(exc.stdout, limit=12000),
             exit_code=int(exc.returncode),

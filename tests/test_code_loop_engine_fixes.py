@@ -1172,6 +1172,11 @@ class _NoCandidateBuilder:
     def check_patch_applies(self, *, draft, parent_artifact, source_context):
         return None
 
+    def materialize_source_add_derived_artifacts(self, *, draft, source_context):
+        # Builder materialization itself is covered with a real subprocess in
+        # test_code_editing_build_fixes; this loop fixture only models its API.
+        return draft
+
     def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context):
         raise AssertionError("no-candidate test should not build")
 

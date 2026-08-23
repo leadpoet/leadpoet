@@ -18,9 +18,14 @@ completions.
 
 **Suppression is three exact paths, not a family.** `_SUPPRESSED_ROUTES` is
 `{"/health", "/health/live", "/health/ready"}`, matched against the concrete
-request path. Every other health or liveness route is traced normally —
-`/health/v2-authority`, `/attest/health` and `/attestation/health` all export
-spans, and `/health/v2-authority` is one of the busier routes on the gateway.
+request path. Every other health, liveness or readiness route is traced
+normally — `/health/v2-authority`, `/attest/health`, `/attestation/health` and
+the `/attestation/deploy-readiness` readiness probe all export spans.
+`/attestation/deploy-readiness` is probe traffic and is one of the highest-volume
+routes on the gateway, so it dominates any unfiltered aggregate; exclude it
+before reading request counts as user traffic. `/health/v2-authority` is
+low-volume by comparison but a recurring source of 5xx, so it is worth keeping
+in error queries.
 
 **`duration_ms` above is an attribute name, not a column name.** The middleware
 sets it as a float count of milliseconds, and it does arrive. But the span's
@@ -28,6 +33,11 @@ sets it as a float count of milliseconds, and it does arrive. But the span's
 from the span's start and end timestamps. Query `duration_ns` (divide by `1e6`
 for milliseconds); a query written against a `duration_ms` column matches
 nothing.
+
+**There is no environment on a span.** The fixed resource dict carries only
+`service.name`, so no `deployment.environment` attribute is ever set and the
+store's `env` column is `''` on every gateway span. Filtering by environment
+silently matches nothing — filter on `service_name` instead.
 
 ## Enabling (gateway host only)
 

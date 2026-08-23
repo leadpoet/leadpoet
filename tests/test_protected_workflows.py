@@ -385,7 +385,10 @@ def test_scoring_receipt_failure_policy_is_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
+        "_DEV_EVALUATION_JOB_SCOPES",
+        "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
+        "MAX_DEV_EVALUATION_INPUT_BYTES",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"

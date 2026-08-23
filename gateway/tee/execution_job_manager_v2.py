@@ -65,6 +65,20 @@ MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
 MAX_INPUT_BYTES = 64 * 1024 * 1024
+# Measured candidate evaluation carries two independently verified source
+# archives inside canonical JSON: the candidate source and the replay snapshot.
+# Each archive is bounded to 64 MiB before base64 encoding, so the ordinary
+# 64 MiB job ceiling cannot represent a valid near-limit evaluation request.
+# Keep the larger chunked-upload allowance tied to only the two measured dev
+# evaluation operation/purpose pairs; every other scoring job remains at the
+# ordinary ceiling.
+MAX_DEV_EVALUATION_INPUT_BYTES = 256 * 1024 * 1024
+_DEV_EVALUATION_JOB_SCOPES = frozenset(
+    {
+        ("run_dev_replay_v2", "research_lab.candidate_test.v2"),
+        ("run_dev_hybrid_v2", "research_lab.candidate_hybrid_test.v2"),
+    }
+)
 # Allocation authority and its direct weight-publication consumers carry the
 # same complete, independently validated receipt ancestry. Uploads remain
 # chunked; allow only these exact coordinator operation/purpose pairs to exceed
@@ -1107,6 +1121,8 @@ def _bounded_external_authority_limit(value: int) -> int:
 
 
 def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
+    if (operation, purpose) in _DEV_EVALUATION_JOB_SCOPES:
+        return MAX_DEV_EVALUATION_INPUT_BYTES
     if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
         return MAX_ALLOCATION_ANCESTRY_INPUT_BYTES
     return MAX_INPUT_BYTES

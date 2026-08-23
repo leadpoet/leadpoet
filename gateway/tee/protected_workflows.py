@@ -69,9 +69,12 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/execution_job_manager_v2.py": (
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
+        "_DEV_EVALUATION_JOB_SCOPES",
         "_execution_failure_code",
+        "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
         "ExecutionJobManagerV2",
+        "MAX_DEV_EVALUATION_INPUT_BYTES",
     ),
     "leadpoet_canonical/ancestry_checkpoint_v2.py": (
         "ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION",

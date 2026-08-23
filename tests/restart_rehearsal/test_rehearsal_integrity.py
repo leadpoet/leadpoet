@@ -8901,10 +8901,14 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
     assert 'bash /home/ec2-user/gw_restart.sh\n' in script
     assert "direct miner-maintenance restart performed secret writes" in script
-    first_rollout = script.split(
-        'elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
-    )[1].split('bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh"', 1)[0]
-    for variable in (
+    launcher = script.split(
+        '  set +e\n  if [ "$TRANSITION" = "rollback" ]; then', 1
+    )[1].split("  set -e\n", 1)[0]
+    rollback, remaining = launcher.split(
+        '  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
+    )
+    first_rollout, direct = remaining.split("  else\n", 1)
+    git_environment_overrides = (
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",
         "GIT_COMMON_DIR",
@@ -8918,10 +8922,12 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         "GIT_OBJECT_DIRECTORY",
         "GIT_REPLACE_REF_BASE",
         "GIT_WORK_TREE",
-    ):
-        assert f"-u {variable}" in first_rollout
-    assert "-u GIT_CONFIG_KEY_0" in first_rollout
-    assert "-u GIT_CONFIG_VALUE_0" in first_rollout
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    )
+    for restart_path in (rollback, first_rollout, direct):
+        for variable in git_environment_overrides:
+            assert f"-u {variable}" in restart_path
     assert "return _real_boto3_client" not in adapter
     assert 'raise ValueError("local boto3 AWS service is unknown")' in adapter
 

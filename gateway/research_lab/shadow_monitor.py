@@ -285,10 +285,10 @@ class ShadowMonitorDeps:
     select_many: SelectMany
     load_manifest: Callable[[str], Mapping[str, Any]]
     runner_factory: RunnerFactory
-    scorer_factory: Callable[[], Any]
+    scorer_factory: Callable[[str], Any]
     report_store: ShadowReportStore
     attested_runner_factory: AttestedRunnerFactory | None = None
-    attested_scorer_factory: Callable[[int], Any] | None = None
+    attested_scorer_factory: Callable[[int, str], Any] | None = None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
 
@@ -379,15 +379,24 @@ def default_shadow_monitor_deps(settings: ShadowMonitorSettings) -> ShadowMonito
         select_many=select_many,
         load_manifest=load_private_artifact_manifest,
         runner_factory=_default_runner_factory(settings),
-        scorer_factory=QualificationStyleCompanyScorer,
+        scorer_factory=lambda scoring_adapter_version: (
+            QualificationStyleCompanyScorer(
+                reference_scoring_adapter_version=scoring_adapter_version,
+                candidate_scoring_adapter_version=scoring_adapter_version,
+            )
+        ),
         report_store=S3ShadowReportStore(),
         attested_runner_factory=lambda artifact, epoch_id: _default_runner_factory(
             settings,
             epoch_id=epoch_id,
         )(artifact),
-        attested_scorer_factory=lambda epoch_id: QualificationStyleCompanyScorer(
-            attested_epoch_id=epoch_id,
-            attested_purpose="research_lab.rebenchmark.v1",
+        attested_scorer_factory=lambda epoch_id, scoring_adapter_version: (
+            QualificationStyleCompanyScorer(
+                attested_epoch_id=epoch_id,
+                attested_purpose="research_lab.rebenchmark.v1",
+                reference_scoring_adapter_version=scoring_adapter_version,
+                candidate_scoring_adapter_version=scoring_adapter_version,
+            )
         ),
         now=lambda: datetime.now(timezone.utc),
     )
@@ -812,9 +821,12 @@ async def run_shadow_day(
         else deps.runner_factory(shadow_artifact)
     )
     scorer = (
-        deps.attested_scorer_factory(evaluation_epoch)
+        deps.attested_scorer_factory(
+            evaluation_epoch,
+            shadow_artifact.scoring_adapter_version,
+        )
         if deps.attested_scorer_factory is not None
-        else deps.scorer_factory()
+        else deps.scorer_factory(shadow_artifact.scoring_adapter_version)
     )
     semaphore = asyncio.Semaphore(settings.concurrency)
 

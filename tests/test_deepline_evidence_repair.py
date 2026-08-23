@@ -6,6 +6,8 @@ Everything fails open — a repair problem can never break scoring.
 """
 
 import asyncio
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,55 @@ import pytest
 import qualification.scoring.deepline_evidence_repair as repair_module
 import qualification.scoring.lead_scorer as lead_scorer
 from gateway.qualification.models import CompanyOutput, ICPPrompt
+from gateway.qualification.company_fit_proof_receipt import (
+    COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
+    COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
+)
+
+
+def _company_fit_proof():
+    body = {
+        "schema_version": "company-fit-proof-receipt:v1",
+        "contract_sha256": COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
+        "outcome_binding": COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
+        "decision": "match",
+        "company_binding": {
+            "company_name": "TestCo",
+            "company_website": "https://testco.com",
+            "company_linkedin": "https://linkedin.com/company/testco",
+        },
+        "icp_binding": {
+            "employee_count": "51-200",
+            "employee_count_required": True,
+            "company_stage": "",
+            "stage_required": False,
+        },
+        "dimensions": {
+            dimension: "match"
+            for dimension in (
+                "identity", "employee_size", "industry", "geography", "stage"
+            )
+        },
+        "employee_size_proof": {
+            "decision": "match",
+            "observed_employee_count": "51-200",
+            "evidence_source": "scrapingdog_linkedin_company_profile",
+            "evidence_url": "https://linkedin.com/company/testco",
+        },
+        "stage_proof": {
+            "decision": "not_required",
+            "observed_company_stage": "",
+            "evidence_url": "",
+            "evidence_quote": "",
+        },
+    }
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return {
+        **body,
+        "receipt_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
 
 
 def _company() -> CompanyOutput:
@@ -27,6 +78,7 @@ def _company() -> CompanyOutput:
         "country": "United States",
         "state": "",
         "description": "TestCo builds software.",
+        "company_fit_proof_receipt": _company_fit_proof(),
         "intent_signals": [{
             "source": "news",
             "description": "raised a round",

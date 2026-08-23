@@ -3895,6 +3895,12 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 require_company_fit_contract=(
                     compatibility_receipt.get("admission_mode") == "semantic_v1"
                 ),
+                expected_scoring_adapter_version=(
+                    artifact.scoring_adapter_version
+                    if compatibility_receipt.get("admission_mode")
+                    == "qualification_protocol_v2"
+                    else ""
+                ),
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(

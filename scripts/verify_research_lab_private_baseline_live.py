@@ -25,8 +25,12 @@ if str(ROOT) not in sys.path:
 from research_lab.eval import (  # noqa: E402
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    PrivateModelRuntimeError,
     ensure_private_model_outputs,
     private_model_env_passthrough,
+)
+from research_lab.eval.diagnostic_artifact import (  # noqa: E402
+    load_verified_diagnostic_private_model_artifact,
 )
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer  # noqa: E402
 
@@ -82,6 +86,14 @@ def main() -> int:
         default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST", ""),
         help="Immutable private model image digest. Defaults to RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST.",
     )
+    parser.add_argument(
+        "--artifact-manifest-uri",
+        default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI", ""),
+        help=(
+            "Signed artifact manifest for --image. Defaults to "
+            "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI."
+        ),
+    )
     parser.add_argument("--max-icps", type=int, default=1, help="Number of fixture ICPs to run.")
     parser.add_argument("--timeout-seconds", type=int, default=1800, help="Per-ICP model timeout.")
     parser.add_argument(
@@ -91,6 +103,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if not args.image or "@sha256:" not in args.image:
+        print("ERROR: --image or RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST must be an immutable digest")
+        return 2
+
+    try:
+        artifact = load_verified_diagnostic_private_model_artifact(
+            args.artifact_manifest_uri,
+            expected_image_digest=args.image,
+        )
+    except PrivateModelRuntimeError as exc:
+        print(f"ERROR: private model artifact admission failed: {exc}")
+        return 2
+
     missing = [
         name
         for name in ("EXA_API_KEY", "SCRAPINGDOG_API_KEY", "OPENROUTER_API_KEY")
@@ -99,14 +124,26 @@ def main() -> int:
     if missing:
         print("ERROR: missing required provider env vars: " + ", ".join(missing))
         return 2
-    if not args.image or "@sha256:" not in args.image:
-        print("ERROR: --image or RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST must be an immutable digest")
-        return 2
 
-    return asyncio.run(_run(args.image, args.max_icps, args.timeout_seconds, args.include_global_proxy))
+    return asyncio.run(
+        _run(
+            args.image,
+            args.max_icps,
+            args.timeout_seconds,
+            args.include_global_proxy,
+            scoring_adapter_version=artifact.scoring_adapter_version,
+        )
+    )
 
 
-async def _run(image: str, max_icps: int, timeout_seconds: int, include_global_proxy: bool) -> int:
+async def _run(
+    image: str,
+    max_icps: int,
+    timeout_seconds: int,
+    include_global_proxy: bool,
+    *,
+    scoring_adapter_version: str,
+) -> int:
     runner = DockerPrivateModelRunner(
         DockerPrivateModelSpec(
             image_digest=image,
@@ -115,7 +152,10 @@ async def _run(image: str, max_icps: int, timeout_seconds: int, include_global_p
             pull_before_run=False,
         )
     )
-    scorer = QualificationStyleCompanyScorer()
+    scorer = QualificationStyleCompanyScorer(
+        reference_scoring_adapter_version=scoring_adapter_version,
+        candidate_scoring_adapter_version=scoring_adapter_version,
+    )
     positive_icps = 0
     rows: list[dict[str, Any]] = []
     for index, icp in enumerate(DEFAULT_ICPS[: max(1, max_icps)], start=1):
@@ -153,7 +193,17 @@ async def _run(image: str, max_icps: int, timeout_seconds: int, include_global_p
         }
         rows.append(row)
         print(json.dumps({"progress": row}, sort_keys=True), file=sys.stderr, flush=True)
-    print(json.dumps({"positive_icps": positive_icps, "results": rows}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "positive_icps": positive_icps,
+                "results": rows,
+                "scoring_adapter_version": scoring_adapter_version,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0 if positive_icps > 0 else 1
 
 

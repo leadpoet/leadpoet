@@ -141,6 +141,7 @@ def scoring_cache_key(
     icp: Mapping[str, Any],
     companies: Sequence[Mapping[str, Any]],
     is_reference_model: bool,
+    scoring_adapter_version: str = "qualification-company-scorer:v1",
 ) -> str:
     """Stable key for one scoring call.
 
@@ -166,6 +167,7 @@ def scoring_cache_key(
     payload = {
         "icp": icp_part,
         "company_fit_policy": company_fit_cache_policy_identity(),
+        "scoring_adapter_version": str(scoring_adapter_version),
         "companies": [_canonical(c) for c in companies],
         "ref": bool(is_reference_model),
     }

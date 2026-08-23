@@ -6391,6 +6391,7 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
                     "companies": [{"company_name": "Example"}],
                     "icp": {"industry": "Software"},
                     "is_reference_model": True,
+                    "scoring_adapter_version": "qualification-company-scorer:v1",
                     "provider_execution_mode": "live_enclave",
                 },
                 scorer_context,

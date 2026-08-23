@@ -220,6 +220,9 @@ async def test_company_scoring_preserves_handled_signed_transport_failure(
     from research_lab.eval import evaluator
 
     class HandledEvidenceFailureScorer:
+        def __init__(self, **_kwargs):
+            pass
+
         async def score_with_breakdowns(
             self,
             _companies,
@@ -262,6 +265,7 @@ async def test_company_scoring_preserves_handled_signed_transport_failure(
                 "companies": [{"company_name": "Example"}],
                 "icp": {"industry": "Software"},
                 "is_reference_model": True,
+                "scoring_adapter_version": "qualification-company-scorer:v1",
                 "provider_execution_mode": "live_enclave",
             },
             context,

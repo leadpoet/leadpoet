@@ -45,6 +45,9 @@ from research_lab.eval import (  # noqa: E402
     ensure_private_model_outputs,
     private_model_env_passthrough,
 )
+from research_lab.eval.diagnostic_artifact import (  # noqa: E402
+    load_verified_diagnostic_private_model_artifact,
+)
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer  # noqa: E402
 
 
@@ -251,7 +254,10 @@ async def _run(args: argparse.Namespace, icps: list[dict[str, Any]]) -> int:
             pull_before_run=False,
         )
     )
-    scorer = QualificationStyleCompanyScorer()
+    scorer = QualificationStyleCompanyScorer(
+        reference_scoring_adapter_version=args.scoring_adapter_version,
+        candidate_scoring_adapter_version=args.scoring_adapter_version,
+    )
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=max(args.concurrency, args.retry_concurrency),
         thread_name_prefix="stress-icp",
@@ -311,6 +317,7 @@ async def _run(args: argparse.Namespace, icps: list[dict[str, Any]]) -> int:
     provider_errors = sum(1 for row in rows if row["status"] != "completed")
     report = {
         "image": args.image,
+        "scoring_adapter_version": args.scoring_adapter_version,
         "concurrency": args.concurrency,
         "exa_max_rps": args.exa_max_rps,
         "retry_concurrency": args.retry_concurrency,
@@ -335,6 +342,14 @@ def main() -> int:
         "--image",
         default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST", ""),
         help="Immutable private model image digest. Defaults to RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST.",
+    )
+    parser.add_argument(
+        "--artifact-manifest-uri",
+        default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI", ""),
+        help=(
+            "Signed artifact manifest for --image. Defaults to "
+            "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI."
+        ),
     )
     parser.add_argument("--concurrency", type=int, default=10, help="ICPs in flight at once.")
     parser.add_argument("--icp-count", type=int, default=10, help="Total ICPs to run.")
@@ -362,6 +377,15 @@ def main() -> int:
     if args.concurrency < 1 or args.icp_count < 1:
         print("ERROR: --concurrency and --icp-count must be >= 1")
         return 2
+    try:
+        artifact = load_verified_diagnostic_private_model_artifact(
+            args.artifact_manifest_uri,
+            expected_image_digest=args.image,
+        )
+    except PrivateModelRuntimeError as exc:
+        print(f"ERROR: private model artifact admission failed: {exc}")
+        return 2
+    args.scoring_adapter_version = artifact.scoring_adapter_version
     # Same variant acceptance as the worker's _missing_private_scoring_env.
     missing = []
     if not (os.getenv("SCRAPINGDOG_API_KEY") or os.getenv("QUALIFICATION_SCRAPINGDOG_API_KEY")):

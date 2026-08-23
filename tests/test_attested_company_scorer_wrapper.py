@@ -63,6 +63,9 @@ async def test_research_lab_scorer_uses_v2_as_sole_provider_and_scorer(monkeypat
     assert captured["epoch_id"] == 102
     assert captured["purpose"] == "research_lab.rebenchmark.v1"
     assert captured["provider_credential_profile"] == "benchmark_scorer"
+    assert captured["scoring_adapter_version"] == (
+        "qualification-company-scorer:v1"
+    )
     assert scorer.attested_receipts()[0]["receipt_hash"].startswith("sha256:")
     assert receipt_hashes == {"sha256:" + "a" * 64}
 
@@ -117,3 +120,44 @@ async def test_legacy_protocol_cannot_fall_back_to_host_scorer(monkeypatch):
         await scorer.score_with_breakdowns([], {}, False)
     assert calls == []
     assert scorer.attested_receipts() == []
+
+
+@pytest.mark.asyncio
+async def test_exact_adapter_version_selects_v1_rollback_or_v2_proof_gate(
+    monkeypatch,
+):
+    scorer = QualificationStyleCompanyScorer(
+        reference_scoring_adapter_version="qualification-company-scorer:v2",
+        candidate_scoring_adapter_version="qualification-company-scorer:v1",
+    )
+    captured = []
+
+    async def local(
+        _companies,
+        _icp,
+        is_reference_model,
+        *,
+        scoring_adapter_version,
+    ):
+        captured.append((is_reference_model, scoring_adapter_version))
+        return []
+
+    monkeypatch.setattr(scorer, "_score_with_breakdowns_impl", local)
+    await scorer.score_with_breakdowns([], {}, True)
+    await scorer.score_with_breakdowns([], {}, False)
+
+    assert captured == [
+        (True, "qualification-company-scorer:v2"),
+        (False, "qualification-company-scorer:v1"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["reference_scoring_adapter_version", "candidate_scoring_adapter_version"],
+)
+def test_unknown_scoring_adapter_version_fails_before_scoring(field):
+    with pytest.raises(ValueError, match="adapter version is unsupported"):
+        QualificationStyleCompanyScorer(
+            **{field: "qualification-company-scorer:v99"}
+        )

@@ -102,6 +102,18 @@ QUALIFICATION_PROTOCOL_CONSUMER_API_V2 = (
     "research-lab-qualification-consumer-api:v2"
 )
 QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2 = "qualification_protocol_v2"
+QUALIFICATION_SCORING_ADAPTER_VERSION_V1 = (
+    "qualification-company-scorer:v1"
+)
+QUALIFICATION_SCORING_ADAPTER_VERSION_V2 = (
+    "qualification-company-scorer:v2"
+)
+QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS = frozenset(
+    {
+        QUALIFICATION_SCORING_ADAPTER_VERSION_V1,
+        QUALIFICATION_SCORING_ADAPTER_VERSION_V2,
+    }
+)
 QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = Path(__file__).with_name(
     "sourcing_model_qualification_outcome_v2.json"
 )
@@ -2796,6 +2808,63 @@ def _qualification_protocol_adapter_surface_v2(root: Path) -> bool:
     )
 
 
+def qualification_protocol_scoring_adapter_version_v2(
+    root: Path,
+    *,
+    contract: Mapping[str, Any],
+) -> str:
+    """Measure the signed contract's exact supported scoring adapter.
+
+    The already-published v1 rollback contract did not freeze this constant,
+    so v1 alone may use the equivalent literal binding from its hash-bound
+    adapter source. New v2 contracts must freeze the exact constant in the
+    signed consumer contract. Unknown versions never inherit v2 behavior.
+    """
+
+    adapter_path = Path(root) / "research_lab_adapter.py"
+    try:
+        adapter_tree = ast.parse(adapter_path.read_bytes())
+        source_version = _unique_literal_binding_v1(
+            adapter_tree,
+            "SCORING_ADAPTER_VERSION",
+        )
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(
+            "qualification protocol scoring adapter binding is unavailable"
+        ) from exc
+    exact_constants = contract.get("exact_constants")
+    adapter_constants = (
+        exact_constants.get("research_lab_adapter.py")
+        if isinstance(exact_constants, Mapping)
+        else None
+    )
+    contract_version = (
+        adapter_constants.get("SCORING_ADAPTER_VERSION")
+        if isinstance(adapter_constants, Mapping)
+        else None
+    )
+    if (
+        not isinstance(source_version, str)
+        or source_version
+        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+    ):
+        raise ValueError(
+            "qualification protocol scoring adapter version is unsupported"
+        )
+    if contract_version is None:
+        if source_version != QUALIFICATION_SCORING_ADAPTER_VERSION_V1:
+            raise ValueError(
+                "qualification protocol v2 scoring adapter is not frozen in "
+                "the signed consumer contract"
+            )
+    elif contract_version != source_version:
+        raise ValueError(
+            "qualification protocol scoring adapter differs from the signed "
+            "consumer contract"
+        )
+    return source_version
+
+
 def qualification_protocol_source_tree_admission_v2(
     root: Path,
     *,
@@ -2829,12 +2898,30 @@ def qualification_protocol_source_tree_admission_v2(
         )
     contract_path = root / str(contract.get("path") or "")
     parity_path = root / str(parity.get("path") or "")
+    try:
+        source_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        if not isinstance(source_contract, Mapping):
+            raise ValueError("signed consumer contract must be an object")
+        scoring_adapter_version = qualification_protocol_scoring_adapter_version_v2(
+            root,
+            contract=source_contract,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            "qualification protocol signed consumer contract is invalid"
+        ) from exc
     if (
         not contract_path.is_file()
         or not parity_path.is_file()
         or _snapshot_sha256(contract_path) != str(contract.get("sha256") or "")
         or _snapshot_sha256(parity_path) != str(parity.get("sha256") or "")
         or not str(contract.get("contract_id") or "")
+        or not isinstance(source_contract, Mapping)
+        or source_contract.get("contract_id") != contract.get("contract_id")
+        or source_contract.get("canonical_path") != contract.get("path")
+        or source_contract.get("parity_fixture_path") != parity.get("path")
+        or document.get("scoring_adapter_version")
+        != scoring_adapter_version
     ):
         raise ValueError(
             "qualification protocol signed consumer documents differ from source"
@@ -2852,7 +2939,9 @@ def qualification_protocol_source_tree_admission_v2(
         "contract_id": str(contract["contract_id"]),
         "contract_hash": str(contract["sha256"]),
         "parity_hash": str(parity["sha256"]),
-        "bindings": {},
+        "bindings": {
+            "scoring_adapter_version": scoring_adapter_version,
+        },
         "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
     }
     return {**body, "receipt_hash": _sha256_json(body)}
@@ -2909,7 +2998,12 @@ def validate_qualification_protocol_source_receipt_v2(
         or normalized.get("contract_id") != str(contract.get("contract_id") or "")
         or normalized.get("contract_hash") != str(contract.get("sha256") or "")
         or normalized.get("parity_hash") != str(parity.get("sha256") or "")
-        or normalized.get("bindings") != {}
+        or normalized.get("bindings")
+        != {
+            "scoring_adapter_version": str(
+                document.get("scoring_adapter_version") or ""
+            )
+        }
         or normalized.get("entrypoints")
         != sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2)
         or normalized.get("receipt_hash") != _sha256_json(body)

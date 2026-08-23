@@ -2221,14 +2221,50 @@ COPY . /app
 RUN python - <<'PY'
 import research_lab_adapter
 import sourcing_model
+import hashlib
+import json
 import re
+from pathlib import Path
 metadata = research_lab_adapter.adapter_metadata()
 assert re.fullmatch(
     r"sourcing-model-research-lab-adapter:[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}",
     str(metadata.get("adapter_version") or ""),
 )
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
-assert metadata.get("scoring_adapter_version") == "qualification-company-scorer:v1"
+scoring_adapter_version = metadata.get("scoring_adapter_version")
+assert scoring_adapter_version in (
+    "qualification-company-scorer:v1",
+    "qualification-company-scorer:v2",
+)
+assert scoring_adapter_version == research_lab_adapter.SCORING_ADAPTER_VERSION
+signed_contract = json.loads(
+    (Path(sourcing_model.__file__).resolve().parent / "consumer_contract.json")
+    .read_text(encoding="utf-8")
+)
+signed_scoring_adapter_version = (
+    signed_contract.get("exact_constants", {{}})
+    .get("research_lab_adapter.py", {{}})
+    .get("SCORING_ADAPTER_VERSION")
+)
+if signed_scoring_adapter_version is not None:
+    assert signed_scoring_adapter_version == scoring_adapter_version
+if scoring_adapter_version == "qualification-company-scorer:v2":
+    assert signed_scoring_adapter_version == scoring_adapter_version
+    from qualification.scoring.company_fit_decision import (
+        company_fit_proof_receipt_contract_identity,
+    )
+    company_fit_proof = metadata.get("company_fit_proof_receipt")
+    assert isinstance(company_fit_proof, dict)
+    assert company_fit_proof == company_fit_proof_receipt_contract_identity()
+    assert hashlib.sha256(json.dumps(
+        company_fit_proof,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest() == (
+        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+    )
 capability_contract_version = metadata.get("capability_contract_version")
 expected_runtime_capabilities = {{
     "sourcing-model-runtime-capabilities:v2": {{

@@ -249,6 +249,7 @@ async def test_company_scores_are_returned_only_from_v2_enclave(monkeypatch):
         companies=[{"company_name": "Example"}],
         icp={"industry": "Software"},
         is_reference_model=False,
+        scoring_adapter_version="qualification-company-scorer:v1",
         execute=execute,
     )
 
@@ -280,6 +281,7 @@ async def test_company_score_projection_mismatch_fails_closed():
             companies=[],
             icp={},
             is_reference_model=False,
+            scoring_adapter_version="qualification-company-scorer:v1",
             execute=execute,
         )
 
@@ -297,6 +299,23 @@ async def test_company_score_sequence_must_be_non_negative_integer():
             companies=[],
             icp={},
             is_reference_model=False,
+            scoring_adapter_version="qualification-company-scorer:v1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_company_score_adapter_version_is_required_and_supported():
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="adapter version is unsupported",
+    ):
+        await v2_authority.execute_company_scores_v2(
+            epoch_id=10,
+            purpose="research_lab.candidate_score.v1",
+            companies=[],
+            icp={},
+            is_reference_model=False,
+            scoring_adapter_version="qualification-company-scorer:v3",
         )
 
 

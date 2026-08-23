@@ -2,11 +2,19 @@
 
 import asyncio
 import copy
+import hashlib
+import json
 import os
 import pickle
 from unittest import mock
 
+import pytest
+
 from gateway.qualification.models import CompanyOutput, ICPPrompt
+from gateway.qualification.company_fit_proof_receipt import (
+    COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
+    COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
+)
 from qualification.scoring.lead_scorer import (
     _llm_reverify_company,
     _matches_exclusion_list,
@@ -28,13 +36,62 @@ from qualification.scoring.company_fit_decision import (
 )
 
 
+def _proof(name, website, linkedin):
+    body = {
+        "schema_version": "company-fit-proof-receipt:v1",
+        "contract_sha256": COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
+        "outcome_binding": COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
+        "decision": "match",
+        "company_binding": {
+            "company_name": name,
+            "company_website": website,
+            "company_linkedin": linkedin,
+        },
+        "icp_binding": {
+            "employee_count": "11-50|51-200",
+            "employee_count_required": True,
+            "company_stage": "",
+            "stage_required": False,
+        },
+        "dimensions": {
+            dimension: "match"
+            for dimension in (
+                "identity", "employee_size", "industry", "geography", "stage"
+            )
+        },
+        "employee_size_proof": {
+            "decision": "match",
+            "observed_employee_count": "51-200",
+            "evidence_source": "scrapingdog_linkedin_company_profile",
+            "evidence_url": linkedin,
+        },
+        "stage_proof": {
+            "decision": "not_required",
+            "observed_company_stage": "",
+            "evidence_url": "",
+            "evidence_quote": "",
+        },
+    }
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return {
+        **body,
+        "receipt_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
 def _company(name="Acme", website="https://acme.com", linkedin=""):
     return CompanyOutput(
         company_name=name, company_website=website, company_linkedin=linkedin,
         industry="Software", employee_count="51-200", country="United States",
         intent_signals=[{"description": "raised", "source": "news",
                          "url": "https://n.example.com/a", "date": "2026-07-01",
-                         "snippet": "Acme raised a round this month."}])
+                         "snippet": "Acme raised a round this month."}],
+        company_fit_proof_receipt=(
+            _proof(name, website, linkedin) if linkedin else None
+        ),
+    )
 
 
 def _icp(**over):
@@ -339,6 +396,104 @@ def test_web_dimension_tri_state_requires_evidence():
     )
 
 
+@pytest.mark.parametrize(
+    ("dimension", "observed_field", "matching", "contradiction", "flag_field"),
+    [
+        (
+            "employee_size",
+            "observed_employee_count",
+            "51-200",
+            "201-500",
+            "employee_size_matches",
+        ),
+        (
+            "industry",
+            "observed_industry",
+            "Software",
+            "Manufacturing",
+            "industry_matches",
+        ),
+        (
+            "geography",
+            "observed_hq_country",
+            "United States",
+            "Canada",
+            "geography_matches",
+        ),
+        (
+            "stage",
+            "observed_company_stage",
+            "Series A",
+            "Series C",
+            "stage_matches",
+        ),
+    ],
+)
+def test_web_dimension_boolean_must_agree_with_canonical_observation(
+    dimension,
+    observed_field,
+    matching,
+    contradiction,
+    flag_field,
+):
+    icp = _icp(company_stage="Series A")
+    base = {
+        "observed_employee_count": "51-200",
+        "employee_size_matches": True,
+        "observed_industry": "Software",
+        "observed_subindustry": "SaaS",
+        "industry_matches": True,
+        "observed_hq_country": "United States",
+        "geography_matches": True,
+        "observed_company_stage": "Series A",
+        "stage_matches": True,
+    }
+
+    observed_match_flag_false = {
+        **base,
+        observed_field: matching,
+        flag_field: False,
+    }
+    inconsistent_match = _reverify_decision(
+        observed_match_flag_false,
+        "",
+        "series a",
+        icp=icp,
+    )
+    assert inconsistent_match.details["dimension_decisions"][dimension] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+    observed_conflict_flag_true = {
+        **base,
+        observed_field: contradiction,
+        flag_field: True,
+    }
+    inconsistent_conflict = _reverify_decision(
+        observed_conflict_flag_true,
+        "",
+        "series a",
+        icp=icp,
+    )
+    assert inconsistent_conflict.details["dimension_decisions"][dimension] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+    supported_conflict = _reverify_decision(
+        {
+            **base,
+            observed_field: contradiction,
+            flag_field: False,
+        },
+        "",
+        "series a",
+        icp=icp,
+    )
+    assert supported_conflict.details["dimension_decisions"][dimension] == (
+        COMPANY_FIT_MISMATCH
+    )
+
+
 def test_web_dimension_matches_require_citations_and_bound_identity():
     company = _company(linkedin="https://linkedin.com/company/acme")
     icp = _icp()
@@ -397,9 +552,9 @@ def test_web_geography_rejects_state_conflict_and_accepts_state_match():
         "",
         icp=icp,
     )
-    assert conflict.decision == COMPANY_FIT_MISMATCH
+    assert conflict.decision == COMPANY_FIT_UNAVAILABLE
     assert conflict.details["dimension_decisions"]["geography"] == (
-        COMPANY_FIT_MISMATCH
+        COMPANY_FIT_UNAVAILABLE
     )
 
     match = _reverify_decision(

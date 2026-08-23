@@ -149,7 +149,7 @@ class EmployeeSizeBucketTests(unittest.TestCase):
                 },
                 icp,
             ),
-            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_UNAVAILABLE,
         )
         self.assertEqual(
             _decision_from_observed_employee_size(
@@ -238,7 +238,11 @@ class EmployeeSizeBucketTests(unittest.TestCase):
                 )
             )
         self.assertEqual(result.decision, COMPANY_FIT_UNAVAILABLE)
-        prompt = observed["json"]["messages"][0]["content"]
+        prompt = next(
+            message["content"]
+            for message in observed["json"]["messages"]
+            if message["role"] == "user"
+        )
         for bucket in LINKEDIN_EMPLOYEE_BUCKETS:
             with self.subTest(bucket=bucket):
                 self.assertIn(bucket, prompt)

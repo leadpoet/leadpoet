@@ -607,16 +607,22 @@ class SupabaseRoutingExperimentStore:
             "schema_version": "leadpoet.research_lab.routing_event.v2",
             **dict(event_doc),
         }
+        event_hash = _event_hash(event_type, document)
         params = {
-                "p_event_hash": _event_hash(event_type, document),
+                "p_event_hash": event_hash,
                 "p_experiment_hash": normalized_experiment_hash,
                 "p_event_type": event_type,
                 "p_claim_key": claim.claim_key,
                 "p_claim_generation": claim.claim_generation,
                 "p_event_doc": document,
-            }
+        }
         result = self._rpc("research_lab_routing_append_fenced_event_v3", params)
-        if not isinstance(result, Mapping):
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"event_hash", "idempotent"}
+            or result.get("event_hash") != event_hash
+            or type(result.get("idempotent")) is not bool
+        ):
             raise RoutingExperimentStoreError("routing event result is malformed")
         return dict(result)
 
@@ -627,6 +633,7 @@ class SupabaseRoutingExperimentStore:
         variant_id: str,
         unit_ref: str,
         idempotency_key: str,
+        artifact_key: str,
     ) -> Mapping[str, Any] | None:
         """Read one redacted paid-call/recovery marker, never a provider body."""
 
@@ -637,37 +644,38 @@ class SupabaseRoutingExperimentStore:
             raise RoutingExperimentStoreError(
                 "Model transition idempotency key is invalid"
             )
-        matches: list[Mapping[str, Any]] = []
-        for row in self._select_rows(
-            "research_lab_routing_experiment_events_v2",
-            experiment_hash=normalized_experiment_hash,
-            order_column="created_at",
+        normalized_artifact_key = str(artifact_key or "").strip().lower()
+        if not re.fullmatch(
+            r"[0-9a-f]{40}:"
+            r"(?:sha256:)?[0-9a-f]{64}:"
+            r"(?:sha256:)?[0-9a-f]{64}",
+            normalized_artifact_key,
         ):
-            if row.get("event_type") != "model_transition_completed":
-                continue
-            document = row.get("event_doc")
-            if not isinstance(document, Mapping):
-                raise RoutingExperimentStoreError(
-                    "Model transition marker is malformed"
-                )
-            if (
-                document.get("variant_id") == variant_id
-                and document.get("unit_ref") == unit_ref
-                and document.get("idempotency_key") == idempotency_key
-            ):
-                matches.append(dict(document))
-        if not matches:
-            return None
-        if len(matches) != 1:
             raise RoutingExperimentStoreError(
-                "Model transition marker is duplicated"
+                "Model transition artifact identity is invalid"
             )
-        marker = matches[0]
+        marker_result = self._rpc(
+            "research_lab_routing_load_model_transition_v2",
+            {
+                "p_experiment_hash": normalized_experiment_hash,
+                "p_variant_id": variant_id,
+                "p_unit_ref": unit_ref,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        if marker_result is None:
+            return None
+        if not isinstance(marker_result, Mapping):
+            raise RoutingExperimentStoreError(
+                "Model transition marker is malformed"
+            )
+        marker = dict(marker_result)
         expected = {
             "schema_version",
             "event_schema_version",
             "variant_id",
             "unit_ref",
+            "artifact_key",
             "idempotency_key",
             "action_sha256",
             "continuation_sha256",
@@ -678,15 +686,33 @@ class SupabaseRoutingExperimentStore:
             "terminal_receipt_hash",
             "model_completion_contract_hash",
         }
+        if marker.get("event_schema_version") != (
+            "leadpoet.research_lab.model_transition.v2"
+        ):
+            raise RoutingExperimentStoreError(
+                "legacy or unknown Model transition marker is ineligible"
+            )
         if (
             set(marker) != expected
             or marker.get("schema_version")
             != "leadpoet.research_lab.routing_event.v2"
-            or marker.get("event_schema_version")
-            != "leadpoet.research_lab.model_transition.v1"
         ):
             raise RoutingExperimentStoreError(
                 "Model transition marker fields are malformed"
+            )
+        stored_artifact_key = str(marker.get("artifact_key") or "")
+        if not re.fullmatch(
+            r"[0-9a-f]{40}:"
+            r"(?:sha256:)?[0-9a-f]{64}:"
+            r"(?:sha256:)?[0-9a-f]{64}",
+            stored_artifact_key,
+        ):
+            raise RoutingExperimentStoreError(
+                "Model transition stored artifact identity is invalid"
+            )
+        if stored_artifact_key != normalized_artifact_key:
+            raise RoutingExperimentStoreError(
+                "Model transition artifact identity differs"
             )
         for name in (
             "continuation_sha256",

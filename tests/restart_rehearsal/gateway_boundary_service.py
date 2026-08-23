@@ -518,6 +518,7 @@ def _migration_schema_contract(
             "160-research-lab-routing-adapter-failures.sql",
             "161-research-lab-exact-model-transitions.sql",
             "162-research-lab-candidate-routing-experiments.sql",
+            "163-research-lab-model-transition-artifact-custody.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -627,6 +628,8 @@ def _migration_schema_contract(
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
+        "research_lab_routing_exact_model_transition_contract_v2",
+        "research_lab_routing_load_model_transition_v2",
         "research_lab_candidate_append_model_unit_terminal_v1",
         "research_lab_candidate_append_waterfall_receipt_v1",
         "research_lab_candidate_append_waterfall_metric_v1",

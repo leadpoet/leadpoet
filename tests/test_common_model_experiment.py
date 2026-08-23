@@ -14,8 +14,10 @@ from research_lab.routing_experiments import ProviderReceipt
 from research_lab.canonical import sha256_json
 from gateway.research_lab.common_model_experiment import (
     CommonModelExperimentError,
+    CommonModelExperimentRecoveryError,
     ExactModelExperimentCoordinator,
     FencedModelTransitionRepository,
+    MODEL_TRANSITION_SCHEMA_VERSION,
     ProtectedModelActionResult,
     ReviewedProtectedModelActionDispatcher,
     _validate_variant_provider_binding,
@@ -74,12 +76,32 @@ def _action():
     }
 
 
+def _append_event_ack(value):
+    document = {
+        "schema_version": "leadpoet.research_lab.routing_event.v2",
+        **value["event_doc"],
+    }
+    return {
+        "event_hash": sha256_json(
+            {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                "event_type": value["event_type"],
+                "document": document,
+            }
+        ),
+        "idempotent": False,
+    }
+
+
 class _Transport:
+    def __init__(self, release=None):
+        self.release = dict(_release() if release is None else release)
+
     def build_runner_start(self, **values):
         return {"start": True, **values}
 
     def runner_preflight(self, **_values):
-        release = _release()
+        release = self.release
         return {
             "preflight_sha256": "6" * 64,
             "release_identity_sha256": release["release_identity_sha256"],
@@ -123,7 +145,9 @@ class _Transport:
         }
 
 
-def _registration():
+def _registration(*, commit_char: str = "1"):
+    release = {**_release(), "source_commit": commit_char * 40}
+    artifact = {**_artifact(), "commit_sha": commit_char * 40}
     manifest = {
         "manifest_sha256": HASHES["manifest"],
         "bindings": [{
@@ -134,10 +158,10 @@ def _registration():
         }]
     }
     protocol = ResearchLabModelRunnerProtocol(
-        transport=_Transport(), expected_release_identity=_release()
+        transport=_Transport(release), expected_release_identity=release
     )
     return ExactModelRunnerRegistration(
-        artifact_identity=_artifact(),
+        artifact_identity=artifact,
         protocol=protocol,
         host_capability_manifest=manifest,
     )
@@ -161,12 +185,23 @@ def test_exact_registration_accepts_site_main_champion_identity():
 class _Transitions:
     def __init__(self):
         self.values = {}
+        self.artifact_keys = {}
 
     def load_model_transition(self, **identity):
-        return self.values.get(identity["idempotency_key"])
+        idempotency_key = identity["idempotency_key"]
+        value = self.values.get(idempotency_key)
+        if value is not None and self.artifact_keys.get(idempotency_key) != (
+            identity["artifact_key"]
+        ):
+            raise CommonModelExperimentRecoveryError(
+                "stored Model transition artifact identity differs"
+            )
+        return value
 
     def append_model_transition(self, **value):
-        self.values[value["action"]["idempotency_key"]] = {
+        idempotency_key = value["action"]["idempotency_key"]
+        self.artifact_keys[idempotency_key] = value["artifact_key"]
+        self.values[idempotency_key] = {
             "action": dict(value["action"]),
             "continuation": dict(value["continuation"]),
             "completion": dict(value["completion"]),
@@ -303,7 +338,7 @@ def test_protected_model_result_rejects_missing_measured_call_count():
         )
 
 
-def test_fenced_restart_replays_signed_job_result_without_paid_call():
+def test_fenced_restart_rejects_artifact_b_then_replays_artifact_a():
     class _Store:
         marker = None
 
@@ -315,7 +350,7 @@ def test_fenced_restart_replays_signed_job_result_without_paid_call():
                 "schema_version": "leadpoet.research_lab.routing_event.v2",
                 **value["event_doc"],
             }
-            return {"inserted": True}
+            return _append_event_ack(value)
 
     class _ReplayDispatcher(_Dispatcher):
         dispatch_calls = 0
@@ -359,20 +394,66 @@ def test_fenced_restart_replays_signed_job_result_without_paid_call():
         target_count=1,
         evaluated_on="2026-08-20",
     )
-    for _ in range(2):
-        coordinator = ExactModelExperimentCoordinator(
+    def coordinator(registration):
+        return ExactModelExperimentCoordinator(
             experiment_hash="sha256:" + "d" * 64,
-            registration=_registration(),
+            registration=registration,
             dispatcher=dispatcher,
             transitions=FencedModelTransitionRepository(
                 store=store, claim=object()
             ),
         )
-        result = coordinator.run_unit(**values)
+
+    registration_a = _registration()
+    result = coordinator(registration_a).run_unit(**values)
+    assert store.marker["artifact_key"] == registration_a.key
+    assert store.marker["event_schema_version"] == (
+        MODEL_TRANSITION_SCHEMA_VERSION
+    )
+
+    with pytest.raises(
+        CommonModelExperimentRecoveryError,
+        match="artifact identity differs",
+    ):
+        coordinator(_registration(commit_char="9")).run_unit(**values)
+    assert dispatcher.dispatch_calls == 1
+    assert dispatcher.replay_calls == 0
+
+    result = coordinator(registration_a).run_unit(**values)
 
     assert dispatcher.dispatch_calls == 1
     assert dispatcher.replay_calls == 1
     assert result.replayed_transition_count == 1
+
+
+def test_fenced_repository_rejects_legacy_identityless_v1_marker():
+    class _Store:
+        def append_event(self, **_value):
+            raise AssertionError("legacy marker must fail before append")
+
+        def load_model_transition_marker(self, **_identity):
+            return {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                "event_schema_version": (
+                    "leadpoet.research_lab.model_transition.v1"
+                ),
+            }
+
+    registration = _registration()
+    repository = FencedModelTransitionRepository(
+        store=_Store(), claim=object()
+    )
+    with pytest.raises(
+        CommonModelExperimentRecoveryError,
+        match="artifact identity differs",
+    ):
+        repository.load_model_transition(
+            experiment_hash="sha256:" + "d" * 64,
+            variant_id="baseline",
+            unit_ref="unit-1",
+            idempotency_key=_action()["idempotency_key"],
+            artifact_key=registration.key,
+        )
 
 
 def test_fenced_transition_repository_persists_hashes_not_provider_body():
@@ -385,7 +466,7 @@ def test_fenced_transition_repository_persists_hashes_not_provider_body():
 
         def append_event(self, **value):
             self.document = value["event_doc"]
-            return {"inserted": True}
+            return _append_event_ack(value)
 
     store = _Store()
     repository = FencedModelTransitionRepository(store=store, claim=object())
@@ -393,6 +474,7 @@ def test_fenced_transition_repository_persists_hashes_not_provider_body():
         experiment_hash="sha256:" + "d" * 64,
         variant_id="baseline",
         unit_ref="unit-1",
+        artifact_key=_registration().key,
         action=_action(),
         continuation={"private": "continuation"},
         completion={
@@ -408,6 +490,36 @@ def test_fenced_transition_repository_persists_hashes_not_provider_body():
     assert "provider-value" not in str(store.document)
 
 
+def test_fenced_transition_repository_rejects_unconfirmed_durable_append():
+    class _Store:
+        def load_model_transition_marker(self, **_identity):
+            return None
+
+        def append_event(self, **_value):
+            return {}
+
+    repository = FencedModelTransitionRepository(
+        store=_Store(), claim=object()
+    )
+    with pytest.raises(
+        CommonModelExperimentError,
+        match="durable Model transition result is invalid",
+    ):
+        repository.append_model_transition(
+            experiment_hash="sha256:" + "d" * 64,
+            variant_id="baseline",
+            unit_ref="unit-1",
+            artifact_key=_registration().key,
+            action=_action(),
+            continuation={"private": "continuation"},
+            completion={
+                "completion_sha256": "7" * 64,
+                "provider_response": {"private": "provider-value"},
+            },
+            provider_receipt=None,
+        )
+
+
 def test_stored_transition_action_substitution_fails_closed():
     transitions = _Transitions()
     transitions.values[_action()["idempotency_key"]] = {
@@ -416,6 +528,9 @@ def test_stored_transition_action_substitution_fails_closed():
         "completion": {"completion_sha256": "7" * 64},
         "provider_receipt": None,
     }
+    transitions.artifact_keys[_action()["idempotency_key"]] = (
+        _registration().key
+    )
     coordinator = ExactModelExperimentCoordinator(
         experiment_hash="sha256:" + "d" * 64,
         registration=_registration(),

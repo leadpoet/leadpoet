@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from research_lab.common_model_runner_host import (
     CommonModelRunnerHost,
     HostActionBinding,
@@ -297,6 +301,7 @@ def test_registered_model_unit_is_the_live_lab_protocol_caller():
 
     registration = _registration_for_live_caller()
     persisted = []
+    loaded = []
     result = run_registered_model_unit(
         registration=registration,
         input={"icp": "test"},
@@ -319,16 +324,122 @@ def test_registered_model_unit_is_the_live_lab_protocol_caller():
             )
         ],
         persist_transition=lambda **value: persisted.append(value),
+        load_completion=lambda **value: loaded.append(value) or None,
     )
     assert result["status"] == "completed"
     assert len(persisted) == 1
+    assert persisted[0]["artifact_key"] == registration.key
+    assert loaded == [{
+        "artifact_key": registration.key,
+        "idempotency_key": "c" * 64,
+    }]
 
 
-def _registration_for_live_caller():
+def test_registered_model_continuation_rejects_b_and_a_can_drain():
+    from research_lab.champion_model_runner import run_registered_model_unit
+
+    registration_a = _registration_for_live_caller()
+    binding_calls = []
+    binding = HostActionBinding(
+        action_type="execute_candidate_tool",
+        tool_id="candidate.reviewed",
+        binding_contract_sha256=CONTRACT_HASH,
+        dispatch=lambda action: binding_calls.append(dict(action)) or (
+            HostActionResult(
+                outcome="succeeded",
+                reason_code="fixture",
+                provider_response={"records": []},
+                calls=1,
+                cost_credits=0,
+                latency_ms=1,
+            )
+        ),
+    )
+    persisted = []
+
+    class SimulatedPostCommitCrash(RuntimeError):
+        pass
+
+    def persist_then_crash(**value):
+        persisted.append(value)
+        raise SimulatedPostCommitCrash
+
+    with pytest.raises(SimulatedPostCommitCrash):
+        run_registered_model_unit(
+            registration=registration_a,
+            input={"icp": "test"},
+            execution_mode="full_company",
+            target_count=1,
+            evaluated_on="2026-08-21",
+            bindings=[binding],
+            persist_transition=persist_then_crash,
+        )
+
+    assert len(binding_calls) == 1
+    durable = persisted[0]
+    registration_b = _registration_for_live_caller(commit_char="9")
+    with pytest.raises(ModelRunnerHostError, match="artifact identity differs"):
+        run_registered_model_unit(
+            registration=registration_b,
+            input={"icp": "test"},
+            execution_mode="full_company",
+            target_count=1,
+            evaluated_on="2026-08-21",
+            bindings=[binding],
+            persist_transition=lambda **_value: None,
+            continuation=durable["continuation"],
+            continuation_artifact_key=durable["artifact_key"],
+        )
+    assert len(binding_calls) == 1
+
+    result = run_registered_model_unit(
+        registration=registration_a,
+        input={"icp": "test"},
+        execution_mode="full_company",
+        target_count=1,
+        evaluated_on="2026-08-21",
+        bindings=[binding],
+        persist_transition=lambda **_value: None,
+        continuation=durable["continuation"],
+        continuation_artifact_key=durable["artifact_key"],
+    )
+    assert result["status"] == "completed"
+    assert len(binding_calls) == 1
+
+
+def test_model_runner_hosts_are_default_off_with_no_production_caller():
+    from gateway.research_lab.routing_execution_consumer import (
+        REVIEWED_ROUTING_FACTORY_REGISTRY,
+        RoutingExecutionConsumerConfig,
+    )
+
+    assert RoutingExecutionConsumerConfig.from_env({}).enabled is False
+    assert not REVIEWED_ROUTING_FACTORY_REGISTRY
+
+    root = Path(__file__).resolve().parents[1]
+    callers = []
+    entrypoints = (
+        "run_common_champion(",
+        "run_registered_model_unit(",
+    )
+    for package in (root / "gateway", root / "research_lab"):
+        for path in package.rglob("*.py"):
+            if path == root / "research_lab" / "champion_model_runner.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            for entrypoint in entrypoints:
+                if entrypoint in source:
+                    callers.append(
+                        (path.relative_to(root).as_posix(), entrypoint)
+                    )
+    assert callers == []
+
+
+def _registration_for_live_caller(*, commit_char: str = "1"):
     from research_lab.model_runner_protocol import ExactModelRunnerRegistration
 
     release = {
-        "source_commit": "1" * 40,
+        "source_commit": commit_char * 40,
         "model_artifact_digest": "sha256:" + "a" * 64,
         "consumer_contract_sha256": "c" * 64,
         "catalog_sha256": "d" * 64,
@@ -384,6 +495,13 @@ def _registration_for_live_caller():
                     "action": live_action,
                     "continuation": {"step": 1},
                 }
+            if continuation == {"step": 2} and completion is None:
+                return {
+                    "status": "completed",
+                    "continuation": {"step": 2},
+                    "result": {"leads": []},
+                    "model_receipt": {"receipt_sha256": "f" * 64},
+                }
             assert completion["completion_sha256"] == "e" * 64
             return {
                 "status": "completed",
@@ -399,7 +517,7 @@ def _registration_for_live_caller():
         artifact_identity={
             "repository": "leadpoet/Sourcing_model",
             "branch": "main",
-            "commit_sha": "1" * 40,
+            "commit_sha": commit_char * 40,
             "model_artifact_hash": "sha256:" + "a" * 64,
             "manifest_hash": "sha256:" + "b" * 64,
             "routing_contract_hash": "sha256:" + "c" * 64,

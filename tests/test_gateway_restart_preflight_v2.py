@@ -609,7 +609,102 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/156-production-parity-readonly-role.sql",
         "scripts/161-research-lab-exact-model-transitions.sql",
     }.issubset(set(result["migration_files"]))
+    assert (
+        "scripts/163-research-lab-model-transition-artifact-custody.sql"
+        not in result["migration_files"]
+    )
+    assert result["routing_model_transition_v2_required"] is False
     assert "service-role-value" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("activation_name", "activation_value"),
+    (
+        ("RESEARCH_LAB_ROUTING_EXPERIMENT_ENABLED", "true"),
+        ("RESEARCH_LAB_ROUTING_EXPERIMENT_LIVE_ENABLED", "1"),
+        ("RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED", "yes"),
+        ("RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION", "reviewed_v2"),
+    ),
+)
+def test_routing_activation_requires_exact_transition_custody_rpcs(
+    activation_name,
+    activation_value,
+) -> None:
+    activation = json.loads(_chain_realized_activation_response())[0]
+    required_rpcs = (
+        schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        + schema_preflight.ROUTING_MODEL_TRANSITION_V2_RPCS
+    )
+
+    def opener(request, *, timeout):
+        assert timeout == 10.0
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in required_rpcs
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if request.full_url.endswith(
+            "/rpc/research_lab_compact_weight_settlement_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_compact_weight_settlement_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_candidate_hybrid_purpose_contract_response()
+            )
+        return _SchemaResponse()
+
+    result = schema_preflight.verify_required_supabase_v2_schema(
+        {
+            "SUPABASE_URL": "http://127.0.0.1:3000",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            activation_name: activation_value,
+        },
+        opener=opener,
+        chain_realized_activation_authority=activation,
+    )
+
+    assert result["routing_model_transition_v2_required"] is True
+    assert result["rpc_probe_count"] == len(required_rpcs)
+    assert (
+        "scripts/163-research-lab-model-transition-artifact-custody.sql"
+        in result["migration_files"]
+    )
+
+
+def test_routing_activation_fails_closed_without_transition_lookup_rpc() -> None:
+    activation = json.loads(_chain_realized_activation_response())[0]
+
+    def opener(request, *, timeout):
+        assert timeout == 10.0
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                    + schema_preflight.ROUTING_MODEL_TRANSITION_V2_RPCS[:1]
+                )
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="research_lab_routing_load_model_transition_v2",
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "http://127.0.0.1:3000",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+                "RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED": "true",
+            },
+            opener=opener,
+            chain_realized_activation_authority=activation,
+        )
 
 
 def test_schema_preflight_provided_activation_avoids_data_request() -> None:

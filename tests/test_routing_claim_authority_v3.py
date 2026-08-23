@@ -62,7 +62,15 @@ class _RpcClient:
 
     def rpc(self, name, params):
         self.calls.append((name, dict(params)))
-        return type("_Call", (), {"execute": lambda _self: _RpcResponse(self.result)})()
+        result = (
+            {
+                "event_hash": params["p_event_hash"],
+                "idempotent": False,
+            }
+            if name == "research_lab_routing_append_fenced_event_v3"
+            else self.result
+        )
+        return type("_Call", (), {"execute": lambda _self: _RpcResponse(result)})()
 
 
 def test_claim_is_deterministic_and_contains_only_queue_lease_fence_fields():

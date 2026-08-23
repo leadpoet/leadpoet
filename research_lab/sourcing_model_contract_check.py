@@ -81,6 +81,23 @@ CONTRACT_V55_E55_PATH = Path(__file__).with_name(
 PARITY_FIXTURE_V55_E55_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v55_e55.json"
 )
+CONTRACT_V68_PATH = Path(__file__).with_name("sourcing_model_contract_v68.json")
+PARITY_FIXTURE_V28_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v28.json"
+)
+ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID = (
+    "leadpoet-sourcing-wrapper-contract-v68"
+)
+ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256 = (
+    "sha256:960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
+)
+ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256 = (
+    "sha256:deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
+)
+ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256 = (
+    "sha256:bcbd1d629d1328d43a56e2b3585d776d0b9e8b6c8b9af465aff915d3788239db"
+)
+ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION = "routing-compiler-v5"
 SEMANTIC_COMPATIBILITY_POLICY_V1_PATH = Path(__file__).with_name(
     "sourcing_model_semantic_compatibility_v1.json"
 )
@@ -1739,7 +1756,195 @@ def semantic_compatibility_policy_v1() -> Dict[str, Any]:
         raise ValueError(
             "semantic sourcing compatibility import-time binding policy is invalid"
         )
+    dispatch_v3 = document.get("additive_dispatch_custody_v3")
+    if not isinstance(dispatch_v3, Mapping):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch policy is invalid"
+        )
+    if (
+        dispatch_v3.get("contract_id")
+        != ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID
+        or dispatch_v3.get("contract_sha256")
+        != ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256
+        or dispatch_v3.get("parity_sha256")
+        != ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256
+        or dispatch_v3.get("contract_snapshot_path")
+        != "research_lab/sourcing_model_contract_v68.json"
+        or dispatch_v3.get("parity_snapshot_path")
+        != "research_lab/sourcing_model_parity_fixtures_v28.json"
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch identity is invalid"
+        )
+    for key in ("callables", "exact_constants", "critical_binding_slices"):
+        value = dispatch_v3.get(key)
+        if not isinstance(value, Mapping) or not value:
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch policy is invalid"
+            )
+    if (
+        dict(
+            dict(dispatch_v3["exact_constants"]).get(
+                "sourcing_model/routing/compiler.py"
+            )
+            or {}
+        ).get("COMPILER_VERSION")
+        != ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch compiler is invalid"
+        )
+    for relative, specification in (
+        dispatch_v3.get("critical_binding_slices") or {}
+    ).items():
+        if (
+            not isinstance(relative, str)
+            or not isinstance(specification, Mapping)
+            or not isinstance(specification.get("roots"), list)
+            or not specification.get("roots")
+            or len(set(specification["roots"])) != len(specification["roots"])
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(specification.get("sha256") or "")
+            )
+            is None
+        ):
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch slices are invalid"
+            )
+    metadata_binding = dispatch_v3.get("metadata_binding")
+    if (
+        not isinstance(metadata_binding, Mapping)
+        or metadata_binding.get("adapter_version")
+        != "sourcing-model-research-lab-adapter:v10"
+        or metadata_binding.get("metadata_function")
+        != "model_runner_custody_metadata"
+        or metadata_binding.get("adapter_metadata_key") != "dispatch_custody"
+        or metadata_binding.get("dispatch_metadata_sha256")
+        != ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256
+        or not isinstance(metadata_binding.get("required_model_keys"), list)
+        or not isinstance(metadata_binding.get("required_dispatch_keys"), list)
+        or not metadata_binding.get("required_model_keys")
+        or not metadata_binding.get("required_dispatch_keys")
+        or not set(metadata_binding["required_model_keys"]).issubset(
+            set(metadata_binding["required_dispatch_keys"])
+        )
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch metadata policy is invalid"
+        )
     return document
+
+
+def _same_json_literal(actual: Any, expected: Any) -> bool:
+    """Compare decoded JSON values without Python numeric type coercion."""
+
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _same_json_literal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_json_literal(left, right)
+            for left, right in zip(actual, expected)
+        )
+    return actual == expected
+
+
+def approved_typed_dispatch_custody_v3_metadata_v1() -> Dict[str, Any]:
+    """Build the exact adapter v10 metadata from the reviewed v28 snapshot."""
+
+    if (
+        _snapshot_sha256(CONTRACT_V68_PATH)
+        != ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256
+    ):
+        raise ValueError("typed dispatch custody contract snapshot differs")
+    if (
+        _snapshot_sha256(PARITY_FIXTURE_V28_PATH)
+        != ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256
+    ):
+        raise ValueError("typed dispatch custody parity snapshot differs")
+    violations: List[str] = []
+    parity = _safe_json_document(
+        PARITY_FIXTURE_V28_PATH,
+        label="typed dispatch custody parity snapshot",
+        violations=violations,
+    )
+    if violations or not isinstance(parity, dict):
+        raise ValueError("typed dispatch custody parity snapshot is invalid")
+    projection = parity.get("expected_model_runner_custody_v3_projection")
+    if not isinstance(projection, dict):
+        raise ValueError("typed dispatch custody parity projection is invalid")
+
+    metadata_binding = semantic_compatibility_policy_v1()[
+        "additive_dispatch_custody_v3"
+    ]["metadata_binding"]
+    required_model_keys = metadata_binding["required_model_keys"]
+    required_dispatch_keys = metadata_binding["required_dispatch_keys"]
+    if (
+        len(required_model_keys) != len(set(required_model_keys))
+        or len(required_dispatch_keys) != len(set(required_dispatch_keys))
+    ):
+        raise ValueError("typed dispatch custody metadata policy is invalid")
+    try:
+        expected = {
+            key: deepcopy(projection[key]) for key in required_model_keys
+        }
+    except KeyError as exc:
+        raise ValueError(
+            "typed dispatch custody parity projection is incomplete"
+        ) from exc
+    expected.update(
+        {
+            "completion_included": False,
+            "initial_dispatch_entrypoint": (
+                "dispatch_runner_initial_custody_v3"
+            ),
+            "initial_dispatch_schema_version": (
+                "model-runner-custody:v3-initial-dispatch"
+            ),
+            "start_entrypoint": "build_runner_start_custody_v3",
+            "start_validation_entrypoint": (
+                "validate_runner_start_custody_v3"
+            ),
+            "action_entrypoint": "build_runner_action_custody_v3",
+            "action_validation_entrypoint": (
+                "validate_runner_action_custody_v3"
+            ),
+            "continuation_entrypoint": (
+                "build_runner_initial_continuation_custody_v3"
+            ),
+            "continuation_validation_entrypoint": (
+                "validate_runner_initial_continuation_custody_v3"
+            ),
+        }
+    )
+    if set(expected) != set(required_dispatch_keys):
+        raise ValueError("typed dispatch custody metadata policy is invalid")
+    if _sha256_json(expected) != ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256:
+        raise ValueError("typed dispatch custody approved metadata differs")
+    return expected
+
+
+def validate_typed_dispatch_custody_v3_metadata_v1(
+    value: Any,
+) -> Dict[str, Any]:
+    """Require exact JSON structure and canonical bytes for adapter v10."""
+
+    expected = approved_typed_dispatch_custody_v3_metadata_v1()
+    if type(value) is not dict or set(value) != set(expected):
+        raise ValueError("typed dispatch custody metadata differs")
+    try:
+        actual_sha256 = _sha256_json(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("typed dispatch custody metadata differs") from exc
+    if (
+        actual_sha256 != ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256
+        or not _same_json_literal(value, expected)
+    ):
+        raise ValueError("typed dispatch custody metadata differs")
+    return deepcopy(value)
 
 
 def semantic_compatibility_policy_hash_v1() -> str:
@@ -2154,6 +2359,247 @@ def _semantic_contract_shape_violations_v1(
     return violations
 
 
+def _typed_dispatch_custody_v3_requested(
+    contract: Mapping[str, Any],
+    *,
+    policy: Mapping[str, Any],
+    root: Path | None = None,
+) -> bool:
+    """Detect a custody-v3 claim before exact identity verification."""
+
+    dispatch_v3 = policy["additive_dispatch_custody_v3"]
+    declared_exact_signatures = contract.get("exact_signatures")
+    exact_signatures = (
+        set(declared_exact_signatures)
+        if isinstance(declared_exact_signatures, list)
+        and all(isinstance(item, str) for item in declared_exact_signatures)
+        else set()
+    )
+    exact_markers = {
+        "research_lab_adapter.py:dispatch_runner_initial_custody_v3",
+        "sourcing_model/model_runner.py:model_runner_custody_metadata",
+    }
+    marker_claim = exact_markers.issubset(exact_signatures)
+    contract_constants = contract.get("exact_constants")
+    adapter_constants = (
+        contract_constants.get("research_lab_adapter.py")
+        if isinstance(contract_constants, Mapping)
+        else None
+    )
+    expected_adapter_version = str(
+        dispatch_v3["metadata_binding"]["adapter_version"]
+    )
+    contract_version_claim = (
+        isinstance(adapter_constants, Mapping)
+        and adapter_constants.get("ADAPTER_VERSION") == expected_adapter_version
+    )
+    source_version_claim = False
+    if root is not None:
+        try:
+            adapter_tree = ast.parse((Path(root) / "research_lab_adapter.py").read_bytes())
+            source_version_claim = (
+                _unique_literal_binding_v1(adapter_tree, "ADAPTER_VERSION")
+                == expected_adapter_version
+            )
+        except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+            source_version_claim = False
+    # Contract labels are descriptive rather than globally unique.  The
+    # currently published Lab artifact also uses the v68 label for an older
+    # adapter contract, so the label alone cannot opt a source tree into the
+    # custody-v3 rules.  Positive protocol markers or the exact adapter
+    # version remain fail-closed signals for custody-v3 admission.
+    return marker_claim or contract_version_claim or source_version_claim
+
+
+def _merge_typed_dispatch_policy(
+    policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Overlay v3 requirements while preserving its reviewed v2 runner ABI."""
+
+    merged = deepcopy(dict(policy))
+    dispatch_v3 = dict(policy["additive_dispatch_custody_v3"])
+    for key in ("callables", "exact_constants", "required_imports"):
+        base = deepcopy(dict(merged.get(key) or {}))
+        for relative, values in (dispatch_v3.get(key) or {}).items():
+            if key == "required_imports":
+                base.setdefault(relative, [])
+                base[relative] = [*base[relative], *deepcopy(list(values))]
+            elif key == "callables":
+                existing = dict(base.get(relative) or {})
+                existing.update(deepcopy(dict(values)))
+                base[relative] = existing
+            else:
+                base[relative] = deepcopy(dict(values))
+        merged[key] = base
+    integer_minimums = deepcopy(dict(merged.get("integer_minimums") or {}))
+    for relative, values in (dispatch_v3.get("integer_minimums") or {}).items():
+        integer_minimums[relative] = deepcopy(dict(values))
+    merged["integer_minimums"] = integer_minimums
+    slices = deepcopy(dict(merged.get("critical_binding_slices") or {}))
+    for relative, values in (dispatch_v3.get("critical_binding_slices") or {}).items():
+        slices[relative] = deepcopy(dict(values))
+    merged["critical_binding_slices"] = slices
+    if "import_time_binding_slices" in dispatch_v3:
+        merged["import_time_binding_slices"] = deepcopy(
+            dict(dispatch_v3.get("import_time_binding_slices") or {})
+        )
+    opaque = deepcopy(dict(merged.get("opaque_constants") or {}))
+    for relative, values in (dispatch_v3.get("opaque_constants") or {}).items():
+        current = dict(opaque.get(relative) or {})
+        current.update(dict(values))
+        opaque[relative] = current
+    merged["opaque_constants"] = opaque
+    required_files = list(merged.get("required_files") or ())
+    for relative in dispatch_v3.get("required_files") or ():
+        if relative not in required_files:
+            required_files.append(relative)
+    merged["required_files"] = required_files
+    return merged
+
+
+def _typed_dispatch_metadata_violations(
+    root: Path,
+    *,
+    policy: Mapping[str, Any],
+    parsed: Dict[str, ast.Module],
+) -> List[str]:
+    """Check the adapter/model metadata join without importing model code."""
+
+    dispatch_v3 = policy["additive_dispatch_custody_v3"]
+    requirements = dispatch_v3.get("metadata_binding") or {}
+    adapter_relative = "research_lab_adapter.py"
+    path = root / adapter_relative
+    try:
+        tree = parsed.get(adapter_relative)
+        if tree is None:
+            tree = ast.parse(path.read_bytes())
+            parsed[adapter_relative] = tree
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return ["typed dispatch adapter metadata is unreadable"]
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    metadata = functions.get("adapter_metadata")
+    if metadata is None or isinstance(metadata, ast.AsyncFunctionDef):
+        return ["typed dispatch adapter metadata callable is invalid"]
+    violations: List[str] = []
+    expected_version = str(requirements.get("adapter_version") or "")
+    try:
+        adapter_version = _unique_literal_binding_v1(
+            tree, "ADAPTER_VERSION"
+        )
+    except ValueError:
+        adapter_version = None
+    if adapter_version != expected_version:
+        violations.append("typed dispatch adapter version is not v10")
+    metadata_name = str(requirements.get("metadata_function") or "")
+    if not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == metadata_name
+        for node in ast.walk(metadata)
+    ):
+        violations.append("typed dispatch metadata is not sourced from the model")
+    key_name = str(requirements.get("adapter_metadata_key") or "")
+    if not any(
+        isinstance(node, ast.Dict)
+        and any(
+            isinstance(key, ast.Constant) and key.value == key_name
+            for key in node.keys
+        )
+        for node in ast.walk(metadata)
+    ):
+        violations.append("typed dispatch metadata binding key is missing")
+    dispatch_dicts = []
+    for node in ast.walk(metadata):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if key_name in keys:
+            dispatch_index = next(
+                (
+                    index
+                    for index, key in enumerate(node.keys)
+                    if isinstance(key, ast.Constant) and key.value == key_name
+                ),
+                None,
+            )
+            if dispatch_index is not None and isinstance(
+                node.values[dispatch_index], ast.Dict
+            ):
+                dispatch_dicts.append(node.values[dispatch_index])
+    required_dispatch_keys = set(
+        str(item) for item in requirements.get("required_dispatch_keys") or ()
+    )
+    observed_dispatch_keys = {
+        key.value
+        for dispatch in dispatch_dicts
+        for key in dispatch.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    if any(
+        any(
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == metadata_name
+            for key, value in zip(dispatch.keys, dispatch.values)
+            if key is None
+        )
+        for dispatch in dispatch_dicts
+    ):
+        observed_dispatch_keys.update(
+            str(item) for item in requirements.get("required_model_keys") or ()
+        )
+    if not dispatch_dicts or not required_dispatch_keys.issubset(
+        observed_dispatch_keys
+    ):
+        violations.append("typed dispatch adapter metadata fields are incomplete")
+
+    model_relative = "sourcing_model/model_runner.py"
+    model_path = root / model_relative
+    try:
+        model_tree = parsed.get(model_relative)
+        if model_tree is None:
+            model_tree = ast.parse(model_path.read_bytes())
+            parsed[model_relative] = model_tree
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return [*violations, "typed dispatch model metadata is unreadable"]
+    model_function = next(
+        (
+            node
+            for node in model_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == metadata_name
+        ),
+        None,
+    )
+    model_return = next(
+        (
+            node.value
+            for node in ast.walk(model_function)
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+        ),
+        None,
+    ) if model_function is not None else None
+    observed_model_keys = {
+        key.value
+        for key in (model_return.keys if isinstance(model_return, ast.Dict) else ())
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    required_model_keys = set(
+        str(item) for item in requirements.get("required_model_keys") or ()
+    )
+    if not required_model_keys.issubset(observed_model_keys):
+        violations.append("typed dispatch model metadata fields are incomplete")
+    return violations
+
+
 def verify_semantic_source_tree_compatibility_v1(
     root: Path,
     *,
@@ -2227,6 +2673,64 @@ def verify_semantic_source_tree_compatibility_v1(
         violations.append("unsupported model parity fixture schema major")
     violations.extend(_semantic_contract_shape_violations_v1(contract))
 
+    contract_hash = _snapshot_sha256(contract_file) if contract_file.is_file() else ""
+    parity_hash = _snapshot_sha256(parity_file) if parity_file.is_file() else ""
+    typed_dispatch_requested = _typed_dispatch_custody_v3_requested(
+        contract,
+        policy=policy,
+        root=root,
+    )
+    if typed_dispatch_requested:
+        dispatch_v3 = policy["additive_dispatch_custody_v3"]
+        exact_signatures = contract.get("exact_signatures")
+        exact_signatures_valid = isinstance(exact_signatures, list) and all(
+            isinstance(item, str) for item in exact_signatures
+        )
+        if not exact_signatures_valid:
+            violations.append(
+                "model compatibility exact signatures declaration is invalid"
+            )
+        if contract_id != str(dispatch_v3["contract_id"]):
+            violations.append("typed dispatch contract identity is not approved")
+        if contract_hash != str(dispatch_v3["contract_sha256"]):
+            violations.append("typed dispatch contract snapshot differs")
+        if parity_hash != str(dispatch_v3["parity_sha256"]):
+            violations.append("typed dispatch parity snapshot differs")
+        reviewed_snapshots_match = True
+        for snapshot_path, observed_path, label in (
+            (
+                dispatch_v3["contract_snapshot_path"],
+                contract_file,
+                "typed dispatch contract",
+            ),
+            (
+                dispatch_v3["parity_snapshot_path"],
+                parity_file,
+                "typed dispatch parity",
+            ),
+        ):
+            expected_path = Path(__file__).with_name(Path(snapshot_path).name)
+            try:
+                if (
+                    not expected_path.is_file()
+                    or not observed_path.is_file()
+                    or expected_path.read_bytes() != observed_path.read_bytes()
+                ):
+                    reviewed_snapshots_match = False
+                    violations.append(f"{label} does not match reviewed snapshot")
+            except OSError:
+                reviewed_snapshots_match = False
+                violations.append(f"{label} snapshot is unreadable")
+        typed_dispatch_verified = (
+            exact_signatures_valid
+            and contract_id == str(dispatch_v3["contract_id"])
+            and contract_hash == str(dispatch_v3["contract_sha256"])
+            and parity_hash == str(dispatch_v3["parity_sha256"])
+            and reviewed_snapshots_match
+        )
+        if typed_dispatch_verified:
+            policy = _merge_typed_dispatch_policy(policy)
+
     for relative in (canonical_path, parity_path):
         required_path = root / relative
         if not required_path.is_file() or required_path.is_symlink():
@@ -2268,6 +2772,12 @@ def verify_semantic_source_tree_compatibility_v1(
         },
         "integer_minimums": dict(policy.get("integer_minimums") or {}),
         "exact_constants": dict(policy.get("exact_constants") or {}),
+    }
+    surface_document["full_parameters"] = {
+        f"{relative}:{name}": list(spec.get("full_parameters") or ())
+        for relative, functions in policy_callables.items()
+        for name, spec in functions.items()
+        if spec.get("full_parameters") is not None
     }
     violations.extend(
         _verify_source_tree_contract_document(
@@ -2345,6 +2855,15 @@ def verify_semantic_source_tree_compatibility_v1(
         if observed_hash != str(specification.get("sha256") or ""):
             violations.append(f"hard module semantic drift {relative}")
 
+    if typed_dispatch_requested:
+        violations.extend(
+            _typed_dispatch_metadata_violations(
+                root,
+                policy=policy,
+                parsed=parsed,
+            )
+        )
+
     for relative, expected_hash in (
         policy.get("import_time_binding_slices") or {}
     ).items():
@@ -2371,8 +2890,6 @@ def verify_semantic_source_tree_compatibility_v1(
         if observed_hash != str(expected_hash or ""):
             violations.append(f"hard import-time semantic drift {relative}")
 
-    contract_hash = _snapshot_sha256(contract_file) if contract_file.is_file() else ""
-    parity_hash = _snapshot_sha256(parity_file) if parity_file.is_file() else ""
     manifest_document = _manifest_document(manifest)
     violations.extend(
         _manifest_pair_violations(

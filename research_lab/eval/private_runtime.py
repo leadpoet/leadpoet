@@ -35,6 +35,7 @@ from research_lab.employee_buckets import (
     normalize_employee_count_buckets,
 )
 from research_lab.sourcing_model_contract_check import (
+    ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION,
     QUALIFICATION_SCORING_ADAPTER_VERSION_V2,
     QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
     QUALIFICATION_PROTOCOL_ENTRYPOINT_V2,
@@ -47,6 +48,7 @@ from research_lab.sourcing_model_contract_check import (
     reviewed_consumer_snapshots,
     semantic_compatibility_policy_v1,
     source_tree_compatibility_admission_v1,
+    validate_typed_dispatch_custody_v3_metadata_v1,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ SOURCING_MODEL_MAX_FINALIZATION_RESERVE_SECONDS = 60.0
 EXPECTED_SOURCING_ADAPTER_VERSIONS = frozenset(
     str(snapshot["contract"]["exact_constants"]["research_lab_adapter.py"]["ADAPTER_VERSION"])
     for snapshot in reviewed_consumer_snapshots().values()
-)
+) | frozenset({"sourcing-model-research-lab-adapter:v10"})
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_RUNTIME_CAPABILITIES_BY_CONTRACT_VERSION = {
     "sourcing-model-runtime-capabilities:v2": frozenset(
@@ -2125,6 +2127,22 @@ def validate_sourcing_adapter_metadata(
         raise PrivateModelRuntimeError(
             "private model does not declare a reviewed adapter contract"
         )
+    typed_dispatch_v3 = (
+        document.get("adapter_version")
+        == "sourcing-model-research-lab-adapter:v10"
+    )
+    if typed_dispatch_v3:
+        dispatch_custody = document.get("dispatch_custody")
+        if not isinstance(dispatch_custody, Mapping):
+            raise PrivateModelRuntimeError(
+                "private model v10 adapter metadata lacks typed dispatch custody"
+            )
+        try:
+            validate_typed_dispatch_custody_v3_metadata_v1(dispatch_custody)
+        except ValueError as exc:
+            raise PrivateModelRuntimeError(
+                "private model v10 dispatch custody metadata differs"
+            ) from exc
     if versioned_qualification:
         component_registry_version_valid = bool(
             re.fullmatch(
@@ -2220,7 +2238,12 @@ def validate_sourcing_adapter_metadata(
     expected_compiler_version = str(
         semantic_bindings.get("routing_compiler_version") or ""
     )
-    if versioned_qualification:
+    if typed_dispatch_v3:
+        compiler_version_valid = (
+            routing.get("compiler_version")
+            == ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION
+        )
+    elif versioned_qualification:
         compiler_version_valid = bool(
             re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",

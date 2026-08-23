@@ -771,6 +771,7 @@ def test_v47_shape_auto_admits_keyword_only_model_owned_additions(
     receipt = _admit(tmp_path)
 
     assert "consumer_api_version" not in contract
+    assert "exact_signatures" not in contract
     assert receipt["admission_mode"] == "semantic_v1"
     assert receipt["consumer_api_version"] == "research-lab-consumer-api:v1"
     assert receipt["decision"] == "accepted"
@@ -782,6 +783,83 @@ def test_v47_shape_auto_admits_keyword_only_model_owned_additions(
         "routing_compiler_version": "routing-compiler-v3",
         "scoring_adapter_version": "qualification-company-scorer:v1",
     }
+
+
+@pytest.mark.parametrize(
+    "marker",
+    (
+        "research_lab_adapter.py:dispatch_runner_initial_custody_v3",
+        "sourcing_model/model_runner.py:model_runner_custody_metadata",
+    ),
+)
+def test_one_custody_v3_marker_does_not_reclassify_legacy_contract(
+    marker: str,
+) -> None:
+    policy = compatibility.semantic_compatibility_policy_v1()
+    contract = {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v47",
+        "exact_signatures": [marker],
+    }
+
+    assert not compatibility._typed_dispatch_custody_v3_requested(
+        contract,
+        policy=policy,
+    )
+
+
+def test_legacy_v68_label_without_custody_markers_is_not_reclassified() -> None:
+    policy = compatibility.semantic_compatibility_policy_v1()
+    contract = {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v68",
+        "exact_constants": {
+            "research_lab_adapter.py": {
+                "ADAPTER_VERSION": "sourcing-model-research-lab-adapter:v9",
+            },
+        },
+        "exact_signatures": [],
+    }
+
+    assert not compatibility._typed_dispatch_custody_v3_requested(
+        contract,
+        policy=policy,
+    )
+
+
+def test_both_custody_v3_markers_make_unknown_identity_fail_closed() -> None:
+    policy = compatibility.semantic_compatibility_policy_v1()
+    contract = {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v999",
+        "exact_signatures": [
+            "research_lab_adapter.py:dispatch_runner_initial_custody_v3",
+            "sourcing_model/model_runner.py:model_runner_custody_metadata",
+        ],
+    }
+
+    assert compatibility._typed_dispatch_custody_v3_requested(
+        contract,
+        policy=policy,
+    )
+
+
+def test_v10_source_cannot_use_a_legacy_contract_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_future_tree(tmp_path, monkeypatch)
+    adapter = tmp_path / "research_lab_adapter.py"
+    adapter.write_text(
+        adapter.read_text(encoding="utf-8").replace(
+            "sourcing-model-research-lab-adapter:v7",
+            "sourcing-model-research-lab-adapter:v10",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="typed dispatch contract identity is not approved",
+    ):
+        _admit(tmp_path, _manifest(tmp_path))
 
 
 def test_candidate_build_gate_auto_admits_future_surface_and_rejects_drift(

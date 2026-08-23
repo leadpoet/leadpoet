@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 from typing import Any, Mapping, Protocol
 
 from gateway.research_lab.routing_experiment_runtime import (
@@ -37,6 +38,25 @@ class CommonModelExperimentError(RuntimeError):
 
 class CommonModelExperimentRecoveryError(CommonModelExperimentError):
     """A durable paid-call marker prevents unsafe replay after restart."""
+
+
+MODEL_TRANSITION_SCHEMA_VERSION = (
+    "leadpoet.research_lab.model_transition.v2"
+)
+_ARTIFACT_KEY_RE = re.compile(
+    r"[0-9a-f]{40}:"
+    r"(?:sha256:)?[0-9a-f]{64}:"
+    r"(?:sha256:)?[0-9a-f]{64}"
+)
+
+
+def _require_artifact_key(value: Any) -> str:
+    artifact_key = str(value or "").strip().lower()
+    if not _ARTIFACT_KEY_RE.fullmatch(artifact_key):
+        raise CommonModelExperimentError(
+            "exact Model transition artifact identity is invalid"
+        )
+    return artifact_key
 
 
 @dataclass(frozen=True)
@@ -387,7 +407,7 @@ class ReviewedProtectedModelActionDispatcher:
 
 
 class ModelTransitionRepository(Protocol):
-    """Append-only recovery seam keyed by the Model idempotency key."""
+    """Append-only recovery seam keyed by logical and artifact identity."""
 
     def load_model_transition(
         self,
@@ -396,6 +416,7 @@ class ModelTransitionRepository(Protocol):
         variant_id: str,
         unit_ref: str,
         idempotency_key: str,
+        artifact_key: str,
     ) -> Mapping[str, Any] | None: ...
 
     def append_model_transition(
@@ -404,6 +425,7 @@ class ModelTransitionRepository(Protocol):
         experiment_hash: str,
         variant_id: str,
         unit_ref: str,
+        artifact_key: str,
         action: Mapping[str, Any],
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
@@ -452,8 +474,35 @@ class FencedModelTransitionRepository:
         self._store = store
         self._claim = claim
 
-    def load_model_transition(self, **identity: Any) -> Mapping[str, Any] | None:
-        return self._store.load_model_transition_marker(**identity)
+    def load_model_transition(
+        self,
+        *,
+        experiment_hash: str,
+        variant_id: str,
+        unit_ref: str,
+        idempotency_key: str,
+        artifact_key: str,
+    ) -> Mapping[str, Any] | None:
+        expected_artifact_key = _require_artifact_key(artifact_key)
+        marker = self._store.load_model_transition_marker(
+            experiment_hash=experiment_hash,
+            variant_id=variant_id,
+            unit_ref=unit_ref,
+            idempotency_key=idempotency_key,
+            artifact_key=expected_artifact_key,
+        )
+        if marker is None:
+            return None
+        if (
+            not isinstance(marker, Mapping)
+            or marker.get("event_schema_version")
+            != MODEL_TRANSITION_SCHEMA_VERSION
+            or marker.get("artifact_key") != expected_artifact_key
+        ):
+            raise CommonModelExperimentRecoveryError(
+                "durable Model transition artifact identity differs"
+            )
+        return dict(marker)
 
     def append_model_transition(
         self,
@@ -461,12 +510,14 @@ class FencedModelTransitionRepository:
         experiment_hash: str,
         variant_id: str,
         unit_ref: str,
+        artifact_key: str,
         action: Mapping[str, Any],
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
         provider_receipt: Mapping[str, Any] | None,
         replay_ref: Mapping[str, Any] | None = None,
     ) -> None:
+        expected_artifact_key = _require_artifact_key(artifact_key)
         provider_response = completion.get("provider_response")
         if (provider_receipt is None) != (replay_ref is None):
             raise CommonModelExperimentError(
@@ -508,30 +559,46 @@ class FencedModelTransitionRepository:
                     "model_completion_contract_hash"
                 ],
             }
+        event_document = {
+            "event_schema_version": MODEL_TRANSITION_SCHEMA_VERSION,
+            "variant_id": variant_id,
+            "unit_ref": unit_ref,
+            "artifact_key": expected_artifact_key,
+            "idempotency_key": action.get("idempotency_key"),
+            "action_sha256": action.get("action_sha256"),
+            "continuation_sha256": _sha256(continuation),
+            "completion_sha256": completion.get("completion_sha256"),
+            "provider_response_sha256": _sha256(provider_response),
+            "provider_receipt": (
+                None
+                if provider_receipt is None
+                else dict(provider_receipt)
+            ),
+            **replay_values,
+        }
         result = self._store.append_event(
             experiment_hash=experiment_hash,
             event_type="model_transition_completed",
-            event_doc={
-                "event_schema_version": (
-                    "leadpoet.research_lab.model_transition.v1"
-                ),
-                "variant_id": variant_id,
-                "unit_ref": unit_ref,
-                "idempotency_key": action.get("idempotency_key"),
-                "action_sha256": action.get("action_sha256"),
-                "continuation_sha256": _sha256(continuation),
-                "completion_sha256": completion.get("completion_sha256"),
-                "provider_response_sha256": _sha256(provider_response),
-                "provider_receipt": (
-                    None
-                    if provider_receipt is None
-                    else dict(provider_receipt)
-                ),
-                **replay_values,
-            },
+            event_doc=event_document,
             claim=self._claim,
         )
-        if not isinstance(result, Mapping):
+        durable_document = {
+            "schema_version": "leadpoet.research_lab.routing_event.v2",
+            **event_document,
+        }
+        expected_event_hash = sha256_json(
+            {
+                "schema_version": "leadpoet.research_lab.routing_event.v2",
+                "event_type": "model_transition_completed",
+                "document": durable_document,
+            }
+        )
+        if (
+            not isinstance(result, Mapping)
+            or set(result) != {"event_hash", "idempotent"}
+            or result.get("event_hash") != expected_event_hash
+            or type(result.get("idempotent")) is not bool
+        ):
             raise CommonModelExperimentError(
                 "durable Model transition result is invalid"
             )
@@ -685,6 +752,7 @@ class ExactModelExperimentCoordinator:
             raise CommonModelExperimentError("Model action limit is invalid")
         self._experiment_hash = str(experiment_hash)
         self._registration = registration
+        self._artifact_key = _require_artifact_key(registration.key)
         self._dispatcher = dispatcher
         self._transitions = transitions
         self._max_actions = max_actions
@@ -734,6 +802,7 @@ class ExactModelExperimentCoordinator:
                 variant_id=variant_id,
                 unit_ref=unit_ref,
                 idempotency_key=idempotency_key,
+                artifact_key=self._artifact_key,
             )
             if stored is not None:
                 if "action" in stored:
@@ -852,6 +921,7 @@ class ExactModelExperimentCoordinator:
                     experiment_hash=self._experiment_hash,
                     variant_id=variant_id,
                     unit_ref=unit_ref,
+                    artifact_key=self._artifact_key,
                     action=action,
                     continuation=continuation,
                     completion=completion,

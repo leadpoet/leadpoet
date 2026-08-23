@@ -39,6 +39,11 @@ _MEMBERS = {
         ["action"],
         [],
     ),
+    "ingest_runner_provider_response": (
+        ["action", "host_response"],
+        ["action", "host_response"],
+        [],
+    ),
     "prepare_runner_normalization_request": (
         ["action"],
         ["action"],
@@ -174,6 +179,7 @@ _ROLE_MEMBERS = {
     "host_capability_manifest": "build_host_capability_manifest",
     "official_baseline_execution": "build_official_baseline_execution",
     "provider_prepare": "prepare_runner_provider_request",
+    "provider_response_ingestion": "ingest_runner_provider_response",
     "provider_compiler_inventory": "model_runner_provider_compiler_inventory",
     "provider_compiler_preflight": "runner_provider_compiler_preflight",
     "verifier_execution": "execute_runner_verifier_action",
@@ -230,6 +236,11 @@ _ROLE_HOST_CALLS = {
         ],
     ),
     "provider_prepare": (["action"], [], []),
+    "provider_response_ingestion": (
+        ["action", "host_response"],
+        [],
+        [],
+    ),
     "provider_compiler_inventory": ([], [], []),
     "provider_compiler_preflight": (["host_capability_manifest"], [], []),
     "verifier_execution": (["action"], [], []),
@@ -545,6 +556,96 @@ def runner_declaration(
                 "provider_prepare_contract": identity(
                     "model-runner-provider-dispatch-contract:v1"
                 ),
+                "provider_response_ingestion_entrypoint": (
+                    "ingest_runner_provider_response"
+                ),
+                "provider_response_ingestion_schema_version": (
+                    "model-runner-provider-response-ingestion:v1"
+                ),
+                "provider_response_ingestion_contract": {
+                    **(
+                        ingestion_payload := {
+                            "schema_version": (
+                                "model-runner-provider-response-ingestion:v1"
+                            ),
+                            "ingestion_entrypoint": (
+                                "ingest_model_provider_response"
+                            ),
+                            "ingestion_signature": [
+                                "action",
+                                "host_response",
+                            ],
+                            "host_response_schema_version": (
+                                "host-provider-response:v1"
+                            ),
+                            "host_response_closed_fields": [
+                                "schema_version",
+                                "provider",
+                                "status_code",
+                                "body",
+                            ],
+                            "host_response_body_authority": (
+                                "action_bound_provider_compiler_parser"
+                            ),
+                            "dispatch_schema_version": (
+                                "model-runner-provider-dispatch:v1"
+                            ),
+                            "dispatch_contract_sha256": identity(
+                                "model-runner-provider-dispatch-contract:v1"
+                            )["contract_sha256"],
+                            "compiler_inventory_sha256": "f" * 64,
+                            "parsed_response_schema_versions": [
+                                "model-icp-normalization-provider-response:v1",
+                                "model-provider-response:v3",
+                            ],
+                            "closed_fields": [
+                                "schema_version",
+                                "action_sha256",
+                                "dispatch_sha256",
+                                "compiler_id",
+                                "compiler_contract_sha256",
+                                "request_sha256",
+                                "host_response_schema_version",
+                                "host_response_sha256",
+                                "provider",
+                                "parsed_response_schema_version",
+                                "parsed_response",
+                                "parsed_response_sha256",
+                                "ingestion_sha256",
+                            ],
+                            "raw_host_response_returned": False,
+                            "completion_input": (
+                                "original_unchanged_host_response"
+                            ),
+                            "provider_receipt_binding_input": (
+                                "original_unchanged_host_response"
+                            ),
+                            "completion_reparses_response": True,
+                            "durable_custody": (
+                                "host_provider_action_receipt_before_completion"
+                            ),
+                            "custody_receipt_field": (
+                                "model_provider_response_ingestion"
+                            ),
+                            "replay_requirement": (
+                                "reload_raw_response_reingest_and_require_byte_identical_receipt"
+                            ),
+                            "custody_join": [
+                                "action_sha256",
+                                "host_response_sha256",
+                                "parsed_response_sha256",
+                            ],
+                            "host_semantic_projection_allowed": False,
+                            "hash_algorithm": "sha256",
+                            "canonical_json": (
+                                "utf8-json-sort-keys-compact-ascii-no-nan"
+                            ),
+                        }
+                    ),
+                    "contract_sha256": _canonical_sha256(
+                        ingestion_payload
+                    ),
+                },
                 "provider_compiler_inventory_entrypoint": (
                     "model_runner_provider_compiler_inventory"
                 ),
@@ -619,6 +720,7 @@ def runner_declaration(
                 "project_runner_result_for_benchmark",
                 "build_official_baseline_execution",
                 "prepare_runner_provider_request",
+                "ingest_runner_provider_response",
                 "prepare_runner_normalization_request",
                 "model_runner_provider_compiler_inventory",
                 "runner_provider_compiler_preflight",

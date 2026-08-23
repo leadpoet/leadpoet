@@ -215,8 +215,12 @@ def _protected_result_document(result: ProtectedModelActionResult) -> dict[str, 
         raise OfficialBaselineProtectedAuthorityError(
             "official baseline protected result is invalid"
         )
-    return {
-        "schema_version": "leadpoet.research_lab.official_baseline_protected_result.v1",
+    document = {
+        "schema_version": (
+            "leadpoet.research_lab.official_baseline_protected_result.v2"
+            if result.model_provider_response_ingestion is not None
+            else "leadpoet.research_lab.official_baseline_protected_result.v1"
+        ),
         "host_result": asdict(result.host_result),
         "provider_receipt": (
             None
@@ -225,19 +229,42 @@ def _protected_result_document(result: ProtectedModelActionResult) -> dict[str, 
         ),
         "replay_ref": (None if result.replay_ref is None else dict(result.replay_ref)),
     }
+    if result.model_provider_response_ingestion is not None:
+        if not isinstance(result.model_provider_response_ingestion, Mapping):
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline provider response ingestion is invalid"
+            )
+        document["model_provider_response_ingestion"] = dict(
+            result.model_provider_response_ingestion
+        )
+    return document
 
 
 def _protected_result_from_document(
     value: Mapping[str, Any],
 ) -> ProtectedModelActionResult:
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping):
+        raise OfficialBaselineProtectedAuthorityError(
+            "official baseline protected result document is invalid"
+        )
+    schema_version = value.get("schema_version")
+    expected_fields = {
         "schema_version",
         "host_result",
         "provider_receipt",
         "replay_ref",
-    } or value.get("schema_version") != (
+    }
+    if schema_version == (
+        "leadpoet.research_lab.official_baseline_protected_result.v2"
+    ):
+        expected_fields.add("model_provider_response_ingestion")
+    elif schema_version != (
         "leadpoet.research_lab.official_baseline_protected_result.v1"
     ):
+        raise OfficialBaselineProtectedAuthorityError(
+            "official baseline protected result document is invalid"
+        )
+    if set(value) != expected_fields:
         raise OfficialBaselineProtectedAuthorityError(
             "official baseline protected result document is invalid"
         )
@@ -263,10 +290,18 @@ def _protected_result_from_document(
         raise OfficialBaselineProtectedAuthorityError(
             "official baseline protected replay reference is invalid"
         )
+    ingestion = value.get("model_provider_response_ingestion")
+    if ingestion is not None and not isinstance(ingestion, Mapping):
+        raise OfficialBaselineProtectedAuthorityError(
+            "official baseline protected ingestion receipt is invalid"
+        )
     result = ProtectedModelActionResult(
         host_result=host,
         provider_receipt=receipt,
         replay_ref=None if replay is None else dict(replay),
+        model_provider_response_ingestion=(
+            None if ingestion is None else dict(ingestion)
+        ),
     )
     if _protected_result_document(result) != dict(value):
         raise OfficialBaselineProtectedAuthorityError(
@@ -793,6 +828,7 @@ class _ReservedOfficialBaselineDispatcher:
         elif (
             result.provider_receipt is not None
             or result.replay_ref is not None
+            or result.model_provider_response_ingestion is not None
             or terminal.provider_request_ref is not None
             or host.calls != 0
             or float(host.cost_credits) != 0.0

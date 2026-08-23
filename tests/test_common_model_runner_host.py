@@ -952,7 +952,8 @@ def test_oci_generation_discovers_signed_role_path_and_extensions(
             consumer_path: ["action", "future_optional"]
         },
         "required_keyword_only": {},
-        "frozen_asyncness": {consumer_path: False},
+        # Historical contracts may omit synchronous False entries.
+        "frozen_asyncness": {},
         "exact_constants": {},
         "extensions": {
             "leadpoet.fixture": {"hash_bound": True}
@@ -1050,6 +1051,16 @@ def test_oci_runner_transport_exposes_the_complete_artifact_protocol(monkeypatch
         expected_release_identity={"source_commit": "a" * 40},
         member_name="validate_runner_result",
     ) == {"operation": "validate_runner_result"}
+    assert transport.ingest_runner_provider_response(
+        {"action_sha256": "a" * 64},
+        {
+            "schema_version": "host-provider-response:v1",
+            "provider": "fixture",
+            "status_code": 200,
+            "body": {},
+        },
+        member_name="ingest_runner_provider_response",
+    ) == {"operation": "ingest_runner_provider_response"}
     assert calls == [
         (
             "runner_preflight",
@@ -1075,6 +1086,19 @@ def test_oci_runner_transport_exposes_the_complete_artifact_protocol(monkeypatch
                 "start_request": {"input": {}},
                 "expected_release_identity": {"source_commit": "a" * 40},
                 "member_name": "validate_runner_result",
+            },
+        ),
+        (
+            "ingest_runner_provider_response",
+            {
+                "action": {"action_sha256": "a" * 64},
+                "host_response": {
+                    "schema_version": "host-provider-response:v1",
+                    "provider": "fixture",
+                    "status_code": 200,
+                    "body": {},
+                },
+                "member_name": "ingest_runner_provider_response",
             },
         ),
     ]

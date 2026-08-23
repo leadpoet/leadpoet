@@ -5453,6 +5453,9 @@ class _OfficialBaselineEvidenceProxyLease:
         self._server = server
         self._thread = thread
         self._closed = False
+        self._shutdown_complete = False
+        self._server_close_complete = False
+        self._thread_stopped = False
         self.url = ""
         self.capability_sha256 = ""
         self.ready_provider_ids: tuple[str, ...] = ()
@@ -5533,25 +5536,42 @@ class _OfficialBaselineEvidenceProxyLease:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         close_error: BaseException | None = None
-        try:
-            self._server.shutdown()
-        except BaseException as exc:  # noqa: BLE001 - cleanup must continue
-            close_error = exc
-        try:
-            self._server.server_close()
-        except BaseException as exc:  # noqa: BLE001 - cleanup must continue
-            close_error = close_error or exc
-        self._thread.join(timeout=5.0)
-        if self._thread.is_alive():
+        if not self._shutdown_complete:
+            try:
+                self._server.shutdown()
+                self._shutdown_complete = True
+            except BaseException as exc:  # noqa: BLE001 - cleanup must continue
+                close_error = exc
+        if not self._server_close_complete:
+            try:
+                self._server.server_close()
+                self._server_close_complete = True
+            except BaseException as exc:  # noqa: BLE001 - cleanup must continue
+                close_error = close_error or exc
+        if not self._thread_stopped:
+            try:
+                self._thread.join(timeout=5.0)
+                self._thread_stopped = not self._thread.is_alive()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must continue
+                close_error = close_error or exc
+        self._closed = (
+            self._shutdown_complete
+            and self._server_close_complete
+            and self._thread_stopped
+        )
+        if not self._thread_stopped:
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline evidence proxy thread did not stop"
-            )
+            ) from close_error
         if close_error is not None:
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline evidence proxy cleanup failed"
             ) from close_error
+        if not self._closed:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline evidence proxy cleanup is incomplete"
+            )
 
 
 def _start_official_baseline_evidence_proxy(
@@ -5602,7 +5622,14 @@ def _start_official_baseline_evidence_proxy(
         return lease
     except BaseException as exc:  # noqa: BLE001 - partial construction is closed
         if lease is not None:
-            lease.close()
+            try:
+                lease.close()
+            except BaseException as cleanup_exc:  # noqa: BLE001
+                wrapped = OfficialBaselineAuthorityUnavailable(
+                    "official baseline evidence proxy cleanup failed"
+                )
+                setattr(wrapped, "proxy_lease", lease)
+                raise wrapped from cleanup_exc
         elif server is not None:
             try:
                 server.shutdown()
@@ -5696,6 +5723,7 @@ class ResearchLabGatewayScoringWorker:
             official_baseline_protocol_preflight
         )
         self._active_official_baseline_evidence_proxy: Any | None = None
+        self._official_baseline_proxy_cleanup_pending = False
         # True only for the worker holding the scoring-recovery lease this pass.
         self._holds_maintenance_lease = False
         # Globally-unique lease token for THIS process (worker_ref is a stable
@@ -5747,12 +5775,24 @@ class ResearchLabGatewayScoringWorker:
             selection=selection,
             spec=spec,
         )
-        lease = self._official_baseline_evidence_proxy_factory(
-            benchmark_date=benchmark_date,
-            rolling_window_hash=rolling_window_hash,
-            artifact_hash=artifact.model_artifact_hash,
-            worker_ref=self.worker_ref,
-        )
+        try:
+            lease = self._official_baseline_evidence_proxy_factory(
+                benchmark_date=benchmark_date,
+                rolling_window_hash=rolling_window_hash,
+                artifact_hash=artifact.model_artifact_hash,
+                worker_ref=self.worker_ref,
+            )
+        except BaseException as exc:  # noqa: BLE001 - retain failed cleanup
+            stranded = getattr(exc, "proxy_lease", None)
+            if callable(getattr(stranded, "close", None)):
+                self._active_official_baseline_evidence_proxy = stranded
+                self._official_baseline_proxy_cleanup_pending = True
+            raise
+        if callable(getattr(lease, "close", None)):
+            # Own the lease before validating the returned capability.  A
+            # failed close retains this reference for the next retry.
+            self._active_official_baseline_evidence_proxy = lease
+            self._official_baseline_proxy_cleanup_pending = False
         if (
             not isinstance(getattr(lease, "url", None), str)
             or not isinstance(
@@ -5764,12 +5804,26 @@ class ResearchLabGatewayScoringWorker:
             or not callable(getattr(lease, "close", None))
         ):
             if callable(getattr(lease, "close", None)):
-                lease.close()
+                self._close_active_official_baseline_evidence_proxy()
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline evidence proxy factory returned an invalid lease"
             )
         self._active_official_baseline_evidence_proxy = lease
+        self._official_baseline_proxy_cleanup_pending = False
         return lease
+
+    def _close_active_official_baseline_evidence_proxy(self) -> None:
+        """Release ownership only after shutdown is confirmed complete."""
+
+        lease = self._active_official_baseline_evidence_proxy
+        if lease is None:
+            self._official_baseline_proxy_cleanup_pending = False
+            return
+        self._official_baseline_proxy_cleanup_pending = True
+        lease.close()
+        if self._active_official_baseline_evidence_proxy is lease:
+            self._active_official_baseline_evidence_proxy = None
+            self._official_baseline_proxy_cleanup_pending = False
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -13110,16 +13164,19 @@ class ResearchLabGatewayScoringWorker:
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         if self._active_official_baseline_evidence_proxy is not None:
-            raise OfficialBaselineAuthorityUnavailable(
-                "official baseline evidence proxy lease is already active"
-            )
+            if not getattr(
+                self,
+                "_official_baseline_proxy_cleanup_pending",
+                False,
+            ):
+                raise OfficialBaselineAuthorityUnavailable(
+                    "official baseline evidence proxy lease is already active"
+                )
+            self._close_active_official_baseline_evidence_proxy()
         try:
             return await self._maybe_run_private_baseline_impl()
         finally:
-            lease = self._active_official_baseline_evidence_proxy
-            self._active_official_baseline_evidence_proxy = None
-            if lease is not None:
-                lease.close()
+            self._close_active_official_baseline_evidence_proxy()
 
     async def _maybe_run_private_baseline_impl(self) -> dict[str, Any] | None:
         from leadpoet_canonical.production_parity_boundary_v2 import (

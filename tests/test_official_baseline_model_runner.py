@@ -9,7 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.research_lab.common_model_experiment import ProtectedModelActionResult
+from gateway.research_lab.common_model_experiment import (
+    CommonModelExperimentError,
+    ProtectedModelActionResult,
+    _bind_durable_provider_result,
+)
 from gateway.research_lab import scoring_worker as scoring_worker_module
 from gateway.research_lab.official_baseline_model_runner import (
     ArtifactBenchmarkProjection,
@@ -362,6 +366,123 @@ class _OfficialTransport(_Transport):
         }
         return {**body, "execution_sha256": self._wire_hash(body)}
 
+    def model_runner_provider_compiler_inventory(self, *, member_name):
+        assert member_name == "model_runner_provider_compiler_inventory"
+        return {
+            "schema_version": "model-runner-provider-compiler-inventory:v1",
+            "entries": [],
+            "inventory_sha256": "f" * 64,
+        }
+
+    def prepare_runner_provider_request(self, action, *, member_name):
+        assert member_name == "prepare_runner_provider_request"
+        request = {"credential_binding": {"source": "fixture"}}
+        body = {
+            "schema_version": "model-runner-provider-dispatch:v1",
+            "action_sha256": action["action_sha256"],
+            "action_type": action["action_type"],
+            "tool_id": action["tool_id"],
+            "compiler_id": "fixture.compiler:v1",
+            "compiler_contract_sha256": action[
+                "binding_contract_sha256"
+            ],
+            "provider": "fixture",
+            "request": request,
+            "request_sha256": self._wire_hash(request),
+            "response_contract": {},
+            "budgets": {},
+            "idempotency_key": action["idempotency_key"],
+        }
+        return {**body, "dispatch_sha256": self._wire_hash(body)}
+
+    def ingest_runner_provider_response(
+        self, action, host_response, *, member_name
+    ):
+        assert member_name == "ingest_runner_provider_response"
+        dispatch = self.prepare_runner_provider_request(
+            action,
+            member_name="prepare_runner_provider_request",
+        )
+        parsed = {
+            "schema_version": "model-provider-response:v3",
+            "records": [],
+            "freshness_context": {},
+            "extensions": {},
+            "records_sha256": self._wire_hash([]),
+        }
+        body = {
+            "schema_version": "model-runner-provider-response-ingestion:v1",
+            "action_sha256": action["action_sha256"],
+            "dispatch_sha256": dispatch["dispatch_sha256"],
+            "compiler_id": dispatch["compiler_id"],
+            "compiler_contract_sha256": dispatch[
+                "compiler_contract_sha256"
+            ],
+            "request_sha256": dispatch["request_sha256"],
+            "host_response_schema_version": "host-provider-response:v1",
+            "host_response_sha256": self._wire_hash(host_response),
+            "provider": dispatch["provider"],
+            "parsed_response_schema_version": (
+                "model-provider-response:v3"
+            ),
+            "parsed_response": parsed,
+            "parsed_response_sha256": self._wire_hash(parsed),
+        }
+        return {**body, "ingestion_sha256": self._wire_hash(body)}
+
+    def build_runner_completion(self, action, result, *, member_name):
+        if not isinstance(result.get("provider_response"), dict) or (
+            result["provider_response"].get("schema_version")
+            != "host-provider-response:v1"
+        ):
+            return super().build_runner_completion(
+                action, result, member_name=member_name
+            )
+        ingestion = self.ingest_runner_provider_response(
+            action,
+            result["provider_response"],
+            member_name="ingest_runner_provider_response",
+        )
+        body = {
+            "schema_version": "model-runner-completion:v3",
+            "action_sha256": action["action_sha256"],
+            "provider_response": ingestion["parsed_response"],
+            "provider_response_sha256": ingestion[
+                "parsed_response_sha256"
+            ],
+            "provider_receipt_ref": result["provider_receipt_ref"],
+            "provider_receipt_sha256": result[
+                "provider_receipt_sha256"
+            ],
+            "provider_identity_sha256": result[
+                "provider_identity_sha256"
+            ],
+        }
+        return {
+            **body,
+            "completion_sha256": self._wire_hash(body),
+        }
+
+    def build_runner_provider_receipt_binding(
+        self, action, result, *, member_name
+    ):
+        binding = super().build_runner_provider_receipt_binding(
+            action,
+            result,
+            member_name=member_name,
+        )
+        ingestion = self.ingest_runner_provider_response(
+            action,
+            result["provider_response"],
+            member_name="ingest_runner_provider_response",
+        )
+        return {
+            **binding,
+            "provider_response_sha256": ingestion[
+                "parsed_response_sha256"
+            ],
+        }
+
     def prepare_runner_normalization_request(
         self, action, *, member_name
     ):
@@ -525,11 +646,22 @@ class _Dispatcher:
             execution_mode="measured_lab",
             call_count=1,
         )
+        host_response = {
+            "schema_version": "host-provider-response:v1",
+            "provider": "fixture",
+            "status_code": 200,
+            "body": {"records": []},
+        }
+        ingestion = _OfficialTransport().ingest_runner_provider_response(
+            action,
+            host_response,
+            member_name="ingest_runner_provider_response",
+        )
         return ProtectedModelActionResult(
             host_result=HostActionResult(
                 outcome="succeeded",
                 reason_code="fixture",
-                provider_response={"companies": []},
+                provider_response=host_response,
                 calls=1,
                 cost_credits=0.00001,
                 latency_ms=20,
@@ -538,6 +670,7 @@ class _Dispatcher:
             ),
             provider_receipt=receipt,
             replay_ref={"protected_job_ref": "fixture-job"},
+            model_provider_response_ingestion=ingestion,
         )
 
     def replay_provider_action(self, **_values):
@@ -658,7 +791,7 @@ class _TerminalAuthority:
 
 
 def _exact_fixture():
-    registration = _registration()
+    registration = _official_registration()
     projector = _Projector(registration)
     authority = _ProtectedAuthority(registration)
     terminal = _TerminalAuthority()
@@ -951,6 +1084,9 @@ def test_official_baseline_generation_bundle_is_atomic_and_pinned():
     assert official.member("provider_prepare") == (
         "prepare_runner_provider_request"
     )
+    assert official.member("provider_response_ingestion") == (
+        "ingest_runner_provider_response"
+    )
     assert official.member("verifier_execution") == (
         "execute_runner_verifier_action"
     )
@@ -1007,6 +1143,97 @@ def test_official_baseline_generation_bundle_is_atomic_and_pinned():
         ArtifactRunnerProtocolGeneration.from_declaration(
             tampered_proof_identity,
             expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+
+def test_provider_response_ingestion_frozen_interface_identity_matches_model():
+    declaration = runner_declaration(
+        "v3",
+        contract_hash=HASH["contract"],
+        official_baseline=True,
+    )
+    role = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ]["provider_response_ingestion"]
+    signature = {
+        "consumer_contract_id": "leadpoet-sourcing-wrapper-contract-v73",
+        "consumer_contract_path": (
+            "research_lab_adapter.py:ingest_runner_provider_response"
+        ),
+        "positional_parameters": ["action", "host_response"],
+        "full_parameters": ["action", "host_response"],
+        "required_keyword_only": [],
+        "is_async": False,
+    }
+
+    assert role["interface_contract_sha256"] == (
+        "41708b700cbb8af11c28cdd9556ff70f7eed6676cf30a0d79cba3c0e6c424162"
+    )
+    assert _bare_wire_hash(signature) == (
+        "356052075d056fa1f14eb168a52c1ba80a2db203946edbf5c8656adaa7cafc4f"
+    )
+
+
+def test_missing_or_incompatible_provider_ingestion_fails_generation_admission():
+    declaration = runner_declaration(
+        "v3",
+        contract_hash=HASH["contract"],
+        official_baseline=True,
+    )
+    missing = deepcopy(declaration)
+    role_contract = missing["champion_execution"]["runner_role_contract"]
+    role_contract["roles"].pop("provider_response_ingestion")
+    profile = role_contract["activation_profiles"]["full_company"]
+    profile["required_roles"].remove("provider_response_ingestion")
+    profile["minimum_interface_major"].pop(
+        "provider_response_ingestion"
+    )
+    _rehash_role_contract(missing)
+
+    with pytest.raises(ModelRunnerHostError, match="requirements differ"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            missing,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+    incompatible = deepcopy(declaration)
+    contract = incompatible["champion_execution"][
+        "provider_response_ingestion_contract"
+    ]
+    contract["completion_input"] = "consumer_projected_response"
+    contract["contract_sha256"] = _bare_wire_hash({
+        key: value
+        for key, value in contract.items()
+        if key != "contract_sha256"
+    })
+    with pytest.raises(ModelRunnerHostError, match="contract differs"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            incompatible,
+            expected_consumer_contract_sha256=HASH["contract"],
+        )
+
+
+def test_durable_provider_ingestion_must_replay_byte_identically():
+    registration = _official_registration()
+    action = _provider_action({})
+    protected = _Dispatcher().dispatch_provider_action(
+        action=action,
+        unit_ref="baseline_icp:" + "a" * 64,
+    )
+    ingestion = dict(protected.model_provider_response_ingestion)
+    ingestion["ingestion_sha256"] = "0" * 64
+
+    with pytest.raises(
+        CommonModelExperimentError,
+        match="differs from replay",
+    ):
+        _bind_durable_provider_result(
+            protocol=registration.protocol,
+            action=action,
+            protected=replace(
+                protected,
+                model_provider_response_ingestion=ingestion,
+            ),
         )
 
 
@@ -1485,6 +1712,114 @@ def test_exact_proxy_lease_shutdown_is_complete_and_idempotent():
     assert server.shutdowns == 1
     assert server.closes == 1
     assert thread.joins == [5.0]
+
+
+def test_exact_proxy_lease_partial_shutdown_can_retry():
+    class _Server:
+        def __init__(self):
+            self.shutdowns = 0
+            self.closes = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+        def server_close(self):
+            self.closes += 1
+
+    class _Thread:
+        def __init__(self):
+            self.joins = []
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return len(self.joins) < 2
+
+    server = _Server()
+    thread = _Thread()
+    lease = scoring_worker_module._OfficialBaselineEvidenceProxyLease(
+        server=server,
+        thread=thread,
+    )
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="thread did not stop",
+    ):
+        lease.close()
+    lease.close()
+    lease.close()
+
+    assert server.shutdowns == 1
+    assert server.closes == 1
+    assert thread.joins == [5.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_failed_proxy_shutdown_retains_owner_until_retry_succeeds():
+    class _Server:
+        def __init__(self):
+            self.shutdowns = 0
+            self.closes = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+        def server_close(self):
+            self.closes += 1
+
+    class _Thread:
+        def __init__(self):
+            self.joins = []
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return len(self.joins) < 2
+
+    worker = object.__new__(
+        scoring_worker_module.ResearchLabGatewayScoringWorker
+    )
+    worker._active_official_baseline_evidence_proxy = None
+    server = _Server()
+    thread = _Thread()
+    lease = scoring_worker_module._OfficialBaselineEvidenceProxyLease(
+        server=server,
+        thread=thread,
+    )
+    runs = 0
+
+    async def implementation():
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            worker._active_official_baseline_evidence_proxy = lease
+        return {"status": "fixture success"}
+
+    worker._maybe_run_private_baseline_impl = implementation
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="thread did not stop",
+    ):
+        await worker._maybe_run_private_baseline()
+    assert worker._active_official_baseline_evidence_proxy is lease
+    assert worker._official_baseline_proxy_cleanup_pending is True
+    assert thread.is_alive()
+
+    assert await worker._maybe_run_private_baseline() == {
+        "status": "fixture success"
+    }
+    assert worker._active_official_baseline_evidence_proxy is None
+    assert worker._official_baseline_proxy_cleanup_pending is False
+    assert not thread.is_alive()
+
+    lease.close()
+    assert server.shutdowns == 1
+    assert server.closes == 1
+    assert thread.joins == [5.0, 5.0]
 
 
 def test_exact_proxy_partial_construction_closes_on_live_validation_failure(

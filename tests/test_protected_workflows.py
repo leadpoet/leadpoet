@@ -354,6 +354,29 @@ def test_scoring_receipt_failure_policy_is_protected():
     } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
+def test_official_provider_ingestion_and_proxy_ownership_are_protected():
+    assert {
+        "_V3_OFFICIAL_BASELINE_ROLES",
+        "_validate_provider_response_ingestion_contract",
+        "_validate_runner_role_contract",
+        "ArtifactRunnerProtocolGeneration",
+        "ResearchLabModelRunnerProtocol",
+    } <= set(PROTECTED_SYMBOLS["research_lab/model_runner_protocol.py"])
+    assert {
+        "_validated_durable_provider_ingestion",
+        "_bind_durable_provider_result",
+        "_validate_completion_provider_ingestion",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "gateway/research_lab/common_model_experiment.py"
+        ]
+    )
+    assert {
+        "_OfficialBaselineEvidenceProxyLease.close",
+        "ResearchLabGatewayScoringWorker._close_active_official_baseline_evidence_proxy",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
+
+
 def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",

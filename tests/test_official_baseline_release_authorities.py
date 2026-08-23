@@ -126,7 +126,7 @@ class _Protocol:
     def build_provider_receipt_binding(self, action, result):
         assert action["action_sha256"]
         assert result.provider_receipt_ref
-        return {
+        binding = {
             "provider_receipt_ref": result.provider_receipt_ref,
             "provider_identity_sha256": result.provider_identity_sha256,
             "receipt_sha256": _hash(
@@ -141,6 +141,39 @@ class _Protocol:
                 }
             ),
         }
+        if result.provider_response is not None:
+            binding["provider_response_sha256"] = self.ingest_provider_response(
+                action,
+                result.provider_response,
+            )["parsed_response_sha256"]
+        return binding
+
+    def ingest_provider_response(self, action, host_response):
+        assert self.dispatch is not None
+        parsed = {
+            "schema_version": "model-provider-response:v3",
+            "records": [],
+            "freshness_context": {},
+            "extensions": {},
+            "records_sha256": _hash([]),
+        }
+        body = {
+            "schema_version": "model-runner-provider-response-ingestion:v1",
+            "action_sha256": action["action_sha256"],
+            "dispatch_sha256": self.dispatch["dispatch_sha256"],
+            "compiler_id": self.dispatch["compiler_id"],
+            "compiler_contract_sha256": self.dispatch[
+                "compiler_contract_sha256"
+            ],
+            "request_sha256": self.dispatch["request_sha256"],
+            "host_response_schema_version": "host-provider-response:v1",
+            "host_response_sha256": _hash(host_response),
+            "provider": self.dispatch["provider"],
+            "parsed_response_schema_version": "model-provider-response:v3",
+            "parsed_response": parsed,
+            "parsed_response_sha256": _hash(parsed),
+        }
+        return {**body, "ingestion_sha256": _hash(body)}
 
     def execute_verifier_action(self, action):
         assert self.verifier is not None
@@ -329,6 +362,23 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     assert [call["method"] for call in restarted_proxy.calls] == ["GET"]
     assert terminal.protected_action_result.provider_receipt.call_count == 1
     assert terminal.protected_action_result.replay_ref["provider_request_ref"]
+    assert terminal.protected_action_result.host_result.provider_response == {
+        "schema_version": "host-provider-response:v1",
+        "provider": "deepline",
+        "status_code": 200,
+        "body": {
+            "id": "run-fixture",
+            "status": "completed",
+            "output": {
+                "schema_version": 3,
+                "segment_id": "aggregate-fixture",
+                "rows": [],
+            },
+        },
+    }
+    assert terminal.protected_action_result.model_provider_response_ingestion[
+        "schema_version"
+    ] == "model-runner-provider-response-ingestion:v1"
 
 
 def test_deepline_tampered_progress_fails_closed_without_network():

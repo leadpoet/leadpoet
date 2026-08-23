@@ -113,7 +113,10 @@ if operation == "runner_protocol_generation":
             full_parameters[member] = contract_full_parameters.get(path)
             if path in contract_keyword_only:
                 required_keyword_only[member] = contract_keyword_only[path]
-            frozen_asyncness[member] = contract_asyncness.get(path)
+            # Consumer contracts historically list asynchronous members and
+            # may omit synchronous ``False`` entries.  The signed role
+            # signature remains the exact asyncness authority.
+            frozen_asyncness[member] = contract_asyncness.get(path, False)
         consumer_contract = {
             "schema_version": contract.get("schema_version"),
             "contract_id": contract.get("contract_id"),
@@ -235,6 +238,14 @@ elif operation == "build_official_baseline_execution":
 elif operation == "prepare_runner_provider_request":
     result = declared_member("provider_prepare", "provider_prepare_entrypoint")(
         payload["action"],
+    )
+elif operation == "ingest_runner_provider_response":
+    result = declared_member(
+        "provider_response_ingestion",
+        "provider_response_ingestion_entrypoint",
+    )(
+        payload["action"],
+        payload["host_response"],
     )
 elif operation == "prepare_runner_normalization_request":
     champion = module.adapter_metadata().get("champion_execution", {})
@@ -511,6 +522,22 @@ class DockerModelRunnerTransport:
         return self._call(
             "prepare_runner_provider_request",
             {"action": dict(action), "member_name": member_name},
+        )
+
+    def ingest_runner_provider_response(
+        self,
+        action: Mapping[str, Any],
+        host_response: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]:
+        return self._call(
+            "ingest_runner_provider_response",
+            {
+                "action": dict(action),
+                "host_response": dict(host_response),
+                "member_name": member_name,
+            },
         )
 
     def prepare_runner_normalization_request(

@@ -1611,6 +1611,22 @@ class ArtifactPreparedActionExecutor:
             provider_receipt_ref=receipt.receipt_ref,
             provider_identity_sha256=provider_identity,
         )
+        ingestion: Mapping[str, Any] | None = None
+        if response is not None:
+            try:
+                ingestion = self._protocol.ingest_provider_response(
+                    action,
+                    response,
+                )
+            except Exception as exc:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline artifact provider response ingestion failed"
+                ) from exc
+            if not isinstance(ingestion, Mapping):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline artifact provider response ingestion is invalid"
+                )
+            ingestion = dict(ingestion)
         binding = self._protocol.build_provider_receipt_binding(action, host)
         if (
             not isinstance(binding, Mapping)
@@ -1619,6 +1635,11 @@ class ArtifactPreparedActionExecutor:
             != host.provider_identity_sha256
             or _BARE_HASH_RE.fullmatch(str(binding.get("receipt_sha256") or ""))
             is None
+            or (
+                ingestion is not None
+                and binding.get("provider_response_sha256")
+                != ingestion.get("parsed_response_sha256")
+            )
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact provider receipt binding differs"
@@ -1642,6 +1663,7 @@ class ArtifactPreparedActionExecutor:
                 "provider_receipt_ref": bound_host.provider_receipt_ref,
                 "provider_receipt_sha256": bound_host.provider_receipt_sha256,
             },
+            model_provider_response_ingestion=ingestion,
         )
         return self._known_terminal(
             preparation=preparation,
@@ -1835,6 +1857,8 @@ def load_official_baseline_release_components(
     for method_name in (
         "official_host_binding_catalog",
         "build_official_host_capability_manifest",
+        "prepare_provider_request",
+        "ingest_provider_response",
         "execute_verifier_action",
     ):
         if not callable(getattr(protocol, method_name, None)):

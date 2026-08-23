@@ -50,6 +50,7 @@ class ProtectedModelActionResult:
     host_result: HostActionResult
     provider_receipt: ProviderReceipt | None = None
     replay_ref: Mapping[str, Any] | None = None
+    model_provider_response_ingestion: Mapping[str, Any] | None = None
 
 
 class ExactModelActionDispatcher(Protocol):
@@ -871,6 +872,11 @@ def _bind_durable_provider_result(
         raise CommonModelExperimentError(
             "durable provider result is incomplete"
         )
+    ingestion = _validated_durable_provider_ingestion(
+        protocol=protocol,
+        action=action,
+        protected=protected,
+    )
     try:
         binding = protocol.build_provider_receipt_binding(
             action, host_result
@@ -886,6 +892,11 @@ def _bind_durable_provider_result(
         != host_result.provider_receipt_ref
         or binding.get("provider_identity_sha256")
         != host_result.provider_identity_sha256
+        or (
+            ingestion is not None
+            and binding.get("provider_response_sha256")
+            != ingestion.get("parsed_response_sha256")
+        )
         or not re.fullmatch(
             r"[0-9a-f]{64}", str(binding.get("receipt_sha256") or "")
         )
@@ -903,6 +914,85 @@ def _bind_durable_provider_result(
         provider_receipt_sha256=str(binding["receipt_sha256"]),
         provider_identity_sha256=str(binding["provider_identity_sha256"]),
     )
+
+
+def _validated_durable_provider_ingestion(
+    *,
+    protocol: Any,
+    action: Mapping[str, Any],
+    protected: ProtectedModelActionResult,
+) -> Mapping[str, Any] | None:
+    """Reingest raw custody bytes; never reinterpret model-owned content."""
+
+    generation = getattr(protocol, "protocol_generation", None)
+    requires_ingestion = bool(
+        getattr(generation, "supports_provider_response_ingestion", False)
+    )
+    host_response = protected.host_result.provider_response
+    persisted = protected.model_provider_response_ingestion
+    if not requires_ingestion:
+        if persisted is not None:
+            raise CommonModelExperimentError(
+                "legacy provider result carries unsupported ingestion custody"
+            )
+        return None
+    if host_response is None:
+        if persisted is not None:
+            raise CommonModelExperimentError(
+                "empty provider result carries ingestion custody"
+            )
+        return None
+    if not isinstance(host_response, Mapping) or not isinstance(
+        persisted, Mapping
+    ):
+        raise CommonModelExperimentError(
+            "durable provider response ingestion is incomplete"
+        )
+    ingest = getattr(protocol, "ingest_provider_response", None)
+    if not callable(ingest):
+        raise CommonModelExperimentError(
+            "artifact provider response ingestor is unavailable"
+        )
+    try:
+        replayed = ingest(action, host_response)
+    except Exception as exc:
+        raise CommonModelExperimentError(
+            "artifact provider response ingestion failed"
+        ) from exc
+    if not isinstance(replayed, Mapping) or dict(replayed) != dict(persisted):
+        raise CommonModelExperimentError(
+            "durable provider response ingestion differs from replay"
+        )
+    return dict(persisted)
+
+
+def _validate_completion_provider_ingestion(
+    *,
+    protected: ProtectedModelActionResult,
+    completion: Mapping[str, Any],
+) -> None:
+    """Join artifact completion to its separately custodied ingestion receipt."""
+
+    ingestion = protected.model_provider_response_ingestion
+    if ingestion is None:
+        return
+    parsed_response = ingestion.get("parsed_response")
+    parsed_sha256 = str(
+        ingestion.get("parsed_response_sha256") or ""
+    ).removeprefix("sha256:")
+    completion_sha256 = str(
+        completion.get("provider_response_sha256") or ""
+    ).removeprefix("sha256:")
+    if (
+        not isinstance(parsed_response, Mapping)
+        or completion.get("provider_response") != parsed_response
+        or completion_sha256 != parsed_sha256
+        or _sha256(parsed_response).removeprefix("sha256:")
+        != parsed_sha256
+    ):
+        raise CommonModelExperimentError(
+            "Model completion differs from provider response ingestion"
+        )
 
 
 class ExactModelExperimentCoordinator:
@@ -1078,6 +1168,11 @@ class ExactModelExperimentCoordinator:
                             protected=protected,
                         )
                     completion = protocol.build_completion(action, host_result)
+                    if action_type in _PROVIDER_ACTION_TYPES:
+                        _validate_completion_provider_ingestion(
+                            protected=protected,
+                            completion=completion,
+                        )
                     if (
                         completion.get("completion_sha256")
                         != stored.get("completion_sha256")
@@ -1140,6 +1235,11 @@ class ExactModelExperimentCoordinator:
                         protected=protected,
                     )
                 completion = protocol.build_completion(action, host_result)
+                if action_type in _PROVIDER_ACTION_TYPES:
+                    _validate_completion_provider_ingestion(
+                        protected=protected,
+                        completion=completion,
+                    )
                 self._transitions.append_model_transition(
                     experiment_hash=self._experiment_hash,
                     variant_id=variant_id,

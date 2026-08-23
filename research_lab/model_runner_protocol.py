@@ -41,6 +41,7 @@ _V3_OFFICIAL_BASELINE_ROLES = frozenset({
     "benchmark_projection",
     "official_baseline_execution",
     "provider_prepare",
+    "provider_response_ingestion",
     "provider_compiler_inventory",
     "provider_compiler_preflight",
     "verifier_execution",
@@ -83,6 +84,12 @@ _MEMBER_SIGNATURES = {
         "prepare_runner_provider_request",
         ("action",),
         ("action",),
+        (),
+    ),
+    "provider_response_ingestion": (
+        "ingest_runner_provider_response",
+        ("action", "host_response"),
+        ("action", "host_response"),
         (),
     ),
     "normalization_prepare_legacy": (
@@ -217,6 +224,9 @@ _V3_OFFICIAL_BASELINE_MEMBER_METADATA_KEYS = {
     "benchmark_projection": "benchmark_projection_entrypoint",
     "official_baseline_execution": "official_baseline_execution_entrypoint",
     "provider_prepare": "provider_prepare_entrypoint",
+    "provider_response_ingestion": (
+        "provider_response_ingestion_entrypoint"
+    ),
     "provider_compiler_inventory": "provider_compiler_inventory_entrypoint",
     "provider_compiler_preflight": "provider_compiler_preflight_entrypoint",
     "verifier_execution": "verifier_execution_entrypoint",
@@ -236,6 +246,9 @@ _V3_OFFICIAL_BASELINE_SCHEMA_VERSIONS = {
         "leadpoet.research_lab.official_baseline_execution.v1"
     ),
     "provider_prepare_schema_version": "model-runner-provider-dispatch:v1",
+    "provider_response_ingestion_schema_version": (
+        "model-runner-provider-response-ingestion:v1"
+    ),
     "provider_compiler_inventory_schema_version": (
         "model-runner-provider-compiler-inventory:v1"
     ),
@@ -275,6 +288,7 @@ _V3_OFFICIAL_BASELINE_CONTRACT_KEYS = frozenset({
     "benchmark_projection_contract",
     "official_baseline_execution_contract",
     "provider_prepare_contract",
+    "provider_response_ingestion_contract",
     "verifier_execution_contract",
     "official_host_binding_catalog_contract",
     "candidate_provider_projection_contract",
@@ -369,6 +383,11 @@ _ROLE_INTERFACE_SHAPES = {
         ),
     ),
     "provider_prepare": (("action",), (), ()),
+    "provider_response_ingestion": (
+        ("action", "host_response"),
+        (),
+        (),
+    ),
     "provider_compiler_inventory": ((), (), ()),
     "provider_compiler_preflight": (
         ("host_capability_manifest",),
@@ -380,6 +399,31 @@ _ROLE_INTERFACE_SHAPES = {
     "official_host_capability_manifest": (("availability",), (), ()),
     "normalization_prepare_legacy": (("action",), (), ()),
 }
+
+_PROVIDER_RESPONSE_INGESTION_FIELD_ORDER = (
+    "schema_version",
+    "action_sha256",
+    "dispatch_sha256",
+    "compiler_id",
+    "compiler_contract_sha256",
+    "request_sha256",
+    "host_response_schema_version",
+    "host_response_sha256",
+    "provider",
+    "parsed_response_schema_version",
+    "parsed_response",
+    "parsed_response_sha256",
+    "ingestion_sha256",
+)
+_PROVIDER_RESPONSE_INGESTION_FIELDS = frozenset(
+    _PROVIDER_RESPONSE_INGESTION_FIELD_ORDER
+)
+_HOST_PROVIDER_RESPONSE_FIELDS = frozenset({
+    "schema_version",
+    "provider",
+    "status_code",
+    "body",
+})
 
 
 def _closed_string_mapping(value: Any, *, label: str) -> dict[str, Any]:
@@ -437,6 +481,96 @@ def _bare_sha256_json(value: Any) -> str:
     except (TypeError, ValueError) as exc:
         raise ModelRunnerHostError("artifact value is not canonical JSON") from exc
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_provider_response_ingestion_contract(
+    value: Any,
+    *,
+    provider_dispatch_contract_sha256: str,
+) -> Mapping[str, Any]:
+    """Validate the host-visible ingestion contract before any paid action."""
+
+    contract = _validate_contract_identity(
+        value,
+        label="artifact provider response ingestion contract",
+    )
+    required_fields = {
+        "schema_version",
+        "ingestion_entrypoint",
+        "ingestion_signature",
+        "host_response_schema_version",
+        "host_response_closed_fields",
+        "host_response_body_authority",
+        "dispatch_schema_version",
+        "dispatch_contract_sha256",
+        "compiler_inventory_sha256",
+        "parsed_response_schema_versions",
+        "closed_fields",
+        "raw_host_response_returned",
+        "completion_input",
+        "provider_receipt_binding_input",
+        "completion_reparses_response",
+        "durable_custody",
+        "custody_receipt_field",
+        "replay_requirement",
+        "custody_join",
+        "host_semantic_projection_allowed",
+        "hash_algorithm",
+        "canonical_json",
+        "contract_sha256",
+    }
+    parsed_schemas = _string_sequence(
+        contract.get("parsed_response_schema_versions"),
+        label="artifact parsed provider response schemas",
+    )
+    if (
+        not required_fields.issubset(contract)
+        or contract.get("schema_version")
+        != "model-runner-provider-response-ingestion:v1"
+        or contract.get("ingestion_signature")
+        != ["action", "host_response"]
+        or contract.get("host_response_schema_version")
+        != "host-provider-response:v1"
+        or contract.get("host_response_closed_fields")
+        != ["schema_version", "provider", "status_code", "body"]
+        or contract.get("host_response_body_authority")
+        != "action_bound_provider_compiler_parser"
+        or contract.get("dispatch_schema_version")
+        != "model-runner-provider-dispatch:v1"
+        or contract.get("dispatch_contract_sha256")
+        != provider_dispatch_contract_sha256
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(contract.get("compiler_inventory_sha256") or ""),
+        )
+        or not parsed_schemas
+        or len(parsed_schemas) != len(set(parsed_schemas))
+        or contract.get("closed_fields")
+        != list(_PROVIDER_RESPONSE_INGESTION_FIELD_ORDER)
+        or contract.get("raw_host_response_returned") is not False
+        or contract.get("completion_input")
+        != "original_unchanged_host_response"
+        or contract.get("provider_receipt_binding_input")
+        != "original_unchanged_host_response"
+        or contract.get("completion_reparses_response") is not True
+        or contract.get("durable_custody")
+        != "host_provider_action_receipt_before_completion"
+        or contract.get("custody_receipt_field")
+        != "model_provider_response_ingestion"
+        or contract.get("replay_requirement")
+        != "reload_raw_response_reingest_and_require_byte_identical_receipt"
+        or contract.get("custody_join")
+        != [
+            "action_sha256",
+            "host_response_sha256",
+            "parsed_response_sha256",
+        ]
+        or contract.get("host_semantic_projection_allowed") is not False
+    ):
+        raise ModelRunnerHostError(
+            "artifact provider response ingestion contract differs"
+        )
+    return contract
 
 
 def _runner_interface_contract(role: str) -> dict[str, Any]:
@@ -963,6 +1097,19 @@ class ArtifactRunnerProtocolGeneration:
                             "artifact official baseline " + contract_key
                         ),
                     )
+                provider_dispatch_contract = _validate_contract_identity(
+                    champion.get("provider_prepare_contract"),
+                    label=(
+                        "artifact official baseline "
+                        "provider_prepare_contract"
+                    ),
+                )
+                _validate_provider_response_ingestion_contract(
+                    champion.get("provider_response_ingestion_contract"),
+                    provider_dispatch_contract_sha256=str(
+                        provider_dispatch_contract["contract_sha256"]
+                    ),
+                )
                 for hash_key in sorted(_V3_OFFICIAL_BASELINE_HASH_KEYS):
                     if not re.fullmatch(
                         r"[0-9a-f]{64}", str(champion.get(hash_key) or "")
@@ -1261,6 +1408,10 @@ class ArtifactRunnerProtocolGeneration:
     def supports_official_baseline(self) -> bool:
         return _V3_OFFICIAL_BASELINE_ROLES.issubset(self.members)
 
+    @property
+    def supports_provider_response_ingestion(self) -> bool:
+        return "provider_response_ingestion" in self.members
+
     def official_contract_sha256(self, metadata_key: str) -> str:
         if not self.supports_official_baseline:
             raise ModelRunnerHostError(
@@ -1364,6 +1515,14 @@ class ArtifactRunnerTransport(Protocol):
     def prepare_runner_provider_request(
         self,
         action: Mapping[str, Any],
+        *,
+        member_name: str,
+    ) -> Mapping[str, Any]: ...
+
+    def ingest_runner_provider_response(
+        self,
+        action: Mapping[str, Any],
+        host_response: Mapping[str, Any],
         *,
         member_name: str,
     ) -> Mapping[str, Any]: ...
@@ -1746,6 +1905,10 @@ class ResearchLabModelRunnerProtocol:
             != generation.champion_execution[
                 "provider_compiler_inventory_schema_version"
             ]
+            or result.get("inventory_sha256")
+            != generation.champion_execution[
+                "provider_response_ingestion_contract"
+            ].get("compiler_inventory_sha256")
         ):
             raise ModelRunnerHostError(
                 "artifact provider compiler inventory is invalid"
@@ -1975,6 +2138,101 @@ class ResearchLabModelRunnerProtocol:
                 "artifact provider dispatch request is invalid"
             )
         return dict(result)
+
+    def ingest_provider_response(
+        self,
+        action: Mapping[str, Any],
+        host_response: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Invoke model-owned parsing and validate only its signed envelope."""
+
+        generation = self.protocol_generation
+        if not generation.supports_provider_response_ingestion:
+            raise ModelRunnerHostError(
+                "artifact runner generation has no provider response ingestor"
+            )
+        if (
+            not isinstance(host_response, Mapping)
+            or set(host_response) != _HOST_PROVIDER_RESPONSE_FIELDS
+            or host_response.get("schema_version")
+            != "host-provider-response:v1"
+            or not isinstance(host_response.get("provider"), str)
+            or not host_response.get("provider")
+            or isinstance(host_response.get("status_code"), bool)
+            or not isinstance(host_response.get("status_code"), int)
+            or not 100 <= host_response["status_code"] <= 599
+            or not isinstance(host_response.get("body"), Mapping)
+        ):
+            raise ModelRunnerHostError(
+                "host provider response envelope is invalid"
+            )
+        dispatch = self.prepare_provider_request(action)
+        result = self._official_transport_method(
+            "ingest_runner_provider_response"
+        )(
+            action,
+            host_response,
+            member_name=generation.member("provider_response_ingestion"),
+        )
+        contract = _validate_provider_response_ingestion_contract(
+            generation.champion_execution[
+                "provider_response_ingestion_contract"
+            ],
+            provider_dispatch_contract_sha256=str(
+                _validate_contract_identity(
+                    generation.champion_execution[
+                        "provider_prepare_contract"
+                    ],
+                    label="artifact provider dispatch contract",
+                )["contract_sha256"]
+            ),
+        )
+        if not isinstance(result, Mapping):
+            raise ModelRunnerHostError(
+                "artifact provider response ingestion is invalid"
+            )
+        receipt = dict(result)
+        parsed_response = receipt.get("parsed_response")
+        ingestion_payload = {
+            key: item
+            for key, item in receipt.items()
+            if key != "ingestion_sha256"
+        }
+        if (
+            set(receipt) != _PROVIDER_RESPONSE_INGESTION_FIELDS
+            or receipt.get("schema_version")
+            != generation.champion_execution[
+                "provider_response_ingestion_schema_version"
+            ]
+            or receipt.get("action_sha256")
+            != action.get("action_sha256")
+            or receipt.get("dispatch_sha256")
+            != dispatch.get("dispatch_sha256")
+            or receipt.get("compiler_id") != dispatch.get("compiler_id")
+            or receipt.get("compiler_contract_sha256")
+            != dispatch.get("compiler_contract_sha256")
+            or receipt.get("request_sha256")
+            != dispatch.get("request_sha256")
+            or receipt.get("host_response_schema_version")
+            != contract["host_response_schema_version"]
+            or receipt.get("host_response_sha256")
+            != _bare_sha256_json(host_response)
+            or receipt.get("provider") != host_response.get("provider")
+            or receipt.get("provider") != dispatch.get("provider")
+            or receipt.get("parsed_response_schema_version")
+            not in contract["parsed_response_schema_versions"]
+            or not isinstance(parsed_response, Mapping)
+            or parsed_response.get("schema_version")
+            != receipt.get("parsed_response_schema_version")
+            or receipt.get("parsed_response_sha256")
+            != _bare_sha256_json(parsed_response)
+            or receipt.get("ingestion_sha256")
+            != _bare_sha256_json(ingestion_payload)
+        ):
+            raise ModelRunnerHostError(
+                "artifact provider response ingestion identity differs"
+            )
+        return receipt
 
     def prepare_normalization_request(
         self,

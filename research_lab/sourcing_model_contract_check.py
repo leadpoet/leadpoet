@@ -104,6 +104,12 @@ ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256 = (
     "sha256:bcbd1d629d1328d43a56e2b3585d776d0b9e8b6c8b9af465aff915d3788239db"
 )
 ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION = "routing-compiler-v5"
+CONTRACT_V66_37B_PATH = Path(__file__).with_name(
+    "sourcing_model_contract_v66_37b.json"
+)
+PARITY_FIXTURE_V66_37B_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v66_37b.json"
+)
 SEMANTIC_COMPATIBILITY_POLICY_V1_PATH = Path(__file__).with_name(
     "sourcing_model_semantic_compatibility_v1.json"
 )
@@ -192,6 +198,52 @@ _SEMANTIC_COMPATIBILITY_CACHE_SIZE = 256
 _SEMANTIC_COMPATIBILITY_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], Dict[str, Any]]" = OrderedDict()
 _SEMANTIC_COMPATIBILITY_CACHE_LOCK = threading.Lock()
 REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v66",
+        "contract_path": CONTRACT_V66_37B_PATH,
+        "contract_sha256": (
+            "sha256:6d287578339f5f5f1ebf720dc40932c6822af27b7c8deea53226e65c36d6f81b"
+        ),
+        "parity_path": PARITY_FIXTURE_V66_37B_PATH,
+        "parity_sha256": (
+            "sha256:b22fa55c1c9aa63f1d262624a766d8432c4834d4673fc57ab889aa62e06da29b"
+        ),
+        "required_source_constants": {
+            "sourcing_model/runtime_capabilities.py": {
+                "CAPABILITY_CONTRACT_VERSION": (
+                    "sourcing-model-runtime-capabilities:v3"
+                ),
+            },
+        },
+        "release_identities": (
+            {
+                "source_tree_hash": (
+                    "sha256:8ad8a69a092c3b3c0ab0fbdb1e67925e8b7368cd8803636e948670ef0a7b341a"
+                ),
+                "git_commit_sha": "37b217c527bda31751c1c0ec47c9e19022cab9e3",
+                "manifest_hash": (
+                    "sha256:41f56b55613a99d1d699dae0163c77111baf650136a90dd8b4712282a014a22b"
+                ),
+                "image_digest": (
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                    "sourcing-model@sha256:ad9c1eff90d676cde15a22999a9d73da41a14f9180c5fcbbc77dba483c326586"
+                ),
+            },
+        ),
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+            "sourcing_model/signal_temporal_policy.py:"
+            "signal_temporal_policy": {
+                "vararg": None,
+                "kwarg": "kwargs",
+            },
+        },
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v55",
         "contract_path": CONTRACT_V55_PATH,
@@ -3089,6 +3141,10 @@ def _verify_source_tree_contract_document(
             expected = list(expected_params)
             actual_params = actual["params"]
             contract_key = f"{relative}:{name}"
+            expected_variadic = reviewed_variadic_parameters.get(
+                contract_key,
+                {"vararg": None, "kwarg": None},
+            )
             expected_full = (document.get("full_parameters") or {}).get(
                 contract_key
             )
@@ -3097,8 +3153,8 @@ def _verify_source_tree_contract_document(
                 and (
                     actual["all_params"] != list(expected_full)
                     or actual["positional_only"]
-                    or actual["vararg"] is not None
-                    or actual["kwarg"] is not None
+                    or actual["vararg"] != expected_variadic["vararg"]
+                    or actual["kwarg"] != expected_variadic["kwarg"]
                 )
             ):
                 violations.append(
@@ -3115,10 +3171,6 @@ def _verify_source_tree_contract_document(
                 actual["params"]
                 if expected_full is not None or positional_exact_signatures
                 else actual["all_params"]
-            )
-            expected_variadic = reviewed_variadic_parameters.get(
-                contract_key,
-                {"vararg": None, "kwarg": None},
             )
             if contract_key in exact_signatures and (
                 exact_actual != expected

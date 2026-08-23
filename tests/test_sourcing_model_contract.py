@@ -27,6 +27,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V52_82C_PATH,
     CONTRACT_V55_PATH,
     CONTRACT_V55_E55_PATH,
+    CONTRACT_V66_37B_PATH,
     CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
     PARITY_FIXTURE_V11_PATH,
@@ -39,6 +40,7 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V52_82C_PATH,
     PARITY_FIXTURE_V55_PATH,
     PARITY_FIXTURE_V55_E55_PATH,
+    PARITY_FIXTURE_V66_37B_PATH,
     PARITY_FIXTURE_V7_PATH,
     _resolve_reviewed_consumer_contract_pair,
     _reviewed_consumer_snapshot_for_source_hash,
@@ -464,6 +466,7 @@ def test_exact_v11_contract_and_parity_pair_is_reviewed(tmp_path: Path) -> None:
         "leadpoet-sourcing-wrapper-contract-v47",
         "leadpoet-sourcing-wrapper-contract-v52",
         "leadpoet-sourcing-wrapper-contract-v55",
+        "leadpoet-sourcing-wrapper-contract-v66",
     }
 
 
@@ -865,6 +868,61 @@ def test_exact_v52_82c_revision_is_independently_reviewed(tmp_path: Path) -> Non
             tmp_path,
             source_tree_hash=release_manifest["model_artifact_hash"],
             manifest={**release_manifest, "git_commit_sha": "0" * 40},
+        )
+
+    parity_path.write_text("{}\n", encoding="utf-8")
+    assert _resolve_reviewed_consumer_contract_pair(tmp_path) is None
+
+
+def test_exact_v66_37b_release_is_independently_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V66_37B_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V66_37B_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V66_37B_PATH.read_bytes())
+
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v66"
+    )
+    assert resolved["contract_sha256"] == (
+        "sha256:6d287578339f5f5f1ebf720dc40932c6822af27b7c8deea53226e65c36d6f81b"
+    )
+    assert resolved["parity_sha256"] == (
+        "sha256:b22fa55c1c9aa63f1d262624a766d8432c4834d4673fc57ab889aa62e06da29b"
+    )
+    release_manifest = {
+        "model_artifact_hash": (
+            "sha256:8ad8a69a092c3b3c0ab0fbdb1e67925e8b7368cd8803636e948670ef0a7b341a"
+        ),
+        "git_commit_sha": "37b217c527bda31751c1c0ec47c9e19022cab9e3",
+        "manifest_hash": (
+            "sha256:41f56b55613a99d1d699dae0163c77111baf650136a90dd8b4712282a014a22b"
+        ),
+        "image_digest": (
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+            "sourcing-model@sha256:ad9c1eff90d676cde15a22999a9d73da41a14f9180c5fcbbc77dba483c326586"
+        ),
+    }
+    profiled = _reviewed_consumer_snapshot_for_source_hash(
+        tmp_path,
+        source_tree_hash=release_manifest["model_artifact_hash"],
+        manifest=release_manifest,
+    )
+    assert profiled is not None
+    assert profiled["contract_sha256"] == resolved["contract_sha256"]
+
+    with pytest.raises(
+        ValueError,
+        match="reviewed legacy source manifest identity differs",
+    ):
+        _reviewed_consumer_snapshot_for_source_hash(
+            tmp_path,
+            source_tree_hash=release_manifest["model_artifact_hash"],
+            manifest={**release_manifest, "image_digest": "invalid"},
         )
 
     parity_path.write_text("{}\n", encoding="utf-8")

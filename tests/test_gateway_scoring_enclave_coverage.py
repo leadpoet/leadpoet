@@ -126,6 +126,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v47.json",
         "research_lab/sourcing_model_contract_v52.json",
         "research_lab/sourcing_model_contract_v52_82c.json",
+        "research_lab/sourcing_model_contract_v66_37b.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
@@ -136,6 +137,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v52.json",
         "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
+        "research_lab/sourcing_model_parity_fixtures_v66_37b.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
         "research_lab/sourcing_model_semantic_compatibility_v1.json",
     } <= set(MEASURED_DATA_PATHS)
@@ -149,6 +151,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v47.json",
         "research_lab/sourcing_model_contract_v52.json",
         "research_lab/sourcing_model_contract_v52_82c.json",
+        "research_lab/sourcing_model_contract_v66_37b.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
@@ -159,6 +162,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v52.json",
         "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
+        "research_lab/sourcing_model_parity_fixtures_v66_37b.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
         "research_lab/sourcing_model_semantic_compatibility_v1.json",
     }
@@ -175,6 +179,14 @@ def test_scoring_import_closure_measures_reviewed_site_v52_profile():
     assert "research_lab/sourcing_model_contract_v52_82c.json" in MEASURED_DATA_PATHS
     assert (
         "research_lab/sourcing_model_parity_fixtures_v52_82c.json"
+        in MEASURED_DATA_PATHS
+    )
+
+
+def test_scoring_import_closure_measures_reviewed_v66_profile():
+    assert "research_lab/sourcing_model_contract_v66_37b.json" in MEASURED_DATA_PATHS
+    assert (
+        "research_lab/sourcing_model_parity_fixtures_v66_37b.json"
         in MEASURED_DATA_PATHS
     )
 

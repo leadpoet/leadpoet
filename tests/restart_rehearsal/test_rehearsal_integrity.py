@@ -858,10 +858,10 @@ def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
     assert "Error in sitecustomize" not in result.stderr
 
 
-def test_sitecustomize_accepts_only_exact_regional_s3_client_options() -> None:
+def test_sitecustomize_accepts_only_exact_s3_client_options(monkeypatch) -> None:
     from botocore.config import Config
 
-    exact = {
+    regional = {
         "region_name": "us-east-1",
         "endpoint_url": "https://s3.us-east-1.amazonaws.com",
         "config": Config(
@@ -869,20 +869,40 @@ def test_sitecustomize_accepts_only_exact_regional_s3_client_options() -> None:
             s3={"addressing_style": "virtual"},
         ),
     }
-    rehearsal_sitecustomize._validate_local_boto3_client_options("s3", exact)
+    rehearsal_sitecustomize._validate_local_boto3_client_options(
+        "s3", regional
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "rehearsal-access")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "rehearsal-secret")
+    upload = {
+        "aws_access_key_id": "rehearsal-access",
+        "aws_secret_access_key": "rehearsal-secret",
+        "region_name": "us-east-1",
+        "config": Config(signature_version="s3v4"),
+    }
+    rehearsal_sitecustomize._validate_local_boto3_client_options("s3", upload)
+
+    class ConfigImpostor:
+        _user_provided_options = {
+            "signature_version": "s3v4",
+            "s3": {"addressing_style": "virtual"},
+        }
 
     invalid = (
-        {**exact, "endpoint_url": "https://example.invalid"},
-        {**exact, "region_name": " us-east-1"},
+        {**regional, "endpoint_url": "https://example.invalid"},
+        {**regional, "region_name": " us-east-1"},
         {
-            **exact,
+            **regional,
             "config": Config(
                 signature_version="s3v4",
                 s3={"addressing_style": "path"},
             ),
         },
-        {**exact, "config": Config(signature_version="s3")},
-        {**exact, "use_ssl": True},
+        {**regional, "config": Config(signature_version="s3")},
+        {**regional, "config": ConfigImpostor()},
+        {**regional, "use_ssl": True},
+        {**upload, "aws_secret_access_key": "different"},
+        {**upload, "endpoint_url": "https://s3.us-east-1.amazonaws.com"},
     )
     for options in invalid:
         with pytest.raises(ValueError, match="client options differ"):
@@ -891,7 +911,7 @@ def test_sitecustomize_accepts_only_exact_regional_s3_client_options() -> None:
             )
     with pytest.raises(ValueError, match="client options differ"):
         rehearsal_sitecustomize._validate_local_boto3_client_options(
-            "kms", exact
+            "kms", regional
         )
 
 

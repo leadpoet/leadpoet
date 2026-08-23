@@ -3851,26 +3851,55 @@ def _validate_local_boto3_client_options(
     service_name: str,
     options: Mapping[str, Any],
 ) -> None:
-    if set(options) - {"region_name", "endpoint_url", "config"}:
-        raise ValueError("local boto3 client options differ")
+    from botocore.config import Config
+
     config = options.get("config")
     if config is None:
+        if set(options) - {"region_name", "endpoint_url"}:
+            raise ValueError("local boto3 client options differ")
         return
-    expected_config = {
+    regional_config = {
         "signature_version": "s3v4",
         "s3": {"addressing_style": "virtual"},
     }
+    upload_config = {"signature_version": "s3v4"}
     region = options.get("region_name")
     if (
         service_name != "s3"
-        or getattr(config, "_user_provided_options", None) != expected_config
+        or not isinstance(config, Config)
         or not isinstance(region, str)
         or region != region.strip()
         or not region
-        or options.get("endpoint_url")
-        != f"https://s3.{region}.amazonaws.com"
     ):
         raise ValueError("local boto3 client options differ")
+    configured = config._user_provided_options
+    if configured == regional_config:
+        if (
+            set(options) != {"region_name", "endpoint_url", "config"}
+            or options.get("endpoint_url")
+            != f"https://s3.{region}.amazonaws.com"
+        ):
+            raise ValueError("local boto3 client options differ")
+        return
+    if configured == upload_config:
+        if (
+            set(options)
+            != {
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "region_name",
+                "config",
+            }
+            or not options.get("aws_access_key_id")
+            or options.get("aws_access_key_id")
+            != os.environ.get("AWS_ACCESS_KEY_ID")
+            or not options.get("aws_secret_access_key")
+            or options.get("aws_secret_access_key")
+            != os.environ.get("AWS_SECRET_ACCESS_KEY")
+        ):
+            raise ValueError("local boto3 client options differ")
+        return
+    raise ValueError("local boto3 client options differ")
 
 
 class _LocalKMS:

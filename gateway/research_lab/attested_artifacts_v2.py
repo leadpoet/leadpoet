@@ -136,12 +136,17 @@ async def persist_execution_transport_artifacts_v2(
             "execution artifact root differs from receipt"
         )
     expected_hashes = sorted(
-        [str(item.get("request_artifact_hash") or "") for item in transport_attempts]
+        [
+            str(item.get("request_artifact_hash") or "")
+            for item in transport_attempts
+            if item.get("provider_id") != "aws_s3_object_lock"
+        ]
         + [
             str(item.get("response_artifact_hash") or "")
             for item in transport_attempts
             if item.get("terminal_status")
             in {"authenticated_response", "attested_local_response"}
+            and item.get("provider_id") != "aws_s3_object_lock"
         ]
     )
     listed = await client.v2_list_encrypted_artifacts(

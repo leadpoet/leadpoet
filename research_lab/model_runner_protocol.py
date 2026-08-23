@@ -113,6 +113,9 @@ _V3_RAW_VERSIONS = {
 _V3_PROVIDER_RECEIPT_BINDING_SCHEMA_VERSION = (
     "model-provider-receipt-binding:v1"
 )
+_V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION = (
+    "model-runner-completion-accounting:v2"
+)
 
 
 def _closed_string_mapping(value: Any, *, label: str) -> dict[str, Any]:
@@ -234,7 +237,7 @@ class ArtifactRunnerProtocolGeneration:
             for name, expected in _V3_VERSIONS.items()
         ):
             family = _GENERATION_V3
-            expected_versions = _V3_VERSIONS
+            expected_versions = dict(_V3_VERSIONS)
             required_roles = frozenset(_MEMBER_SIGNATURES)
             if any(
                 raw_constants.get(name) != expected
@@ -267,6 +270,22 @@ class ArtifactRunnerProtocolGeneration:
                 "legacy_rollback_entrypoint",
                 "normalization_action",
             }
+            completion_accounting = model_constants.get(
+                "MODEL_RUNNER_COMPLETION_ACCOUNTING_SCHEMA_VERSION"
+            )
+            if completion_accounting is not None:
+                if completion_accounting != (
+                    _V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION
+                ):
+                    raise ModelRunnerHostError(
+                        "artifact runner v3 completion accounting differs"
+                    )
+                expected_versions[
+                    "MODEL_RUNNER_COMPLETION_ACCOUNTING_SCHEMA_VERSION"
+                ] = _V3_COMPLETION_ACCOUNTING_SCHEMA_VERSION
+                expected_champion_keys.add(
+                    "completion_accounting_schema_version"
+                )
         elif all(
             model_constants.get(name) == expected
             for name, expected in _V2_VERSIONS.items()
@@ -331,6 +350,13 @@ class ArtifactRunnerProtocolGeneration:
             champion_versions["MODEL_RUNNER_CONTINUATION_SCHEMA_VERSION"] = (
                 champion.get("continuation_schema_version")
             )
+            if (
+                "MODEL_RUNNER_COMPLETION_ACCOUNTING_SCHEMA_VERSION"
+                in expected_versions
+            ):
+                champion_versions[
+                    "MODEL_RUNNER_COMPLETION_ACCOUNTING_SCHEMA_VERSION"
+                ] = champion.get("completion_accounting_schema_version")
         if any(
             champion_versions.get(name) != expected_versions[name]
             for name in champion_versions

@@ -97,6 +97,13 @@ from gateway.research_lab.model_authority_v2 import (
     retry_attested_model_runner_v2,
     validate_model_qualification_authority_v1,
 )
+from gateway.research_lab.official_baseline_model_runner import (
+    ExactOfficialBaselineRunner,
+    OfficialBaselineExactDependencies,
+    OfficialBaselineModelOutput,
+    select_official_baseline_release,
+    validate_official_baseline_checkpoint,
+)
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     apply_preflight_control_result,
@@ -612,6 +619,7 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD = "_attested_parent_receipt_hashes"
 _MODEL_QUALIFICATION_AUTHORITY_FIELD = "_model_qualification_authority"
 _MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD = "_model_qualification_partial_count"
+_OFFICIAL_BASELINE_CHECKPOINT_FIELD = "_official_baseline_checkpoint"
 _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP = 2
 
 
@@ -770,6 +778,9 @@ def _baseline_scoring_contract_hash() -> str:
     """Hash score-producing code without binding checkpoints to a release SHA."""
 
     import research_lab.eval as evaluation_package
+    from gateway.research_lab import (
+        official_baseline_model_runner as official_baseline_model_runner_module,
+    )
     from qualification.scoring import lead_scorer as lead_scorer_module
     from research_lab import employee_buckets as employee_buckets_module
     from gateway.tee import model_sandbox_v2 as model_sandbox_module
@@ -804,6 +815,10 @@ def _baseline_scoring_contract_hash() -> str:
         lead_scorer_module._normalize_icp_employee_buckets,
         employee_buckets_module.normalize_employee_count_bucket,
         employee_buckets_module.normalize_observed_employee_count_bucket,
+        select_official_baseline_release,
+        validate_official_baseline_checkpoint,
+        ExactOfficialBaselineRunner.run_icp,
+        ExactOfficialBaselineRunner._finish_unit,
     ]
     if worker_type is not None:
         callables.extend(
@@ -817,7 +832,11 @@ def _baseline_scoring_contract_hash() -> str:
         # Bind the complete source modules so changes anywhere in that real
         # scoring call-closure invalidate a checkpoint without tying measured
         # rows to transport-only gateway releases.
-        for module in (lead_scorer_module, employee_buckets_module):
+        for module in (
+            lead_scorer_module,
+            employee_buckets_module,
+            official_baseline_model_runner_module,
+        ):
             sources.append(
                 (
                     f"{module.__name__}.__module_source__",
@@ -1052,11 +1071,11 @@ def _daily_noise_budget_doc(
 
 
 def _retry_runner_with_provider_cost_scope(
-    runner: AttestedPrivateModelRunnerV2,
+    runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
     *,
     retry_round: int,
     base_scope_override: str = "",
-) -> AttestedPrivateModelRunnerV2:
+) -> AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner:
     """Clone a retry runner with a deterministic per-round cost scope.
 
     The Docker runtime hashes this evaluation scope together with the actual
@@ -1081,6 +1100,8 @@ def _retry_runner_with_provider_cost_scope(
         }
     )
     extra_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = retry_scope
+    if isinstance(runner, ExactOfficialBaselineRunner):
+        return runner.with_spec(replace(runner.spec, extra_env=extra_env))
     return retry_attested_model_runner_v2(
         runner,
         extra_env=extra_env,
@@ -1088,12 +1109,12 @@ def _retry_runner_with_provider_cost_scope(
 
 
 def _baseline_runner_for_attempt(
-    runner: AttestedPrivateModelRunnerV2,
+    runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
     *,
     item_index: int,
     retry_round: int,
     worker_count: int,
-) -> AttestedPrivateModelRunnerV2:
+) -> AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner:
     """Bind each baseline attempt to a deterministic worker proxy profile."""
 
     worker_index = _baseline_worker_index_for_attempt(
@@ -2527,6 +2548,11 @@ def _baseline_attempt_checkpoint_row(
         "_retry_backoff_seconds": backoff_seconds,
         _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: normalized_receipts,
     }
+    official_checkpoint = row.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
+    if official_checkpoint is not None:
+        checkpoint_row[_OFFICIAL_BASELINE_CHECKPOINT_FIELD] = (
+            validate_official_baseline_checkpoint(official_checkpoint)
+        )
     qualification_authority = row.get(_MODEL_QUALIFICATION_AUTHORITY_FIELD)
     if qualification_authority is not None:
         checkpoint_row[_MODEL_QUALIFICATION_AUTHORITY_FIELD] = (
@@ -5363,7 +5389,15 @@ def _load_average_per_cpu() -> float | None:
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
-    def __init__(self, config: ResearchLabGatewayConfig, *, worker_ref: str | None = None):
+    def __init__(
+        self,
+        config: ResearchLabGatewayConfig,
+        *,
+        worker_ref: str | None = None,
+        official_baseline_exact_dependencies: (
+            OfficialBaselineExactDependencies | None
+        ) = None,
+    ):
         config.validate_public_benchmark_split()
         self.config = config
         self.worker_ref = worker_ref or config.scoring_worker_id or "research-lab-scoring-worker"
@@ -5383,6 +5417,12 @@ class ResearchLabGatewayScoringWorker:
         self._baseline_publication_failure_logged_key: str | None = None
         self._baseline_publication_failures_in_process: set[str] = set()
         self._baseline_publication_verified_keys: set[str] = set()
+        # V3/raw official scoring is default-off until the application injects
+        # the reviewed append-only provider/checkpoint authority and immutable
+        # artifact projector.  Release selection never falls back to V2.
+        self._official_baseline_exact_dependencies = (
+            official_baseline_exact_dependencies
+        )
         # True only for the worker holding the scoring-recovery lease this pass.
         self._holds_maintenance_lease = False
         # Globally-unique lease token for THIS process (worker_ref is a stable
@@ -13335,32 +13375,49 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
-        runner = AttestedPrivateModelRunnerV2(
-            artifact=artifact,
-            spec=DockerPrivateModelSpec(
-                image_digest=artifact.image_digest,
-                timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._with_provider_cost_evaluation_scope(
-                    self._private_baseline_scoring_env(),
-                    run_type="private_baseline_rebenchmark",
-                    rolling_window_hash=window.window_hash,
-                    artifact_hash=artifact.model_artifact_hash,
-                    benchmark_date=today,
-                    benchmark_attempt=benchmark_attempt,
-                    evaluation_epoch=evaluation_epoch,
-                    started_at=start,
-                ),
-            ),
-            model_kind="private",
-            worker_index=self.config.scoring_worker_index,
-            epoch_id=evaluation_epoch,
-            parent_graphs=await _attested_model_parent_graphs(
-                model_kind="private",
-                artifact=artifact,
-                epoch_id=evaluation_epoch,
+        baseline_model_spec = DockerPrivateModelSpec(
+            image_digest=artifact.image_digest,
+            timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+            env_passthrough=self._private_model_env_passthrough(),
+            extra_env=self._with_provider_cost_evaluation_scope(
+                self._private_baseline_scoring_env(),
+                run_type="private_baseline_rebenchmark",
+                rolling_window_hash=window.window_hash,
+                artifact_hash=artifact.model_artifact_hash,
+                benchmark_date=today,
+                benchmark_attempt=benchmark_attempt,
+                evaluation_epoch=evaluation_epoch,
+                started_at=start,
             ),
         )
+        baseline_parent_graphs = await _attested_model_parent_graphs(
+            model_kind="private",
+            artifact=artifact,
+            epoch_id=evaluation_epoch,
+        )
+        baseline_release_selection = select_official_baseline_release(artifact)
+        if baseline_release_selection.is_exact:
+            runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner = (
+                ExactOfficialBaselineRunner(
+                    artifact=artifact,
+                    selection=baseline_release_selection,
+                    dependencies=self._official_baseline_exact_dependencies,
+                    spec=baseline_model_spec,
+                    benchmark_date=today,
+                    rolling_window_hash=window.window_hash,
+                    parent_graphs=baseline_parent_graphs,
+                    worker_index=self.config.scoring_worker_index,
+                )
+            )
+        else:
+            runner = AttestedPrivateModelRunnerV2(
+                artifact=artifact,
+                spec=baseline_model_spec,
+                model_kind="private",
+                worker_index=self.config.scoring_worker_index,
+                epoch_id=evaluation_epoch,
+                parent_graphs=baseline_parent_graphs,
+            )
         scorer = QualificationStyleCompanyScorer(
             attested_epoch_id=evaluation_epoch,
             attested_purpose="research_lab.rebenchmark.v1",
@@ -13379,7 +13436,10 @@ class ResearchLabGatewayScoringWorker:
             benchmark_date=today,
             rolling_window_hash=window.window_hash,
         )
-        batch_execution = _private_baseline_uses_batch_execution(self.config)
+        batch_execution = (
+            isinstance(runner, ExactOfficialBaselineRunner)
+            or _private_baseline_uses_batch_execution(self.config)
+        )
         baseline_telemetry_session: ScoringTelemetrySession | None = None
         if scoring_telemetry_enabled(self.config):
             telemetry_run = await allocate_scoring_run(
@@ -13566,10 +13626,15 @@ class ResearchLabGatewayScoringWorker:
                 runner_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = (
                     baseline_progress_provider_cost_base_scope
                 )
-                runner = retry_attested_model_runner_v2(
-                    runner,
-                    extra_env=runner_env,
-                )
+                if isinstance(runner, ExactOfficialBaselineRunner):
+                    runner = runner.with_spec(
+                        replace(runner.spec, extra_env=runner_env)
+                    )
+                else:
+                    runner = retry_attested_model_runner_v2(
+                        runner,
+                        extra_env=runner_env,
+                    )
             if baseline_progress_rows or baseline_progress_attempt_ledger:
                 _record_private_baseline_stage(
                     worker_ref=self.worker_ref,
@@ -13607,6 +13672,44 @@ class ResearchLabGatewayScoringWorker:
                             ),
                         ),
                     )
+                )
+
+        if isinstance(runner, ExactOfficialBaselineRunner):
+            items_by_ref = {
+                _benchmark_item_ref_for_progress(item): item
+                for item in window.benchmark_items
+            }
+            attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
+            for entry in baseline_progress_attempt_ledger:
+                if isinstance(entry, Mapping):
+                    attempts_by_ref.setdefault(
+                        str(entry.get("icp_ref") or ""), []
+                    ).append(entry)
+            for resumed_row in baseline_progress_rows:
+                resumed_ref = _benchmark_item_ref_for_progress(resumed_row)
+                item = items_by_ref.get(resumed_ref)
+                attempts = sorted(
+                    attempts_by_ref.get(resumed_ref) or [],
+                    key=lambda value: int(value.get("retry_round") or 0),
+                )
+                latest_result = (
+                    attempts[-1].get("result_row") if attempts else None
+                )
+                checkpoint = (
+                    latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
+                    if isinstance(latest_result, Mapping)
+                    else None
+                )
+                if item is None or checkpoint is None:
+                    raise RuntimeError(
+                        "official baseline v3 checkpoint is missing its exact model frontier"
+                    )
+                await asyncio.to_thread(
+                    runner.run_icp,
+                    raw_icp=item["icp"],
+                    icp_ref=resumed_ref,
+                    target_count=_icp_company_goal(item["icp"]) or 1,
+                    expected_checkpoint=checkpoint,
                 )
 
         if baseline_telemetry_session is not None:
@@ -13805,7 +13908,11 @@ class ResearchLabGatewayScoringWorker:
         }
         baseline_telemetry_heartbeat_stop: asyncio.Event | None = None
         baseline_telemetry_heartbeat_task: asyncio.Task[Any] | None = None
-        retry_runner: AttestedPrivateModelRunnerV2 | None = None
+        retry_runner: (
+            AttestedPrivateModelRunnerV2
+            | ExactOfficialBaselineRunner
+            | None
+        ) = None
 
         async def _stop_baseline_telemetry_heartbeat() -> None:
             if baseline_telemetry_heartbeat_stop is not None:
@@ -13944,30 +14051,37 @@ class ResearchLabGatewayScoringWorker:
                 duration_seconds=time.time() - start,
             )
             if batch_execution:
-                retry_runner = AttestedPrivateModelRunnerV2(
-                    artifact=artifact,
-                    spec=DockerPrivateModelSpec(
-                        image_digest=artifact.image_digest,
-                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                        env_passthrough=self._private_model_env_passthrough(),
-                        extra_env=self._with_provider_cost_evaluation_scope(
-                            self._private_baseline_retry_scoring_env(),
-                            run_type="private_baseline_rebenchmark",
-                            rolling_window_hash=window.window_hash,
-                            artifact_hash=artifact.model_artifact_hash,
-                            benchmark_date=today,
-                            benchmark_attempt=benchmark_attempt,
-                            evaluation_epoch=evaluation_epoch,
-                            started_at=start,
-                        ),
-                        # The first-pass runner already pulled this digest.
-                        pull_before_run=False,
+                retry_spec = DockerPrivateModelSpec(
+                    image_digest=artifact.image_digest,
+                    timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                    env_passthrough=self._private_model_env_passthrough(),
+                    extra_env=self._with_provider_cost_evaluation_scope(
+                        self._private_baseline_retry_scoring_env(),
+                        run_type="private_baseline_rebenchmark",
+                        rolling_window_hash=window.window_hash,
+                        artifact_hash=artifact.model_artifact_hash,
+                        benchmark_date=today,
+                        benchmark_attempt=benchmark_attempt,
+                        evaluation_epoch=evaluation_epoch,
+                        started_at=start,
                     ),
-                    model_kind="private",
-                    worker_index=self.config.scoring_worker_index,
-                    epoch_id=evaluation_epoch,
-                    parent_graphs=runner.parent_graphs,
+                    # The first-pass runner already pulled this digest.
+                    pull_before_run=False,
                 )
+                if isinstance(runner, ExactOfficialBaselineRunner):
+                    retry_runner: (
+                        AttestedPrivateModelRunnerV2
+                        | ExactOfficialBaselineRunner
+                    ) = runner.with_spec(retry_spec)
+                else:
+                    retry_runner = AttestedPrivateModelRunnerV2(
+                        artifact=artifact,
+                        spec=retry_spec,
+                        model_kind="private",
+                        worker_index=self.config.scoring_worker_index,
+                        epoch_id=evaluation_epoch,
+                        parent_graphs=runner.parent_graphs,
+                    )
                 batch_summaries, retry_stats = await self._run_baseline_batch(
                     runner=runner,
                     retry_runner=retry_runner,
@@ -14016,6 +14130,7 @@ class ResearchLabGatewayScoringWorker:
                         _MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD,
                         None,
                     )
+                    item_summary.pop(_OFFICIAL_BASELINE_CHECKPOINT_FIELD, None)
                     per_icp_summaries.append(item_summary)
             baseline_resume_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
             for item_index, item in enumerate([] if batch_execution else window.benchmark_items, start=1):
@@ -15397,7 +15512,7 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_icp(
         self,
         *,
-        runner: AttestedPrivateModelRunnerV2,
+        runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
         scorer: QualificationStyleCompanyScorer,
         item: Mapping[str, Any],
         item_index: int,
@@ -15488,6 +15603,7 @@ class ResearchLabGatewayScoringWorker:
         retryable = False
         retry_backoff_seconds = 0.0
         attempt_receipt_hashes: set[str] = set()
+        exact_execution: OfficialBaselineModelOutput | None = None
         # In-container trace collection (§9.1): install a per-task collector so
         # the runner's stderr trace markers are published instead of dropped.
         # run_in_executor does NOT copy contextvars (asyncio.to_thread does), so
@@ -15501,7 +15617,25 @@ class ResearchLabGatewayScoringWorker:
             begin_attested_receipt_hash_collection()
         )
         try:
-            if inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
+            if isinstance(runner, ExactOfficialBaselineRunner):
+                exact_call: Any = functools.partial(
+                    runner.run_icp,
+                    raw_icp=item["icp"],
+                    icp_ref=label,
+                    target_count=_icp_company_goal(item["icp"]) or 1,
+                )
+                exact_call = functools.partial(
+                    contextvars.copy_context().run,
+                    exact_call,
+                )
+                exact_execution = await loop.run_in_executor(
+                    executor, exact_call
+                )
+                raw_outputs: Any = [
+                    dict(value)
+                    for value in exact_execution.company_outputs
+                ]
+            elif inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
                 raw_outputs = await runner(item["icp"], {"mode": mode_label})
             else:
                 runner_call: Any = functools.partial(
@@ -15521,15 +15655,23 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
                 model_qualification_partial_count = 0
-            outputs = ensure_private_model_outputs(
-                raw_outputs,
-                context_label=f"{mode_label} for {label}",
-                require_non_empty=False,
+            outputs = (
+                list(raw_outputs)
+                if exact_execution is not None
+                else ensure_private_model_outputs(
+                    raw_outputs,
+                    context_label=f"{mode_label} for {label}",
+                    require_non_empty=False,
+                )
             )
             # The shared benchmark diagnostics cannot initially distinguish a
             # legitimate no-match from missing provider work. Require one fresh
             # retry; provider-backed evidence can then establish a durable zero.
-            if not outputs and model_qualification_authority is None:
+            if (
+                exact_execution is None
+                and not outputs
+                and model_qualification_authority is None
+            ):
                 retryable = True
         except PrivateModelRuntimeError as exc:
             outputs = []
@@ -15573,6 +15715,14 @@ class ResearchLabGatewayScoringWorker:
                 end_incontainer_trace_collection(trace_token)
             end_attested_receipt_hash_collection(model_receipt_token)
             attempt_receipt_hashes.update(model_receipt_hashes)
+            if exact_execution is not None:
+                attempt_receipt_hashes.add(
+                    str(
+                        exact_execution.checkpoint[
+                            "model_receipt_sha256"
+                        ]
+                    )
+                )
         item_elapsed = time.time() - item_start
         if telemetry_session is not None and not runtime_error:
             await telemetry_session.lifecycle(
@@ -15685,6 +15835,18 @@ class ResearchLabGatewayScoringWorker:
             # "companies discovered" number.
             sourced_count=max(len(outputs), model_qualification_partial_count),
         )
+        if exact_execution is not None:
+            diagnostics = dict(item_summary.get("diagnostics") or {})
+            diagnostics["sourcing_failed"] = False
+            diagnostics["official_baseline_model_receipt_sha256"] = (
+                exact_execution.checkpoint["model_receipt_sha256"]
+            )
+            if not outputs:
+                diagnostics["empty_result_provider_evidence_validated"] = True
+                diagnostics["empty_result_authority"] = (
+                    "immutable_artifact_terminal_model_receipt"
+                )
+            item_summary["diagnostics"] = diagnostics
         if model_qualification_authority is not None:
             diagnostics = dict(item_summary.get("diagnostics") or {})
             diagnostics["model_qualification_disposition"] = str(
@@ -15792,6 +15954,10 @@ class ResearchLabGatewayScoringWorker:
             )
             item_summary[_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD] = (
                 model_qualification_partial_count
+            )
+        if exact_execution is not None:
+            item_summary[_OFFICIAL_BASELINE_CHECKPOINT_FIELD] = dict(
+                exact_execution.checkpoint
             )
         if telemetry_session is not None and (runtime_error or scorer_error):
             await telemetry_session.lifecycle(
@@ -15967,8 +16133,8 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_batch(
         self,
         *,
-        runner: AttestedPrivateModelRunnerV2,
-        retry_runner: AttestedPrivateModelRunnerV2,
+        runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
+        retry_runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,
@@ -16022,8 +16188,8 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_batch_inner(
         self,
         *,
-        runner: AttestedPrivateModelRunnerV2,
-        retry_runner: AttestedPrivateModelRunnerV2,
+        runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
+        retry_runner: AttestedPrivateModelRunnerV2 | ExactOfficialBaselineRunner,
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,

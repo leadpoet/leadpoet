@@ -9,6 +9,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CUSTODY_MIGRATION = (
+    ROOT / "scripts" / "163-research-lab-model-transition-artifact-custody.sql"
+)
 MIGRATION = (
     ROOT / "scripts" / "164-research-lab-official-baseline-action-authority.sql"
 )
@@ -52,13 +55,14 @@ def test_official_baseline_disposable_postgres_behavior():
     if not psql:
         pytest.skip("psql is unavailable")
     dsn = os.environ["OFFICIAL_BASELINE_TEST_PG_DSN"]
-    migration = subprocess.run(
-        [psql, dsn, "-v", "ON_ERROR_STOP=1", "-f", str(MIGRATION)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert migration.returncode == 0, migration.stderr
+    for path in (CUSTODY_MIGRATION, MIGRATION):
+        migration = subprocess.run(
+            [psql, dsn, "-v", "ON_ERROR_STOP=1", "-f", str(path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert migration.returncode == 0, migration.stderr
     behavior = subprocess.run(
         [psql, dsn, "-v", "ON_ERROR_STOP=1", "-f", str(BEHAVIOR)],
         text=True,

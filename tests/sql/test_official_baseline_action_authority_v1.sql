@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run after migrations 157 and 163 against disposable PostgreSQL only.
+-- Run after migrations 157, 163, and 164 against disposable PostgreSQL only.
 BEGIN;
 
 DO $official_baseline_happy_path$

@@ -141,6 +141,22 @@ While that run is active and the user has not said `STOP`, Codex may:
   candidate policy's public/private/conditional assignment, publishes the
   aggregate, exposes that score on the subnet dashboard, and leaves candidate
   evaluation ready.
+- Create or update a Leadpoet-owned inline identity-policy document on an
+  existing Leadpoet role, or update a document version of an existing
+  Leadpoet customer-managed policy, only through
+  `scripts/operate_rebenchmark_iam_policy.py`, after its exact-`origin/main`
+  gateway source, approved account and caller ARN, typed run-ledger authority,
+  structural delta, simulations, surrounding inventory, and immediate prior
+  document hash all pass. This authority is policy-document-only: it never
+  permits role trust, policy attachments, permissions boundaries, instance
+  profiles, IAM users or groups, access keys, credentials, or unrelated
+  principals/resources. AWS IAM has no native conditional policy write; the
+  helper's pre/post hash protocol is bounded optimistic concurrency and must
+  never be represented as AWS-native compare-and-swap.
+- The helper may delete only the newly created inline document or staged
+  managed version during guarded cleanup/rollback. It must retain a managed
+  policy's prior default version and fail before any write when all five
+  version slots are occupied.
 
 This exception never permits ad hoc remote source edits, arbitrary SQL or row
 deletion, fabricated scores or provider responses, manual weight vectors,

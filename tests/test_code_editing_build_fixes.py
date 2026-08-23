@@ -1628,6 +1628,11 @@ def test_build_scaffold_binds_v2_metadata_to_signed_source_constant(
         "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
         in dockerfile
     )
+    clear_parent_app = (
+        "RUN find /app -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"
+    )
+    assert dockerfile.index("WORKDIR /app") < dockerfile.index(clear_parent_app)
+    assert dockerfile.index(clear_parent_app) < dockerfile.index("COPY . /app")
 
 
 def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:

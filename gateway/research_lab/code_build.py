@@ -2217,6 +2217,7 @@ def _write_research_lab_build_scaffold(repo_dir: Path, *, base_image_ref: str) -
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
+RUN find /app -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +
 COPY . /app
 RUN python - <<'PY'
 import research_lab_adapter

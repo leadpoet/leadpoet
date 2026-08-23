@@ -142,12 +142,19 @@ While that run is active and the user has not said `STOP`, Codex may:
   aggregate, exposes that score on the subnet dashboard, and leaves candidate
   evaluation ready.
 - Create or update a Leadpoet-owned inline identity-policy document on an
-  existing Leadpoet role, or update a document version of an existing
-  Leadpoet customer-managed policy, only through
+  exact repository-enumerated role/policy pair, or update a document version
+  of an exact repository-enumerated existing Leadpoet customer-managed policy
+  ARN, only through
   `scripts/operate_rebenchmark_iam_policy.py`, after its exact-`origin/main`
-  gateway source, approved account and caller ARN, typed run-ledger authority,
-  structural delta, simulations, surrounding inventory, and immediate prior
-  document hash all pass. This authority is policy-document-only: it never
+  gateway source, approved account and caller ARN, exact target/principals,
+  explicit task-scoped action/resource/condition and hash-only structural
+  delta, custom plus principal requested/decoy simulations, surrounding
+  inventory, and immediate prior document hash all pass. Its redacted plan
+  must be recorded in the OS-locked, generation-checked typed ledger before
+  apply. Ambiguous responses require bounded reconciliation, and a successful
+  simulation requires one final live reread before a receipt. Plans and
+  receipts may expose hashes and target metadata but no policy material. This
+  authority is policy-document-only: it never
   permits role trust, policy attachments, permissions boundaries, instance
   profiles, IAM users or groups, access keys, credentials, or unrelated
   principals/resources. AWS IAM has no native conditional policy write; the

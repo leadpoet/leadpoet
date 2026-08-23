@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import base64
 import contextvars
 from functools import lru_cache
+import hashlib
 import json
 import logging
 import math
@@ -35,10 +36,13 @@ from research_lab.employee_buckets import (
 )
 from research_lab.sourcing_model_contract_check import (
     ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION,
+    QUALIFICATION_SCORING_ADAPTER_VERSION_V2,
+    QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
     QUALIFICATION_PROTOCOL_ENTRYPOINT_V2,
     QUALIFICATION_PROTOCOL_POLICY_SHA256_V2,
     _qualification_protocol_entrypoint_declared_v2,
     compute_compatibility_source_tree_hash_v1,
+    qualification_protocol_scoring_adapter_version_v2,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_profiles,
     reviewed_consumer_snapshots,
@@ -667,8 +671,22 @@ def ensure_private_model_outputs(
     return normalized
 
 
-def _qualification_outcome_sha256(value: Mapping[str, Any]) -> str:
-    return sha256_json(dict(value)).removeprefix("sha256:")
+def _qualification_outcome_sha256(value: Any) -> str:
+    """Match model ``qualification_outcome.sha256_payload`` exactly."""
+
+    try:
+        canonical = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PrivateModelRuntimeError(
+            "qualification outcome must be canonical JSON"
+        ) from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def qualification_outcome_contract_v2() -> dict[str, Any]:
@@ -1054,6 +1072,7 @@ def validate_qualification_outcome_envelope_v2(
         raise PrivateModelRuntimeError(
             "private model qualification outcome companies are invalid"
         )
+    companies_sha256 = _qualification_outcome_sha256(companies)
     normalized_companies = list(
         ensure_private_model_outputs(
             companies,
@@ -1064,6 +1083,24 @@ def validate_qualification_outcome_envelope_v2(
     receipt = validate_qualification_route_completion_receipt_v1(
         document.get("route_completion_receipt")
     )
+    receipt_extensions = receipt.get("extensions")
+    model_binding = (
+        receipt_extensions.get("leadpoet.sourcing-model")
+        if isinstance(receipt_extensions, Mapping)
+        else None
+    )
+    if receipt.get("probe") is None and (
+        not isinstance(model_binding, Mapping)
+        or "companies_sha256" not in model_binding
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(model_binding.get("companies_sha256") or "")
+        )
+        or model_binding.get("companies_sha256") != companies_sha256
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome company hash differs from "
+            "returned companies"
+        )
     extensions = document.get("extensions")
     if (
         set(document) != fields
@@ -1884,6 +1921,24 @@ def build_local_private_artifact_manifest(
                     "private model source has no reviewed contract/parity pair and "
                     "failed semantic compatibility: " + str(exc)
                 ) from exc
+        else:
+            try:
+                expected_scoring_adapter_version = (
+                    qualification_protocol_scoring_adapter_version_v2(
+                        source_root,
+                        contract=source_contract,
+                    )
+                )
+            except ValueError as exc:
+                raise PrivateModelRuntimeError(str(exc)) from exc
+            if (
+                str(scoring_adapter_version)
+                != expected_scoring_adapter_version
+            ):
+                raise PrivateModelRuntimeError(
+                    "private model manifest scoring adapter differs from the "
+                    "signed source contract"
+                )
         # V2 admission requires the exact manifest identity that this helper
         # is constructing. The caller must sign the result and pass the built
         # source plus manifest through unified admission and the measured
@@ -2009,6 +2064,7 @@ def validate_sourcing_adapter_metadata(
     *,
     expected_semantic_bindings: Mapping[str, str] | None = None,
     require_company_fit_contract: bool = False,
+    expected_scoring_adapter_version: str = "",
 ) -> dict[str, Any]:
     """Run the deterministic consumer-owned runtime invariant probe.
 
@@ -2035,6 +2091,22 @@ def validate_sourcing_adapter_metadata(
     expected_adapter_version = str(
         semantic_bindings.get("adapter_version") or ""
     )
+    expected_scoring_version = str(expected_scoring_adapter_version or "")
+    if (
+        expected_scoring_version
+        and expected_scoring_version
+        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+    ):
+        raise PrivateModelRuntimeError(
+            "private model signed scoring adapter version is unsupported"
+        )
+    if expected_scoring_version and document.get(
+        "scoring_adapter_version"
+    ) != expected_scoring_version:
+        raise PrivateModelRuntimeError(
+            "private model scoring adapter metadata differs from its signed "
+            "source contract"
+        )
     if versioned_qualification:
         adapter_version_valid = bool(
             re.fullmatch(
@@ -2293,6 +2365,42 @@ def validate_sourcing_adapter_metadata(
         ):
             raise PrivateModelRuntimeError(
                 "private model company-fit metadata differs from the Lab contract"
+            )
+    if expected_scoring_version == QUALIFICATION_SCORING_ADAPTER_VERSION_V2:
+        from gateway.qualification.company_fit_proof_receipt import (
+            COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
+            company_fit_proof_receipt_contract_identity,
+        )
+
+        company_fit_proof = document.get("company_fit_proof_receipt")
+        try:
+            canonical_company_fit_proof = json.dumps(
+                dict(company_fit_proof),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            canonical_company_fit_proof = ""
+        if (
+            not isinstance(company_fit_proof, Mapping)
+            or canonical_company_fit_proof
+            != json.dumps(
+                company_fit_proof_receipt_contract_identity(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            or hashlib.sha256(
+                canonical_company_fit_proof.encode("utf-8")
+            ).hexdigest()
+            != COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256
+        ):
+            raise PrivateModelRuntimeError(
+                "private model company-fit proof metadata differs from the "
+                "v2 scoring contract"
             )
     intent_sources = routing.get("intent_sources")
     if (

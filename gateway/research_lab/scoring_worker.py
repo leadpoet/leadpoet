@@ -38,6 +38,7 @@ from leadpoet_observability import (
 from gateway.build_info import get_build_info
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
+    AttestedScorerInputContractError,
     canonical_json_bytes as attested_canonical_json_bytes,
     compare_baseline_score_summary as compare_attested_baseline_score_summary,
     compare_promotion_gate_decision as compare_attested_promotion_gate_decision,
@@ -4119,6 +4120,12 @@ class _TraceCapturingCompanyScorer:
         attested_epoch_id: int | None = None,
         attested_purpose: str = "",
         attested_provider_profile: str = "default",
+        reference_scoring_adapter_version: str = (
+            "qualification-company-scorer:v1"
+        ),
+        candidate_scoring_adapter_version: str = (
+            "qualification-company-scorer:v1"
+        ),
     ):
         self._inner = (
             inner
@@ -4127,6 +4134,12 @@ class _TraceCapturingCompanyScorer:
                 attested_epoch_id=attested_epoch_id,
                 attested_purpose=attested_purpose,
                 attested_provider_profile=attested_provider_profile,
+                reference_scoring_adapter_version=(
+                    reference_scoring_adapter_version
+                ),
+                candidate_scoring_adapter_version=(
+                    candidate_scoring_adapter_version
+                ),
             )
         )
         self._recorder = recorder
@@ -4783,6 +4796,8 @@ _TERMINAL_CANDIDATE_ERROR_CLASSES = (
 def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
     text = f"{exc.__class__.__name__}: {str(exc)}"
     lowered = text.lower()
+    if isinstance(exc, AttestedScorerInputContractError):
+        return "scorer_input_contract_incompatible", False
     if isinstance(exc, ConditionalValidationRetryableError):
         return "conditional_validation_retryable_failure", True
     if isinstance(exc, CandidateBaselineNotReady) or "matching_completed_private_baseline_required" in lowered:
@@ -6268,6 +6283,12 @@ class ResearchLabGatewayScoringWorker:
             "scorer": QualificationStyleCompanyScorer(
                 attested_epoch_id=evaluation_epoch,
                 attested_purpose="research_lab.candidate_score.v1",
+                reference_scoring_adapter_version=(
+                    artifact.scoring_adapter_version
+                ),
+                candidate_scoring_adapter_version=(
+                    candidate_artifact.scoring_adapter_version
+                ),
             ),
             "public_items": public_items,
             "private_items": private_items,
@@ -8426,6 +8447,12 @@ class ResearchLabGatewayScoringWorker:
                 ),
                 attested_epoch_id=evaluation_epoch,
                 attested_purpose="research_lab.candidate_score.v1",
+                reference_scoring_adapter_version=(
+                    artifact.scoring_adapter_version
+                ),
+                candidate_scoring_adapter_version=(
+                    candidate_artifact.scoring_adapter_version
+                ),
             )
             last_freshness_check_at = 0.0
             claim_lost_event = asyncio.Event()
@@ -11353,6 +11380,8 @@ class ResearchLabGatewayScoringWorker:
             attested_epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
             attested_purpose="research_lab.rebenchmark.v1",
             attested_provider_profile="benchmark_scorer",
+            reference_scoring_adapter_version=artifact.scoring_adapter_version,
+            candidate_scoring_adapter_version=artifact.scoring_adapter_version,
         )
         summaries, stats = await self._run_baseline_batch(
             runner=runner,
@@ -13336,6 +13365,8 @@ class ResearchLabGatewayScoringWorker:
             attested_epoch_id=evaluation_epoch,
             attested_purpose="research_lab.rebenchmark.v1",
             attested_provider_profile="benchmark_scorer",
+            reference_scoring_adapter_version=artifact.scoring_adapter_version,
+            candidate_scoring_adapter_version=artifact.scoring_adapter_version,
         )
         # Trace scope (§5.4 + in-container capture): keyed per day, attempt,
         # and window so a deliberate same-day replacement never overwrites the

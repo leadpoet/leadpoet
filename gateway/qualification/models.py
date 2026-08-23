@@ -9,13 +9,13 @@ See business_files/tasks10.md Phase 1.2 for specification.
 """
 
 import re
+import unicodedata
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import date, datetime
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 from uuid import UUID
 from enum import Enum
-
 
 # =============================================================================
 # Enums
@@ -218,6 +218,207 @@ def _scan_for_prompt_injection(text: str, field_name: str) -> None:
             )
 
 
+_PROMPT_URL_ROLE_MARKER_RE = re.compile(
+    r"(?:^|[/?&#=])(?:system|assistant|user)\s*(?::|>)",
+    re.IGNORECASE,
+)
+_PROMPT_REGISTRABLE_DOMAIN_RE = re.compile(
+    r"(?=.{1,253}\Z)"
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+    re.ASCII,
+)
+_PROMPT_LINKEDIN_COMPANY_SLUG_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9_-]{0,98}[a-z0-9])?",
+    re.ASCII,
+)
+
+
+def _contains_prompt_control(value: str) -> bool:
+    return any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+        for character in value
+    )
+
+
+def validate_candidate_prompt_text(text: str, field_name: str) -> str:
+    """Reject candidate controls, role markers, and known prompt steering."""
+
+    if not isinstance(text, str):
+        raise ValueError(f"{field_name} must be a string")
+    if _contains_prompt_control(text):
+        raise ValueError(f"{field_name} contains control or format characters")
+    _scan_for_prompt_injection(text, field_name)
+    return text
+
+
+def canonical_candidate_prompt_url(
+    value: str,
+    field_name: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    """Validate and canonicalize a candidate URL before any judge sees it."""
+
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    if _contains_prompt_control(value):
+        raise ValueError(f"{field_name} contains control or format characters")
+    raw = value.strip()
+    if not raw:
+        if allow_empty:
+            return ""
+        raise ValueError(f"{field_name} cannot be empty")
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = "https://" + raw
+    if any(character.isspace() for character in raw) or _contains_prompt_control(raw):
+        raise ValueError(f"{field_name} contains whitespace or controls")
+    if "\\" in raw:
+        raise ValueError(f"{field_name} contains an ambiguous URL path separator")
+    decoded = raw
+    for _decode_round in range(4):
+        next_decoded = unquote(decoded)
+        if any(character.isspace() for character in next_decoded) or _contains_prompt_control(
+            next_decoded
+        ):
+            raise ValueError(f"{field_name} contains encoded controls")
+        _scan_for_prompt_injection(next_decoded, field_name)
+        if _PROMPT_URL_ROLE_MARKER_RE.search(next_decoded):
+            raise ValueError(
+                f"prompt_injection_detected in {field_name!r}: role marker"
+            )
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    else:
+        raise ValueError(f"{field_name} has excessive percent encoding")
+    try:
+        parsed = urlparse(raw)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is not a valid URL") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ValueError(
+            f"{field_name} must be an absolute credential-free HTTP(S) URL"
+        )
+    host = parsed.hostname.casefold()
+    if any(ord(character) > 0x7F for character in host):
+        raise ValueError(f"{field_name} hostname must use ASCII or punycode")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host + (f":{port}" if port is not None else "")
+    return urlunparse(
+        (
+            parsed.scheme.casefold(),
+            netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def candidate_prompt_url_origin(
+    value: str,
+    field_name: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    """Return only a strict DNS origin for an untrusted candidate URL."""
+
+    canonical = canonical_candidate_prompt_url(
+        value,
+        field_name,
+        allow_empty=allow_empty,
+    )
+    if not canonical:
+        return ""
+    parsed = urlparse(canonical)
+    from leadpoet_verifier.identity.normalization import normalize_url
+
+    registrable_domain = str(
+        normalize_url(canonical).domain.registrable_domain or ""
+    ).casefold()
+    if _PROMPT_REGISTRABLE_DOMAIN_RE.fullmatch(registrable_domain) is None:
+        raise ValueError(f"{field_name} has no strict registrable DNS domain")
+    port = parsed.port
+    return urlunparse(
+        (
+            parsed.scheme.casefold(),
+            registrable_domain + (f":{port}" if port is not None else ""),
+            "",
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def candidate_linkedin_prompt_slug(
+    value: str,
+    field_name: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    """Return a strict LinkedIn person/company slug, never a raw URL."""
+
+    canonical = canonical_candidate_prompt_url(
+        value,
+        field_name,
+        allow_empty=allow_empty,
+    )
+    if not canonical:
+        return ""
+    parsed = urlparse(canonical)
+    host = str(parsed.hostname or "").casefold()
+    if host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        raise ValueError(f"{field_name} must use linkedin.com")
+    parts = [unquote(part).casefold() for part in parsed.path.split("/") if part]
+    if len(parts) != 2 or parts[0] not in {"company", "in"}:
+        raise ValueError(f"{field_name} must contain one strict LinkedIn slug")
+    slug = parts[1]
+    if _PROMPT_LINKEDIN_COMPANY_SLUG_RE.fullmatch(slug) is None:
+        raise ValueError(f"{field_name} slug is invalid")
+    return slug
+
+
+def candidate_company_prompt_identity(
+    *,
+    company_name: str,
+    company_website: str,
+    company_linkedin: str,
+) -> Dict[str, str]:
+    """Project raw candidate identity to inert, bounded judge locators."""
+
+    validate_candidate_prompt_text(company_name, "company_name")
+    website = candidate_prompt_url_origin(
+        company_website,
+        "company_website",
+        allow_empty=True,
+    )
+    registrable_domain = str(urlparse(website).hostname or "").casefold()
+    linkedin_slug = candidate_linkedin_prompt_slug(
+        company_linkedin,
+        "company_linkedin",
+        allow_empty=True,
+    )
+
+    return {
+        "company": registrable_domain,
+        "website": (
+            f"https://{registrable_domain}" if registrable_domain else ""
+        ),
+        "company_linkedin": linkedin_slug,
+    }
+
+
 class IntentSignal(BaseModel):
     """
     Intent signal attached to a lead.
@@ -281,13 +482,13 @@ class IntentSignal(BaseModel):
     @field_validator('description')
     @classmethod
     def validate_description_no_injection(cls, v: str) -> str:
-        _scan_for_prompt_injection(v, "description")
+        validate_candidate_prompt_text(v, "description")
         return v
 
     @field_validator('snippet')
     @classmethod
     def validate_snippet_no_injection(cls, v: str) -> str:
-        _scan_for_prompt_injection(v, "snippet")
+        validate_candidate_prompt_text(v, "snippet")
         return v
 
     @field_validator('date')
@@ -323,26 +524,7 @@ class IntentSignal(BaseModel):
         - Wrong case (HTTP://WWW.TECHCRUNCH.COM → https://www.techcrunch.com)
         - Whitespace
         """
-        v = v.strip()
-        if not v:
-            raise ValueError("URL cannot be empty")
-        
-        if not v.lower().startswith(('http://', 'https://')):
-            v = 'https://' + v
-        
-        parsed = urlparse(v)
-        if not parsed.hostname:
-            raise ValueError("URL must contain a valid hostname")
-        
-        normalized = urlunparse((
-            parsed.scheme.lower(),
-            parsed.netloc.lower(),
-            parsed.path,
-            parsed.params,
-            parsed.query,
-            parsed.fragment,
-        ))
-        return normalized
+        return canonical_candidate_prompt_url(v, "intent_signal.url")
 
 
 # =============================================================================
@@ -460,8 +642,9 @@ class RequiredAttributeClaim(BaseModel):
 
     Carried through scoring so the fit gate can enforce that an ICP's
     ``required_attribute`` was actually validated with evidence — previously
-    the claim was stripped before scoring and never checked. Bounded fields,
-    same prompt-injection containment pattern as IntentSignal.description.
+    the claim was stripped before scoring and never checked. These fields are
+    bounded for storage and audit, but model-authored evidence is never
+    interpolated into the independent scorer prompt.
     """
     model_config = {"extra": "ignore"}
 
@@ -520,26 +703,39 @@ class CompanyOutput(BaseModel):
     required_attribute: Optional[RequiredAttributeClaim] = Field(
         None, description="Model-reported required_attribute validation (scorer-enforced)")
 
+    # Retain the model-owned proof as an opaque optional mapping at this shared
+    # parsing boundary. Only the exact Research Lab v2 scorer validates and
+    # requires its closed schema; v1/public paths must continue to ignore it.
+    company_fit_proof_receipt: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Model-owned company-fit audit receipt; validated only by the "
+            "exact Research Lab v2 scorer"
+        ),
+    )
+
+    @field_validator('company_name')
+    @classmethod
+    def _reject_unsafe_company_name(cls, v: str) -> str:
+        normalized = v.strip()
+        if not normalized:
+            raise ValueError("company_name cannot be blank")
+        validate_candidate_prompt_text(normalized, "company_name")
+        return normalized
+
     @field_validator('company_website')
     @classmethod
     def _normalize_company_website(cls, v: str) -> str:
         """Normalize same way IntentSignal.url does — accept miner variability."""
-        v = v.strip()
-        if not v:
-            raise ValueError("company_website cannot be empty")
-        if not v.lower().startswith(('http://', 'https://')):
-            v = 'https://' + v
-        parsed = urlparse(v)
-        if not parsed.hostname:
-            raise ValueError("company_website must contain a valid hostname")
-        return urlunparse((
-            parsed.scheme.lower(),
-            parsed.netloc.lower(),
-            parsed.path,
-            parsed.params,
-            parsed.query,
-            parsed.fragment,
-        ))
+        return canonical_candidate_prompt_url(v, "company_website")
+
+    @field_validator('company_linkedin')
+    @classmethod
+    def _reject_unsafe_company_linkedin(cls, v: str) -> str:
+        raw = v.strip()
+        if raw:
+            candidate_linkedin_prompt_slug(raw, "company_linkedin")
+        return raw
 
     @field_validator('description')
     @classmethod

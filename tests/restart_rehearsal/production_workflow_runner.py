@@ -6345,6 +6345,9 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
         }
 
     class HandledEvidenceFailureScorer:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
         async def score_with_breakdowns(
             self,
             _companies: Any,
@@ -6391,6 +6394,7 @@ def _exercise_rebenchmark_sandbox_retry_contract() -> dict[str, Any]:
                     "companies": [{"company_name": "Example"}],
                     "icp": {"industry": "Software"},
                     "is_reference_model": True,
+                    "scoring_adapter_version": "qualification-company-scorer:v1",
                     "provider_execution_mode": "live_enclave",
                 },
                 scorer_context,
@@ -10442,14 +10446,18 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
     provider_observations = dict(
         (matched.details or {}).get("provider_observations") or {}
     )
-    contradicted = dict(verdict)
-    contradicted["employee_size_matches"] = False
+    inconsistent = dict(verdict)
+    inconsistent["employee_size_matches"] = False
+    contradicted = dict(inconsistent)
+    contradicted["observed_employee_count"] = "51"
     malformed = ("50.0", "1-10", -1)
     if (
         matched.decision != COMPANY_FIT_MATCH
         or provider_observations.get("observed_employee_count") != "50"
         or _decision_from_observed_employee_size(contradicted, icp)
         != COMPANY_FIT_MISMATCH
+        or _decision_from_observed_employee_size(inconsistent, icp)
+        != COMPANY_FIT_UNAVAILABLE
         or any(
             _decision_from_observed_employee_size(
                 {

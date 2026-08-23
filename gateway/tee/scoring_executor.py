@@ -439,6 +439,9 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
 
 async def _qualification_company_scores(payload: Mapping[str, Any]) -> Dict[str, Any]:
     from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+    from research_lab.sourcing_model_contract_check import (
+        QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
+    )
 
     companies = payload.get("companies")
     icp = payload.get("icp")
@@ -449,8 +452,20 @@ async def _qualification_company_scores(payload: Mapping[str, Any]) -> Dict[str,
     is_reference_model = payload.get("is_reference_model")
     if not isinstance(is_reference_model, bool):
         raise ScoringExecutorError("is_reference_model must be a boolean")
+    scoring_adapter_version = payload.get("scoring_adapter_version")
+    if (
+        not isinstance(scoring_adapter_version, str)
+        or scoring_adapter_version
+        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+    ):
+        raise ScoringExecutorError(
+            "scoring_adapter_version must be an exact supported version"
+        )
 
-    scorer = QualificationStyleCompanyScorer()
+    scorer = QualificationStyleCompanyScorer(
+        reference_scoring_adapter_version=scoring_adapter_version,
+        candidate_scoring_adapter_version=scoring_adapter_version,
+    )
     result = scorer.score_with_breakdowns(companies, icp, is_reference_model)
     if inspect.isawaitable(result):
         result = await result

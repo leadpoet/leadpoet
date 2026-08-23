@@ -19,6 +19,9 @@ permissions:
 
 env:
   CI: "true"
+  # One immutable source identity is shared by checkout verification and the
+  # adapter-v10 tests. Do not replace this with a branch or a short ref.
+  SOURCING_MODEL_SOURCE_SHA: "dda2a974dfa2c5c743da6c2da8e46355293ed325"
   DISABLE_BACKGROUND_TASKS: "true"
   ENABLE_FULFILLMENT: "false"
   LANGFUSE_ENABLED: "false"
@@ -57,6 +60,36 @@ jobs:
         with:
           ref: ${{ github.event.deployment.ref || github.ref }}
           fetch-depth: 0
+
+      - name: Check out exact Sourcing_model source
+        uses: actions/checkout@v4
+        with:
+          repository: leadpoet/Sourcing_model
+          ref: ${{ env.SOURCING_MODEL_SOURCE_SHA }}
+          path: .ci/sourcing-model
+          fetch-depth: 1
+          token: ${{ secrets.SOURCING_MODEL_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Verify exact Sourcing_model source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$GITHUB_WORKSPACE/.ci/sourcing-model"
+          expected_sha="$SOURCING_MODEL_SOURCE_SHA"
+          test -d "$source_root/.git"
+          test "$(git -C "$source_root" rev-parse HEAD)" = "$expected_sha"
+          test -z "$(git -C "$source_root" symbolic-ref -q HEAD || true)"
+          test -z "$(git -C "$source_root" status --porcelain=v1 --untracked-files=all)"
+          test "$(git -C "$source_root" ls-files -m -o --exclude-standard)" = ""
+          test -f "$source_root/sourcing_model/consumer_contract.json"
+          test -f "$source_root/sourcing_model/consumer_parity_fixtures.json"
+          test "$(sha256sum "$source_root/sourcing_model/consumer_contract.json" | cut -d' ' -f1)" = "960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
+          test "$(sha256sum "$source_root/sourcing_model/consumer_parity_fixtures.json" | cut -d' ' -f1)" = "deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
+          {
+            echo "SOURCING_MODEL_SOURCE_ROOT=$source_root"
+            echo "SOURCING_MODEL_SOURCE_SHA=$expected_sha"
+          } >> "$GITHUB_ENV"
 
       - name: Verify repository instruction parity
         run: cmp --silent AGENTS.md CLAUDE.md

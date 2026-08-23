@@ -2412,6 +2412,12 @@ class AttestedPrivateModelRunnerV2:
                         compatibility_receipt.get("admission_mode")
                         == "semantic_v1"
                     ),
+                    expected_scoring_adapter_version=(
+                        self.artifact.scoring_adapter_version
+                        if compatibility_receipt.get("admission_mode")
+                        == "qualification_protocol_v2"
+                        else ""
+                    ),
                 )
                 validate_consumer_runtime_probe_v1(
                     probe,

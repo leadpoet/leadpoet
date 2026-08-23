@@ -63,7 +63,7 @@ def _manifest_doc(model_artifact_hash: str, manifest_uri: str) -> dict[str, Any]
         ),
         "config_hash": "sha256:" + "e" * 64,
         "component_registry_version": "1.0",
-        "scoring_adapter_version": "1.0",
+        "scoring_adapter_version": "qualification-company-scorer:v1",
         "manifest_uri": manifest_uri,
         "signature_ref": "kms:sig",
         "build_id": "",
@@ -294,7 +294,7 @@ def _deps(
         select_many=db.select_many,
         load_manifest=lambda uri: manifests[uri],
         runner_factory=_runner_factory,
-        scorer_factory=FakeScorer,
+        scorer_factory=lambda _scoring_adapter_version: FakeScorer(),
         report_store=store,
         now=clock.now,
     )
@@ -499,8 +499,14 @@ async def test_run_shadow_day_uses_async_authorities_and_emits_receipt_roots() -
     scorer_epochs: list[int] = []
     runner_epochs: list[int] = []
 
-    def _scorer_factory(epoch_id: int) -> FakeAttestedScorer:
+    scorer_versions: list[str] = []
+
+    def _scorer_factory(
+        epoch_id: int,
+        scoring_adapter_version: str,
+    ) -> FakeAttestedScorer:
         scorer_epochs.append(epoch_id)
+        scorer_versions.append(scoring_adapter_version)
         return scorer
 
     def _runner_factory(
@@ -514,7 +520,7 @@ async def test_run_shadow_day_uses_async_authorities_and_emits_receipt_roots() -
         select_many=base_deps.select_many,
         load_manifest=base_deps.load_manifest,
         runner_factory=lambda _artifact: runner,
-        scorer_factory=FakeScorer,
+        scorer_factory=lambda _scoring_adapter_version: FakeScorer(),
         report_store=store,
         attested_runner_factory=_runner_factory,
         attested_scorer_factory=_scorer_factory,
@@ -538,6 +544,7 @@ async def test_run_shadow_day_uses_async_authorities_and_emits_receipt_roots() -
     )
 
     assert scorer_epochs == [77]
+    assert scorer_versions == ["qualification-company-scorer:v1"]
     assert runner_epochs == [77]
     assert runner.calls == ["icp_a"]
     assert report["attested_v2_receipt_hashes"] == [

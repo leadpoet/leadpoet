@@ -119,6 +119,18 @@ QUALIFICATION_PROTOCOL_CONSUMER_API_V2 = (
     "research-lab-qualification-consumer-api:v2"
 )
 QUALIFICATION_PROTOCOL_ADMISSION_MODE_V2 = "qualification_protocol_v2"
+QUALIFICATION_SCORING_ADAPTER_VERSION_V1 = (
+    "qualification-company-scorer:v1"
+)
+QUALIFICATION_SCORING_ADAPTER_VERSION_V2 = (
+    "qualification-company-scorer:v2"
+)
+QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS = frozenset(
+    {
+        QUALIFICATION_SCORING_ADAPTER_VERSION_V1,
+        QUALIFICATION_SCORING_ADAPTER_VERSION_V2,
+    }
+)
 QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = Path(__file__).with_name(
     "sourcing_model_qualification_outcome_v2.json"
 )
@@ -2323,14 +2335,6 @@ def _semantic_contract_shape_violations_v1(
     if not functions_valid:
         violations.append("model compatibility functions declaration is invalid")
 
-    exact_signatures = contract.get("exact_signatures")
-    if not isinstance(exact_signatures, list) or not all(
-        isinstance(item, str) for item in exact_signatures
-    ):
-        violations.append(
-            "model compatibility exact signatures declaration is invalid"
-        )
-
     for key, label in (
         ("full_parameters", "full parameter declaration"),
         ("required_keyword_only", "required keyword-only declaration"),
@@ -2359,8 +2363,9 @@ def _typed_dispatch_custody_v3_requested(
     contract: Mapping[str, Any],
     *,
     policy: Mapping[str, Any],
+    root: Path | None = None,
 ) -> bool:
-    """Identify the one approved v3 surface before applying its stricter ABI."""
+    """Detect a custody-v3 claim before exact identity verification."""
 
     dispatch_v3 = policy["additive_dispatch_custody_v3"]
     declared_exact_signatures = contract.get("exact_signatures")
@@ -2370,16 +2375,40 @@ def _typed_dispatch_custody_v3_requested(
         and all(isinstance(item, str) for item in declared_exact_signatures)
         else set()
     )
-    exact_marker = (
-        "research_lab_adapter.py:dispatch_runner_initial_custody_v3"
-        in exact_signatures
-        or "sourcing_model/model_runner.py:model_runner_custody_metadata"
-        in exact_signatures
+    exact_markers = {
+        "research_lab_adapter.py:dispatch_runner_initial_custody_v3",
+        "sourcing_model/model_runner.py:model_runner_custody_metadata",
+    }
+    marker_claim = exact_markers.issubset(exact_signatures)
+    contract_constants = contract.get("exact_constants")
+    adapter_constants = (
+        contract_constants.get("research_lab_adapter.py")
+        if isinstance(contract_constants, Mapping)
+        else None
     )
+    expected_adapter_version = str(
+        dispatch_v3["metadata_binding"]["adapter_version"]
+    )
+    contract_version_claim = (
+        isinstance(adapter_constants, Mapping)
+        and adapter_constants.get("ADAPTER_VERSION") == expected_adapter_version
+    )
+    source_version_claim = False
+    if root is not None:
+        try:
+            adapter_tree = ast.parse((Path(root) / "research_lab_adapter.py").read_bytes())
+            source_version_claim = (
+                _unique_literal_binding_v1(adapter_tree, "ADAPTER_VERSION")
+                == expected_adapter_version
+            )
+        except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+            source_version_claim = False
     return (
         str(contract.get("contract_id") or "")
         == str(dispatch_v3["contract_id"])
-        or exact_marker
+        or marker_claim
+        or contract_version_claim
+        or source_version_claim
     )
 
 
@@ -2650,15 +2679,25 @@ def verify_semantic_source_tree_compatibility_v1(
     typed_dispatch_requested = _typed_dispatch_custody_v3_requested(
         contract,
         policy=policy,
+        root=root,
     )
     if typed_dispatch_requested:
         dispatch_v3 = policy["additive_dispatch_custody_v3"]
+        exact_signatures = contract.get("exact_signatures")
+        exact_signatures_valid = isinstance(exact_signatures, list) and all(
+            isinstance(item, str) for item in exact_signatures
+        )
+        if not exact_signatures_valid:
+            violations.append(
+                "model compatibility exact signatures declaration is invalid"
+            )
         if contract_id != str(dispatch_v3["contract_id"]):
             violations.append("typed dispatch contract identity is not approved")
         if contract_hash != str(dispatch_v3["contract_sha256"]):
             violations.append("typed dispatch contract snapshot differs")
         if parity_hash != str(dispatch_v3["parity_sha256"]):
             violations.append("typed dispatch parity snapshot differs")
+        reviewed_snapshots_match = True
         for snapshot_path, observed_path, label in (
             (
                 dispatch_v3["contract_snapshot_path"],
@@ -2678,10 +2717,20 @@ def verify_semantic_source_tree_compatibility_v1(
                     or not observed_path.is_file()
                     or expected_path.read_bytes() != observed_path.read_bytes()
                 ):
+                    reviewed_snapshots_match = False
                     violations.append(f"{label} does not match reviewed snapshot")
             except OSError:
+                reviewed_snapshots_match = False
                 violations.append(f"{label} snapshot is unreadable")
-        policy = _merge_typed_dispatch_policy(policy)
+        typed_dispatch_verified = (
+            exact_signatures_valid
+            and contract_id == str(dispatch_v3["contract_id"])
+            and contract_hash == str(dispatch_v3["contract_sha256"])
+            and parity_hash == str(dispatch_v3["parity_sha256"])
+            and reviewed_snapshots_match
+        )
+        if typed_dispatch_verified:
+            policy = _merge_typed_dispatch_policy(policy)
 
     for relative in (canonical_path, parity_path):
         required_path = root / relative
@@ -3277,6 +3326,63 @@ def _qualification_protocol_adapter_surface_v2(root: Path) -> bool:
     )
 
 
+def qualification_protocol_scoring_adapter_version_v2(
+    root: Path,
+    *,
+    contract: Mapping[str, Any],
+) -> str:
+    """Measure the signed contract's exact supported scoring adapter.
+
+    The already-published v1 rollback contract did not freeze this constant,
+    so v1 alone may use the equivalent literal binding from its hash-bound
+    adapter source. New v2 contracts must freeze the exact constant in the
+    signed consumer contract. Unknown versions never inherit v2 behavior.
+    """
+
+    adapter_path = Path(root) / "research_lab_adapter.py"
+    try:
+        adapter_tree = ast.parse(adapter_path.read_bytes())
+        source_version = _unique_literal_binding_v1(
+            adapter_tree,
+            "SCORING_ADAPTER_VERSION",
+        )
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(
+            "qualification protocol scoring adapter binding is unavailable"
+        ) from exc
+    exact_constants = contract.get("exact_constants")
+    adapter_constants = (
+        exact_constants.get("research_lab_adapter.py")
+        if isinstance(exact_constants, Mapping)
+        else None
+    )
+    contract_version = (
+        adapter_constants.get("SCORING_ADAPTER_VERSION")
+        if isinstance(adapter_constants, Mapping)
+        else None
+    )
+    if (
+        not isinstance(source_version, str)
+        or source_version
+        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+    ):
+        raise ValueError(
+            "qualification protocol scoring adapter version is unsupported"
+        )
+    if contract_version is None:
+        if source_version != QUALIFICATION_SCORING_ADAPTER_VERSION_V1:
+            raise ValueError(
+                "qualification protocol v2 scoring adapter is not frozen in "
+                "the signed consumer contract"
+            )
+    elif contract_version != source_version:
+        raise ValueError(
+            "qualification protocol scoring adapter differs from the signed "
+            "consumer contract"
+        )
+    return source_version
+
+
 def qualification_protocol_source_tree_admission_v2(
     root: Path,
     *,
@@ -3310,12 +3416,30 @@ def qualification_protocol_source_tree_admission_v2(
         )
     contract_path = root / str(contract.get("path") or "")
     parity_path = root / str(parity.get("path") or "")
+    try:
+        source_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        if not isinstance(source_contract, Mapping):
+            raise ValueError("signed consumer contract must be an object")
+        scoring_adapter_version = qualification_protocol_scoring_adapter_version_v2(
+            root,
+            contract=source_contract,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            "qualification protocol signed consumer contract is invalid"
+        ) from exc
     if (
         not contract_path.is_file()
         or not parity_path.is_file()
         or _snapshot_sha256(contract_path) != str(contract.get("sha256") or "")
         or _snapshot_sha256(parity_path) != str(parity.get("sha256") or "")
         or not str(contract.get("contract_id") or "")
+        or not isinstance(source_contract, Mapping)
+        or source_contract.get("contract_id") != contract.get("contract_id")
+        or source_contract.get("canonical_path") != contract.get("path")
+        or source_contract.get("parity_fixture_path") != parity.get("path")
+        or document.get("scoring_adapter_version")
+        != scoring_adapter_version
     ):
         raise ValueError(
             "qualification protocol signed consumer documents differ from source"
@@ -3333,7 +3457,9 @@ def qualification_protocol_source_tree_admission_v2(
         "contract_id": str(contract["contract_id"]),
         "contract_hash": str(contract["sha256"]),
         "parity_hash": str(parity["sha256"]),
-        "bindings": {},
+        "bindings": {
+            "scoring_adapter_version": scoring_adapter_version,
+        },
         "entrypoints": sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2),
     }
     return {**body, "receipt_hash": _sha256_json(body)}
@@ -3390,7 +3516,12 @@ def validate_qualification_protocol_source_receipt_v2(
         or normalized.get("contract_id") != str(contract.get("contract_id") or "")
         or normalized.get("contract_hash") != str(contract.get("sha256") or "")
         or normalized.get("parity_hash") != str(parity.get("sha256") or "")
-        or normalized.get("bindings") != {}
+        or normalized.get("bindings")
+        != {
+            "scoring_adapter_version": str(
+                document.get("scoring_adapter_version") or ""
+            )
+        }
         or normalized.get("entrypoints")
         != sorted(QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2)
         or normalized.get("receipt_hash") != _sha256_json(body)

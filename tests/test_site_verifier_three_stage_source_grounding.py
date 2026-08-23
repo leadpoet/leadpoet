@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from qualification.scoring.intent_verification_three_stage import (
+    _apply_guardrails,
     _rescue_medium_with_corroboration,
     _scrape_exa,
     _search_exa_corroboration,
@@ -67,6 +68,19 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
         super().tearDown()
 
+    def test_guardrail_rejects_same_domain_different_evidence_path(self):
+        supplied = "https://news.example/exact-article"
+        verdict = supported("https://news.example/different-article")
+
+        guarded = _apply_guardrails(
+            {"claimed_source_urls": [supplied]},
+            verdict["answer"],
+        )
+
+        item = guarded["signal_evaluations"][0]
+        self.assertEqual(item["signal_status"], "unable_to_verify")
+        self.assertEqual(item["source_urls_supplied"], [supplied])
+
     async def test_exact_official_domain_can_establish_entity_but_not_claim(self):
         url = "https://advario.com/news/terminal-project"
         stage_one = supported(url)
@@ -102,9 +116,14 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["rejection_reason"], "stage3_contradicted")
         self.assertEqual(call.await_count, 2)
 
-    async def test_unrelated_domain_without_entity_name_still_fails_closed(self):
+    async def test_domain_absence_defers_to_stage_three_entity_authority(self):
         url = "https://news.example/terminal-project"
-        call = AsyncMock(return_value=supported(url))
+        stage_three = contradicted(url)
+        stage_three["answer"]["signal_evaluations"][0].update(
+            signal_status="wrong_entity",
+            same_entity_check="fail",
+        )
+        call = AsyncMock(side_effect=[supported(url), stage_three])
         fetch = AsyncMock(return_value={
             "results": [{
                 "url": url,
@@ -130,12 +149,12 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(result["client_ready"])
-        self.assertFalse(result["company_check"])
+        self.assertIsNone(result["company_check"])
         self.assertEqual(
             result["rejection_reason"],
-            "wrong_entity_company_not_in_fetched_content",
+            "stage3_wrong_entity",
         )
-        self.assertEqual(call.await_count, 1)
+        self.assertEqual(call.await_count, 2)
 
     async def test_exa_retries_only_a_transient_fetch_without_changing_evidence(self):
         calls = 0
@@ -390,7 +409,10 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             result["stage3"]["claim_matches_miner_date"],
             "no_date_in_content",
         )
-        self.assertEqual(result["corroboration"]["independent_urls"], [corroborating])
+        self.assertEqual(
+            result["corroboration"]["independent_urls"],
+            [corroborating],
+        )
         self.assertTrue(result["corroboration"]["cited_independent"])
         self.assertEqual(call.await_count, 3)
 

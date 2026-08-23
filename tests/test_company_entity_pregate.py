@@ -223,36 +223,32 @@ class GateRoutingIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(caller.calls, 2)
         self.assertIsNotNone(result["stage3"])
-        self.assertTrue(result["company_check"])
+        # No authoritative website was supplied, so the candidate-authored
+        # name is never used as a terminal pre-LLM identity fact.
+        self.assertIsNone(result["company_check"])
         self.assertEqual(result["decision"], "approve")
 
-    def test_confident_absence_cheap_rejects_without_stage3(self):
-        # Marriott-style page: distinctive token "artha" is absent entirely.
+    def test_candidate_name_absence_defers_to_stage3(self):
+        # A candidate-authored name cannot independently reject a company.
         result, caller = self._run(
             company_name="Artha Capital",
             text="Marriott International announced a new hotel opening in Denver.",
             s3_env=_s3_approve(self.URL),
         )
-        self.assertEqual(caller.calls, 1, "Stage 3 must NOT be called")
-        self.assertIsNone(result["stage3"])
-        self.assertEqual(result["decision"], "reject")
-        self.assertEqual(
-            result["rejection_reason"], "wrong_entity_company_not_in_fetched_content"
-        )
-        self.assertFalse(result["company_check"])
+        self.assertEqual(caller.calls, 2, "Stage 3 must remain authoritative")
+        self.assertIsNotNone(result["stage3"])
+        self.assertEqual(result["decision"], "approve")
+        self.assertIsNone(result["company_check"])
 
-    def test_generic_tail_present_still_cheap_rejects(self):
-        # "capital" appears but is a generic tail; "artha" (distinctive) does
-        # not → still a confident absence, still cheap-rejected.
+    def test_generic_tail_cannot_make_candidate_name_authoritative(self):
         result, caller = self._run(
             company_name="Artha Capital",
             text="The private equity firm raised fresh capital for its new fund.",
             s3_env=_s3_approve(self.URL),
         )
-        self.assertEqual(caller.calls, 1)
-        self.assertEqual(
-            result["rejection_reason"], "wrong_entity_company_not_in_fetched_content"
-        )
+        self.assertEqual(caller.calls, 2)
+        self.assertEqual(result["decision"], "approve")
+        self.assertIsNone(result["company_check"])
 
     def test_generic_only_name_defers_never_cheap_rejects(self):
         # No distinctive fingerprint → must defer to the judge even when the

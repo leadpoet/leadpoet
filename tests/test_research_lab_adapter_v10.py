@@ -182,6 +182,10 @@ def test_v10_reviewed_snapshots_are_byte_exact() -> None:
 
 
 def test_v10_source_root_is_bound_to_exact_commit(monkeypatch) -> None:
+    # Establish that CI supplied a usable checkout before changing only the
+    # expected identity. This keeps the negative case about an SHA mismatch,
+    # rather than an absent or arbitrary local tree.
+    _required_source_root()
     monkeypatch.setenv("SOURCING_MODEL_SOURCE_SHA", "0" * 40)
 
     with pytest.raises(

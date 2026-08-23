@@ -66,6 +66,30 @@ def test_sourcing_model_profile_authority_is_protected():
     } <= protected
 
 
+def test_typed_dispatch_custody_v3_authority_is_protected():
+    contract_symbols = set(
+        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
+    )
+    assert {
+        "CONTRACT_V68_PATH",
+        "PARITY_FIXTURE_V28_PATH",
+        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID",
+        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256",
+        "ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256",
+        "ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256",
+        "ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION",
+        "_same_json_literal",
+        "approved_typed_dispatch_custody_v3_metadata_v1",
+        "validate_typed_dispatch_custody_v3_metadata_v1",
+        "_typed_dispatch_custody_v3_requested",
+        "_merge_typed_dispatch_policy",
+        "_typed_dispatch_metadata_violations",
+    } <= contract_symbols
+    assert "EXPECTED_SOURCING_ADAPTER_VERSIONS" in PROTECTED_SYMBOLS[
+        "research_lab/eval/private_runtime.py"
+    ]
+
+
 def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)

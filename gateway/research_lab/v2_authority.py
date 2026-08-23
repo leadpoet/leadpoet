@@ -68,6 +68,9 @@ from leadpoet_canonical.attested_v2 import (
     validate_receipt_graph,
     validate_receipt_graphs,
 )
+from research_lab.sourcing_model_contract_check import (
+    QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MEASURED_OPERATION_LOGGER = logging.getLogger(
     "leadpoet.measured.operations"
@@ -1408,6 +1411,7 @@ async def execute_company_scores_v2(
     companies: Sequence[Mapping[str, Any]],
     icp: Mapping[str, Any],
     is_reference_model: bool,
+    scoring_adapter_version: str,
     provider_credential_profile: str = "default",
     attestation_out: dict[str, Any] | None = None,
     execute: Any = execute_scoring_v2,
@@ -1415,6 +1419,14 @@ async def execute_company_scores_v2(
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
         raise ResearchLabV2AuthorityError(
             "V2 company score sequence must be a non-negative integer"
+        )
+    if (
+        not isinstance(scoring_adapter_version, str)
+        or scoring_adapter_version
+        not in QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS
+    ):
+        raise ResearchLabV2AuthorityError(
+            "V2 company scoring adapter version is unsupported"
         )
     outcome = await execute(
         operation=OP_QUALIFICATION_COMPANY_SCORES,
@@ -1425,6 +1437,7 @@ async def execute_company_scores_v2(
             "companies": [dict(item) for item in companies],
             "icp": dict(icp),
             "is_reference_model": bool(is_reference_model),
+            "scoring_adapter_version": scoring_adapter_version,
             "provider_execution_mode": "live_enclave",
             "scoring_context_purpose": _v2_purpose(purpose),
         },

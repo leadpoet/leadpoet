@@ -125,6 +125,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v46.json",
         "research_lab/sourcing_model_contract_v47.json",
         "research_lab/sourcing_model_contract_v52.json",
+        "research_lab/sourcing_model_contract_v52_82c.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
@@ -134,6 +135,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v46.json",
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v52.json",
+        "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
         "research_lab/sourcing_model_semantic_compatibility_v1.json",
     } <= set(MEASURED_DATA_PATHS)
@@ -146,6 +148,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_contract_v46.json",
         "research_lab/sourcing_model_contract_v47.json",
         "research_lab/sourcing_model_contract_v52.json",
+        "research_lab/sourcing_model_contract_v52_82c.json",
         "research_lab/sourcing_model_contract_v7.json",
         "research_lab/sourcing_model_parity_fixtures.json",
         "research_lab/sourcing_model_parity_fixtures_v11.json",
@@ -155,6 +158,7 @@ def test_scoring_import_closure_contains_authority_modules():
         "research_lab/sourcing_model_parity_fixtures_v46.json",
         "research_lab/sourcing_model_parity_fixtures_v47.json",
         "research_lab/sourcing_model_parity_fixtures_v52.json",
+        "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
         "research_lab/sourcing_model_parity_fixtures_v7.json",
         "research_lab/sourcing_model_semantic_compatibility_v1.json",
     }
@@ -165,6 +169,14 @@ def test_scoring_import_closure_contains_authority_modules():
     assert "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE" in manifest["environment_variables"]
     assert "QUALIFICATION_OPENROUTER_API_KEY" in manifest["environment_variables"]
     assert manifest["manifest_hash"].startswith("sha256:")
+
+
+def test_scoring_import_closure_measures_reviewed_site_v52_profile():
+    assert "research_lab/sourcing_model_contract_v52_82c.json" in MEASURED_DATA_PATHS
+    assert (
+        "research_lab/sourcing_model_parity_fixtures_v52_82c.json"
+        in MEASURED_DATA_PATHS
+    )
 
 
 def test_gateway_code_hash_includes_verifier_runtime_data():

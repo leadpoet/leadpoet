@@ -24,6 +24,7 @@ from research_lab.sourcing_model_contract_check import (
     CONTRACT_V46_PATH,
     CONTRACT_V47_PATH,
     CONTRACT_V52_PATH,
+    CONTRACT_V52_82C_PATH,
     CONTRACT_V55_PATH,
     CONTRACT_V55_E55_PATH,
     CONTRACT_V7_PATH,
@@ -35,10 +36,12 @@ from research_lab.sourcing_model_contract_check import (
     PARITY_FIXTURE_V46_PATH,
     PARITY_FIXTURE_V47_PATH,
     PARITY_FIXTURE_V52_PATH,
+    PARITY_FIXTURE_V52_82C_PATH,
     PARITY_FIXTURE_V55_PATH,
     PARITY_FIXTURE_V55_E55_PATH,
     PARITY_FIXTURE_V7_PATH,
     _resolve_reviewed_consumer_contract_pair,
+    _reviewed_consumer_snapshot_for_source_hash,
     load_wrapper_contract,
     resolve_reviewed_consumer_snapshot,
     reviewed_consumer_profiles,
@@ -787,6 +790,85 @@ def test_exact_v55_e55_revision_is_independently_reviewed(tmp_path: Path) -> Non
             == "leadpoet-sourcing-wrapper-contract-v55"
         ]
     ) == 2
+
+
+def test_exact_v52_82c_revision_is_independently_reviewed(tmp_path: Path) -> None:
+    contract = json.loads(CONTRACT_V52_82C_PATH.read_text(encoding="utf-8"))
+    contract_path = tmp_path / contract["canonical_path"]
+    parity_path = tmp_path / contract["parity_fixture_path"]
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_bytes(CONTRACT_V52_82C_PATH.read_bytes())
+    parity_path.write_bytes(PARITY_FIXTURE_V52_82C_PATH.read_bytes())
+
+    resolved = _resolve_reviewed_consumer_contract_pair(tmp_path)
+
+    assert resolved is not None
+    assert resolved["contract"]["contract_id"] == (
+        "leadpoet-sourcing-wrapper-contract-v52"
+    )
+    assert resolved["contract_sha256"] == (
+        "sha256:48609451a69cf41a6a7615224e628417df4a27040a1b54c9958460cc76a48fc9"
+    )
+    assert resolved["parity_sha256"] == (
+        "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
+    )
+    assert resolved["release_identities"] == (
+        {
+            "source_tree_hash": (
+                "sha256:6835100e66840dab82a08d93abfeaba8cbaf51484c20e62a91c787c9d36366aa"
+            ),
+            "git_commit_sha": "82cfc8ecc1d57fd91f6a56ad4d2b7fd4fc4f2e43",
+            "manifest_hash": (
+                "sha256:168b4fb51a20cc82835d35905ae0dcf5bd39e6a1c2115b289dd6c9cb975c3652"
+            ),
+            "image_digest": (
+                "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                "sourcing-model@sha256:1d4b55a84575559b2c8a13663d59b48985caa834fc4fb4fa34ba76c4f552b83f"
+            ),
+        },
+    )
+    assert len(
+        [
+            profile
+            for profile in reviewed_consumer_profiles()
+            if profile["contract"]["contract_id"]
+            == "leadpoet-sourcing-wrapper-contract-v52"
+        ]
+    ) == 2
+
+    release_manifest = {
+        "model_artifact_hash": (
+            "sha256:6835100e66840dab82a08d93abfeaba8cbaf51484c20e62a91c787c9d36366aa"
+        ),
+        "git_commit_sha": "82cfc8ecc1d57fd91f6a56ad4d2b7fd4fc4f2e43",
+        "manifest_hash": (
+            "sha256:168b4fb51a20cc82835d35905ae0dcf5bd39e6a1c2115b289dd6c9cb975c3652"
+        ),
+        "image_digest": (
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+            "sourcing-model@sha256:1d4b55a84575559b2c8a13663d59b48985caa834fc4fb4fa34ba76c4f552b83f"
+        ),
+    }
+    profiled = _reviewed_consumer_snapshot_for_source_hash(
+        tmp_path,
+        source_tree_hash=release_manifest["model_artifact_hash"],
+        manifest=release_manifest,
+    )
+    assert profiled is not None
+    assert profiled["contract_sha256"] == resolved["contract_sha256"]
+
+    with pytest.raises(
+        ValueError,
+        match="reviewed legacy source manifest identity differs",
+    ):
+        _reviewed_consumer_snapshot_for_source_hash(
+            tmp_path,
+            source_tree_hash=release_manifest["model_artifact_hash"],
+            manifest={**release_manifest, "git_commit_sha": "0" * 40},
+        )
+
+    parity_path.write_text("{}\n", encoding="utf-8")
+    assert _resolve_reviewed_consumer_contract_pair(tmp_path) is None
 
 
 def test_exact_v12_contact_contract_and_parity_pair_is_reviewed(

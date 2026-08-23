@@ -71,6 +71,12 @@ CONTRACT_V52_PATH = Path(__file__).with_name("sourcing_model_contract_v52.json")
 PARITY_FIXTURE_V52_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v52.json"
 )
+CONTRACT_V52_82C_PATH = Path(__file__).with_name(
+    "sourcing_model_contract_v52_82c.json"
+)
+PARITY_FIXTURE_V52_82C_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v52_82c.json"
+)
 CONTRACT_V55_PATH = Path(__file__).with_name("sourcing_model_contract_v55.json")
 PARITY_FIXTURE_V55_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v55.json"
@@ -503,6 +509,47 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
 # intent-source evidence surface. Keep both byte-exact v55 revisions so the
 # active release and the older rollback releases remain independently bound.
 REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v52",
+        "contract_path": CONTRACT_V52_82C_PATH,
+        "contract_sha256": (
+            "sha256:48609451a69cf41a6a7615224e628417df4a27040a1b54c9958460cc76a48fc9"
+        ),
+        "parity_path": PARITY_FIXTURE_V52_82C_PATH,
+        "parity_sha256": (
+            "sha256:1e06b5bbe638356661494054363fbba8b8cba0181260b3396ce259f129d90e5d"
+        ),
+        "required_source_constants": {
+            "sourcing_model/runtime_capabilities.py": {
+                "CAPABILITY_CONTRACT_VERSION": (
+                    "sourcing-model-runtime-capabilities:v3"
+                ),
+            },
+        },
+        "release_identities": (
+            {
+                "source_tree_hash": (
+                    "sha256:6835100e66840dab82a08d93abfeaba8cbaf51484c20e62a91c787c9d36366aa"
+                ),
+                "git_commit_sha": "82cfc8ecc1d57fd91f6a56ad4d2b7fd4fc4f2e43",
+                "manifest_hash": (
+                    "sha256:168b4fb51a20cc82835d35905ae0dcf5bd39e6a1c2115b289dd6c9cb975c3652"
+                ),
+                "image_digest": (
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
+                    "sourcing-model@sha256:1d4b55a84575559b2c8a13663d59b48985caa834fc4fb4fa34ba76c4f552b83f"
+                ),
+            },
+        ),
+        "positional_exact_signatures": True,
+        "variadic_parameters": {
+            "sourcing_model/corporate_filing_contract.py:"
+            "build_corporate_filing_envelope": {
+                "vararg": None,
+                "kwarg": "payload",
+            },
+        },
+    },
     {
         "contract_id": "leadpoet-sourcing-wrapper-contract-v55",
         "contract_path": CONTRACT_V55_E55_PATH,

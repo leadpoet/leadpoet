@@ -572,7 +572,7 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:2eda73128cea01ebf2f63027474b651a3626080296d87997330c399cc0b0dc29",
+      "ast_sha256": "sha256:e4e978fccf42d3f0289fda79ff0106fb0e5f11dc8f26b0c97a72c0a5b1978ad0",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -6377,7 +6377,7 @@
       "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
     },
     {
-      "ast_sha256": "sha256:0ea67aea860bc4864bb81e7bdf0154ed37d15d9793cc325382b20c594667c010",
+      "ast_sha256": "sha256:cf2e6bbaccaa4afd7aa5cd9ced231844f7672165a56a56e7e59010f22a80723f",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -7812,7 +7812,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:0c2d1034828addb936b7eb38f26cf5f73d6ece54b17ee05e1e251eb0ccd12fe6",
-  "protected_source_commit": "8bc5951a1d5165e7b4510d3ce3064ededf3d93f7",
+  "manifest_hash": "sha256:6763ea2301c3e76ce961864641fababb6eaa4f3a6b49a73de342ffbde2a04126",
+  "protected_source_commit": "73dea212f390a8a9b729331c5a1289451769e16e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

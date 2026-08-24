@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 import fcntl
 import hashlib
@@ -28,6 +29,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote
@@ -52,16 +54,20 @@ DEFAULT_LEDGER = (
     / "state"
     / "leadpoet-overnight-rebenchmark-validation.json"
 )
-REQUEST_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_change.v1"
+REQUEST_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_change.v2"
 PLAN_REQUEST_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_plan_request.v1"
-PLAN_RECEIPT_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_plan.v1"
+PLAN_RECEIPT_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_plan.v2"
 TASK_SCOPE_SCHEMA = "leadpoet.rebenchmark_iam_task_scope.v1"
 AUTHORITY_SCHEMA = "leadpoet.rebenchmark_iam_authority.v1"
-RECEIPT_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_receipt.v1"
+RECEIPT_SCHEMA = "leadpoet.rebenchmark_iam_policy_document_receipt.v2"
+INTENT_SCHEMA = "leadpoet.rebenchmark_iam_policy_intent.v1"
+RECONCILIATION_SCHEMA = "leadpoet.rebenchmark_iam_policy_reconciliation.v1"
+OPERATION_RECORD_SCHEMA = "leadpoet.rebenchmark_iam_operation_record.v1"
 LEDGER_SCHEMA = "leadpoet.overnight_rebenchmark_validation.v1"
 NEVER_PAUSE_SCHEMA = "leadpoet.rebenchmark_iam_never_pause.v1"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+INVOCATION_RE = re.compile(r"^[0-9a-f]{32}$")
 ROLE_NAME_RE = re.compile(r"^leadpoet-[A-Za-z0-9+=,.@_-]{1,56}$")
 POLICY_NAME_RE = re.compile(
     r"^(?:Leadpoet[A-Za-z0-9+=,.@_-]{1,120}|leadpoet-[A-Za-z0-9+=,.@_-]{1,119})$"
@@ -104,6 +110,49 @@ MANAGED_TARGET_ALLOWLIST = frozenset(
     f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:policy/leadpoet/production-parity/{name}"
     for name in MANAGED_POLICY_NAMES
 )
+MANAGED_POLICY_CONTROLLER_ROLE = "leadpoet-production-parity-controller"
+MANAGED_TARGET_PRINCIPAL_ALLOWLIST = {
+    arn: frozenset({MANAGED_POLICY_CONTROLLER_ROLE})
+    for arn in MANAGED_TARGET_ALLOWLIST
+}
+MANAGED_POLICY_DOCUMENT_HASHES = {
+    "LeadpoetParityControllerCloudFront": (
+        "sha256:f7095b6fe01bdf5f26ee1adc9e5bfa82ba3246acf293113c5d14fdd5410ec731"
+    ),
+    "LeadpoetParityControllerData": (
+        "sha256:572c3931b63b87053ae923b483cb39acd61a8ffe33278fb6f77250c65b242618"
+    ),
+    "LeadpoetParityControllerEc2Launch": (
+        "sha256:5466df394b6369c338ff9efdae6d6e7ba945506bca9dec1f21db11d0edcace3e"
+    ),
+    "LeadpoetParityControllerLifecycle": (
+        "sha256:71f508e73efd44721f3f25e80cfb76c5f37dec380b5c9f153c88dbb09041ecb2"
+    ),
+}
+MANAGED_TARGET_DOCUMENT_HASH_ALLOWLIST = {
+    f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:policy/leadpoet/production-parity/{name}": digest
+    for name, digest in MANAGED_POLICY_DOCUMENT_HASHES.items()
+}
+GATEWAY_INLINE_TARGET = (
+    "leadpoet-gateway-s3-cloudwatch-role",
+    "leadpoet-gateway-env-secretsmanager",
+)
+REVOCATION_INLINE_TARGETS = frozenset(
+    {
+        (
+            "leadpoet-production-parity-controller",
+            "LeadpoetProductionParityRevokeOlderSessions",
+        ),
+        (
+            "leadpoet-production-parity-runner",
+            "LeadpoetProductionParityRunnerRevokeOlderSessions",
+        ),
+    }
+)
+PLAN_VALIDITY_SECONDS = 60
+REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS = 65
+REVOCATION_NEW_CUTOFF_FUTURE_LIMIT_SECONDS = 80
+REVOCATION_APPLY_MIN_FUTURE_SECONDS = 2
 PRINCIPAL_ROLE_ALLOWLIST = frozenset(
     {
         "leadpoet-gateway-s3-cloudwatch-role",
@@ -195,6 +244,26 @@ def _sha256_bytes(value: bytes) -> str:
 
 def _sha256_json(value: Any) -> str:
     return _sha256_bytes(_json(value).encode("utf-8"))
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _parse_timestamp(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        value,
+    ) is None:
+        raise OperationError(f"{label} is invalid")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise OperationError(f"{label} is invalid") from exc
 
 
 def _policy_document(value: Any) -> Mapping[str, Any]:
@@ -604,6 +673,92 @@ def _target(value: Any) -> dict[str, str]:
     raise OperationError("IAM policy target kind is unsupported")
 
 
+def _revocation_cutoff(document: Mapping[str, Any]) -> datetime:
+    canonical = _canonical_policy(document)
+    statements = canonical["Statement"]
+    if len(statements) != 1:
+        raise OperationError("IAM revocation policy structure differs")
+    statement = statements[0]
+    if set(statement) != {"Effect", "Action", "Resource", "Condition"} or (
+        statement.get("Effect") != "Deny"
+        or statement.get("Action") != ["*"]
+        or statement.get("Resource") != ["*"]
+    ):
+        raise OperationError("IAM revocation policy structure differs")
+    condition = statement.get("Condition")
+    if (
+        not isinstance(condition, Mapping)
+        or set(condition) != {"DateLessThan"}
+        or not isinstance(condition.get("DateLessThan"), Mapping)
+        or set(condition["DateLessThan"]) != {"aws:TokenIssueTime"}
+    ):
+        raise OperationError("IAM revocation policy condition differs")
+    cutoff = condition["DateLessThan"].get("aws:TokenIssueTime")
+    if not isinstance(cutoff, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        cutoff,
+    ) is None:
+        raise OperationError("IAM revocation policy cutoff is invalid")
+    try:
+        return datetime.strptime(cutoff, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise OperationError("IAM revocation policy cutoff is invalid") from exc
+
+
+def _validate_target_policy_authority(
+    target: Mapping[str, str],
+    *,
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any],
+    phase: str = "plan",
+) -> None:
+    if phase not in {"plan", "apply", "reconcile"}:
+        raise OperationError("IAM policy authority phase is invalid")
+    desired = _canonical_policy(after)
+    if target["kind"] == "managed":
+        expected_hash = MANAGED_TARGET_DOCUMENT_HASH_ALLOWLIST.get(
+            target["policy_arn"]
+        )
+        if expected_hash is None or _sha256_json(desired) != expected_hash:
+            raise OperationError(
+                "managed IAM policy differs from repository document authority"
+            )
+        return
+
+    identity = (target["role_name"], target["policy_name"])
+    if identity == GATEWAY_INLINE_TARGET:
+        if before is None or _canonical_policy(before) != desired:
+            raise OperationError(
+                "gateway IAM policy has no repository-authorized mutable delta"
+            )
+        return
+    if identity not in REVOCATION_INLINE_TARGETS:
+        raise OperationError("inline IAM policy target authority is unavailable")
+
+    desired_cutoff = _revocation_cutoff(desired)
+    if before is not None:
+        prior = _canonical_policy(before)
+        if prior == desired:
+            return
+        prior_cutoff = _revocation_cutoff(prior)
+        if desired_cutoff <= prior_cutoff:
+            raise OperationError("IAM revocation policy cutoff would weaken authority")
+    if phase == "reconcile":
+        return
+    now = datetime.now(timezone.utc)
+    minimum = (
+        REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS
+        if phase == "plan"
+        else REVOCATION_APPLY_MIN_FUTURE_SECONDS
+    )
+    if desired_cutoff < (now + timedelta(seconds=minimum)) or desired_cutoff > (
+        now + timedelta(seconds=REVOCATION_NEW_CUTOFF_FUTURE_LIMIT_SECONDS)
+    ):
+        raise OperationError("IAM revocation policy cutoff is outside the safe window")
+
+
 def _validate_simulations(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not 1 <= len(value) <= 32:
         raise OperationError("IAM policy simulation cases are invalid")
@@ -738,6 +893,7 @@ def _validate_plan_receipt(
         "expected_delta",
         "expected_delta_hash",
         "task_scope_hash",
+        "simulation_hash",
         "simulation_case_count",
         "fixed_decoy_case_count",
         "principal_arns",
@@ -745,6 +901,8 @@ def _validate_plan_receipt(
         "managed_default_version_id",
         "managed_prior_versions",
         "managed_stable_hash",
+        "planned_at",
+        "expires_at",
         "concurrency_model",
         "aws_native_compare_and_swap",
         "secret_values_printed",
@@ -782,6 +940,7 @@ def _validate_plan_receipt(
                 "desired_document_hash",
                 "expected_delta_hash",
                 "task_scope_hash",
+                "simulation_hash",
             )
         )
         or value.get("expected_delta_hash") != _sha256_json(delta)
@@ -798,11 +957,20 @@ def _validate_plan_receipt(
         or not isinstance(versions, list)
     ):
         raise OperationError("gateway IAM plan receipt differs")
+    planned_at = _parse_timestamp(value.get("planned_at"), label="IAM plan creation time")
+    expires_at = _parse_timestamp(value.get("expires_at"), label="IAM plan expiry")
+    if (
+        not planned_at < expires_at
+        or (expires_at - planned_at).total_seconds() > PLAN_VALIDITY_SECONDS
+    ):
+        raise OperationError("gateway IAM plan validity window differs")
     for arn in principal_arns:
         prefix = f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/"
         role = str(arn).removeprefix(prefix)
         if not str(arn).startswith(prefix) or role not in PRINCIPAL_ROLE_ALLOWLIST:
             raise OperationError("gateway IAM plan principal differs")
+    if principal_arns != _expected_principal_arns(target):
+        raise OperationError("gateway IAM plan principals differ from the target")
     normalized_versions: list[dict[str, Any]] = []
     for row in versions:
         if not isinstance(row, Mapping) or set(row) != {
@@ -858,13 +1026,141 @@ def _validate_plan_receipt(
     return normalized
 
 
+def _validate_plan_freshness(
+    plan: Mapping[str, Any], *, now: datetime | None = None
+) -> None:
+    observed = now or datetime.now(timezone.utc)
+    planned_at = _parse_timestamp(plan.get("planned_at"), label="IAM plan creation time")
+    expires_at = _parse_timestamp(plan.get("expires_at"), label="IAM plan expiry")
+    if observed < planned_at or observed >= expires_at:
+        raise OperationError("IAM policy plan is not inside its apply window")
+
+
+def _intent_material(value: Mapping[str, Any]) -> dict[str, Any]:
+    keys = {
+        "schema_version",
+        "operation_id",
+        "control_run_id",
+        "invocation_id",
+        "reservation_generation",
+        "change_id",
+        "plan_hash",
+        "target",
+        "origin_main_sha",
+        "bridge_source_hash",
+        "prior_document_hash",
+        "inventory_hash",
+        "desired_document_hash",
+        "reserved_at",
+    }
+    return {key: value[key] for key in keys}
+
+
+def _validate_intent(value: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "operation_id",
+        "intent_hash",
+        "control_run_id",
+        "invocation_id",
+        "status",
+        "reservation_generation",
+        "ledger_generation",
+        "change_id",
+        "plan_hash",
+        "target",
+        "origin_main_sha",
+        "bridge_source_hash",
+        "prior_document_hash",
+        "inventory_hash",
+        "desired_document_hash",
+        "reserved_at",
+        "stop_requested_at",
+        "last_reconciliation_status",
+        "last_reconciled_at",
+        "completed_at",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise OperationError("IAM policy intent fields differ")
+    status = value.get("status")
+    reservation_generation = value.get("reservation_generation")
+    ledger_generation = value.get("ledger_generation")
+    if (
+        value.get("schema_version") != INTENT_SCHEMA
+        or not INVOCATION_RE.fullmatch(str(value.get("operation_id") or ""))
+        or not INVOCATION_RE.fullmatch(str(value.get("control_run_id") or ""))
+        or not INVOCATION_RE.fullmatch(str(value.get("invocation_id") or ""))
+        or status not in {"reserved", "stop_requested", "ambiguous", "completed", "aborted"}
+        or not isinstance(reservation_generation, int)
+        or isinstance(reservation_generation, bool)
+        or reservation_generation < 0
+        or not isinstance(ledger_generation, int)
+        or isinstance(ledger_generation, bool)
+        or ledger_generation < reservation_generation + 1
+        or value.get("change_id") != plan["change_id"]
+        or _target(value.get("target")) != plan["target"]
+        or value.get("plan_hash") != plan["plan_hash"]
+        or value.get("origin_main_sha") != plan["origin_main_sha"]
+        or value.get("bridge_source_hash") != plan["bridge_source_hash"]
+        or value.get("prior_document_hash") != plan["prior_document_hash"]
+        or value.get("inventory_hash") != plan["inventory_hash"]
+        or value.get("desired_document_hash") != plan["desired_document_hash"]
+        or HASH_RE.fullmatch(str(value.get("intent_hash") or "")) is None
+    ):
+        raise OperationError("IAM policy intent differs from its plan authority")
+    reserved_at = _parse_timestamp(
+        value.get("reserved_at"), label="IAM intent reservation time"
+    )
+    planned_at = _parse_timestamp(plan.get("planned_at"), label="IAM plan creation time")
+    expires_at = _parse_timestamp(plan.get("expires_at"), label="IAM plan expiry")
+    if not planned_at <= reserved_at < expires_at:
+        raise OperationError("IAM policy intent reservation window differs")
+    for name in ("stop_requested_at", "last_reconciled_at", "completed_at"):
+        timestamp = value.get(name)
+        if timestamp is not None and _parse_timestamp(
+            timestamp, label=f"IAM intent {name}"
+        ) < reserved_at:
+            raise OperationError("IAM policy intent event ordering differs")
+    stop_requested_at = value.get("stop_requested_at")
+    last_status = value.get("last_reconciliation_status")
+    last_at = value.get("last_reconciled_at")
+    completed_at = value.get("completed_at")
+    if (
+        last_status not in {None, "before", "ambiguous"}
+        or ((last_status is None) != (last_at is None))
+        or (
+            status == "reserved"
+            and (stop_requested_at is not None or completed_at is not None)
+        )
+        or (status == "stop_requested" and stop_requested_at is None)
+        or (status == "ambiguous" and last_status != "ambiguous")
+        or (status in {"completed", "aborted"} and completed_at is None)
+        or (status not in {"completed", "aborted"} and completed_at is not None)
+    ):
+        raise OperationError("IAM policy intent lifecycle differs")
+    if completed_at is not None:
+        completed_time = _parse_timestamp(
+            completed_at, label="IAM intent completion time"
+        )
+        for name in ("stop_requested_at", "last_reconciled_at"):
+            timestamp = value.get(name)
+            if timestamp is not None and completed_time < _parse_timestamp(
+                timestamp, label=f"IAM intent {name}"
+            ):
+                raise OperationError("IAM policy intent completion ordering differs")
+    if value.get("intent_hash") != _sha256_json(_intent_material(value)):
+        raise OperationError("IAM policy intent hash differs")
+    return dict(value)
+
+
 def _validate_request(
     value: Any,
     *,
     commit: str | None = None,
     source_hash: str | None = None,
+    require_intent: bool = False,
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != {
+    base_keys = {
         "schema_version",
         "change_id",
         "target",
@@ -873,7 +1169,15 @@ def _validate_request(
         "simulations",
         "plan",
         "prune_managed_version",
-    }:
+    }
+    if (
+        not isinstance(value, Mapping)
+        or frozenset(value) not in {
+            frozenset(base_keys),
+            frozenset(base_keys | {"intent"}),
+        }
+        or (require_intent and "intent" not in value)
+    ):
         raise OperationError("IAM policy change request fields are invalid")
     if value.get("schema_version") != REQUEST_SCHEMA:
         raise OperationError("IAM policy change request schema is invalid")
@@ -890,12 +1194,13 @@ def _validate_request(
         or plan["target"] != target
         or plan["desired_document_hash"] != _sha256_json(desired)
         or plan["task_scope_hash"] != _sha256_json(value.get("task_scope"))
+        or plan["simulation_hash"] != _sha256_json(simulations)
         or plan["simulation_case_count"] != len(simulations)
     ):
         raise OperationError("IAM policy change request plan binding differs")
     if value.get("prune_managed_version") is not None:
         raise OperationError("pre-existing managed IAM policy versions cannot be pruned")
-    return {
+    normalized = {
         "schema_version": REQUEST_SCHEMA,
         "change_id": change_id,
         "target": target,
@@ -908,6 +1213,9 @@ def _validate_request(
         "plan": plan,
         "prune_managed_version": None,
     }
+    if "intent" in value:
+        normalized["intent"] = _validate_intent(value["intent"], plan)
+    return normalized
 
 
 def _page(iam: Any, method: str, key: str, **kwargs: Any) -> list[Any]:
@@ -1253,13 +1561,80 @@ def _principal_arns(
             raise OperationError(
                 "managed IAM policy is attached to a user or group outside scope"
             )
-    if (
-        not roles
-        or len(roles) != len(set(roles))
-        or any(role not in PRINCIPAL_ROLE_ALLOWLIST for role in roles)
-    ):
+    actual = [
+        f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/{role}"
+        for role in sorted(roles)
+    ]
+    expected = _expected_principal_arns(target)
+    if len(roles) != len(set(roles)) or actual != expected:
+        raise OperationError("IAM effective-policy principals differ from the target")
+    return actual
+
+
+def _expected_principal_arns(target: Mapping[str, str]) -> list[str]:
+    if target["kind"] == "inline_role":
+        roles = frozenset({target["role_name"]})
+    else:
+        roles = MANAGED_TARGET_PRINCIPAL_ALLOWLIST.get(target["policy_arn"])
+        if roles is None:
+            raise OperationError("managed IAM policy principal target is outside scope")
+    if not roles or any(role not in PRINCIPAL_ROLE_ALLOWLIST for role in roles):
         raise OperationError("IAM effective-policy principal is outside scope")
-    return [f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/{role}" for role in sorted(roles)]
+    return [
+        f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/{role}"
+        for role in sorted(roles)
+    ]
+
+
+def _validate_setup_managed_authority(setup: Mapping[str, Any]) -> None:
+    role = setup.get("CONTROLLER_ROLE")
+    names = setup.get("CONTROLLER_POLICY_NAMES")
+    generator = setup.get("_controller_policy_slices")
+    if (
+        role != MANAGED_POLICY_CONTROLLER_ROLE
+        or not isinstance(names, Mapping)
+        or len(names) != len(MANAGED_POLICY_NAMES)
+        or set(names.values()) != MANAGED_POLICY_NAMES
+        or not callable(generator)
+        or setup.get("EXPECTED_ACCOUNT_ID") != EXPECTED_ACCOUNT_ID
+        or setup.get("EXPECTED_REGION") != EXPECTED_REGION
+    ):
+        raise OperationError("repository managed IAM authority differs")
+    setup_targets = {
+        f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:policy/leadpoet/production-parity/{name}"
+        for name in names.values()
+        if isinstance(name, str)
+    }
+    if (
+        setup_targets != set(MANAGED_TARGET_PRINCIPAL_ALLOWLIST)
+        or setup_targets != set(MANAGED_TARGET_DOCUMENT_HASH_ALLOWLIST)
+        or any(
+            roles != frozenset({role})
+            for roles in MANAGED_TARGET_PRINCIPAL_ALLOWLIST.values()
+        )
+    ):
+        raise OperationError("repository managed IAM target/principal authority differs")
+    try:
+        documents = generator(
+            account_id=EXPECTED_ACCOUNT_ID,
+            region=EXPECTED_REGION,
+            production_secret_id=setup["PRODUCTION_GATEWAY_SECRET_ID"],
+            readonly_secret_id=setup["READONLY_DSN_SECRET_ID"],
+            miner_intake_secret_id=setup["DEFAULT_MINER_INTAKE_SECRET_ID"],
+            runner_arn=(
+                f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/"
+                f"{setup['RUNNER_ROLE']}"
+            ),
+        )
+    except Exception as exc:
+        raise OperationError("repository managed IAM document authority failed") from exc
+    if not isinstance(documents, Mapping) or set(documents) != MANAGED_POLICY_NAMES:
+        raise OperationError("repository managed IAM document inventory differs")
+    document_hashes = {
+        name: _policy_hash(document) for name, document in documents.items()
+    }
+    if document_hashes != MANAGED_POLICY_DOCUMENT_HASHES:
+        raise OperationError("repository managed IAM document authority differs")
 
 
 def _simulate_before_write(
@@ -1331,10 +1706,10 @@ def _plan_receipt(
     delta = _policy_delta(state["document"], request["desired_document"])
     if len(delta) > MAX_DELTA_ITEMS:
         raise OperationError("IAM policy structural delta is too large")
+    principals = _principal_arns(state, request["target"])
     decoys = _simulate_before_write(
         iam, request["desired_document"], request["simulations"]
     )
-    principals = _principal_arns(state, request["target"])
     managed = request["target"]["kind"] == "managed"
     if (
         managed
@@ -1344,6 +1719,19 @@ def _plan_receipt(
         raise OperationError(
             "managed IAM policy capacity cannot preserve an exact rollback version"
         )
+    if request["target"]["kind"] == "inline_role" and (
+        request["target"]["role_name"], request["target"]["policy_name"]
+    ) in REVOCATION_INLINE_TARGETS:
+        # Simulations are sequential and bounded in count, but their network
+        # latency can consume the cutoff window. Recheck immediately before
+        # authoring the expiring plan so a past/near cutoff is never emitted.
+        _validate_target_policy_authority(
+            request["target"],
+            before=state["document"],
+            after=request["desired_document"],
+            phase="plan",
+        )
+    planned_at = datetime.now(timezone.utc)
     receipt: dict[str, Any] = {
         "schema_version": PLAN_RECEIPT_SCHEMA,
         "status": "planned",
@@ -1361,6 +1749,7 @@ def _plan_receipt(
         "expected_delta": delta,
         "expected_delta_hash": _sha256_json(delta),
         "task_scope_hash": _sha256_json(scope),
+        "simulation_hash": _sha256_json(request["simulations"]),
         "simulation_case_count": len(request["simulations"]),
         "fixed_decoy_case_count": len(decoys),
         "principal_arns": principals,
@@ -1373,6 +1762,10 @@ def _plan_receipt(
         ),
         "managed_stable_hash": (
             _sha256_json(state["inventory"]["stable"]) if managed else None
+        ),
+        "planned_at": _format_timestamp(planned_at),
+        "expires_at": _format_timestamp(
+            planned_at + timedelta(seconds=PLAN_VALIDITY_SECONDS)
         ),
         "concurrency_model": CONCURRENCY_MODEL,
         "aws_native_compare_and_swap": False,
@@ -1423,6 +1816,9 @@ def _receipt_base(
     account_id: str,
     caller_arn: str,
 ) -> dict[str, Any]:
+    intent = request.get("intent")
+    if not isinstance(intent, Mapping):
+        raise OperationError("IAM policy receipt requires a durable intent")
     return {
         "schema_version": RECEIPT_SCHEMA,
         "change_id": request["change_id"],
@@ -1437,7 +1833,13 @@ def _receipt_base(
         "desired_document_hash": _sha256_json(request["desired_document"]),
         "expected_delta_hash": _sha256_json(request["expected_delta"]),
         "task_scope_hash": _sha256_json(request["task_scope"]),
+        "simulation_hash": request["plan"]["simulation_hash"],
         "plan_hash": request["plan"]["plan_hash"],
+        "operation_id": intent["operation_id"],
+        "intent_hash": intent["intent_hash"],
+        "control_run_id": intent["control_run_id"],
+        "invocation_id": intent["invocation_id"],
+        "reservation_generation": intent["reservation_generation"],
         "simulation_case_count": len(request["simulations"]),
         "fixed_decoy_case_count": request["plan"]["fixed_decoy_case_count"],
         "principal_simulation_count": (
@@ -1489,6 +1891,15 @@ def _apply_inline(
             raise OperationError("IAM inline policy plan no longer matches live state")
     if not reconciled:
         _check_preconditions(before, request)
+        if before["document_hash"] != desired_hash:
+            _validate_plan_freshness(request["plan"])
+            if (target["role_name"], target["policy_name"]) in REVOCATION_INLINE_TARGETS:
+                _validate_target_policy_authority(
+                    target,
+                    before=before["document"],
+                    after=request["desired_document"],
+                    phase="apply",
+                )
     decoys = _simulate_before_write(
         iam, request["desired_document"], request["simulations"]
     )
@@ -1525,6 +1936,14 @@ def _apply_inline(
     immediate = _inline_state(iam, target)
     if not is_planned_before(immediate):
         raise OperationError("IAM inline policy changed before write")
+    _validate_plan_freshness(request["plan"])
+    if (target["role_name"], target["policy_name"]) in REVOCATION_INLINE_TARGETS:
+        _validate_target_policy_authority(
+            target,
+            before=immediate["document"],
+            after=request["desired_document"],
+            phase="apply",
+        )
     write_error: Exception | None = None
     try:
         iam.put_role_policy(
@@ -1707,6 +2126,10 @@ def _apply_managed(
         raise OperationError("managed IAM policy plan no longer matches live state")
     if base_matches:
         _check_preconditions(before, request)
+    if active_version is None and not (
+        base_matches and before["document_hash"] == desired_hash
+    ):
+        _validate_plan_freshness(plan)
     decoys = _simulate_before_write(
         iam, request["desired_document"], request["simulations"]
     )
@@ -1810,6 +2233,7 @@ def _apply_managed(
             raise OperationError(
                 "managed IAM policy capacity cannot preserve an exact rollback version"
             )
+        _validate_plan_freshness(plan)
         create_error: Exception | None = None
         returned_version = ""
         try:
@@ -1963,6 +2387,141 @@ def _apply_managed(
     return receipt
 
 
+def _reconciliation_receipt(
+    *,
+    status: str,
+    state: Mapping[str, Any],
+    request: Mapping[str, Any],
+    source_hash: str,
+    commit: str,
+    account_id: str,
+    caller_arn: str,
+) -> dict[str, Any]:
+    intent = request["intent"]
+    target = request["target"]
+    return {
+        "schema_version": RECONCILIATION_SCHEMA,
+        "status": status,
+        "change_id": request["change_id"],
+        "target": dict(target),
+        "origin_main_sha": commit,
+        "bridge_source_hash": source_hash,
+        "account_id": account_id,
+        "caller_arn": caller_arn,
+        "route": "gateway_bridge",
+        "local_chain": "ignored_non_authority",
+        "plan_hash": request["plan"]["plan_hash"],
+        "operation_id": intent["operation_id"],
+        "intent_hash": intent["intent_hash"],
+        "control_run_id": intent["control_run_id"],
+        "invocation_id": intent["invocation_id"],
+        "reservation_generation": intent["reservation_generation"],
+        "simulation_hash": request["plan"]["simulation_hash"],
+        "observed_document_hash": state["document_hash"],
+        "observed_inventory_hash": state["inventory_hash"],
+        "target_present": bool(state.get("target_present", True)),
+        "managed_default_version_id": (
+            state["default_version_id"] if target["kind"] == "managed" else None
+        ),
+        "reconciled_at": _format_timestamp(datetime.now(timezone.utc)),
+        "secret_values_printed": False,
+        "policy_material_printed": False,
+    }
+
+
+def _reconcile_policy(
+    iam: Any,
+    request: Mapping[str, Any],
+    *,
+    source_hash: str,
+    commit: str,
+    account_id: str,
+    caller_arn: str,
+) -> dict[str, Any]:
+    target = request["target"]
+    loader = (
+        (lambda: _inline_state(iam, target))
+        if target["kind"] == "inline_role"
+        else (lambda: _managed_state(iam, target))
+    )
+    first = loader()
+    second = loader()
+    if first != second:
+        return _reconciliation_receipt(
+            status="ambiguous",
+            state=second,
+            request=request,
+            source_hash=source_hash,
+            commit=commit,
+            account_id=account_id,
+            caller_arn=caller_arn,
+        )
+    state = second
+    plan = request["plan"]
+    if target["kind"] == "inline_role":
+        exact_before = (
+            state["document_hash"] == plan["prior_document_hash"]
+            and state["inventory_hash"] == plan["inventory_hash"]
+            and state["target_present"] == plan["target_present"]
+        )
+        exact_applied = (
+            state["document_hash"] == plan["desired_document_hash"]
+            and state["inventory_hash"] == plan["inventory_hash"]
+            and state["target_present"] is True
+        )
+    else:
+        exact_before = _managed_matches_plan_base(state, plan)
+        exact_applied = (
+            _managed_plan_addition(
+                state,
+                plan,
+                desired_hash=plan["desired_document_hash"],
+                default_new=True,
+            )
+            is not None
+        )
+    if exact_before and plan["prior_document_hash"] != plan["desired_document_hash"]:
+        return _reconciliation_receipt(
+            status="before",
+            state=state,
+            request=request,
+            source_hash=source_hash,
+            commit=commit,
+            account_id=account_id,
+            caller_arn=caller_arn,
+        )
+    if exact_applied or (
+        exact_before
+        and plan["prior_document_hash"] == plan["desired_document_hash"]
+    ):
+        if target["kind"] == "inline_role":
+            return _apply_inline(
+                iam,
+                request,
+                source_hash=source_hash,
+                commit=commit,
+                account_id=account_id,
+                caller_arn=caller_arn,
+            )
+        return _apply_managed(
+            iam,
+            request,
+            source_hash=source_hash,
+            commit=commit,
+            account_id=account_id,
+            caller_arn=caller_arn,
+        )
+    return _reconciliation_receipt(
+        status="ambiguous",
+        state=state,
+        request=request,
+        source_hash=source_hash,
+        commit=commit,
+        account_id=account_id,
+        caller_arn=caller_arn,
+    )
+
+
 def _gateway_clients(setup: Mapping[str, Any]) -> tuple[Any, Any, str, str]:
     sts, iam, account_id = setup["_iam_clients"](EXPECTED_REGION)
     identity = sts.get_caller_identity()
@@ -1983,6 +2542,7 @@ def _remote_entry(
     source_hash: str,
     commit: str,
 ) -> dict[str, Any]:
+    _validate_setup_managed_authority(setup)
     sts, iam, account_id, caller_arn = _gateway_clients(setup)
     try:
         if operation == "probe":
@@ -2004,6 +2564,11 @@ def _remote_entry(
                 state = _inline_state(iam, validated_plan["target"])
             else:
                 state = _managed_state(iam, validated_plan["target"])
+            _validate_target_policy_authority(
+                validated_plan["target"],
+                before=state["document"],
+                after=validated_plan["desired_document"],
+            )
             return _plan_receipt(
                 iam,
                 validated_plan,
@@ -2013,11 +2578,41 @@ def _remote_entry(
                 account_id=account_id,
                 caller_arn=caller_arn,
             )
-        if operation != "apply":
+        if operation not in {"apply", "reconcile"}:
             raise OperationError("IAM policy operation is unsupported")
         validated = _validate_request(
-            request, commit=commit, source_hash=source_hash
+            request,
+            commit=commit,
+            source_hash=source_hash,
+            require_intent=True,
         )
+        if validated["target"]["kind"] == "inline_role":
+            authority_state = _inline_state(iam, validated["target"])
+        else:
+            authority_state = _managed_state(iam, validated["target"])
+        _validate_target_policy_authority(
+            validated["target"],
+            before=(authority_state["document"] if operation == "apply" else None),
+            after=validated["desired_document"],
+            phase="reconcile",
+        )
+        if operation == "reconcile":
+            if validated["intent"]["status"] not in {
+                "reserved",
+                "stop_requested",
+                "ambiguous",
+            }:
+                raise OperationError("IAM reconciliation intent is not active")
+            return _reconcile_policy(
+                iam,
+                validated,
+                source_hash=source_hash,
+                commit=commit,
+                account_id=account_id,
+                caller_arn=caller_arn,
+            )
+        if validated["intent"]["status"] != "reserved":
+            raise OperationError("IAM apply intent is not reserved")
         if validated["target"]["kind"] == "inline_role":
             return _apply_inline(
                 iam,
@@ -2274,14 +2869,277 @@ def _active_ledger_lock(path: Path):
             os.close(lock_descriptor)
 
 
+@contextlib.contextmanager
+def _iam_operation_lock(path: Path):
+    lock_path = path.parent / f".{path.name}.iam-operation.lock"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_CREAT
+            | os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+        ):
+            raise OperationError("IAM operation lock metadata is unsafe")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    except OSError as exc:
+        raise OperationError("IAM operation lock is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def _operation_record_path(path: Path, intent: Mapping[str, Any]) -> Path:
+    operation_id = str(intent.get("operation_id") or "")
+    if INVOCATION_RE.fullmatch(operation_id) is None:
+        raise OperationError("IAM operation record identity is invalid")
+    return path.parent / f".{path.name}.iam-operation.{operation_id}.json"
+
+
+def _operation_record_identity(
+    request: Mapping[str, Any], *, attempt_generation: int, state: str
+) -> dict[str, Any]:
+    intent = request["intent"]
+    return {
+        "schema_version": OPERATION_RECORD_SCHEMA,
+        "operation_id": intent["operation_id"],
+        "intent_hash": intent["intent_hash"],
+        "control_run_id": intent["control_run_id"],
+        "invocation_id": intent["invocation_id"],
+        "plan_hash": request["plan"]["plan_hash"],
+        "attempt_generation": attempt_generation,
+        "state": state,
+    }
+
+
+def _validate_operation_record(
+    value: Any, request: Mapping[str, Any]
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "operation_id",
+        "intent_hash",
+        "control_run_id",
+        "invocation_id",
+        "plan_hash",
+        "attempt_generation",
+        "attempt_operation",
+        "state",
+        "receipt",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        raise OperationError("IAM operation record fields differ")
+    intent = request["intent"]
+    generation = value.get("attempt_generation")
+    state = value.get("state")
+    receipt = value.get("receipt")
+    if (
+        value.get("schema_version") != OPERATION_RECORD_SCHEMA
+        or value.get("operation_id") != intent["operation_id"]
+        or value.get("intent_hash") != intent["intent_hash"]
+        or value.get("control_run_id") != intent["control_run_id"]
+        or value.get("invocation_id") != intent["invocation_id"]
+        or value.get("plan_hash") != request["plan"]["plan_hash"]
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < intent["reservation_generation"] + 1
+        or generation > intent["ledger_generation"]
+        or value.get("attempt_operation") not in {"apply", "reconcile"}
+        or state not in {"pending", "outcome"}
+        or (state == "pending" and receipt is not None)
+        or (state == "outcome" and not isinstance(receipt, Mapping))
+    ):
+        raise OperationError("IAM operation record differs from its intent")
+    return dict(value)
+
+
+def _read_operation_record(
+    path: Path, request: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    record_path = _operation_record_path(path, request["intent"])
+    try:
+        before = record_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OperationError("IAM operation record is unavailable") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or record_path.is_symlink()
+        or before.st_uid != os.geteuid()
+        or before.st_nlink != 1
+        or before.st_mode & 0o077
+        or not 1 <= before.st_size <= MAX_REQUEST_BYTES
+    ):
+        raise OperationError("IAM operation record metadata is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(record_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or opened.st_size != before.st_size
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 1
+                or opened.st_mode & 0o077
+            ):
+                raise OperationError("IAM operation record changed during open")
+            raw = bytearray()
+            while len(raw) <= MAX_REQUEST_BYTES:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if len(raw) != opened.st_size:
+                raise OperationError("IAM operation record read differs")
+        finally:
+            os.close(descriptor)
+        value = json.loads(raw.decode("utf-8"))
+        raw[:] = b"\0" * len(raw)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise OperationError("IAM operation record is unavailable") from exc
+    return _validate_operation_record(value, request)
+
+
+def _write_operation_record(
+    path: Path,
+    request: Mapping[str, Any],
+    *,
+    attempt_operation: str,
+    receipt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if attempt_operation not in {"apply", "reconcile"}:
+        raise OperationError("IAM operation record action is invalid")
+    parent = path.parent
+    try:
+        metadata = parent.stat()
+    except OSError as exc:
+        raise OperationError("IAM operation record directory is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o077
+    ):
+        raise OperationError("IAM operation record directory metadata is unsafe")
+    state = "outcome" if receipt is not None else "pending"
+    value = {
+        **_operation_record_identity(
+            request,
+            attempt_generation=request["intent"]["ledger_generation"],
+            state=state,
+        ),
+        "attempt_operation": attempt_operation,
+        "receipt": dict(receipt) if receipt is not None else None,
+    }
+    _validate_operation_record(value, request)
+    encoded = (_json(value) + "\n").encode("utf-8")
+    record_path = _operation_record_path(path, request["intent"])
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{record_path.name}.", dir=str(parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, record_path)
+        directory = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        raise OperationError("IAM operation record could not be persisted") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return value
+
+
+def _execute_intent_operation(
+    operation: str,
+    request: Mapping[str, Any],
+    *,
+    ledger: Path,
+    commit: str,
+    sources: Sequence[Mapping[str, str]],
+    source_hash: str,
+) -> dict[str, Any]:
+    if operation not in {"apply", "reconcile"}:
+        raise OperationError("IAM intent operation is invalid")
+    record = _read_operation_record(ledger, request)
+    generation = request["intent"]["ledger_generation"]
+    if record is not None and record["state"] == "outcome":
+        cached = dict(record["receipt"])
+        if cached.get("schema_version") == RECEIPT_SCHEMA:
+            return _validate_remote_receipt(
+                operation,
+                cached,
+                request=request,
+                commit=commit,
+                source_hash=source_hash,
+            )
+        if record["attempt_generation"] == generation:
+            if operation != "reconcile":
+                raise OperationError(
+                    "IAM reconciliation result must be recorded before another apply"
+                )
+            return _validate_remote_receipt(
+                operation,
+                cached,
+                request=request,
+                commit=commit,
+                source_hash=source_hash,
+            )
+    if (
+        record is not None
+        and record["attempt_generation"] == generation
+        and record["state"] == "pending"
+        and operation == "apply"
+    ):
+        raise OperationError(
+            "IAM apply outcome is unknown; read-only reconciliation is required"
+        )
+    _write_operation_record(
+        ledger, request, attempt_operation=operation, receipt=None
+    )
+    receipt = _remote_call(
+        operation,
+        request,
+        commit=commit,
+        sources=sources,
+        source_hash=source_hash,
+    )
+    _write_operation_record(
+        ledger, request, attempt_operation=operation, receipt=receipt
+    )
+    return receipt
+
+
 def _validate_active_ledger(
     path: Path,
     *,
     commit: str,
     source_hash: str,
     required_plan_hash: str | None = None,
+    require_intent: bool = False,
+    allowed_statuses: frozenset[str] = frozenset({"running"}),
     _lock_held: bool = False,
-) -> None:
+) -> Mapping[str, Any]:
     if not _lock_held:
         with _active_ledger_lock(path):
             return _validate_active_ledger(
@@ -2289,6 +3147,8 @@ def _validate_active_ledger(
                 commit=commit,
                 source_hash=source_hash,
                 required_plan_hash=required_plan_hash,
+                require_intent=require_intent,
+                allowed_statuses=allowed_statuses,
                 _lock_held=True,
             )
     try:
@@ -2339,9 +3199,12 @@ def _validate_active_ledger(
     plans = value.get("iam_policy_plans")
     plan_history = value.get("iam_policy_plan_history", [])
     changes = value.get("iam_policy_changes")
+    intents = value.get("iam_policy_intents")
     if (
         value.get("schema_version") != LEDGER_SCHEMA
-        or value.get("status") != "running"
+        or value.get("status") not in allowed_statuses
+        or not INVOCATION_RE.fullmatch(str(value.get("control_run_id") or ""))
+        or not INVOCATION_RE.fullmatch(str(value.get("invocation_id") or ""))
         or not isinstance(route, Mapping)
         or route.get("schema_version") != AUTHORITY_SCHEMA
         or route.get("status") != "authority_ready"
@@ -2374,8 +3237,19 @@ def _validate_active_ledger(
         or not isinstance(plan_history, list)
         or not isinstance(plans, list)
         or not isinstance(changes, list)
+        or not isinstance(intents, list)
     ):
         raise OperationError("typed IAM authority ledger gate is not satisfied")
+    active_intents = [
+        item
+        for item in intents
+        if isinstance(item, Mapping)
+        and item.get("status") in {"reserved", "stop_requested", "ambiguous"}
+    ]
+    if len(active_intents) > 1 or (
+        required_plan_hash is None and active_intents
+    ):
+        raise OperationError("typed IAM policy intent ledger gate is not satisfied")
     if required_plan_hash is not None:
         matching = [
             item
@@ -2384,7 +3258,7 @@ def _validate_active_ledger(
         ]
         if len(matching) != 1:
             raise OperationError("typed IAM policy plan ledger gate is not satisfied")
-        _validate_plan_receipt(
+        plan = _validate_plan_receipt(
             matching[0], commit=commit, source_hash=source_hash
         )
         if any(
@@ -2393,6 +3267,18 @@ def _validate_active_ledger(
             for item in changes
         ):
             raise OperationError("typed IAM policy plan is already completed")
+        if require_intent:
+            if len(active_intents) != 1:
+                raise OperationError("typed IAM policy intent ledger gate is not satisfied")
+            intent = _validate_intent(active_intents[0], plan)
+            if (
+                intent["plan_hash"] != required_plan_hash
+                or intent["control_run_id"] != value["control_run_id"]
+                or intent["invocation_id"] != value["invocation_id"]
+                or intent["ledger_generation"] != value["generation"]
+            ):
+                raise OperationError("typed IAM policy intent ledger gate differs")
+    return value
 
 
 def _remote_call(
@@ -2501,10 +3387,87 @@ def _validate_remote_receipt(
             or plan["desired_document_hash"]
             != _sha256_json(request["desired_document"])
             or plan["task_scope_hash"] != _sha256_json(request["task_scope"])
+            or plan["simulation_hash"] != _sha256_json(request["simulations"])
             or plan["simulation_case_count"] != len(request["simulations"])
         ):
             raise OperationError("gateway IAM plan receipt request binding differs")
         return plan
+    if operation == "reconcile" and value.get("schema_version") == RECONCILIATION_SCHEMA:
+        expected_keys = {
+            "schema_version",
+            "status",
+            "change_id",
+            "target",
+            "origin_main_sha",
+            "bridge_source_hash",
+            "account_id",
+            "caller_arn",
+            "route",
+            "local_chain",
+            "plan_hash",
+            "operation_id",
+            "intent_hash",
+            "control_run_id",
+            "invocation_id",
+            "reservation_generation",
+            "simulation_hash",
+            "observed_document_hash",
+            "observed_inventory_hash",
+            "target_present",
+            "managed_default_version_id",
+            "reconciled_at",
+            "secret_values_printed",
+            "policy_material_printed",
+        }
+        intent = request.get("intent") if isinstance(request, Mapping) else None
+        plan = request.get("plan") if isinstance(request, Mapping) else None
+        target = request.get("target") if isinstance(request, Mapping) else None
+        if (
+            set(value) != expected_keys
+            or value.get("status") not in {"before", "ambiguous"}
+            or not isinstance(intent, Mapping)
+            or not isinstance(plan, Mapping)
+            or value.get("change_id") != request.get("change_id")
+            or value.get("target") != target
+            or value.get("plan_hash") != plan.get("plan_hash")
+            or value.get("operation_id") != intent.get("operation_id")
+            or value.get("intent_hash") != intent.get("intent_hash")
+            or value.get("control_run_id") != intent.get("control_run_id")
+            or value.get("invocation_id") != intent.get("invocation_id")
+            or value.get("reservation_generation")
+            != intent.get("reservation_generation")
+            or value.get("simulation_hash") != plan.get("simulation_hash")
+            or HASH_RE.fullmatch(str(value.get("observed_document_hash") or ""))
+            is None
+            or HASH_RE.fullmatch(str(value.get("observed_inventory_hash") or ""))
+            is None
+            or not isinstance(value.get("target_present"), bool)
+            or not fixed
+        ):
+            raise OperationError("gateway IAM reconciliation receipt differs")
+        _parse_timestamp(value.get("reconciled_at"), label="IAM reconciliation time")
+        managed = isinstance(target, Mapping) and target.get("kind") == "managed"
+        if managed:
+            if re.fullmatch(
+                r"v[1-9][0-9]*",
+                str(value.get("managed_default_version_id") or ""),
+            ) is None:
+                raise OperationError("gateway IAM reconciliation receipt differs")
+        elif value.get("managed_default_version_id") is not None:
+            raise OperationError("gateway IAM reconciliation receipt differs")
+        exact_before = (
+            value["observed_document_hash"] == plan.get("prior_document_hash")
+            and value["observed_inventory_hash"] == plan.get("inventory_hash")
+            and value["target_present"] == plan.get("target_present")
+            and (
+                not managed
+                or value["managed_default_version_id"]
+                == plan.get("managed_default_version_id")
+            )
+        )
+        if (value["status"] == "before") != exact_before:
+            raise OperationError("gateway IAM reconciliation classification differs")
+        return dict(value)
     if not isinstance(request, Mapping):
         raise OperationError("gateway IAM policy receipt request is invalid")
     common_keys = {
@@ -2521,6 +3484,7 @@ def _validate_remote_receipt(
         "desired_document_hash",
         "expected_delta_hash",
         "task_scope_hash",
+        "simulation_hash",
         "plan_hash",
         "simulation_case_count",
         "fixed_decoy_case_count",
@@ -2531,6 +3495,11 @@ def _validate_remote_receipt(
         "policy_material_printed",
         "status",
         "readback_document_hash",
+        "operation_id",
+        "intent_hash",
+        "control_run_id",
+        "invocation_id",
+        "reservation_generation",
     }
     managed_keys = {"managed_version_id", "pruned_managed_version_id"}
     status = value.get("status")
@@ -2552,7 +3521,15 @@ def _validate_remote_receipt(
         or value.get("expected_delta_hash")
         != _sha256_json(request["expected_delta"])
         or value.get("task_scope_hash") != _sha256_json(request["task_scope"])
+        or value.get("simulation_hash") != _sha256_json(request["simulations"])
+        or value.get("simulation_hash") != request["plan"]["simulation_hash"]
         or value.get("plan_hash") != request["plan"]["plan_hash"]
+        or value.get("operation_id") != request["intent"]["operation_id"]
+        or value.get("intent_hash") != request["intent"]["intent_hash"]
+        or value.get("control_run_id") != request["intent"]["control_run_id"]
+        or value.get("invocation_id") != request["intent"]["invocation_id"]
+        or value.get("reservation_generation")
+        != request["intent"]["reservation_generation"]
         or value.get("simulation_case_count") != len(request["simulations"])
         or value.get("fixed_decoy_case_count")
         != request["plan"]["fixed_decoy_case_count"]
@@ -2589,6 +3566,9 @@ def _parser() -> argparse.ArgumentParser:
     apply = commands.add_parser("apply")
     apply.add_argument("--request-fd", type=int, required=True)
     apply.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
+    reconcile = commands.add_parser("reconcile")
+    reconcile.add_argument("--request-fd", type=int, required=True)
+    reconcile.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     return parser
 
 
@@ -2628,21 +3608,60 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raw_request, commit=commit, source_hash=source_hash
                 )
                 required_plan_hash = request["plan"]["plan_hash"]
-            with _active_ledger_lock(args.ledger):
-                _validate_active_ledger(
-                    args.ledger,
-                    commit=commit,
-                    source_hash=source_hash,
-                    required_plan_hash=required_plan_hash,
-                    _lock_held=True,
-                )
-                receipt = _remote_call(
-                    args.command,
-                    request,
-                    commit=commit,
-                    sources=sources,
-                    source_hash=source_hash,
-                )
+            if args.command == "plan":
+                with _active_ledger_lock(args.ledger):
+                    _validate_active_ledger(
+                        args.ledger,
+                        commit=commit,
+                        source_hash=source_hash,
+                        required_plan_hash=None,
+                        _lock_held=True,
+                    )
+                    receipt = _remote_call(
+                        args.command,
+                        request,
+                        commit=commit,
+                        sources=sources,
+                        source_hash=source_hash,
+                    )
+            else:
+                with _iam_operation_lock(args.ledger):
+                    with _active_ledger_lock(args.ledger):
+                        ledger = _validate_active_ledger(
+                            args.ledger,
+                            commit=commit,
+                            source_hash=source_hash,
+                            required_plan_hash=required_plan_hash,
+                            require_intent=True,
+                            allowed_statuses=(
+                                frozenset({"running"})
+                                if args.command == "apply"
+                                else frozenset({"running", "stop_requested"})
+                            ),
+                            _lock_held=True,
+                        )
+                        active = [
+                            item
+                            for item in ledger["iam_policy_intents"]
+                            if isinstance(item, Mapping)
+                            and item.get("status")
+                            in {"reserved", "stop_requested", "ambiguous"}
+                        ]
+                        intent = dict(active[0])
+                        if args.command == "apply" and intent["status"] != "reserved":
+                            raise OperationError("IAM apply intent is not reserved")
+                        request = dict(request)
+                        request["intent"] = intent
+                        receipt = _execute_intent_operation(
+                            args.command,
+                            request,
+                            ledger=args.ledger,
+                            commit=commit,
+                            sources=sources,
+                            source_hash=source_hash,
+                        )
+                    print(_json(receipt))
+                    return 0
     except OperationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

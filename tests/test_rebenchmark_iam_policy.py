@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
 from pathlib import Path
 import socket
+from threading import Barrier, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +22,7 @@ CALLER = operator.EXPECTED_CALLER_ARN
 COMMIT = "a" * 40
 SOURCE_HASH = "sha256:" + "b" * 64
 ROLE = "leadpoet-gateway-s3-cloudwatch-role"
+CONTROLLER_ROLE = parity_setup.CONTROLLER_ROLE
 POLICY_NAME = "leadpoet-gateway-env-secretsmanager"
 MANAGED_POLICY_NAME = "LeadpoetParityControllerData"
 MANAGED_ARN = (
@@ -113,6 +117,54 @@ def _request(
         "plan": plan,
         "prune_managed_version": prune,
     }
+
+
+def _test_intent(plan: dict[str, object]) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": operator.INTENT_SCHEMA,
+        "operation_id": "1" * 32,
+        "control_run_id": "2" * 32,
+        "invocation_id": "3" * 32,
+        "status": "reserved",
+        "reservation_generation": 4,
+        "ledger_generation": 5,
+        "change_id": plan["change_id"],
+        "plan_hash": plan["plan_hash"],
+        "target": plan["target"],
+        "origin_main_sha": plan["origin_main_sha"],
+        "bridge_source_hash": plan["bridge_source_hash"],
+        "prior_document_hash": plan["prior_document_hash"],
+        "inventory_hash": plan["inventory_hash"],
+        "desired_document_hash": plan["desired_document_hash"],
+        "reserved_at": plan["planned_at"],
+        "stop_requested_at": None,
+        "last_reconciliation_status": None,
+        "last_reconciled_at": None,
+        "completed_at": None,
+    }
+    value["intent_hash"] = operator._sha256_json(operator._intent_material(value))
+    return value
+
+
+def _bound_request(request: dict[str, object]) -> dict[str, object]:
+    normalized = operator._validate_request(request)
+    normalized["intent"] = _test_intent(normalized["plan"])
+    return normalized
+
+
+def _with_expired_plan(request: dict[str, object]) -> dict[str, object]:
+    value = json.loads(json.dumps(request))
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    value["plan"]["planned_at"] = (now - timedelta(seconds=30)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    value["plan"]["expires_at"] = (now - timedelta(seconds=15)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    material = dict(value["plan"])
+    material.pop("plan_hash")
+    value["plan"]["plan_hash"] = operator._sha256_json(material)
+    return value
 
 
 class FakeSts:
@@ -239,7 +291,19 @@ class FakeInlineIam:
 
 
 class FakeManagedIam:
-    def __init__(self, *, version_count: int = 1):
+    def __init__(
+        self,
+        *,
+        version_count: int = 1,
+        policy_name: str = MANAGED_POLICY_NAME,
+        attached_roles: tuple[str, ...] = (CONTROLLER_ROLE,),
+    ):
+        self.policy_name = policy_name
+        self.policy_arn = (
+            f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/production-parity/"
+            f"{policy_name}"
+        )
+        self.attached_roles = attached_roles
         self.versions: dict[str, dict[str, object]] = {
             f"v{index}": operator._canonical_policy(BEFORE)
             for index in range(1, version_count + 1)
@@ -258,11 +322,11 @@ class FakeManagedIam:
         self.delete_fails_before_once = False
 
     def get_policy(self, *, PolicyArn):
-        assert PolicyArn == MANAGED_ARN
+        assert PolicyArn == self.policy_arn
         return {
             "Policy": {
-                "Arn": MANAGED_ARN,
-                "PolicyName": MANAGED_POLICY_NAME,
+                "Arn": self.policy_arn,
+                "PolicyName": self.policy_name,
                 "Path": "/leadpoet/production-parity/",
                 "Description": "Leadpoet test policy",
                 "DefaultVersionId": self.default,
@@ -270,7 +334,7 @@ class FakeManagedIam:
         }
 
     def list_policy_versions(self, *, PolicyArn):
-        assert PolicyArn == MANAGED_ARN
+        assert PolicyArn == self.policy_arn
         return {
             "Versions": [
                 {"VersionId": version, "IsDefaultVersion": version == self.default}
@@ -279,7 +343,7 @@ class FakeManagedIam:
         }
 
     def get_policy_version(self, *, PolicyArn, VersionId):
-        assert PolicyArn == MANAGED_ARN
+        assert PolicyArn == self.policy_arn
         return {"PolicyVersion": {"Document": self.versions[VersionId]}}
 
     def list_policy_tags(self, **kwargs):
@@ -287,7 +351,9 @@ class FakeManagedIam:
 
     def list_entities_for_policy(self, **kwargs):
         return {
-            "PolicyRoles": [{"RoleName": ROLE}],
+            "PolicyRoles": [
+                {"RoleName": role_name} for role_name in self.attached_roles
+            ],
             "PolicyUsers": [],
             "PolicyGroups": [],
         }
@@ -336,7 +402,7 @@ class FakeManagedIam:
         }
 
     def create_policy_version(self, **kwargs):
-        assert kwargs["PolicyArn"] == MANAGED_ARN
+        assert kwargs["PolicyArn"] == self.policy_arn
         assert kwargs["SetAsDefault"] is False
         next_id = max(int(value[1:]) for value in self.versions) + 1
         version = f"v{next_id}"
@@ -348,7 +414,7 @@ class FakeManagedIam:
         return {"PolicyVersion": {"VersionId": version}}
 
     def set_default_policy_version(self, *, PolicyArn, VersionId):
-        assert PolicyArn == MANAGED_ARN
+        assert PolicyArn == self.policy_arn
         assert VersionId in self.versions
         if self.set_default_fails_before_once:
             self.set_default_fails_before_once = False
@@ -363,7 +429,7 @@ class FakeManagedIam:
             raise RuntimeError("redacted response loss")
 
     def delete_policy_version(self, *, PolicyArn, VersionId):
-        assert PolicyArn == MANAGED_ARN
+        assert PolicyArn == self.policy_arn
         assert VersionId != self.default
         if self.delete_fails_before_once:
             self.delete_fails_before_once = False
@@ -375,7 +441,7 @@ class FakeManagedIam:
 def _apply_inline(iam: FakeInlineIam, request: dict[str, object]):
     return operator._apply_inline(
         iam,
-        operator._validate_request(request),
+        _bound_request(request),
         source_hash=SOURCE_HASH,
         commit=COMMIT,
         account_id=ACCOUNT,
@@ -386,12 +452,18 @@ def _apply_inline(iam: FakeInlineIam, request: dict[str, object]):
 def _apply_managed(iam: FakeManagedIam, request: dict[str, object]):
     return operator._apply_managed(
         iam,
-        operator._validate_request(request),
+        _bound_request(request),
         source_hash=SOURCE_HASH,
         commit=COMMIT,
         account_id=ACCOUNT,
         caller_arn=CALLER,
     )
+
+
+def _remote_setup(iam) -> dict[str, object]:
+    setup = dict(vars(parity_setup))
+    setup["_iam_clients"] = lambda region: (FakeSts(), iam, ACCOUNT)
+    return setup
 
 
 def test_policy_validation_rejects_trust_material_and_unrelated_targets():
@@ -713,6 +785,9 @@ def test_plan_receipt_is_hash_only_and_binds_exact_task_scope():
     assert plan["expected_delta_hash"] == operator._sha256_json(
         plan["expected_delta"]
     )
+    assert plan["simulation_hash"] == operator._sha256_json(
+        request["simulations"]
+    )
 
     altered = dict(request)
     altered_scope = json.loads(json.dumps(request["task_scope"]))
@@ -720,6 +795,13 @@ def test_plan_receipt_is_hash_only_and_binds_exact_task_scope():
     altered["task_scope"] = altered_scope
     with pytest.raises(operator.OperationError, match="plan binding differs"):
         operator._validate_request(altered)
+
+    swapped = json.loads(json.dumps(request))
+    swapped["simulations"][0]["action"] = "s3:GetObject"
+    assert len(swapped["simulations"]) == plan["simulation_case_count"]
+    assert operator._sha256_json(swapped["simulations"]) != plan["simulation_hash"]
+    with pytest.raises(operator.OperationError, match="plan binding differs"):
+        operator._validate_request(swapped)
 
 
 def test_gateway_identity_rejects_same_account_principal_drift():
@@ -830,6 +912,66 @@ def test_inline_response_loss_is_reconciled_without_duplicate_write():
     assert [event[0] for event in iam.events] == ["put"]
 
 
+def test_expired_plan_cannot_start_write_but_applied_state_reconciles():
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _request(iam, operator._inline_state(iam, target), target=target)
+    expired = _with_expired_plan(request)
+
+    with pytest.raises(operator.OperationError, match="apply window"):
+        _apply_inline(iam, expired)
+    assert iam.events == []
+
+    iam.document = operator._canonical_policy(AFTER)
+    receipt = _apply_inline(iam, expired)
+
+    assert receipt["status"] == "reconciled"
+    assert iam.events == []
+
+
+def test_read_only_reconciliation_classifies_before_applied_and_third_state():
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _bound_request(
+        _request(iam, operator._inline_state(iam, target), target=target)
+    )
+
+    before = operator._reconcile_policy(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    assert before["status"] == "before"
+    assert iam.events == []
+
+    iam.document = operator._canonical_policy(AFTER)
+    applied = operator._reconcile_policy(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    assert applied["status"] == "reconciled"
+    assert iam.events == []
+
+    iam.document = operator._canonical_policy(THIRD)
+    ambiguous = operator._reconcile_policy(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    assert ambiguous["status"] == "ambiguous"
+    assert iam.events == []
+
+
 def test_inline_transport_failure_rolls_back_and_redacts_provider_error():
     iam = FakeInlineIam()
     target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
@@ -871,6 +1013,43 @@ def test_managed_update_keeps_prior_default_as_rollback_version():
     assert operator._policy_hash(iam.versions["v2"]) == operator._policy_hash(AFTER)
 
 
+def test_managed_reconciliation_is_idempotent_and_staged_state_is_ambiguous():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _request(iam, operator._managed_state(iam, target), target=target)
+    bound = _bound_request(request)
+    iam.create_policy_version(
+        PolicyArn=MANAGED_ARN,
+        PolicyDocument=operator._json(operator._canonical_policy(AFTER)),
+        SetAsDefault=False,
+    )
+    staged_event_count = len(iam.events)
+
+    staged = operator._reconcile_policy(
+        iam,
+        bound,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    assert staged["status"] == "ambiguous"
+    assert len(iam.events) == staged_event_count
+
+    iam.set_default_policy_version(PolicyArn=MANAGED_ARN, VersionId="v2")
+    applied_event_count = len(iam.events)
+    applied = operator._reconcile_policy(
+        iam,
+        bound,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    assert applied["status"] == "reconciled"
+    assert len(iam.events) == applied_event_count
+
+
 def test_managed_capacity_fails_before_irreversible_prune_or_write():
     iam = FakeManagedIam(version_count=5)
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
@@ -895,6 +1074,422 @@ def test_managed_plan_rejects_user_or_group_attachments_before_write():
     with pytest.raises(operator.OperationError, match="user or group"):
         _request(iam, state, target=target)
 
+    assert iam.events == []
+
+
+def test_managed_target_principals_are_derived_from_setup_authority():
+    expected_arns = {
+        f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/production-parity/{name}"
+        for name in parity_setup.CONTROLLER_POLICY_NAMES.values()
+    }
+    assert set(operator.MANAGED_TARGET_PRINCIPAL_ALLOWLIST) == expected_arns
+    assert set(operator.MANAGED_TARGET_PRINCIPAL_ALLOWLIST.values()) == {
+        frozenset({parity_setup.CONTROLLER_ROLE})
+    }
+    operator._validate_setup_managed_authority(vars(parity_setup))
+
+    with pytest.raises(operator.OperationError, match="authority differs"):
+        invalid_setup = dict(vars(parity_setup))
+        invalid_setup["CONTROLLER_ROLE"] = "leadpoet-production-parity-runner"
+        operator._validate_setup_managed_authority(invalid_setup)
+
+
+@pytest.mark.parametrize(
+    "policy_name", sorted(parity_setup.CONTROLLER_POLICY_NAMES.values())
+)
+def test_each_managed_target_requires_exact_controller_principal(policy_name):
+    iam = FakeManagedIam(policy_name=policy_name)
+    target = {"kind": "managed", "policy_arn": iam.policy_arn}
+
+    request = _request(iam, operator._managed_state(iam, target), target=target)
+
+    assert request["plan"]["principal_arns"] == [
+        f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "policy_name", sorted(parity_setup.CONTROLLER_POLICY_NAMES.values())
+)
+@pytest.mark.parametrize(
+    "unexpected_role",
+    (
+        "leadpoet-gateway-s3-cloudwatch-role",
+        "leadpoet-validator-s3-cloudwatch-role",
+        "leadpoet-production-parity-runner",
+        "leadpoet-production-parity-static-bootstrap",
+    ),
+)
+def test_managed_target_rejects_each_unexpected_allowlisted_principal(
+    policy_name,
+    unexpected_role,
+):
+    iam = FakeManagedIam(
+        policy_name=policy_name,
+        attached_roles=(unexpected_role,),
+    )
+    target = {"kind": "managed", "policy_arn": iam.policy_arn}
+    state = operator._managed_state(iam, target)
+
+    with pytest.raises(operator.OperationError, match="principals differ"):
+        _request(iam, state, target=target)
+
+    assert iam.simulation_calls == 0
+    assert iam.events == []
+
+
+@pytest.mark.parametrize(
+    "policy_name", sorted(parity_setup.CONTROLLER_POLICY_NAMES.values())
+)
+@pytest.mark.parametrize(
+    "attached_roles",
+    (
+        (),
+        (CONTROLLER_ROLE, "leadpoet-gateway-s3-cloudwatch-role"),
+    ),
+    ids=("missing", "extra"),
+)
+def test_managed_target_rejects_missing_or_extra_principal(
+    policy_name,
+    attached_roles,
+):
+    iam = FakeManagedIam(
+        policy_name=policy_name,
+        attached_roles=attached_roles,
+    )
+    target = {"kind": "managed", "policy_arn": iam.policy_arn}
+    state = operator._managed_state(iam, target)
+
+    with pytest.raises(operator.OperationError, match="principals differ"):
+        _request(iam, state, target=target)
+
+    assert iam.simulation_calls == 0
+    assert iam.events == []
+
+
+def _controller_documents() -> dict[str, dict[str, object]]:
+    return parity_setup._controller_policy_slices(
+        account_id=ACCOUNT,
+        region=operator.EXPECTED_REGION,
+        production_secret_id=parity_setup.PRODUCTION_GATEWAY_SECRET_ID,
+        readonly_secret_id=parity_setup.READONLY_DSN_SECRET_ID,
+        miner_intake_secret_id=parity_setup.DEFAULT_MINER_INTAKE_SECRET_ID,
+        runner_arn=f"arn:aws:iam::{ACCOUNT}:role/{parity_setup.RUNNER_ROLE}",
+    )
+
+
+@pytest.mark.parametrize(
+    "policy_name", sorted(parity_setup.CONTROLLER_POLICY_NAMES.values())
+)
+def test_each_managed_document_requires_exact_setup_authority(policy_name):
+    document = _controller_documents()[policy_name]
+    target = {
+        "kind": "managed",
+        "policy_arn": (
+            f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/production-parity/"
+            f"{policy_name}"
+        ),
+    }
+
+    operator._validate_target_policy_authority(
+        target,
+        before=operator._canonical_policy(document),
+        after=operator._canonical_policy(document),
+    )
+
+    added_action = json.loads(json.dumps(document))
+    added_action["Statement"].append(
+        {
+            "Sid": "UnapprovedTermination",
+            "Effect": "Allow",
+            "Action": "ec2:TerminateInstances",
+            "Resource": f"arn:aws:ec2:us-east-1:{ACCOUNT}:instance/*",
+        }
+    )
+    with pytest.raises(operator.OperationError, match="document authority"):
+        operator._validate_target_policy_authority(
+            target,
+            before=operator._canonical_policy(document),
+            after=operator._canonical_policy(added_action),
+        )
+
+
+def test_managed_document_rejects_condition_removal_and_resource_broadening():
+    policy_name = "LeadpoetParityControllerLifecycle"
+    document = _controller_documents()[policy_name]
+    target = {
+        "kind": "managed",
+        "policy_arn": (
+            f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/production-parity/"
+            f"{policy_name}"
+        ),
+    }
+    without_condition = json.loads(json.dumps(document))
+    next(
+        statement
+        for statement in without_condition["Statement"]
+        if statement.get("Condition")
+    ).pop("Condition")
+    broadened_resource = json.loads(json.dumps(document))
+    next(
+        statement
+        for statement in broadened_resource["Statement"]
+        if statement.get("Resource") != "*"
+    )["Resource"] = "*"
+
+    for altered in (without_condition, broadened_resource):
+        with pytest.raises(operator.OperationError, match="document authority"):
+            operator._validate_target_policy_authority(
+                target,
+                before=operator._canonical_policy(document),
+                after=operator._canonical_policy(altered),
+            )
+
+
+def _revoke_document(cutoff: datetime) -> dict[str, object]:
+    return parity_setup._revoke_older_sessions_policy(
+        cutoff=cutoff.isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+
+def test_revocation_authority_allows_only_a_newer_exact_bounded_cutoff():
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    before = _revoke_document(now - timedelta(minutes=2))
+    after = _revoke_document(
+        now
+        + timedelta(
+            seconds=operator.REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS + 5
+        )
+    )
+    target = {
+        "kind": "inline_role",
+        "role_name": parity_setup.CONTROLLER_ROLE,
+        "policy_name": parity_setup.CONTROLLER_REVOKE_POLICY,
+    }
+
+    operator._validate_target_policy_authority(
+        target,
+        before=operator._canonical_policy(before),
+        after=operator._canonical_policy(after),
+    )
+
+    weakened = _revoke_document(now - timedelta(minutes=3))
+    with pytest.raises(operator.OperationError, match="weaken"):
+        operator._validate_target_policy_authority(
+            target,
+            before=operator._canonical_policy(before),
+            after=operator._canonical_policy(weakened),
+        )
+    for invalid_cutoff in (
+        now - timedelta(minutes=1),
+        now
+        + timedelta(
+            seconds=operator.REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS - 2
+        ),
+        now
+        + timedelta(
+            seconds=operator.REVOCATION_NEW_CUTOFF_FUTURE_LIMIT_SECONDS + 2
+        ),
+    ):
+        with pytest.raises(operator.OperationError, match="safe window"):
+            operator._validate_target_policy_authority(
+                target,
+                before=operator._canonical_policy(before),
+                after=operator._canonical_policy(
+                    _revoke_document(invalid_cutoff)
+                ),
+            )
+    with pytest.raises(operator.OperationError, match="safe window"):
+        operator._validate_target_policy_authority(
+            target,
+            before=operator._canonical_policy(before),
+            after=operator._canonical_policy(
+                _revoke_document(now + timedelta(seconds=1))
+            ),
+            phase="apply",
+        )
+    removed_condition = json.loads(json.dumps(after))
+    removed_condition["Statement"][0].pop("Condition")
+    with pytest.raises(operator.OperationError, match="structure"):
+        operator._validate_target_policy_authority(
+            target,
+            before=operator._canonical_policy(before),
+            after=operator._canonical_policy(removed_condition),
+        )
+
+
+def test_revocation_plan_rechecks_cutoff_after_simulation_latency(monkeypatch):
+    initial_now = datetime.now(timezone.utc).replace(microsecond=0)
+    before = operator._canonical_policy(
+        _revoke_document(initial_now - timedelta(minutes=2))
+    )
+    desired = operator._canonical_policy(
+        _revoke_document(
+            initial_now
+            + timedelta(
+                seconds=operator.REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS + 5
+            )
+        )
+    )
+    target = {
+        "kind": "inline_role",
+        "role_name": parity_setup.CONTROLLER_ROLE,
+        "policy_name": parity_setup.CONTROLLER_REVOKE_POLICY,
+    }
+    operator._validate_target_policy_authority(
+        target,
+        before=before,
+        after=desired,
+    )
+    scope = operator._computed_task_scope(
+        before,
+        desired,
+        scope_id="revocation-after-simulation",
+        target=target,
+    )
+    request = operator._validate_plan_request(
+        {
+            "schema_version": operator.PLAN_REQUEST_SCHEMA,
+            "change_id": "revocation-after-simulation",
+            "target": target,
+            "desired_document": desired,
+            "task_scope": scope,
+            "simulations": [
+                {
+                    "name": "old-session-denied",
+                    "action": "sts:AssumeRole",
+                    "resources": [
+                        f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"
+                    ],
+                    "context": {},
+                    "expected": "explicitDeny",
+                }
+            ],
+            "prune_managed_version": None,
+        }
+    )
+
+    class ExplicitDenyIam:
+        @staticmethod
+        def simulate_custom_policy(**kwargs):
+            resource = kwargs["ResourceArns"][0]
+            return {
+                "EvaluationResults": [
+                    {
+                        "EvalActionName": kwargs["ActionNames"][0],
+                        "EvalResourceName": resource,
+                        "EvalDecision": "explicitDeny",
+                        "MissingContextValues": [],
+                    }
+                ]
+            }
+
+    class AdvancedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            advanced = initial_now + timedelta(
+                seconds=operator.REVOCATION_NEW_CUTOFF_FUTURE_LIMIT_SECONDS + 10
+            )
+            return advanced if tz is not None else advanced.replace(tzinfo=None)
+
+    monkeypatch.setattr(operator, "datetime", AdvancedDatetime)
+    state = {
+        "document": before,
+        "document_hash": operator._sha256_json(before),
+        "inventory": {},
+        "inventory_hash": "sha256:" + "8" * 64,
+        "target_present": True,
+    }
+    with pytest.raises(operator.OperationError, match="safe window"):
+        operator._plan_receipt(
+            ExplicitDenyIam(),
+            request,
+            state=state,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+        )
+
+
+def test_plan_window_has_apply_liveness_and_revocation_safety_margin():
+    assert operator.PLAN_VALIDITY_SECONDS == 60
+    assert (
+        operator.REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS
+        >= operator.PLAN_VALIDITY_SECONDS
+        + operator.REVOCATION_APPLY_MIN_FUTURE_SECONDS
+        + 3
+    )
+    assert (
+        operator.REVOCATION_NEW_CUTOFF_FUTURE_LIMIT_SECONDS
+        > operator.REVOCATION_NEW_CUTOFF_MIN_FUTURE_SECONDS
+    )
+
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _request(iam, operator._inline_state(iam, target), target=target)
+    plan = request["plan"]
+    planned_at = operator._parse_timestamp(
+        plan["planned_at"], label="IAM plan creation time"
+    )
+    operator._validate_plan_freshness(
+        plan,
+        now=planned_at + timedelta(seconds=operator.PLAN_VALIDITY_SECONDS - 1),
+    )
+    with pytest.raises(operator.OperationError, match="apply window"):
+        operator._validate_plan_freshness(
+            plan,
+            now=planned_at + timedelta(seconds=operator.PLAN_VALIDITY_SECONDS),
+        )
+
+
+def test_gateway_target_rejects_self_authorized_action_before_simulation():
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    desired = json.loads(json.dumps(AFTER))
+    desired["Statement"].append(
+        {
+            "Sid": "TerminateProduction",
+            "Effect": "Allow",
+            "Action": "ec2:TerminateInstances",
+            "Resource": f"arn:aws:ec2:us-east-1:{ACCOUNT}:instance/*",
+        }
+    )
+    canonical_before = operator._canonical_policy(BEFORE)
+    canonical_desired = operator._canonical_policy(desired)
+    request = {
+        "schema_version": operator.PLAN_REQUEST_SCHEMA,
+        "change_id": "unapproved-terminate",
+        "target": target,
+        "desired_document": desired,
+        "task_scope": operator._computed_task_scope(
+            canonical_before,
+            canonical_desired,
+            scope_id="unapproved-terminate",
+            target=target,
+        ),
+        "simulations": [
+            {
+                "name": "unrelated-s3-read",
+                "action": "s3:GetObject",
+                "resources": [RESOURCE],
+                "context": {},
+                "expected": "allowed",
+            }
+        ],
+        "prune_managed_version": None,
+    }
+
+    with pytest.raises(operator.OperationError, match="no repository-authorized"):
+        operator._remote_entry(
+            "plan",
+            request,
+            _remote_setup(iam),
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+        )
+
+    assert iam.simulation_calls == 0
     assert iam.events == []
 
 
@@ -1020,7 +1615,7 @@ def test_remote_receipt_validation_rejects_any_unexpected_output_field():
     authority = operator._remote_entry(
         "probe",
         None,
-        {"_iam_clients": lambda region: (FakeSts(), object(), ACCOUNT)},
+        _remote_setup(object()),
         source_hash=SOURCE_HASH,
         commit=COMMIT,
     )
@@ -1039,7 +1634,7 @@ def test_remote_receipt_validation_rejects_any_unexpected_output_field():
 def test_policy_receipt_is_bound_to_exact_normalized_request():
     iam = FakeInlineIam()
     target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
-    request = operator._validate_request(
+    request = _bound_request(
         _request(iam, operator._inline_state(iam, target), target=target)
     )
     receipt = operator._apply_inline(
@@ -1088,6 +1683,8 @@ def test_typed_active_ledger_is_required_for_apply(tmp_path: Path):
         "status": "running",
         "repo": str(tmp_path),
         "generation": 1,
+        "control_run_id": "2" * 32,
+        "invocation_id": "3" * 32,
         "started_at": "2026-08-23T00:00:00Z",
         "updated_at": "2026-08-23T00:00:01Z",
         "stages": [],
@@ -1096,6 +1693,7 @@ def test_typed_active_ledger_is_required_for_apply(tmp_path: Path):
         "iam_policy_plan_history": [],
         "iam_policy_plans": [],
         "iam_policy_changes": [],
+        "iam_policy_intents": [],
         "iam_never_pause_invariant": {
             "schema_version": operator.NEVER_PAUSE_SCHEMA,
             "status": "enforced",
@@ -1135,6 +1733,247 @@ def test_active_ledger_shared_guard_blocks_a_stale_exclusive_writer(
             os.close(descriptor)
 
 
+def test_iam_execution_lock_is_exclusive(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.json"
+    lock_path = ledger.parent / f".{ledger.name}.iam-operation.lock"
+
+    with operator._iam_operation_lock(ledger):
+        descriptor = os.open(lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+
+def test_duplicate_managed_apply_executes_aws_once_and_replays_redacted_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    raw_request = _request(iam, operator._managed_state(iam, target), target=target)
+    request = _bound_request(raw_request)
+    barrier = Barrier(2)
+    calls: list[str] = []
+    calls_lock = Lock()
+
+    def remote_call(operation, call_request, **_kwargs):
+        with calls_lock:
+            calls.append(operation)
+        return operator._apply_managed(
+            iam,
+            call_request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+        )
+
+    monkeypatch.setattr(operator, "_remote_call", remote_call)
+
+    def apply_once(_index: int) -> dict[str, object]:
+        barrier.wait(timeout=2)
+        with operator._iam_operation_lock(ledger):
+            return operator._execute_intent_operation(
+                "apply",
+                request,
+                ledger=ledger,
+                commit=COMMIT,
+                sources=[],
+                source_hash=SOURCE_HASH,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        receipts = list(executor.map(apply_once, range(2)))
+
+    assert receipts[0] == receipts[1]
+    assert calls == ["apply"]
+    assert iam.events == [("create", "v2"), ("default", "v2")]
+    assert sorted(iam.versions) == ["v1", "v2"]
+    record = operator._read_operation_record(ledger, request)
+    assert record is not None
+    assert record["state"] == "outcome"
+    assert record["receipt"] == receipts[0]
+
+
+def test_unknown_apply_outcome_requires_reconciliation_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    raw_request = _request(iam, operator._managed_state(iam, target), target=target)
+    request = _bound_request(raw_request)
+    calls: list[str] = []
+
+    def lost_apply(operation, _request, **_kwargs):
+        calls.append(operation)
+        raise operator.OperationError("redacted lost apply outcome")
+
+    monkeypatch.setattr(operator, "_remote_call", lost_apply)
+    with operator._iam_operation_lock(ledger):
+        with pytest.raises(operator.OperationError, match="lost apply outcome"):
+            operator._execute_intent_operation(
+                "apply",
+                request,
+                ledger=ledger,
+                commit=COMMIT,
+                sources=[],
+                source_hash=SOURCE_HASH,
+            )
+    with operator._iam_operation_lock(ledger):
+        with pytest.raises(operator.OperationError, match="reconciliation is required"):
+            operator._execute_intent_operation(
+                "apply",
+                request,
+                ledger=ledger,
+                commit=COMMIT,
+                sources=[],
+                source_hash=SOURCE_HASH,
+            )
+    assert calls == ["apply"]
+    pending = operator._read_operation_record(ledger, request)
+    assert pending is not None and pending["state"] == "pending"
+
+    def reconcile(operation, call_request, **_kwargs):
+        calls.append(operation)
+        state = operator._managed_state(iam, target)
+        return operator._reconciliation_receipt(
+            status="before",
+            state=state,
+            request=call_request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+        )
+
+    monkeypatch.setattr(operator, "_remote_call", reconcile)
+    with operator._iam_operation_lock(ledger):
+        first = operator._execute_intent_operation(
+            "reconcile",
+            request,
+            ledger=ledger,
+            commit=COMMIT,
+            sources=[],
+            source_hash=SOURCE_HASH,
+        )
+    with operator._iam_operation_lock(ledger):
+        second = operator._execute_intent_operation(
+            "reconcile",
+            request,
+            ledger=ledger,
+            commit=COMMIT,
+            sources=[],
+            source_hash=SOURCE_HASH,
+        )
+
+    assert first == second
+    assert first["status"] == "before"
+    assert calls == ["apply", "reconcile"]
+
+
+def test_active_ledger_apply_requires_exact_run_generation_and_intent(
+    tmp_path: Path,
+) -> None:
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _request(iam, operator._inline_state(iam, target), target=target)
+    plan = request["plan"]
+    intent = _test_intent(plan)
+    route = {
+        "schema_version": operator.AUTHORITY_SCHEMA,
+        "status": "authority_ready",
+        "origin_main_sha": COMMIT,
+        "bridge_source_hash": SOURCE_HASH,
+        "account_id": ACCOUNT,
+        "caller_arn": CALLER,
+        "route": "gateway_bridge",
+        "local_chain": "ignored_non_authority",
+        "secret_values_printed": False,
+        "policy_material_printed": False,
+    }
+    value = {
+        "schema_version": operator.LEDGER_SCHEMA,
+        "status": "running",
+        "repo": str(tmp_path),
+        "generation": intent["ledger_generation"],
+        "control_run_id": intent["control_run_id"],
+        "invocation_id": intent["invocation_id"],
+        "started_at": "2026-08-23T00:00:00Z",
+        "updated_at": "2026-08-23T00:00:01Z",
+        "stages": [],
+        "iam_authority_route": route,
+        "iam_authority_routes": [route],
+        "iam_policy_plan_history": [],
+        "iam_policy_plans": [plan],
+        "iam_policy_changes": [],
+        "iam_policy_intents": [intent],
+        "iam_never_pause_invariant": {
+            "schema_version": operator.NEVER_PAUSE_SCHEMA,
+            "status": "enforced",
+            "local_chain_failure_disposition": "ignored_non_authority",
+            "blocks_recovery": False,
+            "operator_iam_request_allowed": False,
+        },
+    }
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps(value), encoding="utf-8")
+    ledger.chmod(0o600)
+
+    loaded = operator._validate_active_ledger(
+        ledger,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+        required_plan_hash=plan["plan_hash"],
+        require_intent=True,
+    )
+    assert loaded["iam_policy_intents"] == [intent]
+
+    value["generation"] += 1
+    ledger.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(operator.OperationError, match="intent ledger gate differs"):
+        operator._validate_active_ledger(
+            ledger,
+            commit=COMMIT,
+            source_hash=SOURCE_HASH,
+            required_plan_hash=plan["plan_hash"],
+            require_intent=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"status": "completed"}, "lifecycle"),
+        ({"status": "stop_requested"}, "lifecycle"),
+        (
+            {
+                "last_reconciliation_status": "ambiguous",
+                "last_reconciled_at": None,
+            },
+            "lifecycle",
+        ),
+    ),
+)
+def test_intent_lifecycle_is_independently_validated(
+    overrides: dict[str, object], message: str
+) -> None:
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _request(iam, operator._inline_state(iam, target), target=target)
+    intent = _test_intent(request["plan"])
+    intent.update(overrides)
+
+    with pytest.raises(operator.OperationError, match=message):
+        operator._validate_intent(intent, request["plan"])
+
+
 def test_completed_plan_cannot_be_replayed_through_active_ledger(tmp_path: Path):
     iam = FakeInlineIam()
     target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
@@ -1157,6 +1996,8 @@ def test_completed_plan_cannot_be_replayed_through_active_ledger(tmp_path: Path)
         "status": "running",
         "repo": str(tmp_path),
         "generation": 4,
+        "control_run_id": "2" * 32,
+        "invocation_id": "3" * 32,
         "started_at": "2026-08-23T00:00:00Z",
         "updated_at": "2026-08-23T00:00:01Z",
         "stages": [],
@@ -1165,6 +2006,7 @@ def test_completed_plan_cannot_be_replayed_through_active_ledger(tmp_path: Path)
         "iam_policy_plan_history": [],
         "iam_policy_plans": [request["plan"]],
         "iam_policy_changes": [receipt],
+        "iam_policy_intents": [],
         "iam_never_pause_invariant": {
             "schema_version": operator.NEVER_PAUSE_SCHEMA,
             "status": "enforced",

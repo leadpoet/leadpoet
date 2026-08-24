@@ -147,11 +147,20 @@ While that run is active and the user has not said `STOP`, Codex may:
   ARN, only through
   `scripts/operate_rebenchmark_iam_policy.py`, after its exact-`origin/main`
   gateway source, approved account and caller ARN, exact target/principals,
-  explicit task-scoped action/resource/condition and hash-only structural
-  delta, custom plus principal requested/decoy simulations, surrounding
-  inventory, and immediate prior document hash all pass. Its redacted plan
-  must be recorded in the OS-locked, generation-checked typed ledger before
-  apply. Ambiguous responses require bounded reconciliation, and a successful
+  independent target-specific action/resource/condition authority derived
+  from the exact committed setup source, hash-only structural delta, custom
+  plus principal requested/decoy simulations, surrounding inventory, and
+  immediate prior document hash all pass. Caller-authored task scope is only a
+  redacted description and grants no IAM authority. Its redacted,
+  gateway-expiring 60-second plan hash-binds the exact normalized requested
+  simulations and must be recorded in the OS-locked,
+  generation-checked typed ledger and reserved as one exact
+  run/invocation-bound durable intent before apply. `STOP` preserves an
+  in-flight intent as `stop_requested`; an owner-only exclusive execution lock
+  and redacted dispatch/outcome record serialize apply/reconcile, and an
+  unknown outcome may resume only through exact read-only reconciliation.
+  Exact-before closes the proved-no-write intent so an active run can replan;
+  Ambiguous responses require bounded reconciliation, and a successful
   simulation requires one final live reread before a receipt. Plans and
   receipts may expose hashes and target metadata but no policy material. This
   authority is policy-document-only: it never

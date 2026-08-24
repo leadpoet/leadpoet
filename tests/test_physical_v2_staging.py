@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 
 from scripts import setup_production_parity_staging as parity_setup
@@ -1011,18 +1012,29 @@ def test_parity_workflows_reject_non_main_code_before_aws_credentials():
         ".github/workflows/production-parity-fast.yml",
         ".github/workflows/physical-v2-staging.yml",
     ):
-        source = (ROOT / relative_path).read_text(encoding="utf-8")
-        main_gate = source.index(
-            "name: Require exact current main candidate before credentials"
+        workflow = yaml.safe_load(
+            (ROOT / relative_path).read_text(encoding="utf-8")
         )
-        local_action = source.index(
-            "uses: ./.github/actions/setup-production-parity-controller"
+        steps = workflow["jobs"]["validate"]["steps"]
+        main_gate = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name")
+            == "Require exact current main candidate before credentials"
         )
-        aws_credentials = source.index(
-            "uses: aws-actions/configure-aws-credentials@v4"
+        local_action = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == "./.github/actions/setup-production-parity-controller"
+        )
+        aws_credentials = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
         )
 
-        assert 'git rev-parse origin/main' in source
+        assert "git rev-parse origin/main" in steps[main_gate]["run"]
         assert main_gate < local_action < aws_credentials
 
 

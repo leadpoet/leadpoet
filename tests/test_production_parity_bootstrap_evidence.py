@@ -674,10 +674,13 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "--query Metadata" in download_stage
     assert "--output json" in download_stage
     assert '"$candidate_bundle"' in download_stage
+    assert '> "$candidate_bundle_metadata"' in download_stage
     assert "head-object" not in execute
-    assert 'printf \'%s\' "$candidate_bundle_metadata"' in metadata_stage
+    assert '"$candidate_bundle_metadata"' in metadata_stage
+    assert "os.O_NOFOLLOW" in execute
+    assert "stat.S_ISREG(metadata.st_mode)" in execute
     assert "--output text" not in metadata_stage
-    assert "unset candidate_bundle_metadata" in metadata_stage
+    assert 'rm -f "$candidate_bundle_metadata"' in metadata_stage
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -951,6 +954,7 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
         "authority": "host",
     }
     assert not (tmp_path / "work" / "candidate.bundle").exists()
+    assert not list((tmp_path / "work").glob("candidate-bundle-metadata.*"))
     assert result.stdout == ""
     assert result.stderr == ""
 

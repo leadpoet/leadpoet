@@ -2406,7 +2406,8 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
     ):
         position = restart.rindex(f"-m {module_name}")
         position = restart.rfind("env -u", 0, position)
-        command = restart[position:position + 700]
+        command_end = restart.index("\n\n", position)
+        command = restart[position:command_end]
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
         assert "-u GATEWAY_GIT_HELPER" in command

@@ -23,6 +23,11 @@ def test_trusted_main_push_admits_signed_artifact_without_private_checkout() -> 
     job = workflow.split("  signed-artifact-admission:", 1)[1].split(
         "\n  validate:", 1
     )[0]
+    job_environment = job.split("\n    steps:", 1)[0]
+    admission_step = job.split(
+        "      - name: Admit current signed artifact before provider spend",
+        1,
+    )[1].split("\n      - name: Remove ephemeral ECR login", 1)[0]
 
     assert "github.event_name == 'push'" in job
     assert "github.ref == 'refs/heads/main'" in job
@@ -34,11 +39,12 @@ def test_trusted_main_push_admits_signed_artifact_without_private_checkout() -> 
     assert (
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE: "
         "${{ runner.temp }}/leadpoet-docker-operation-v2.lock"
-    ) in job
+    ) in admission_step
     assert (
         "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE: "
         "${{ runner.temp }}/leadpoet-docker-operation-v2.admission.lock"
-    ) in job
+    ) in admission_step
+    assert "runner.temp" not in job_environment
     assert "branches/leadpoet-lab/current.json" in job
     assert "ecr:BatchGetImage" in job
     assert "kms:Verify" in job

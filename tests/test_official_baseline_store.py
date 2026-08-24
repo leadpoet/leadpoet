@@ -173,7 +173,7 @@ def _dependency_context() -> OfficialBaselineDependencyContext:
         config_hash=_sha("7"),
         component_registry_version="components:v3",
         scoring_adapter_version="scoring:v1",
-        manifest_uri="s3://fixture/model/manifest.json",
+        manifest_uri="s3://fixture/model/" + "5" * 40 + ".json",
         manifest_hash=_sha("8"),
         signature_ref="kms://fixture",
         signed_extensions={
@@ -183,6 +183,10 @@ def _dependency_context() -> OfficialBaselineDependencyContext:
     )
     return OfficialBaselineDependencyContext(
         artifact=artifact,
+        artifact_pointer_uri=(
+            "s3://fixture/model/branches/leadpoet-lab/current.json"
+        ),
+        artifact_pointer_manifest_hash=artifact.manifest_hash,
         selection=select_official_baseline_release(artifact),
         spec=DockerPrivateModelSpec(image_digest=artifact.image_digest),
         benchmark_date="2026-08-23",

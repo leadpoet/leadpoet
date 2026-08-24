@@ -978,7 +978,7 @@ def _exact_fixture(*, current=False):
         config_hash="sha256:" + "e" * 64,
         component_registry_version="components:v3",
         scoring_adapter_version="scoring:v1",
-        manifest_uri="s3://fixture/model/manifest.json",
+        manifest_uri="s3://fixture/model/" + "1" * 40 + ".json",
         manifest_hash="sha256:" + HASH["manifest"],
         signature_ref="kms://fixture",
         signed_extensions={
@@ -1196,7 +1196,7 @@ def test_old_drain_is_selected_only_by_exact_signed_legacy_contract():
         config_hash="sha256:" + "e" * 64,
         component_registry_version="components:v2",
         scoring_adapter_version="scoring:v1",
-        manifest_uri="s3://fixture/model/manifest.json",
+        manifest_uri="s3://fixture/model/" + "1" * 40 + ".json",
         manifest_hash="sha256:" + HASH["manifest"],
         signature_ref="kms://fixture",
         compatibility_contract={

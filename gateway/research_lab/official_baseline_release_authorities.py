@@ -405,15 +405,6 @@ def _load_json_object(value: bytes) -> Mapping[str, Any]:
     return dict(decoded)
 
 
-def _branch_from_manifest_uri(value: str) -> str:
-    matches = re.findall(r"(?:^|/)branches/(main|leadpoet-lab)(?:/|$)", value)
-    if len(matches) != 1:
-        raise OfficialBaselineAuthorityUnavailable(
-            "official baseline artifact branch identity is unavailable"
-        )
-    return matches[0]
-
-
 def _release_identity(context: OfficialBaselineDependencyContext) -> Mapping[str, Any]:
     return _artifact_release_identity(context.artifact)
 
@@ -1918,7 +1909,7 @@ def load_official_baseline_release_components(
         )
     artifact_identity = {
         "repository": "leadpoet/Sourcing_model",
-        "branch": _branch_from_manifest_uri(context.artifact.manifest_uri),
+        "branch": context.source_branch,
         "commit_sha": context.artifact.git_commit_sha,
         "model_artifact_hash": context.artifact.model_artifact_hash,
         "manifest_hash": context.artifact.manifest_hash,

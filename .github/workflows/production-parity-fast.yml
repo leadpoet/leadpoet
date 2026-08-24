@@ -90,6 +90,8 @@ jobs:
       - name: Admit current signed artifact before provider spend
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          LEADPOET_DOCKER_OPERATION_LOCK_FILE: ${{ runner.temp }}/leadpoet-docker-operation-v2.lock
+          LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE: ${{ runner.temp }}/leadpoet-docker-operation-v2.admission.lock
         run: python scripts/verify_signed_sourcing_artifact_admission.py
 
       - name: Remove ephemeral ECR login

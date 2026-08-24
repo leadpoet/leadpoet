@@ -450,6 +450,7 @@ def _apply_inline(iam: FakeInlineIam, request: dict[str, object]):
 
 
 def _apply_managed(iam: FakeManagedIam, request: dict[str, object]):
+    desired = operator._canonical_policy(request["desired_document"])
     return operator._apply_managed(
         iam,
         _bound_request(request),
@@ -457,6 +458,7 @@ def _apply_managed(iam: FakeManagedIam, request: dict[str, object]):
         commit=COMMIT,
         account_id=ACCOUNT,
         caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
     )
 
 
@@ -1578,6 +1580,424 @@ def test_multi_resource_simulation_preserves_legacy_flat_rows():
     )
 
 
+def _semantic_context_policy(*, applicable: bool = False) -> dict[str, object]:
+    conditioned_action = "s3:Get*" if applicable else "kms:Verify"
+    return operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "UnconditionalRead",
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": RESOURCE,
+                },
+                {
+                    "Sid": "ConditionedStatement",
+                    "Effect": "Allow",
+                    "Action": conditioned_action,
+                    "Resource": "*" if not applicable else RESOURCE,
+                    "Condition": {
+                        "ForAnyValue:StringEquals": {
+                            "kms:ResourceAliases": "alias/leadpoet-test"
+                        }
+                    },
+                },
+            ],
+        }
+    )
+
+
+def _semantic_context_response(*, top: list[str], nested: list[str]):
+    return {
+        "EvaluationResults": [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": (
+                    "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                ),
+                "EvalDecision": "allowed",
+                "MissingContextValues": top,
+                "ResourceSpecificResults": [
+                    {
+                        "EvalResourceName": RESOURCE,
+                        "EvalResourceDecision": "allowed",
+                        "MissingContextValues": nested,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("top", "nested"),
+    (
+        (["kms:ResourceAliases"], []),
+        ([], ["kms:ResourceAliases"]),
+        (["KMS:RESOURCEALIASES"], ["kms:ResourceAliases"]),
+    ),
+    ids=("top", "nested", "both-casefolded"),
+)
+def test_simulation_tolerates_only_known_action_inapplicable_context(
+    top,
+    nested,
+):
+    case = {
+        "name": "semantic-context",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    operator._check_simulation_response(
+        _semantic_context_response(top=top, nested=nested),
+        case,
+        label="custom-policy",
+        condition_documents=(_semantic_context_policy(),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("missing", "documents", "expected_code"),
+    (
+        (
+            "private:UnknownContext",
+            (_semantic_context_policy(),),
+            "IAM_SIM_MISSING_CONTEXT_UNKNOWN",
+        ),
+        (
+            "kms:ResourceAliases",
+            (_semantic_context_policy(applicable=True),),
+            "IAM_SIM_MISSING_CONTEXT_APPLICABLE",
+        ),
+        (
+            "kms:ResourceAliases",
+            (
+                _semantic_context_policy(),
+                _semantic_context_policy(applicable=True),
+            ),
+            "IAM_SIM_MISSING_CONTEXT_APPLICABLE",
+        ),
+    ),
+    ids=("unknown", "action-applicable", "unrelated-and-applicable"),
+)
+@pytest.mark.parametrize(
+    "placement",
+    ("top", "nested", "both"),
+)
+def test_simulation_context_semantics_fail_closed_without_leaking(
+    missing,
+    documents,
+    expected_code,
+    placement,
+):
+    case = {
+        "name": "semantic-context-negative",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+    top = [missing] if placement in {"top", "both"} else []
+    nested = [missing] if placement in {"nested", "both"} else []
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._check_simulation_response(
+            _semantic_context_response(top=top, nested=nested),
+            case,
+            label="custom-policy",
+            condition_documents=documents,
+        )
+
+    assert failure.value.remote_diagnostic_code == expected_code
+    assert missing not in str(failure.value)
+    assert RESOURCE not in str(failure.value)
+
+
+def test_context_authority_includes_policy_variables_and_wildcard_denies():
+    document = operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Deny",
+                    "Action": "S3:*",
+                    "Resource": "arn:aws:s3:::bucket/${aws:PrincipalTag/team}/*",
+                    "Condition": {
+                        "StringEquals": {"aws:RequestedRegion": "us-east-1"}
+                    },
+                }
+            ],
+        }
+    )
+
+    known, applicable = operator._context_key_authority(
+        (document,), action="s3:GetObject"
+    )
+
+    assert known == {"aws:principaltag/team", "aws:requestedregion"}
+    assert applicable == known
+
+
+def test_principal_context_inventory_is_hash_bound_around_simulation():
+    case = {
+        "name": "principal-context-snapshot",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    class IAM:
+        def simulate_principal_policy(self, **kwargs):
+            assert kwargs["PolicySourceArn"].endswith(CONTROLLER_ROLE)
+            return _semantic_context_response(
+                top=["kms:ResourceAliases"], nested=[]
+            )
+
+    calls = 0
+
+    def stable_loader(_principal_arn):
+        nonlocal calls
+        calls += 1
+        return (_semantic_context_policy(),)
+
+    operator._simulate_principals(
+        IAM(),
+        [f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"],
+        [case],
+        condition_documents_loader=stable_loader,
+    )
+    assert calls == 2
+
+    def changing_loader(_principal_arn):
+        nonlocal calls
+        calls += 1
+        return (
+            _semantic_context_policy(applicable=(calls % 2 == 0)),
+        )
+
+    calls = 0
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._simulate_principals(
+            IAM(),
+            [f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"],
+            [case],
+            condition_documents_loader=changing_loader,
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+
+
+def test_managed_principal_context_inventory_is_exact_and_complete():
+    setup_documents = operator._validate_setup_managed_authority(
+        dict(vars(parity_setup))
+    )
+    revoke = operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Deny",
+                    "Action": "*",
+                    "Resource": "*",
+                    "Condition": {
+                        "DateLessThan": {
+                            "aws:TokenIssueTime": "2026-08-23T00:05:00Z"
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    class IAM:
+        boundary = None
+        extra_attachment = False
+
+        def __init__(self):
+            self.revoke = revoke
+            self.defaults: dict[str, str] = {}
+            self.live_versions: dict[str, dict[str, dict[str, object]]] = {}
+            for arn in sorted(operator.MANAGED_TARGET_ALLOWLIST):
+                name = arn.rsplit("/", 1)[-1]
+                self.defaults[arn] = "v1"
+                self.live_versions[arn] = {
+                    "v1": operator._canonical_policy(setup_documents[name])
+                }
+
+        def set_default_document(self, arn, document):
+            version = f"v{len(self.live_versions[arn]) + 1}"
+            self.live_versions[arn][version] = operator._canonical_policy(document)
+            self.defaults[arn] = version
+
+        def get_role(self, **kwargs):
+            assert kwargs == {"RoleName": CONTROLLER_ROLE}
+            role = {
+                "Arn": f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}",
+            }
+            if self.boundary is not None:
+                role["PermissionsBoundary"] = self.boundary
+            return {"Role": role}
+
+        def list_role_policies(self, **kwargs):
+            assert kwargs["RoleName"] == CONTROLLER_ROLE
+            return {
+                "PolicyNames": [operator.MANAGED_CONTROLLER_REVOKE_POLICY]
+            }
+
+        def list_attached_role_policies(self, **kwargs):
+            assert kwargs["RoleName"] == CONTROLLER_ROLE
+            arns = sorted(operator.MANAGED_TARGET_ALLOWLIST)
+            if self.extra_attachment:
+                arns.append(
+                    f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/production-parity/Extra"
+                )
+            return {
+                "AttachedPolicies": [
+                    {"PolicyArn": arn, "PolicyName": arn.rsplit("/", 1)[-1]}
+                    for arn in arns
+                ]
+            }
+
+        def get_role_policy(self, **kwargs):
+            assert kwargs == {
+                "RoleName": CONTROLLER_ROLE,
+                "PolicyName": operator.MANAGED_CONTROLLER_REVOKE_POLICY,
+            }
+            return {"PolicyDocument": self.revoke}
+
+        def get_policy(self, **kwargs):
+            arn = kwargs["PolicyArn"]
+            assert arn in self.live_versions
+            return {
+                "Policy": {
+                    "Arn": arn,
+                    "PolicyName": arn.rsplit("/", 1)[-1],
+                    "DefaultVersionId": self.defaults[arn],
+                }
+            }
+
+        def get_policy_version(self, **kwargs):
+            arn = kwargs["PolicyArn"]
+            version = kwargs["VersionId"]
+            return {
+                "PolicyVersion": {
+                    "VersionId": version,
+                    "Document": self.live_versions[arn][version],
+                }
+            }
+
+    principal = f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"
+    iam = IAM()
+    target_hash = operator._policy_hash(setup_documents[MANAGED_POLICY_NAME])
+
+    def load():
+        return operator._managed_principal_condition_documents(
+            iam,
+            setup_documents,
+            principal,
+            target_policy_arn=MANAGED_ARN,
+            target_allowed_document_hashes=frozenset({target_hash}),
+        )
+
+    observed = load()
+    assert len(observed) == len(setup_documents) + 1
+    assert operator._policy_hash(observed[-1]) == operator._policy_hash(revoke)
+
+    iam.extra_attachment = True
+    with pytest.raises(operator.RemoteDiagnosticError) as extra:
+        load()
+    assert extra.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+
+    iam.extra_attachment = False
+    iam.boundary = {
+        "PermissionsBoundaryType": "Policy",
+        "PermissionsBoundaryArn": (
+            f"arn:aws:iam::{ACCOUNT}:policy/leadpoet/Boundary"
+        ),
+    }
+    with pytest.raises(operator.RemoteDiagnosticError) as boundary:
+        load()
+    assert boundary.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+
+    iam.boundary = None
+    non_target = next(
+        arn for arn in sorted(operator.MANAGED_TARGET_ALLOWLIST)
+        if arn != MANAGED_ARN
+    )
+    iam.set_default_document(non_target, _semantic_context_policy())
+    with pytest.raises(operator.RemoteDiagnosticError) as drifted:
+        load()
+    assert drifted.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+
+    non_target_name = non_target.rsplit("/", 1)[-1]
+    iam.set_default_document(non_target, setup_documents[non_target_name])
+    prior = operator._canonical_policy(BEFORE)
+    prior_hash = operator._policy_hash(prior)
+    iam.set_default_document(MANAGED_ARN, prior)
+    transitioned = operator._managed_principal_condition_documents(
+        iam,
+        setup_documents,
+        principal,
+        target_policy_arn=MANAGED_ARN,
+        target_allowed_document_hashes=frozenset({target_hash, prior_hash}),
+    )
+    assert operator._policy_hash(
+        transitioned[sorted(operator.MANAGED_TARGET_ALLOWLIST).index(MANAGED_ARN)]
+    ) == prior_hash
+    with pytest.raises(operator.RemoteDiagnosticError) as wrong_phase:
+        load()
+    assert wrong_phase.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+
+    iam.set_default_document(MANAGED_ARN, setup_documents[MANAGED_POLICY_NAME])
+    drift_case = {
+        "name": "live-default-drift",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    def simulate_principal_policy(**_kwargs):
+        iam.set_default_document(MANAGED_ARN, prior)
+        return _semantic_context_response(
+            top=["kms:ResourceAliases"], nested=[]
+        )
+
+    iam.simulate_principal_policy = simulate_principal_policy
+
+    def transition_loader(_principal_arn):
+        return operator._managed_principal_condition_documents(
+            iam,
+            setup_documents,
+            principal,
+            target_policy_arn=MANAGED_ARN,
+            target_allowed_document_hashes=frozenset({target_hash, prior_hash}),
+        )
+
+    with pytest.raises(operator.RemoteDiagnosticError) as default_drift:
+        operator._simulate_principals(
+            iam,
+            [principal],
+            [drift_case],
+            condition_documents_loader=transition_loader,
+        )
+    assert (
+        default_drift.value.remote_diagnostic_code
+        == "IAM_SIM_PRINCIPAL_INVENTORY"
+    )
+
+    iam.set_default_document(MANAGED_ARN, setup_documents[MANAGED_POLICY_NAME])
+    iam.revoke = operator._canonical_policy(BEFORE)
+    with pytest.raises(operator.RemoteDiagnosticError) as invalid_revoke:
+        load()
+    assert (
+        invalid_revoke.value.remote_diagnostic_code
+        == "IAM_SIM_PRINCIPAL_INVENTORY"
+    )
+
+
 def test_multi_resource_legacy_flat_denial_is_not_misattributed_per_resource():
     resources = [RESOURCE, f"{RESOURCE}archive"]
     results = [
@@ -2082,6 +2502,384 @@ def test_managed_postwrite_simulation_failure_restores_prior_default():
     assert set(iam.versions) == {"v1"}
 
 
+def test_managed_inventory_drift_blocks_version_creation_before_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+
+    def drifted_inventory(_principal_arn):
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+    assert iam.events == []
+
+
+def test_managed_inventory_drift_after_create_cleans_before_default_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    inventory_calls = 0
+
+    def drifted_inventory(_principal_arn):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 1:
+            return (operator._canonical_policy(BEFORE),)
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert inventory_calls == 2
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+    assert [event[0] for event in iam.events] == ["create", "delete"]
+
+
+def test_managed_resumed_staged_inventory_drift_cleans_before_default_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    iam.create_policy_version(
+        PolicyArn=MANAGED_ARN,
+        PolicyDocument=operator._json(operator._canonical_policy(AFTER)),
+        SetAsDefault=False,
+    )
+    iam.events.clear()
+
+    def drifted_inventory(_principal_arn):
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+    assert [event[0] for event in iam.events] == ["delete"]
+
+
+def test_managed_principal_inventory_drift_rolls_back_updated_default():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _request(iam, operator._managed_state(iam, target), target=target)
+    bound = _bound_request(request)
+    loader_calls = 0
+
+    def changing_loader(_principal_arn):
+        nonlocal loader_calls
+        loader_calls += 1
+        return (
+            _semantic_context_policy(applicable=loader_calls > 1),
+        )
+
+    with pytest.raises(operator.OperationError, match="simulation rolled back"):
+        operator._apply_managed(
+            iam,
+            bound,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=(
+                lambda _principal_arn: (_semantic_context_policy(),)
+            ),
+            condition_documents_loader=changing_loader,
+        )
+
+    assert loader_calls == 2
+    assert iam.principal_simulation_calls == 2
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+
+
+def test_remote_entry_propagates_exact_managed_inventory_loader(monkeypatch):
+    desired = operator._canonical_policy(AFTER)
+    desired_hash = operator._policy_hash(desired)
+    prior_hash = operator._policy_hash(operator._canonical_policy(BEFORE))
+    setup_documents = {"sentinel": desired}
+    validated = {
+        "target": {"kind": "managed", "policy_arn": MANAGED_ARN},
+        "desired_document": desired,
+        "plan": {
+            "prior_document_hash": prior_hash,
+            "desired_document_hash": desired_hash,
+        },
+        "intent": {"status": "reserved"},
+    }
+    iam = object()
+    principal = f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"
+    loaded_documents = (_semantic_context_policy(),)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        operator,
+        "_validate_setup_managed_authority",
+        lambda _setup: setup_documents,
+    )
+    monkeypatch.setattr(
+        operator,
+        "_gateway_clients",
+        lambda _setup: (FakeSts(), iam, ACCOUNT, CALLER),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_request",
+        lambda *_args, **_kwargs: validated,
+    )
+    monkeypatch.setattr(
+        operator,
+        "_managed_state",
+        lambda *_args, **_kwargs: {"document": desired},
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_target_policy_authority",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def load_inventory(
+        loaded_iam,
+        loaded_setup_documents,
+        loaded_principal,
+        *,
+        target_policy_arn,
+        target_allowed_document_hashes,
+    ):
+        assert loaded_iam is iam
+        assert loaded_setup_documents is setup_documents
+        assert loaded_principal == principal
+        assert target_policy_arn == MANAGED_ARN
+        if target_allowed_document_hashes == frozenset({desired_hash}):
+            observed["postwrite_loaded"] = True
+        elif target_allowed_document_hashes == frozenset(
+            {prior_hash, desired_hash}
+        ):
+            observed["prewrite_loaded"] = True
+        else:
+            raise AssertionError("unexpected managed target transition set")
+        return loaded_documents
+
+    monkeypatch.setattr(
+        operator,
+        "_managed_principal_condition_documents",
+        load_inventory,
+    )
+
+    def apply_managed(
+        loaded_iam,
+        loaded_request,
+        *,
+        prewrite_condition_documents_loader,
+        condition_documents_loader,
+        **_kwargs,
+    ):
+        assert loaded_iam is iam
+        assert loaded_request is validated
+        assert prewrite_condition_documents_loader(principal) == loaded_documents
+        assert condition_documents_loader(principal) == loaded_documents
+        return {"status": "propagated"}
+
+    monkeypatch.setattr(operator, "_apply_managed", apply_managed)
+
+    assert operator._remote_entry(
+        "apply",
+        {},
+        {},
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+    ) == {"status": "propagated"}
+    assert observed == {
+        "prewrite_loaded": True,
+        "postwrite_loaded": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    (
+        (RuntimeError("private provider failure"), "IAM_AUTHORITY_INVENTORY_API"),
+        (
+            operator.OperationError("private inventory detail"),
+            "IAM_AUTHORITY_INVENTORY_SHAPE",
+        ),
+    ),
+)
+def test_remote_entry_classifies_authority_inventory_without_private_detail(
+    monkeypatch,
+    failure,
+    expected_code,
+):
+    desired = operator._canonical_policy(AFTER)
+    validated = {
+        "target": {"kind": "managed", "policy_arn": MANAGED_ARN},
+        "desired_document": desired,
+        "plan": {"desired_document_hash": operator._policy_hash(desired)},
+        "intent": {"status": "reserved"},
+    }
+    iam = object()
+    monkeypatch.setattr(
+        operator,
+        "_validate_setup_managed_authority",
+        lambda _setup: {},
+    )
+    monkeypatch.setattr(
+        operator,
+        "_gateway_clients",
+        lambda _setup: (FakeSts(), iam, ACCOUNT, CALLER),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_request",
+        lambda *_args, **_kwargs: validated,
+    )
+
+    def fail_inventory(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(operator, "_managed_state", fail_inventory)
+
+    with pytest.raises(operator.RemoteDiagnosticError) as raised:
+        operator._remote_entry(
+            "apply",
+            {},
+            {},
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+        )
+
+    assert raised.value.remote_diagnostic_code == expected_code
+    assert "private" not in str(raised.value)
+
+
+def test_authority_inventory_retries_transient_api_failure():
+    calls = 0
+
+    def transient_loader():
+        nonlocal calls
+        calls += 1
+        if calls < operator.INVENTORY_READ_ATTEMPTS:
+            raise RuntimeError("private transient provider failure")
+        return {"document_hash": "sha256:" + "1" * 64}
+
+    assert operator._redacted_inventory_read(
+        transient_loader,
+        stage="authority",
+    ) == {"document_hash": "sha256:" + "1" * 64}
+    assert calls == operator.INVENTORY_READ_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "expected_reads"),
+    (
+        (
+            RuntimeError("private provider failure"),
+            "IAM_RECONCILE_INVENTORY_API",
+            1 + operator.INVENTORY_READ_ATTEMPTS,
+        ),
+        (
+            operator.OperationError("private inventory detail"),
+            "IAM_RECONCILE_INVENTORY_SHAPE",
+            2,
+        ),
+    ),
+)
+def test_remote_entry_classifies_reconciliation_inventory_without_writes(
+    monkeypatch,
+    failure,
+    expected_code,
+    expected_reads,
+):
+    desired = operator._canonical_policy(AFTER)
+    state = {"document": desired}
+    validated = {
+        "target": {"kind": "managed", "policy_arn": MANAGED_ARN},
+        "desired_document": desired,
+        "plan": {"desired_document_hash": operator._policy_hash(desired)},
+        "intent": {"status": "reserved"},
+    }
+    iam = object()
+    reads = 0
+    monkeypatch.setattr(
+        operator,
+        "_validate_setup_managed_authority",
+        lambda _setup: {},
+    )
+    monkeypatch.setattr(
+        operator,
+        "_gateway_clients",
+        lambda _setup: (FakeSts(), iam, ACCOUNT, CALLER),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_request",
+        lambda *_args, **_kwargs: validated,
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_target_policy_authority",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fail_stability_read(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return state
+        raise failure
+
+    monkeypatch.setattr(operator, "_managed_state", fail_stability_read)
+
+    with pytest.raises(operator.RemoteDiagnosticError) as raised:
+        operator._remote_entry(
+            "reconcile",
+            {},
+            {},
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+        )
+
+    assert reads == expected_reads
+    assert raised.value.remote_diagnostic_code == expected_code
+    assert "private" not in str(raised.value)
+
+
 def test_managed_create_and_default_response_loss_are_reconciled():
     iam = FakeManagedIam()
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
@@ -2429,6 +3227,11 @@ def test_duplicate_managed_apply_executes_aws_once_and_replays_redacted_outcome(
             commit=COMMIT,
             account_id=ACCOUNT,
             caller_arn=CALLER,
+            prewrite_condition_documents_loader=(
+                lambda _principal_arn: (
+                    operator._canonical_policy(call_request["desired_document"]),
+                )
+            ),
         )
 
     monkeypatch.setattr(operator, "_remote_call", remote_call)

@@ -98,6 +98,7 @@ from gateway.research_lab.provider_evidence_proxy import (
 from gateway.research_lab.provider_capabilities import (
     summary_mentions_private_capability,
     validate_candidate_provider_diff,
+    validate_source_add_model_activation_diff,
     validate_source_add_registration_diff,
 )
 from gateway.research_lab.provider_probe import (
@@ -225,6 +226,24 @@ def _is_editable_test_path(path: str) -> bool:
 
 def _source_add_runtime_source_text(source_context: Any) -> str:
     relative = "sourcing_model/routing/runtime.py"
+    editable = {
+        str(item)
+        for item in getattr(source_context, "editable_files", ())
+        if item
+    }
+    if relative not in editable:
+        return ""
+    try:
+        return (
+            Path(getattr(source_context, "source_root"))
+            / relative
+        ).read_text(encoding="utf-8", errors="replace")
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+def _source_add_model_runner_source_text(source_context: Any) -> str:
+    relative = "sourcing_model/model_runner.py"
     editable = {
         str(item)
         for item in getattr(source_context, "editable_files", ())
@@ -6003,6 +6022,15 @@ class CodeEditLoopEngine:
                         source_incorporation_context,
                         existing_runtime_source=(
                             _source_add_runtime_source_text(source_context)
+                        ),
+                    )
+                )
+                source_errors.extend(
+                    validate_source_add_model_activation_diff(
+                        draft.unified_diff,
+                        source_incorporation_context,
+                        existing_model_runner_source=(
+                            _source_add_model_runner_source_text(source_context)
                         ),
                     )
                 )

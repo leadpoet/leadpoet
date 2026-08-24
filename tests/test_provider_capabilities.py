@@ -16,6 +16,7 @@ from gateway.research_lab.provider_capabilities import (
     summary_mentions_private_capability,
     validate_candidate_provider_diff,
     validate_capability_provider_doc,
+    validate_source_add_model_activation_diff,
     validate_source_add_registration_diff,
 )
 from gateway.research_lab.provider_evidence_proxy import (
@@ -45,6 +46,15 @@ class SourceAddRoutingRegistration:
     pass
 
 SOURCE_ADD_ROUTING_REGISTRATIONS = ()
+"""
+_MODEL_RUNNER_SOURCE = """_COMMON_SOURCE_ADD_BY_INTENT = {
+    "FUNDING": "intent.source_add.predictleads_financing",
+    "HIRING": "intent.source_add.predictleads_jobs",
+    "PARTNERSHIP": "intent.source_add.predictleads_connections",
+}
+
+def unrelated_model_runner_behavior():
+    return "unchanged"
 """
 
 
@@ -120,6 +130,22 @@ def _router_runtime_diff(before: str, after: str) -> str:
     return (
         "diff --git a/sourcing_model/routing/runtime.py "
         "b/sourcing_model/routing/runtime.py\n"
+        f"{body}"
+    )
+
+
+def _model_runner_diff(before: str, after: str) -> str:
+    body = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="a/sourcing_model/model_runner.py",
+            tofile="b/sourcing_model/model_runner.py",
+        )
+    )
+    return (
+        "diff --git a/sourcing_model/model_runner.py "
+        "b/sourcing_model/model_runner.py\n"
         f"{body}"
     )
 
@@ -678,6 +704,84 @@ def test_category_scoped_intent_registration_matches_approved_guidance():
         context,
         existing_runtime_source=_EMPTY_ROUTER_RUNTIME,
     ) == []
+
+
+def _intent_source_add_context() -> dict:
+    provider = _provider_doc("community_signals", origin="source_add")
+    provider["planner_summary"].update(
+        {
+            "intent_categories": ["TECHSTACK"],
+            "best_for_features": ["intent.techstack"],
+        }
+    )
+    return approved_source_router_suggestions(
+        "Use community_signals for intent discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+
+
+def test_source_add_intent_activation_requires_exact_static_model_mapping():
+    context = _intent_source_add_context()
+    activated = _MODEL_RUNNER_SOURCE.replace(
+        '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n',
+        '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n'
+        '    "TECHSTACK": "intent.source_add.community_signals",\n',
+    )
+
+    assert validate_source_add_model_activation_diff(
+        _model_runner_diff(_MODEL_RUNNER_SOURCE, activated),
+        context,
+        existing_model_runner_source=_MODEL_RUNNER_SOURCE,
+    ) == []
+    assert validate_source_add_model_activation_diff(
+        "",
+        context,
+        existing_model_runner_source=_MODEL_RUNNER_SOURCE,
+    ) == ["source_add_model_activation_missing"]
+
+
+@pytest.mark.parametrize(
+    "changed,expected",
+    [
+        (
+            _MODEL_RUNNER_SOURCE.replace(
+                '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n',
+                '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n'
+                '    "TECHSTACK": "intent.source_add.community_signals",\n'
+                '    "ACQUISITION": "intent.source_add.community_signals",\n',
+            ),
+            "source_add_model_activation_differs",
+        ),
+        (
+            _MODEL_RUNNER_SOURCE.replace(
+                '    "HIRING": "intent.source_add.predictleads_jobs",\n',
+                '    "HIRING": "intent.source_add.community_signals",\n'
+                '    "TECHSTACK": "intent.source_add.community_signals",\n',
+            ),
+            "source_add_model_activation_differs",
+        ),
+        (
+            _MODEL_RUNNER_SOURCE.replace(
+                '    return "unchanged"\n',
+                '    return "changed"\n',
+            ).replace(
+                '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n',
+                '    "PARTNERSHIP": "intent.source_add.predictleads_connections",\n'
+                '    "TECHSTACK": "intent.source_add.community_signals",\n',
+            ),
+            "source_add_model_activation_unrelated_change",
+        ),
+    ],
+)
+def test_source_add_intent_activation_rejects_extra_overwrite_or_unrelated_change(
+    changed: str,
+    expected: str,
+) -> None:
+    assert validate_source_add_model_activation_diff(
+        _model_runner_diff(_MODEL_RUNNER_SOURCE, changed),
+        _intent_source_add_context(),
+        existing_model_runner_source=_MODEL_RUNNER_SOURCE,
+    ) == [expected]
 
 
 def test_source_mention_without_discovery_stage_fails_closed_for_clarification():

@@ -67,6 +67,7 @@ _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
+_SOURCE_ADD_MODEL_RUNNER_PATH = "sourcing_model/model_runner.py"
 _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (
     "leadpoet.intent-source-binding-manifest:v1"
 )
@@ -2168,6 +2169,177 @@ def validate_source_add_registration_diff(
     ):
         errors.append("source_add_registration_wrong_model_target")
     return sorted(set(errors))
+
+
+def validate_source_add_model_activation_diff(
+    unified_diff: str,
+    source_context: Mapping[str, Any] | None,
+    *,
+    existing_model_runner_source: str = "",
+) -> list[str]:
+    """Require an exact static model-owned category activation for intent sources."""
+
+    requests = (
+        source_context.get("requests")
+        if isinstance(source_context, Mapping)
+        and isinstance(source_context.get("requests"), list)
+        else []
+    )
+    expected: dict[str, str] = {}
+    for request in requests:
+        if not isinstance(request, Mapping) or request.get("stage") != "intent_evidence":
+            continue
+        tool_id = str(request.get("tool_id") or "")
+        provider_id = str(request.get("provider_id") or "")
+        if tool_id != f"intent.source_add.{provider_id}":
+            return ["source_add_model_activation_request_invalid"]
+        categories = request.get("intent_categories")
+        if not isinstance(categories, list) or not categories:
+            return ["source_add_model_activation_request_invalid"]
+        for raw_category in categories:
+            category = str(raw_category or "").strip()
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", category):
+                return ["source_add_model_activation_request_invalid"]
+            if category in expected and expected[category] != tool_id:
+                return ["source_add_model_activation_ambiguous"]
+            expected[category] = tool_id
+    if not expected:
+        return []
+    if not existing_model_runner_source:
+        return ["source_add_model_activation_source_unavailable"]
+
+    def sections(diff_text: str) -> list[tuple[str, str, str]]:
+        result: list[tuple[str, str, str]] = []
+        current: list[str] = []
+        old_path = ""
+        new_path = ""
+        for line in diff_text.splitlines(keepends=True):
+            match = re.fullmatch(
+                r"diff --git a/(\S+) b/(\S+)\r?\n?",
+                line,
+            )
+            if match is not None:
+                if current:
+                    result.append((old_path, new_path, "".join(current)))
+                old_path, new_path = match.groups()
+                current = [line]
+            elif current:
+                current.append(line)
+        if current:
+            result.append((old_path, new_path, "".join(current)))
+        return result
+
+    def assignment(node: ast.AST) -> ast.AST | None:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_COMMON_SOURCE_ADD_BY_INTENT"
+        ):
+            return node.value
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_COMMON_SOURCE_ADD_BY_INTENT"
+        ):
+            return node.value
+        return None
+
+    def parse(source: str) -> tuple[dict[str, str], tuple[str, ...]]:
+        tree = ast.parse(source)
+        bindings = [node for node in tree.body if assignment(node) is not None]
+        stores = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id == "_COMMON_SOURCE_ADD_BY_INTENT"
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ]
+        if len(bindings) != 1 or len(stores) != 1:
+            raise ValueError("SOURCE_ADD activation binding is ambiguous")
+        value = assignment(bindings[0])
+        if not isinstance(value, ast.Dict) or len(value.keys) != len(value.values):
+            raise ValueError("SOURCE_ADD activation must be a static dict")
+        mapping: dict[str, str] = {}
+        for key, item in zip(value.keys, value.values):
+            if (
+                not isinstance(key, ast.Constant)
+                or not isinstance(key.value, str)
+                or not isinstance(item, ast.Constant)
+                or not isinstance(item.value, str)
+                or key.value in mapping
+            ):
+                raise ValueError("SOURCE_ADD activation must use unique strings")
+            mapping[key.value] = item.value
+        signature: list[str] = []
+        for node in tree.body:
+            if assignment(node) is None:
+                signature.append(ast.dump(node, include_attributes=False))
+                continue
+            placeholder = ast.Constant(value="_COMMON_SOURCE_ADD_BY_INTENT=<reviewed>")
+            if isinstance(node, ast.Assign):
+                normalized: ast.AST = ast.Assign(
+                    targets=node.targets,
+                    value=placeholder,
+                    type_comment=node.type_comment,
+                )
+            else:
+                normalized = ast.AnnAssign(
+                    target=node.target,
+                    annotation=node.annotation,
+                    value=placeholder,
+                    simple=node.simple,
+                )
+            signature.append(ast.dump(normalized, include_attributes=False))
+        return mapping, tuple(signature)
+
+    model_sections = [
+        section
+        for old_path, new_path, section in sections(str(unified_diff or ""))
+        if old_path == _SOURCE_ADD_MODEL_RUNNER_PATH
+        and new_path == _SOURCE_ADD_MODEL_RUNNER_PATH
+    ]
+    if len(model_sections) > 1:
+        return ["source_add_model_activation_diff_ambiguous"]
+    try:
+        existing, existing_signature = parse(existing_model_runner_source)
+    except (SyntaxError, ValueError):
+        return ["source_add_model_activation_existing_source_invalid"]
+    desired = dict(existing)
+    for category, tool_id in expected.items():
+        if category in desired and desired[category] != tool_id:
+            return ["source_add_model_activation_existing_category_conflict"]
+        desired[category] = tool_id
+    if not model_sections:
+        return [] if desired == existing else ["source_add_model_activation_missing"]
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-source-add-activation-check-"
+        ) as raw:
+            root = Path(raw)
+            model_runner_path = root / _SOURCE_ADD_MODEL_RUNNER_PATH
+            model_runner_path.parent.mkdir(parents=True)
+            model_runner_path.write_text(
+                existing_model_runner_source,
+                encoding="utf-8",
+            )
+            patch_path = root / "model-runner.diff"
+            patch_path.write_text(model_sections[0], encoding="utf-8")
+            _run_git_apply(
+                patch_path,
+                cwd=root,
+                timeout_seconds=5,
+                check=False,
+            )
+            observed_source = model_runner_path.read_text(encoding="utf-8")
+        observed, observed_signature = parse(observed_source)
+    except (CodeEditBuildError, OSError, SyntaxError, ValueError):
+        return ["source_add_model_activation_diff_invalid"]
+    if observed_signature != existing_signature:
+        return ["source_add_model_activation_unrelated_change"]
+    if observed != desired:
+        return ["source_add_model_activation_differs"]
+    return []
 
 
 def _credential_ready(provider: Mapping[str, Any]) -> bool:

@@ -802,9 +802,10 @@ def build_code_edit_auto_research_messages(
         "Approved SOURCE_ADD incorporation:\n"
         "- A Routerverse source may be registered only from Context JSON approved_provider_capabilities.routerverse_source_incorporation.requests.\n"
         "- For a source-incorporation plan, add the exact SourceAddRoutingRegistration to sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS using only the request's provider_id, stage, revision, manifest_sha256, execution_mode, priority, capabilities, idempotency, cost/budget bounds, intent_categories, evidence types, category_contracts, binding_requirements, best_for, avoid_when, best_for_description, and avoid_when_description.\n"
+        "- For an intent_evidence registration, also add each approved intent category to sourcing_model/model_runner.py::_COMMON_SOURCE_ADD_BY_INTENT with the request's exact tool_id. Preserve every existing category mapping and all other model-runner code. This static model-owned selection is required; registration alone cannot make the candidate use the source.\n"
         "- Match the inspected signed source contract exactly: v8 uses the request's canonical binding manifest and all applicable v8 fields; v7 rollback uses legacy_v7_manifest_sha256 and omits v8-only fields. Provisioning provenance is never a v8 registration digest.\n"
         "- The registration must be in the model structure. Do not substitute a query/prompt tweak, hard-coded provider branch, host binding, endpoint, credential, dependency, or network client.\n"
-        "- A model registration remains unavailable until a consumer separately binds and activates the same exact tool ID; do not weaken that fail-closed boundary.\n"
+        "- Model-owned category selection does not replace the consumer boundary: the source remains unavailable until the consumer separately binds and activates the same exact tool ID. Do not weaken that fail-closed boundary.\n"
         "- If the request cannot be implemented from the inspected registration source, return no_viable_patch instead of guessing.\n\n"
         + tree_branch_rules
         +

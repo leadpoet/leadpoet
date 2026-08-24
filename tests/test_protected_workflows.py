@@ -66,6 +66,24 @@ def test_sourcing_model_profile_authority_is_protected():
     } <= protected
 
 
+def test_qualification_branch_control_authority_is_protected():
+    protected = set(
+        PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"]
+    )
+    assert {
+        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1",
+        "_qualification_outcome_sha256",
+        "validate_qualification_branch_control_failure_v1",
+        "validate_qualification_route_completion_receipt_v1",
+        "validate_qualification_outcome_envelope_v2",
+    } <= protected
+
+
 def test_typed_dispatch_custody_v3_authority_is_protected():
     contract_symbols = set(
         PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]

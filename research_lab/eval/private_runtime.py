@@ -156,6 +156,9 @@ _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2 = dict(
 _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2 = dict(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["required_route_outcomes"]
 )
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["branch_control_failure"]
+)
 QUALIFICATION_OUTCOME_PROTOCOL_ID_V2 = str(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_id"]
 )
@@ -202,6 +205,42 @@ QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2 = str(
 )
 QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2 = tuple(
     str(item) for item in _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["states"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["extension_key"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["schema_version"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["authority"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1 = tuple(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["proof_fields"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1[
+        "allowed_match_modes"
+    ]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 = int(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["maximum_branch_number"]
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["reason_policy"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1 = (
+    "required_branch_deadline_exhausted"
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1[
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1
+    ]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1["failure_class"]
 )
 _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_SORTED_UNIQUE_BY_V2 = str(
     _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["sorted_unique_by"]
@@ -273,6 +312,59 @@ if (
     is not False
 ):
     raise RuntimeError("qualification outcome route policy is unsupported")
+if (
+    QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    != "com.leadpoet.branch-control-failure"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1
+    != "sourcing-model.branch-control-failure.v1"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1
+    != "sourcing_model"
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "provider_route_outcome"
+    )
+    is not False
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "host_route_counters_unchanged"
+    )
+    is not True
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "proof_hash_excludes_only"
+    )
+    != "proof_sha256"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1
+    != (
+        "authority",
+        "branch_id_sha256",
+        "branch_number",
+        "failure_class",
+        "match_mode",
+        "phase",
+        "proof_sha256",
+        "reason",
+        "retryable",
+        "schema_version",
+    )
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1 != {"all", "any"}
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 != 4
+    or set(_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1)
+    != {QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1}
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1
+    != {
+        "phase": "pre_dispatch",
+        "failure_class": "branch_deadline_exhausted",
+        "retryable": True,
+        "required_branch_status": "skipped",
+    }
+    or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
+        "incomplete_retryable"
+    ].get("retryable_branch_control_alternative")
+    is not True
+    or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
+        "incomplete_terminal"
+    ].get("terminal_branch_control_alternative")
+    is not False
+):
+    raise RuntimeError("qualification outcome branch control policy is unsupported")
 _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2 = int(
     _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_nesting_depth"]
 )
@@ -689,6 +781,61 @@ def _qualification_outcome_sha256(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def validate_qualification_branch_control_failure_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one model-owned, non-provider branch-control authority."""
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model branch control failure is invalid"
+        )
+    document = dict(value)
+    reason = document.get("reason")
+    reason_policy = (
+        _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1.get(reason)
+        if isinstance(reason, str)
+        else None
+    )
+    body = {
+        key: item
+        for key, item in document.items()
+        if key != "proof_sha256"
+    }
+    if (
+        set(document)
+        != set(QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1)
+        or document.get("schema_version")
+        != QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1
+        or document.get("authority")
+        != QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1
+        or not isinstance(reason_policy, Mapping)
+        or document.get("phase") != reason_policy.get("phase")
+        or document.get("match_mode")
+        not in QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1
+        or type(document.get("branch_number")) is not int
+        or not 1
+        <= document["branch_number"]
+        <= QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(document.get("branch_id_sha256") or "")
+        )
+        or document.get("failure_class")
+        != reason_policy.get("failure_class")
+        or type(document.get("retryable")) is not bool
+        or document.get("retryable") is not reason_policy.get("retryable")
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(document.get("proof_sha256") or "")
+        )
+        or document.get("proof_sha256")
+        != _qualification_outcome_sha256(body)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model branch control failure differs from protocol"
+        )
+    return document
+
+
 def qualification_outcome_contract_v2() -> dict[str, Any]:
     """Load the candidate-bound, cross-repository protocol semantics."""
 
@@ -1018,6 +1165,13 @@ def validate_qualification_route_completion_receipt_v1(
         raise PrivateModelRuntimeError(
             "private model route completion receipt differs from protocol"
         )
+    branch_control = None
+    if QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 in extensions:
+        branch_control = validate_qualification_branch_control_failure_v1(
+            extensions[
+                QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+            ]
+        )
     if probe is not None and (
         not isinstance(probe, Mapping)
         or set(probe) != {"schema_version", "case_id", "nonce_sha256"}
@@ -1032,6 +1186,10 @@ def validate_qualification_route_completion_receipt_v1(
         raise PrivateModelRuntimeError(
             "private model route completion probe is invalid"
         )
+    if probe is not None and branch_control is not None:
+        raise PrivateModelRuntimeError(
+            "private model route completion probe contains branch control failure"
+        )
     required_outcomes = dict(extensions).get(
         QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
     )
@@ -1040,6 +1198,7 @@ def validate_qualification_route_completion_receipt_v1(
         and _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PRODUCTION_REQUIRED_V2
         and (
             not isinstance(required_outcomes, list)
+            or not required_outcomes
             or summary.get("attempted") != len(required_outcomes)
             or any(
                 summary.get(state)
@@ -1120,10 +1279,23 @@ def validate_qualification_outcome_envelope_v2(
         raise PrivateModelRuntimeError(
             "private model qualification outcome differs from protocol"
         )
+    if QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 in extensions:
+        raise PrivateModelRuntimeError(
+            "private model branch control failure is not receipt-bound"
+        )
 
     complete = document["completion_state"] == "complete"
     disposition = receipt["disposition"]
     summary = receipt["route_summary"]
+    receipt_extensions = receipt["extensions"]
+    branch_control = receipt_extensions.get(
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    )
+    branch_control_failure_class = (
+        branch_control["failure_class"]
+        if isinstance(branch_control, Mapping)
+        else None
+    )
     if (
         receipt["partial"] != (
             not complete and bool(normalized_companies)
@@ -1135,6 +1307,7 @@ def validate_qualification_outcome_envelope_v2(
                 or receipt["failure_classes"]
                 or summary["retryable_failed"] != 0
                 or summary["terminal_failed"] != 0
+                or branch_control is not None
                 or disposition
                 != (
                     "complete_nonempty"
@@ -1149,15 +1322,33 @@ def validate_qualification_outcome_envelope_v2(
                 not receipt["failure_classes"]
                 or disposition
                 not in {"incomplete_retryable", "incomplete_terminal"}
+                or (
+                    branch_control_failure_class is not None
+                    and branch_control_failure_class
+                    not in receipt["failure_classes"]
+                )
+                or (
+                    QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1
+                    in receipt["failure_classes"]
+                    and branch_control is None
+                )
                 or receipt["retryable"]
                 != (disposition == "incomplete_retryable")
                 or (
                     disposition == "incomplete_retryable"
                     and summary["retryable_failed"] <= 0
+                    and not (
+                        isinstance(branch_control, Mapping)
+                        and branch_control.get("retryable") is True
+                    )
                 )
                 or (
                     disposition == "incomplete_terminal"
                     and summary["terminal_failed"] <= 0
+                    and not (
+                        isinstance(branch_control, Mapping)
+                        and branch_control.get("retryable") is False
+                    )
                 )
             )
         )

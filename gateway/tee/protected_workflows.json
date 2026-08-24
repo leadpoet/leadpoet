@@ -6832,6 +6832,46 @@
       "symbol": "PRIVATE_RUNTIME_FAILURE_SCHEMA_VERSION"
     },
     {
+      "ast_sha256": "sha256:97e9d935ea77f975ab80c8fa5cf90cbc8b128436de67fceac33c4123ec27f148",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1"
+    },
+    {
+      "ast_sha256": "sha256:4dc81ac035adf0844b2ee0f2c5fe792149d9a4a66918124b2ca1f317f8c74946",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1"
+    },
+    {
+      "ast_sha256": "sha256:afe84042aedc056657fcf685f5c760c7dd9bf19fd070086931843c0369658934",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1"
+    },
+    {
+      "ast_sha256": "sha256:af7c8a21615fd8a624387620fe14f1db67dd9997af8e901c8ce3270be9ce1f53",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1"
+    },
+    {
+      "ast_sha256": "sha256:d631a42a08adf7b48a8b9143609bee0d3777263bc376e52976788bd7c086a44f",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1"
+    },
+    {
+      "ast_sha256": "sha256:c030f39f508d2d9b2e76511120745f6a6862f839733d0d2329f0692350c634a8",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1"
+    },
+    {
+      "ast_sha256": "sha256:afe08af5c64552dc0baa8fb33342c62b304ca5bc8383762eaa8936fb34f46b03",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1"
+    },
+    {
+      "ast_sha256": "sha256:d9021cb95109e1d2d5ad096cfc22e190094d7f5e20c5d7c7e4afc9fe4a85dea3",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1"
+    },
+    {
       "ast_sha256": "sha256:8ff11687f4141764c8471de8dba2df6622726c768d48984ab0d5aea63c92785c",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2"
@@ -6912,6 +6952,26 @@
       "symbol": "_PROVIDER_OUTAGE_TEXT_MARKERS"
     },
     {
+      "ast_sha256": "sha256:2bd937f7c16235d6f566552791a9ffdd69fb10b606d08948aebba6feee2b11e1",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1"
+    },
+    {
+      "ast_sha256": "sha256:3f4adba7230070ce4e1bd2d8a50ac0d808ced87572a55e116045d4fdf7012f4e",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1"
+    },
+    {
+      "ast_sha256": "sha256:c03d961a01cefb584063f83f7252ecc2b48f87bf1a5861518da2dba73116dea9",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1"
+    },
+    {
+      "ast_sha256": "sha256:903d923eabc74dbeb91151349348a2948fb9bf63a58914b9f134c555d94b50f4",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_QUALIFICATION_OUTCOME_HASH_RE"
+    },
+    {
       "ast_sha256": "sha256:7a2b640c021fbe9bdd52d95f0a42d58fe7c26f1955ea14b6059231afa3e0c184",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
@@ -6960,6 +7020,11 @@
       "ast_sha256": "sha256:4efc1d93ae35124d5b0cc5ebf6f651b34acaec895e7e6eca3d935aaf1ce071e6",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_qualification_outcome_extensions_valid_v2"
+    },
+    {
+      "ast_sha256": "sha256:ae5fe7de229944b594a5bcafc0ecf6848673da2a4de0792621af92d254e55fdc",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_qualification_outcome_sha256"
     },
     {
       "ast_sha256": "sha256:a64698301ae510d05b808d2d081264b58f89b61d662ca5bf0bca3dee902f5d42",
@@ -7022,7 +7087,12 @@
       "symbol": "qualification_outcome_required_route_terminal_satisfies_v2"
     },
     {
-      "ast_sha256": "sha256:9a55b754500bb632bf24870266720176cfd1b3f98776154b6c8588bfc97ddc03",
+      "ast_sha256": "sha256:c794299fa5f6d9507a77fa77e09b6a9fe056c11b5b2b04ab1e162a29fb9f0477",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "validate_qualification_branch_control_failure_v1"
+    },
+    {
+      "ast_sha256": "sha256:8e5f590d75094df1d30efc12572fdc57337a3a1f082cef2d27afd8af6f3244b4",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_qualification_outcome_envelope_v2"
     },
@@ -7037,7 +7107,7 @@
       "symbol": "validate_qualification_outcome_protocol_probe_cases_v1"
     },
     {
-      "ast_sha256": "sha256:147f6e856a033d36c7eb5eed39ff007706d82a673257c905d6f36b82c5256f48",
+      "ast_sha256": "sha256:386f33ae527c5af28f59414ebb59032ee528b136cd7c2ab2a66ffde406f846e3",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_qualification_route_completion_receipt_v1"
     },
@@ -7362,7 +7432,7 @@
       "symbol": "_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2"
     },
     {
-      "ast_sha256": "sha256:1ee119c759a9bf15ec0ee1bdcd003a0363c7b2b6c26ab8c6328a368bea9136fb",
+      "ast_sha256": "sha256:170305aaec86685db4987aa07d7b0546bfa8743f6da943b90e7a5082707b4011",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2"
     },
@@ -7947,7 +8017,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:06e984ce89439fdcc0d0be0b2a86fca23e1903efb54b569152ae9ee71509b55c",
-  "protected_source_commit": "1471885b53ecd23d272ab59fea69decfa5749bd0",
+  "manifest_hash": "sha256:7c22f3e4bee9adacb2590ac35494c8ad64186671d7ed6c22285fbcfaf7a7baa0",
+  "protected_source_commit": "7f4859632e7f7a4665fe3cfda5e3cd024339453e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

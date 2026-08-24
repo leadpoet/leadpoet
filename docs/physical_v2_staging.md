@@ -181,18 +181,21 @@ The August 2026 rebenchmark incident was an IAM simulator inventory and
 classification failure, not missing operator access and not a Sourcing_model
 commit failure. AWS can return `MissingContextValues` at both aggregate and
 resource-specific levels, including keys from statements that do not apply to
-the simulated action. The commissioner evaluates those keys against the
-complete live principal-policy inventory: unknown or action-applicable missing
-context fails closed, while a known key belonging only to action-inapplicable
-statements does not create a false denial.
+the simulated action. For managed parity-controller changes, the commissioner
+evaluates those keys against the complete live principal-policy inventory:
+unknown or action-applicable missing context fails closed, while a known key
+belonging only to action-inapplicable statements does not create a false
+denial.
 
-Inventory and API reads use bounded retries and return fixed typed diagnostics;
-they never trigger a request for operator credentials or manual IAM work. The
-complete principal inventory is revalidated immediately before each managed
-policy write and after activation. Drift before activation removes only the
-exact plan-bound staged version under guarded readback. If an apply outcome is
-unknown, the same ledger-bound intent must be reconciled to exact-before,
-exact-applied, or ambiguous state; it must never be blindly reapplied.
+Authority and reconciliation inventory reads use bounded retries, and all
+failures cross the bridge only as fixed typed diagnostics; they never trigger a
+request for operator credentials or manual IAM work. For managed
+parity-controller changes, the complete principal inventory is revalidated
+immediately before each forward managed-policy write and after activation.
+Drift before activation removes only the exact plan-bound staged version under
+guarded readback. If an apply outcome is unknown, the same ledger-bound intent
+must be reconciled to exact-before, exact-applied, or ambiguous state; it must
+never be blindly reapplied.
 
 Migration `156-production-parity-readonly-role.sql` is never pasted into an SQL
 editor and the repository bootstrap does not apply arbitrary SQL. During an

@@ -807,29 +807,71 @@ async def create_request(
 _ACTIVE_REQUESTS_CACHE_TTL_SECONDS = float(
     os.getenv("FULFILLMENT_ACTIVE_CACHE_TTL_SECONDS", "5")
 )
+# How far past the TTL a poller will accept the previous pool rather than wait
+# behind an in-flight refresh.  This is the serve-stale ceiling, not the TTL:
+# the pool is still refreshed every TTL seconds, and a poller only reaches
+# back this far when the refreshing query is itself slow.  30s matches the
+# lifecycle tick that changes the pool, and stays far inside
+# FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES — the commit-window headroom the
+# cutoff enforces is measured in minutes, so a pool up to 30s old cannot
+# surface a request that has run out of usable window.
+_ACTIVE_REQUESTS_STALE_CEILING_SECONDS = float(
+    os.getenv("FULFILLMENT_ACTIVE_CACHE_STALE_CEILING_SECONDS", "30")
+)
 _active_requests_cache = {"fetched_at_mono": 0.0, "rows": None}
-_active_requests_cache_lock = threading.Lock()
+_active_requests_cache_lock = threading.Lock()  # serializes the DB refresh
+_active_requests_state_lock = threading.Lock()  # guards the dict above
+
+
+def _read_active_request_rows(max_age_seconds: float):
+    """Return the cached pool if it is younger than ``max_age_seconds``."""
+    with _active_requests_state_lock:
+        rows = _active_requests_cache["rows"]
+        if rows is None:
+            return None
+        age = _time.monotonic() - _active_requests_cache["fetched_at_mono"]
+        return rows if age < max_age_seconds else None
 
 
 def _fetch_active_request_rows(supabase, cutoff: str) -> list:
     """Fetch the miner-visible open pool, cached for a few seconds.
 
-    The lock deliberately covers the DB fetch: when the cache expires under
-    concurrent polling, the first caller refreshes while the rest briefly
-    serialize behind it — one query instead of a thundering herd.
+    Exactly one caller refreshes; the rest keep serving the pool they already
+    have instead of queueing behind the DB round-trip.  The refresh lock used
+    to cover the fetch, which meant a slow query was paid by every miner
+    polling at that moment rather than by one of them — on 2026-08-24 a
+    database that had slowed to ~1s per query turned a 40ms endpoint into a
+    1.1s endpoint for every concurrent poller, because they all blocked on the
+    same refresh and returned together.  Serving the previous pool while the
+    refresh runs decouples the endpoint from the database's tail: the pool is
+    still refreshed on the same TTL, but a slow refresh now costs one request,
+    not all of them.
+
+    A caller only waits when there is nothing safe to serve — a cold cache, or
+    a pool older than the stale ceiling.
 
     Callers must NOT mutate the returned rows (they are shared across
     requests); the handler below builds fresh dicts for everything it
     returns.
     """
-    with _active_requests_cache_lock:
-        now_mono = _time.monotonic()
-        if (
-            _active_requests_cache["rows"] is not None
-            and now_mono - _active_requests_cache["fetched_at_mono"]
-            < _ACTIVE_REQUESTS_CACHE_TTL_SECONDS
-        ):
-            return _active_requests_cache["rows"]
+    rows = _read_active_request_rows(_ACTIVE_REQUESTS_CACHE_TTL_SECONDS)
+    if rows is not None:
+        return rows
+
+    if not _active_requests_cache_lock.acquire(blocking=False):
+        # Someone else is refreshing. Serve the pool we already have rather
+        # than inherit their DB latency.
+        stale = _read_active_request_rows(_ACTIVE_REQUESTS_STALE_CEILING_SECONDS)
+        if stale is not None:
+            return stale
+        # Cold cache, or too old to serve — wait for the in-flight refresh.
+        _active_requests_cache_lock.acquire()
+
+    try:
+        # The refresh we waited for may have already filled the cache.
+        rows = _read_active_request_rows(_ACTIVE_REQUESTS_CACHE_TTL_SECONDS)
+        if rows is not None:
+            return rows
 
         # FIFO: return up to FULFILLMENT_MAX_PARALLEL_REQUESTS oldest visible
         # requests.  Miners may work on any/all of them in parallel. Once a
@@ -850,9 +892,13 @@ def _fetch_active_request_rows(supabase, cutoff: str) -> list:
             .limit(FULFILLMENT_MAX_PARALLEL_REQUESTS) \
             .execute()
 
-        _active_requests_cache["rows"] = resp.data or []
-        _active_requests_cache["fetched_at_mono"] = now_mono
-        return _active_requests_cache["rows"]
+        fetched = resp.data or []
+        with _active_requests_state_lock:
+            _active_requests_cache["rows"] = fetched
+            _active_requests_cache["fetched_at_mono"] = _time.monotonic()
+        return fetched
+    finally:
+        _active_requests_cache_lock.release()
 
 
 @fulfillment_router.get("/requests/active")

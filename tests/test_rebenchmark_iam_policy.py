@@ -450,6 +450,7 @@ def _apply_inline(iam: FakeInlineIam, request: dict[str, object]):
 
 
 def _apply_managed(iam: FakeManagedIam, request: dict[str, object]):
+    desired = operator._canonical_policy(request["desired_document"])
     return operator._apply_managed(
         iam,
         _bound_request(request),
@@ -457,6 +458,7 @@ def _apply_managed(iam: FakeManagedIam, request: dict[str, object]):
         commit=COMMIT,
         account_id=ACCOUNT,
         caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
     )
 
 
@@ -2500,6 +2502,66 @@ def test_managed_postwrite_simulation_failure_restores_prior_default():
     assert set(iam.versions) == {"v1"}
 
 
+def test_managed_inventory_drift_blocks_version_creation_before_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+
+    def drifted_inventory(_principal_arn):
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+    assert iam.events == []
+
+
+def test_managed_inventory_drift_blocks_default_activation_before_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    iam.create_policy_version(
+        PolicyArn=MANAGED_ARN,
+        PolicyDocument=operator._json(operator._canonical_policy(AFTER)),
+        SetAsDefault=False,
+    )
+    iam.events.clear()
+
+    def drifted_inventory(_principal_arn):
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1", "v2"}
+    assert iam.events == []
+
+
 def test_managed_principal_inventory_drift_rolls_back_updated_default():
     iam = FakeManagedIam()
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
@@ -2522,6 +2584,9 @@ def test_managed_principal_inventory_drift_rolls_back_updated_default():
             commit=COMMIT,
             account_id=ACCOUNT,
             caller_arn=CALLER,
+            prewrite_condition_documents_loader=(
+                lambda _principal_arn: (_semantic_context_policy(),)
+            ),
             condition_documents_loader=changing_loader,
         )
 
@@ -2534,11 +2599,15 @@ def test_managed_principal_inventory_drift_rolls_back_updated_default():
 def test_remote_entry_propagates_exact_managed_inventory_loader(monkeypatch):
     desired = operator._canonical_policy(AFTER)
     desired_hash = operator._policy_hash(desired)
+    prior_hash = operator._policy_hash(operator._canonical_policy(BEFORE))
     setup_documents = {"sentinel": desired}
     validated = {
         "target": {"kind": "managed", "policy_arn": MANAGED_ARN},
         "desired_document": desired,
-        "plan": {"desired_document_hash": desired_hash},
+        "plan": {
+            "prior_document_hash": prior_hash,
+            "desired_document_hash": desired_hash,
+        },
         "intent": {"status": "reserved"},
     }
     iam = object()
@@ -2584,8 +2653,14 @@ def test_remote_entry_propagates_exact_managed_inventory_loader(monkeypatch):
         assert loaded_setup_documents is setup_documents
         assert loaded_principal == principal
         assert target_policy_arn == MANAGED_ARN
-        assert target_allowed_document_hashes == frozenset({desired_hash})
-        observed["loaded"] = True
+        if target_allowed_document_hashes == frozenset({desired_hash}):
+            observed["postwrite_loaded"] = True
+        elif target_allowed_document_hashes == frozenset(
+            {prior_hash, desired_hash}
+        ):
+            observed["prewrite_loaded"] = True
+        else:
+            raise AssertionError("unexpected managed target transition set")
         return loaded_documents
 
     monkeypatch.setattr(
@@ -2598,11 +2673,13 @@ def test_remote_entry_propagates_exact_managed_inventory_loader(monkeypatch):
         loaded_iam,
         loaded_request,
         *,
+        prewrite_condition_documents_loader,
         condition_documents_loader,
         **_kwargs,
     ):
         assert loaded_iam is iam
         assert loaded_request is validated
+        assert prewrite_condition_documents_loader(principal) == loaded_documents
         assert condition_documents_loader(principal) == loaded_documents
         return {"status": "propagated"}
 
@@ -2615,7 +2692,10 @@ def test_remote_entry_propagates_exact_managed_inventory_loader(monkeypatch):
         source_hash=SOURCE_HASH,
         commit=COMMIT,
     ) == {"status": "propagated"}
-    assert observed == {"loaded": True}
+    assert observed == {
+        "prewrite_loaded": True,
+        "postwrite_loaded": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -3114,6 +3194,11 @@ def test_duplicate_managed_apply_executes_aws_once_and_replays_redacted_outcome(
             commit=COMMIT,
             account_id=ACCOUNT,
             caller_arn=CALLER,
+            prewrite_condition_documents_loader=(
+                lambda _principal_arn: (
+                    operator._canonical_policy(call_request["desired_document"]),
+                )
+            ),
         )
 
     monkeypatch.setattr(operator, "_remote_call", remote_call)

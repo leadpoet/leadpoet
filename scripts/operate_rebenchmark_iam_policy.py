@@ -1745,6 +1745,24 @@ def _simulate_principals(
                 raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
 
 
+def _validate_principal_condition_inventory(
+    principal_arns: Sequence[str],
+    condition_documents_loader: Any | None,
+) -> None:
+    if condition_documents_loader is None or not principal_arns:
+        raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+    for principal_arn in principal_arns:
+        try:
+            loaded = condition_documents_loader(principal_arn)
+            if not isinstance(loaded, tuple) or not loaded:
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            tuple(_canonical_policy(document) for document in loaded)
+        except RemoteDiagnosticError:
+            raise
+        except Exception as exc:
+            raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY") from exc
+
+
 def _decoy_resource(resource: str, *, action: str) -> str:
     if resource == "*":
         service = action.split(":", 1)[0]
@@ -2516,6 +2534,7 @@ def _apply_managed(
     commit: str,
     account_id: str,
     caller_arn: str,
+    prewrite_condition_documents_loader: Any | None = None,
     condition_documents_loader: Any | None = None,
 ) -> dict[str, Any]:
     target = request["target"]
@@ -2644,6 +2663,9 @@ def _apply_managed(
                 "managed IAM policy capacity cannot preserve an exact rollback version"
             )
         _validate_plan_freshness(plan)
+        _validate_principal_condition_inventory(
+            principal_arns, prewrite_condition_documents_loader
+        )
         create_error: Exception | None = None
         returned_version = ""
         try:
@@ -2686,6 +2708,9 @@ def _apply_managed(
             raise OperationError(
                 "managed IAM policy default guard found a third state"
             )
+        _validate_principal_condition_inventory(
+            principal_arns, prewrite_condition_documents_loader
+        )
         try:
             iam.set_default_policy_version(PolicyArn=arn, VersionId=new_version)
         except Exception as exc:
@@ -2848,6 +2873,7 @@ def _reconcile_policy(
     commit: str,
     account_id: str,
     caller_arn: str,
+    prewrite_condition_documents_loader: Any | None = None,
     condition_documents_loader: Any | None = None,
 ) -> dict[str, Any]:
     target = request["target"]
@@ -2924,6 +2950,9 @@ def _reconcile_policy(
             commit=commit,
             account_id=account_id,
             caller_arn=caller_arn,
+            prewrite_condition_documents_loader=(
+                prewrite_condition_documents_loader
+            ),
             condition_documents_loader=condition_documents_loader,
         )
     return _reconciliation_receipt(
@@ -3036,6 +3065,27 @@ def _remote_entry(
             if validated["target"]["kind"] == "managed"
             else None
         )
+        prewrite_condition_documents_loader = (
+            (
+                lambda principal_arn: _managed_principal_condition_documents(
+                    iam,
+                    setup_documents,
+                    principal_arn,
+                    target_policy_arn=validated["target"]["policy_arn"],
+                    # Before either managed-policy write, the live default may
+                    # still be the prior document or may already be the exact
+                    # desired document after an acknowledged response loss.
+                    target_allowed_document_hashes=frozenset(
+                        {
+                            validated["plan"]["prior_document_hash"],
+                            validated["plan"]["desired_document_hash"],
+                        }
+                    ),
+                )
+            )
+            if validated["target"]["kind"] == "managed"
+            else None
+        )
         if operation == "reconcile":
             if validated["intent"]["status"] not in {
                 "reserved",
@@ -3050,6 +3100,9 @@ def _remote_entry(
                 commit=commit,
                 account_id=account_id,
                 caller_arn=caller_arn,
+                prewrite_condition_documents_loader=(
+                    prewrite_condition_documents_loader
+                ),
                 condition_documents_loader=condition_documents_loader,
             )
         if validated["intent"]["status"] != "reserved":
@@ -3071,6 +3124,9 @@ def _remote_entry(
             commit=commit,
             account_id=account_id,
             caller_arn=caller_arn,
+            prewrite_condition_documents_loader=(
+                prewrite_condition_documents_loader
+            ),
             condition_documents_loader=condition_documents_loader,
         )
     finally:

@@ -227,10 +227,49 @@ jobs:
             *[!0-9a-f]*|'') exit 1 ;;
           esac
           test "${#bundle_sha256}" -eq 64
+          bundle_binding="$PARITY_TEMP/candidate-bundle-binding.json"
+          python3 - "$bundle_binding" "$CANDIDATE_SHA" \
+            "$bundle_sha256" "$bundle_size_bytes" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1])
+          descriptor = os.open(
+              output,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+              0o600,
+          )
+          try:
+              with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "candidate-sha": sys.argv[2],
+                          "bundle-sha256": sys.argv[3],
+                          "bundle-size-bytes": sys.argv[4],
+                      },
+                      handle,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+          except BaseException:
+              try:
+                  os.close(descriptor)
+              except OSError:
+                  pass
+              raise
+          PY
+          test -f "$bundle_binding"
+          test ! -L "$bundle_binding"
           aws s3 cp "$PARITY_TEMP/candidate.bundle" \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate.bundle" \
-            --metadata "candidate-sha=$CANDIDATE_SHA,bundle-sha256=$bundle_sha256,bundle-size-bytes=$bundle_size_bytes" \
             --only-show-errors
+          aws s3 cp "$bundle_binding" \
+            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate-bundle-binding.json" \
+            --only-show-errors
+          rm -f "$bundle_binding"
           printf 'sha256=%s\nsize_bytes=%s\n' \
             "$bundle_sha256" "$bundle_size_bytes" >> "$GITHUB_OUTPUT"
 
@@ -279,24 +318,24 @@ jobs:
               "production_parity_bootstrap_evidence.py",
               "exec",
           )
-          candidate_bundle_metadata_validator = r'''import json
+          candidate_bundle_binding_validator = r'''import json
           import os
           import stat
           import sys
 
-          MAX_METADATA_BYTES = 4096
+          MAX_BINDING_BYTES = 4096
 
           def exact_object(pairs):
               value = {}
               for key, item in pairs:
                   if type(key) is not str or key in value:
-                      raise ValueError("metadata object keys are not unique strings")
+                      raise ValueError("binding object keys are not unique strings")
                   value[key] = item
               return value
 
           try:
               if len(sys.argv) != 5:
-                  raise ValueError("metadata arguments are invalid")
+                  raise ValueError("binding arguments are invalid")
               descriptor = os.open(
                   sys.argv[1],
                   os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -306,16 +345,16 @@ jobs:
                   if (
                       not stat.S_ISREG(metadata.st_mode)
                       or metadata.st_size <= 0
-                      or metadata.st_size > MAX_METADATA_BYTES
+                      or metadata.st_size > MAX_BINDING_BYTES
                   ):
-                      raise ValueError("metadata file is outside its bound")
-                  raw = os.read(descriptor, MAX_METADATA_BYTES + 1)
+                      raise ValueError("binding file is outside its bound")
+                  raw = os.read(descriptor, MAX_BINDING_BYTES + 1)
                   if len(raw) != metadata.st_size:
-                      raise ValueError("metadata file changed during read")
+                      raise ValueError("binding file changed during read")
               finally:
                   os.close(descriptor)
-              if not raw or len(raw) > MAX_METADATA_BYTES:
-                  raise ValueError("metadata input is outside its bound")
+              if not raw or len(raw) > MAX_BINDING_BYTES:
+                  raise ValueError("binding input is outside its bound")
               actual = json.loads(
                   raw.decode("utf-8"),
                   object_pairs_hook=exact_object,
@@ -335,8 +374,8 @@ jobs:
               raise SystemExit(1)
           '''
           compile(
-              candidate_bundle_metadata_validator,
-              "candidate_bundle_metadata_validator.py",
+              candidate_bundle_binding_validator,
+              "candidate_bundle_binding_validator.py",
               "exec",
           )
           q = shlex.quote
@@ -352,7 +391,7 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
-          candidate_bundle_metadata=""
+          candidate_bundle_binding=""
           candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
           candidate_repo={q(root + "/repo")}
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
@@ -415,7 +454,7 @@ jobs:
             elif [ "$final_status" -ne 0 ]; then
               final_status="$(failure_response_code)" || final_status=1
             fi
-            rm -f "$candidate_bundle" "$candidate_bundle_metadata" \
+            rm -f "$candidate_bundle" "$candidate_bundle_binding" \
               >/dev/null 2>&1 || true
             exit "$final_status"
           }}
@@ -430,28 +469,30 @@ jobs:
           failure_stage=bootstrap-workspace
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
-          candidate_bundle_metadata="$(
-            mktemp {q(root + "/candidate-bundle-metadata.XXXXXX")}
+          candidate_bundle_binding="$(
+            mktemp {q(root + "/candidate-bundle-binding.XXXXXX")}
           )"
-          test -f "$candidate_bundle_metadata"
-          test ! -L "$candidate_bundle_metadata"
+          test -f "$candidate_bundle_binding"
+          test ! -L "$candidate_bundle_binding"
           failure_stage=candidate-bundle-download
           aws s3api get-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate.bundle")} \
-            --query Metadata \
-            --output json \
             --region {q(required['AWS_REGION'])} \
-            "$candidate_bundle" \
-            > "$candidate_bundle_metadata" 2>/dev/null
+            "$candidate_bundle" >/dev/null 2>&1
+          aws s3api get-object \
+            --bucket {q(artifact_bucket)} \
+            --key {q(prefix + "/candidate-bundle-binding.json")} \
+            --region {q(required['AWS_REGION'])} \
+            "$candidate_bundle_binding" >/dev/null 2>&1
           failure_stage=candidate-bundle-metadata
-          /usr/bin/python3.11 -c {q(candidate_bundle_metadata_validator)} \
-            "$candidate_bundle_metadata" \
+          /usr/bin/python3.11 -c {q(candidate_bundle_binding_validator)} \
+            "$candidate_bundle_binding" \
             {q(required['CANDIDATE_SHA'])} \
             "$candidate_bundle_sha256" \
             "$candidate_bundle_size_bytes"
-          rm -f "$candidate_bundle_metadata"
-          candidate_bundle_metadata=""
+          rm -f "$candidate_bundle_binding"
+          candidate_bundle_binding=""
           failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"

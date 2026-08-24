@@ -8855,6 +8855,44 @@ def test_rollback_rehearsal_keeps_newer_commit_on_origin_main() -> None:
     assert '"$CANDIDATE_SHA:refs/heads/main"' in forward_section
 
 
+def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "prepare_validator_initial_active_lineage_v2(" in script
+    assert "prepare_gateway_final_active_lineage_v2(" in script
+    assert "validate_active_release_requirements_v2(conflicting)" in script
+    assert "running_channel[\"gateway_release_manifest\"]" in script
+    assert '"leadpoet-validator-main" in containers' in script
+    assert 'f"VALIDATOR_V2_DEPLOY_COMMIT={running_commit}"' in script
+    assert (
+        'ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS="/tmp/leadpoet-'
+        "validator-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert (
+        'ACTIVE_RELEASE_GATEWAY_REQUIREMENTS="/tmp/leadpoet-'
+        "gateway-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert (
+        'ACTIVE_RELEASE_GATEWAY_LINEAGE="/tmp/leadpoet-'
+        "gateway-active-release-lineage.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert '"GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED=1"' in script
+    assert '"GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS=' in script
+    assert '"GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE=' in script
+    assert '"VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"' in script
+    assert '"VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=' in script
+    assert '"VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=' in script
+    assert '"VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=' in script
+    assert '"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=' in script
+    assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
+    assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
+
+
 def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:
     from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
 

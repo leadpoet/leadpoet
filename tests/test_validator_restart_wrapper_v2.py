@@ -270,6 +270,10 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
                 "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS=1",
                 "VALIDATOR_RESTART_INVOCATION_ID=validator-stale",
                 "LEADPOET_RESTART_INVOCATION_ID=validator-stale",
+                "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=/tmp/leadpoet-stale-initial.json",
+                "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=/tmp/leadpoet-stale-final-requirements.json",
+                "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=/tmp/leadpoet-stale-final-lineage.json",
+                "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS=/tmp/leadpoet-stale-stable.json",
                 "VALIDATOR_NETUID=71",
             )
         )
@@ -291,9 +295,17 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
     assert "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS" not in exports
     assert "VALIDATOR_RESTART_INVOCATION_ID" not in exports
     assert "LEADPOET_RESTART_INVOCATION_ID" not in exports
+    assert "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" not in exports
+    assert "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" not in exports
+    assert "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" not in exports
+    assert "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" not in exports
     cached = cache.read_text(encoding="utf-8")
     assert "VALIDATOR_RESTART_INVOCATION_ID" not in cached
     assert "LEADPOET_RESTART_INVOCATION_ID" not in cached
+    assert "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" not in cached
+    assert "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" not in cached
+    assert "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" not in cached
+    assert "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" not in cached
 
     preserved = subprocess.run(
         [
@@ -301,12 +313,16 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
             "-c",
             (
                 "set -a; . \"$1\"; set +a; "
-                "printf '%s\\n%s\\n%s\\n%s\\n%s\\n' "
+                "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' "
                 "\"$VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE\" "
                 "\"$VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS\" "
                 "\"$VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS\" "
                 "\"$VALIDATOR_RESTART_INVOCATION_ID\" "
-                "\"$LEADPOET_RESTART_INVOCATION_ID\""
+                "\"$LEADPOET_RESTART_INVOCATION_ID\" "
+                "\"$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT\" "
+                "\"$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT\" "
+                "\"$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT\" "
+                "\"$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS\""
             ),
             "bash",
             str(export_file),
@@ -321,6 +337,10 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
             "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS": "2100",
             "VALIDATOR_RESTART_INVOCATION_ID": "validator-active",
             "LEADPOET_RESTART_INVOCATION_ID": "validator-active",
+            "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT": "/tmp/leadpoet-active-initial.json",
+            "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT": "/tmp/leadpoet-active-final-requirements.json",
+            "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT": "/tmp/leadpoet-active-final-lineage.json",
+            "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS": "/tmp/leadpoet-active-stable.json",
         },
     )
     assert preserved.stdout.splitlines() == [
@@ -329,7 +349,247 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
         "2100",
         "validator-active",
         "validator-active",
+        "/tmp/leadpoet-active-initial.json",
+        "/tmp/leadpoet-active-final-requirements.json",
+        "/tmp/leadpoet-active-final-lineage.json",
+        "/tmp/leadpoet-active-stable.json",
     ]
+
+
+def _handoff_environment(prefix: str) -> dict[str, str]:
+    return {
+        "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT": (
+            f"/tmp/leadpoet-{prefix}-initial.json"
+        ),
+        "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT": (
+            f"/tmp/leadpoet-{prefix}-final-requirements.json"
+        ),
+        "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT": (
+            f"/tmp/leadpoet-{prefix}-final-lineage.json"
+        ),
+    }
+
+
+def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
+    tmp_path: Path,
+) -> None:
+    names = set(_handoff_environment("fixture"))
+    clean_env = {key: value for key, value in os.environ.items() if key not in names}
+    clean_env["VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED"] = "1"
+    missing = subprocess.run(
+        ["bash", "validator_restart.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=clean_env,
+    )
+    assert missing.returncode == 2
+    assert "paired validator active release handoff is incomplete" in missing.stderr
+    assert "Pulling latest GitHub main" not in missing.stdout
+
+    unsafe_env = _handoff_environment("fixture")
+    unsafe_env["VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"] = str(
+        tmp_path / "outside-controller-root.json"
+    )
+    unsafe = subprocess.run(
+        ["bash", "validator_restart.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**clean_env, **unsafe_env},
+    )
+    assert unsafe.returncode == 2
+    assert "one exact controller-owned /tmp/leadpoet-*.json path" in unsafe.stderr
+    assert "Pulling latest GitHub main" not in unsafe.stdout
+
+
+def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="${VALIDATOR_V2_GATEWAY_'
+        'RELEASE_REQUIREMENTS:-/home/ec2-user/.config/leadpoet/'
+        'gateway-v2-release-requirements.json}"'
+    ) in script
+    assert (
+        'VALIDATOR_ACTIVE_PUBLICATION_JOURNAL="$VALIDATOR_ROOT/'
+        'validator_weights/authoritative_weight_publication_v2.json"'
+    ) in script
+    module_gate = script.index(
+        'VALIDATOR_ACTIVE_RELEASE_PREPARER="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT/gateway/tee/'
+        'prepare_active_release_lineage_v2.py"'
+    )
+    runtime_env = script.index(
+        'echo "Preparing validator runtime env from Secrets Manager"'
+    )
+    shutdown = script.index('echo "Stopping validator processes and containers"')
+    assert module_gate < runtime_env < shutdown
+    assert "selected validator release lacks bounded active release lineage support" in script[
+        module_gate:runtime_env
+    ]
+    assert "Validator remains running; production shutdown has not started." in script[
+        module_gate:runtime_env
+    ]
+
+    release_start = script.index(
+        'echo "Acquiring the independently built V2 release channel"'
+    )
+    release_ready = script.index(
+        'record_validator_restart_timing "release_ready"', release_start
+    )
+    release = script[release_start:release_ready]
+    assert "gateway.tee.release_channel_v2" in release
+    assert '--gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"' in release
+    assert '--validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"' in release
+    assert "--lineage-output" not in release
+    assert "--lineage-repository" not in release
+    assert "--lineage-authority-commit" not in release
+
+    running = script.index(
+        "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}'",
+        release_ready,
+    )
+    initial = script.index(
+        "--phase validator-initial",
+        running,
+    )
+    marker = script.index(
+        'echo "Prepared validator active release requirements sidecar"', initial
+    )
+    wait = script.index(
+        'while [ "$SECONDS" -lt "$VALIDATOR_ACTIVE_RELEASE_HANDOFF_DEADLINE" ]; do',
+        marker,
+    )
+    final = script.index(
+        "--phase validator-final",
+        wait,
+    )
+    preflight = script.index(
+        "python3 -m validator_tee.host.restart_preflight_v2", final
+    )
+    docker_guard = script.index(
+        "-m validator_tee.host.docker_operation_guard_v2",
+        preflight,
+    )
+    artifact_cleanup = script.index(
+        "run_bounded_validator_restart_artifact_cleanup",
+        docker_guard,
+    )
+    final_recheck = script.index(
+        'echo "Rechecking publication journal and compact lineage immediately before validator shutdown"',
+        artifact_cleanup,
+    )
+    second_final = script.index(
+        "prepare_validator_final_active_release_lineage",
+        final_recheck,
+    )
+    unchanged_hash_gate = script.index(
+        'if [ "$(\n    sha256sum',
+        second_final,
+    )
+    destructive = script.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1", preflight)
+    assert release_ready < running < initial < marker < wait < final < preflight
+    assert (
+        preflight
+        < docker_guard
+        < artifact_cleanup
+        < final_recheck
+        < second_final
+        < unchanged_hash_gate
+        < destructive
+    )
+    assert "validator active release authority changed before shutdown" in script[
+        unchanged_hash_gate:destructive
+    ]
+
+    initial_call = script[initial:marker]
+    for argument in (
+        '--candidate-commit "$VALIDATOR_DEPLOY_SHA"',
+        '--authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT"',
+        '--restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID"',
+        '--running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA"',
+        '--journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL"',
+        '--validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"',
+        '--chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE"',
+        '--repository "$VALIDATOR_ROOT"',
+        '--lineage-id "$VALIDATOR_ANCESTRY_LINEAGE_ID"',
+        '--bucket "$VALIDATOR_V2_RELEASE_BUCKET"',
+        '--prefix "$VALIDATOR_V2_RELEASE_PREFIX"',
+        '--requirements-output "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"',
+    ):
+        assert argument in initial_call
+    assert 'sudo chown -- "$(id -u):$(id -g)"' in initial_call
+
+    final_call = script[final:preflight]
+    for argument in (
+        '--candidate-commit "$VALIDATOR_DEPLOY_SHA"',
+        '--authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT"',
+        '--restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID"',
+        '--initial-requirements "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"',
+        '--final-requirements-input "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT"',
+        '--lineage-input "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT"',
+        '--journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL"',
+        '--validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"',
+        '--chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE"',
+        '--repository "$VALIDATOR_ROOT"',
+        '--lineage-id "$VALIDATOR_ANCESTRY_LINEAGE_ID"',
+        '--bucket "$VALIDATOR_V2_RELEASE_BUCKET"',
+        '--prefix "$VALIDATOR_V2_RELEASE_PREFIX"',
+        '--requirements-output "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS"',
+        '--lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"',
+    ):
+        assert argument in final_call
+    assert '"$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS"' in final_call
+    assert '"$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"' in final_call
+    assert "Validator remains running; production shutdown has not started." in script[
+        marker:destructive
+    ]
+
+
+def test_standalone_active_release_sidecars_use_bounded_nofollow_reads() -> None:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index('if [ "$active_release_handoff_count" -eq 0 ]; then')
+    end = script.index("\nfi\n\nfollow_superseding_validator_release()", start)
+    standalone = script[start:end]
+
+    assert "os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW" in standalone
+    assert "stat.S_ISREG(metadata.st_mode)" in standalone
+    assert "max_document_bytes = 4 * 1024 * 1024" in standalone
+    assert "os.read(fd, max_document_bytes + 1)" in standalone
+    assert standalone.count("load_bounded_json(") == 3
+    assert ".read_text(" not in standalone
+    assert ".read_bytes(" not in standalone
+
+
+def test_validator_active_release_handoff_survives_reexec_and_cleans_exact_files():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    handoff_names = (
+        "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
+        "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
+        "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
+        "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS",
+    )
+
+    candidate_reexec_start = script.index("exec env", script.index("restart_script_differs"))
+    candidate_reexec_end = script.index(
+        'bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"', candidate_reexec_start
+    )
+    candidate_reexec = script[candidate_reexec_start:candidate_reexec_end]
+    supersession_start = script.index("follow_superseding_validator_release() {")
+    supersession_end = script.index("\n}\n", supersession_start)
+    supersession = script[supersession_start:supersession_end]
+    for name in handoff_names:
+        assert f'{name}="${name}"' in candidate_reexec
+        assert f'{name}="${name}"' in supersession
+        assert f'"{name}"' in script[script.index("skip_keys = {") : script.index("exports = []")]
+
+    cleanup_start = script.index("cleanup_validator_restart_preparation() {")
+    cleanup_end = script.index("\n}\n", cleanup_start)
+    cleanup = script[cleanup_start:cleanup_end]
+    assert 'rm -f -- "$handoff_path"' in cleanup
+    assert "rm -rf" not in cleanup[cleanup.index("for handoff_path") :]
 
 
 def _make_forward_restart_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
@@ -349,6 +609,7 @@ def _make_forward_restart_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
     for relative in (
         Path("validator_restart.sh"),
         Path("Leadpoet/utils/exact_commit_restart_v2.py"),
+        Path("gateway/tee/prepare_active_release_lineage_v2.py"),
         Path("validator_tee/scripts/verify_pinned_gateway_release_v2.sh"),
     ):
         target = repo / relative
@@ -388,6 +649,7 @@ def _run_forward_restart_fixture(
     launcher: Path,
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "repo"
+    handoff_prefix = f"/tmp/leadpoet-{tmp_path.name}"
     return subprocess.run(
         ["bash", str(launcher)],
         check=False,
@@ -403,6 +665,15 @@ def _run_forward_restart_fixture(
             "VALIDATOR_ENV_FILE": str(tmp_path / "validator.env"),
             "VALIDATOR_ENV_BACKUP_DIR": str(tmp_path / "env-backups"),
             "VALIDATOR_COORDINATED_EXPECTED_COMMIT": expected_commit,
+            "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT": (
+                handoff_prefix + "-initial.json"
+            ),
+            "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT": (
+                handoff_prefix + "-final-requirements.json"
+            ),
+            "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT": (
+                handoff_prefix + "-final-lineage.json"
+            ),
         },
     )
 
@@ -468,6 +739,19 @@ def test_exact_restart_preserves_newer_validator_restart_controller():
         '/home/ec2-user/validator_restart.sh}"'
     ) in script
     assert "VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" in script
+    assert (
+        'VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-$VALIDATOR_ROOT}"'
+        in script
+    )
+    assert (
+        'VALIDATOR_ACTIVE_RELEASE_PREPARER="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT/gateway/tee/'
+        'prepare_active_release_lineage_v2.py"'
+        in script
+    )
+    initial = script.index("--phase validator-initial")
+    assert 'PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT"' in script[
+        script.index("run_validator_active_release_phase() {"):initial
+    ]
 
 
 def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation():

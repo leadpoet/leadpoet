@@ -18,6 +18,8 @@ VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_r
 GATEWAY_REPO_ROOT="${LEADPOET_GATEWAY_REPO_ROOT:-$PRODUCTION_GATEWAY_REPO_ROOT}"
 GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-$PRODUCTION_GATEWAY_PYTHON_BIN}"
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
+VALIDATOR_V2_HOTKEY_CONFIG_PATH="${LEADPOET_VALIDATOR_V2_HOTKEY_CONFIG_PATH:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
+VALIDATOR_CHAIN_SIGNING_PROFILE_PATH="${LEADPOET_VALIDATOR_CHAIN_SIGNING_PROFILE_PATH:-$VALIDATOR_REPO_ROOT/validator_tee/enclave/chain_signing_profile_v2.json}"
 GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH}"
 GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
 VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
@@ -51,6 +53,9 @@ temporary_root=""
 coordination_file=""
 gateway_handoff_file=""
 gateway_handoff_nonce=""
+paired_gateway_handoff_file=""
+paired_gateway_handoff_nonce=""
+active_release_restart_invocation_id=""
 controller_verifier_b64=""
 expected_controller_commit=""
 gateway_restart_log=""
@@ -60,6 +65,15 @@ validator_observation=""
 validator_evidence=""
 transition_manifest=""
 final_manifest=""
+validator_initial_requirements_remote=""
+gateway_validator_requirements_remote=""
+validator_final_requirements_remote=""
+validator_final_lineage_remote=""
+validator_initial_requirements_local=""
+gateway_final_requirements_local=""
+gateway_final_lineage_local=""
+GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH="${LEADPOET_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH:-/home/ec2-user/tee/gateway-v2-release-requirements.json}"
+GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH="${LEADPOET_GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH:-/home/ec2-user/tee/gateway-v2-release-lineage.json}"
 
 usage() {
   cat <<'EOF'
@@ -92,6 +106,11 @@ cleanup() {
     if [ -n "$gateway_handoff_file" ] && [ -n "$gateway_handoff_nonce" ]; then
       publish_gateway_handoff_value "failed:$commit" >/dev/null 2>&1 &
       gateway_cancel_job="$!"
+    fi
+    if [ -n "$paired_gateway_handoff_file" ] \
+        && [ -n "$paired_gateway_handoff_nonce" ]; then
+      publish_paired_gateway_handoff_value "failed:$commit" \
+        >/dev/null 2>&1 || true
     fi
     for _ in $(seq 1 20); do
       if [ -n "$gateway_job_pgid" ] \
@@ -190,6 +209,32 @@ cleanup() {
   if [ -n "$gateway_handoff_file" ]; then
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
       "rm -f -- '$gateway_handoff_file'" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$paired_gateway_handoff_file" ]; then
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$paired_gateway_handoff_file'" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${validator_initial_requirements_remote:-}" ]; then
+    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'" \
+      >/dev/null 2>&1 || true
+  fi
+  if [ -n "${gateway_validator_requirements_remote:-}" ]; then
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$gateway_counterpart_lineage_remote' '$gateway_counterpart_lineage_remote.tmp'" \
+      >/dev/null 2>&1 || true
+  fi
+  if [ -n "$gateway_validator_requirements_remote" ]; then
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp'" \
+      >/dev/null 2>&1 || true
+  fi
+  if [ -n "$validator_initial_requirements_remote" ] \
+      || [ -n "$validator_final_requirements_remote" ] \
+      || [ -n "$validator_final_lineage_remote" ]; then
+    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'" \
+      >/dev/null 2>&1 || true
   fi
   if [ -n "$temporary_root" ]; then
     rm -rf -- "$temporary_root"
@@ -318,7 +363,9 @@ done
 for remote_path in \
   "$GATEWAY_REPO_ROOT" \
   "$GATEWAY_PYTHON_BIN" \
-  "$GATEWAY_DEPLOY_READINESS_PATH"; do
+  "$GATEWAY_DEPLOY_READINESS_PATH" \
+  "$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH" \
+  "$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH"; do
   if ! [[ "$remote_path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
     echo "ERROR: readiness authority path contains unsupported characters" >&2
     exit 2
@@ -336,7 +383,7 @@ if [ "$disable_miner_submissions_before_restart" = "1" ] \
   echo "ERROR: miner-maintenance bootstrap requires the production release channel" >&2
   exit 2
 fi
-if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+if [ "$component" != "validator" ]; then
   unsafe_git_environment=(
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR
     GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_PARAMETERS
@@ -455,6 +502,7 @@ LOCAL_READINESS_CANDIDATE_PATHS=(
   gateway/build_info.py
   gateway/deploy_readiness.py
   gateway/tee/release_channel_v2.py
+  gateway/tee/active_release_requirements_v2.py
   gateway/tee/release_lineage_v2.py
   gateway/tee/release_manifest_v2.py
   gateway/tee/topology.py
@@ -484,7 +532,7 @@ verify_local_readiness_candidate_sources() {
       echo "ERROR: local readiness candidate source is unavailable: $path" >&2
       return 1
     fi
-    if ! expected_blob="$(git -C "$ROOT" rev-parse "$commit:$path")"; then
+    if ! expected_blob="$(git -C "$ROOT" rev-parse "$branch_commit:$path")"; then
       echo "ERROR: local readiness candidate Git blob is unavailable: $path" >&2
       return 1
     fi
@@ -690,10 +738,25 @@ validator_observation="$temporary_root/validator-readiness-observation.json"
 validator_evidence="$temporary_root/validator-readiness-evidence.json"
 transition_manifest="$temporary_root/deploy-readiness-transition.json"
 final_manifest="$temporary_root/deploy-readiness-v2.json"
+validator_initial_requirements_local="$temporary_root/validator-active-release-requirements.json"
+gateway_final_requirements_local="$temporary_root/gateway-active-release-requirements.json"
+gateway_final_lineage_local="$temporary_root/gateway-active-release-lineage.json"
+validator_counterpart_lineage_local="$temporary_root/validator-counterpart-release-lineage.json"
+restart_transfer_id="$(basename "$temporary_root")"
+active_release_restart_invocation_id="${LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-restart-$(python3 -c 'import secrets; print(secrets.token_hex(24))')}"
+if ! [[ "$active_release_restart_invocation_id" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
+  echo "ERROR: active release restart invocation identity generation failed" >&2
+  exit 1
+fi
+validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
+gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
+validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
+validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
+gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
 
 echo "Fetching current public V2 compatibility authority"
 git -C "$ROOT" fetch origin main
-if [ "$disable_miner_submissions_before_restart" = "1" ]; then
+if [ "$component" != "validator" ]; then
   if [ -n "$(git -C "$ROOT" for-each-ref --format='%(refname)' refs/replace)" ]; then
     echo "ERROR: miner-maintenance Git authority changed to include replacement refs" >&2
     exit 1
@@ -733,25 +796,32 @@ ssh_common=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=20
 )
-if [ "$disable_miner_submissions_before_restart" = "1" ]; then
-  selected_operator_blob="$(
-    git -C "$ROOT" rev-parse \
-      "$commit:scripts/restart_attested_release_local.sh"
-  )"
-  local_operator_blob="$(
-    git -C "$ROOT" hash-object \
-      "$ROOT/scripts/restart_attested_release_local.sh"
-  )"
-  if [ "$local_operator_blob" != "$selected_operator_blob" ]; then
-    echo "ERROR: miner-maintenance restart operator is not the exact candidate Git blob" >&2
-    exit 1
-  fi
+scp_common=(
+  -q
+  -o BatchMode=yes
+  -o ConnectTimeout=15
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=20
+)
+selected_operator_blob="$(
+  git -C "$ROOT" rev-parse \
+    "$branch_commit:scripts/restart_attested_release_local.sh"
+)"
+local_operator_blob="$(
+  git -C "$ROOT" hash-object --no-filters \
+    "$ROOT/scripts/restart_attested_release_local.sh"
+)"
+if [ "$local_operator_blob" != "$selected_operator_blob" ]; then
+  echo "ERROR: restart operator is not the exact frozen authority Git blob" >&2
+  exit 1
+fi
+if [ "$component" != "validator" ]; then
   selected_controller_verifier_blob="$(
     git -C "$ROOT" rev-parse \
-      "$commit:scripts/verify_installed_gateway_controller_v1.py"
+      "$branch_commit:scripts/verify_installed_gateway_controller_v1.py"
   )"
   local_controller_verifier_blob="$(
-    git -C "$ROOT" hash-object \
+    git -C "$ROOT" hash-object --no-filters \
       "$ROOT/scripts/verify_installed_gateway_controller_v1.py"
   )"
   if [ "$local_controller_verifier_blob" != "$selected_controller_verifier_blob" ]; then
@@ -771,7 +841,7 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
   python3 "$ROOT/scripts/verify_installed_gateway_controller_v1.py" \
     --repo-root "$ROOT" \
     --expected-controller-commit "$expected_controller_commit" \
-    --expected-commit "$commit" \
+    --expected-commit "$branch_commit" \
     --verify-lineage-only
   echo "Candidate-bound installed gateway controller: $expected_controller_commit"
   controller_verifier_b64="$(
@@ -782,9 +852,18 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
     echo "ERROR: installed-controller verifier could not be encoded" >&2
     exit 1
   fi
+fi
+if [ "$disable_miner_submissions_before_restart" = "1" ]; then
   gateway_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
   if ! [[ "$gateway_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
     echo "ERROR: miner-maintenance handoff nonce generation failed" >&2
+    exit 1
+  fi
+fi
+if [ "$component" = "all" ]; then
+  paired_gateway_handoff_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  if ! [[ "$paired_gateway_handoff_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: paired gateway handoff nonce generation failed" >&2
     exit 1
   fi
 fi
@@ -885,6 +964,396 @@ publish_coordination_value() {
     "$remote_command"
 }
 
+validate_validator_initial_release_requirements() {
+  run_local_readiness_python \
+    "$commit" "$branch_commit" "$active_release_restart_invocation_id" \
+    "$validator_initial_requirements_local" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+
+expected_commit = sys.argv[1]
+expected_authority = sys.argv[2]
+expected_invocation = sys.argv[3]
+max_document_bytes = 4 * 1024 * 1024
+try:
+    descriptor = os.open(
+        sys.argv[4],
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+except OSError as exc:
+    raise SystemExit(
+        f"validator active release requirements cannot be opened securely: {exc}"
+    ) from exc
+try:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size <= 0
+        or metadata.st_size > max_document_bytes
+    ):
+        raise SystemExit(
+            "validator active release requirements are not a bounded regular file"
+        )
+    raw = os.read(descriptor, max_document_bytes + 1)
+    if len(raw) != metadata.st_size or len(raw) > max_document_bytes:
+        raise SystemExit(
+            "validator active release requirements changed during its bounded read"
+        )
+finally:
+    os.close(descriptor)
+value = validate_active_release_requirements_v2(json.loads(raw))
+if value["candidate_commit_sha"] != expected_commit:
+    raise SystemExit("validator active release requirements candidate differs")
+if value["authority_commit_sha"] != expected_authority:
+    raise SystemExit("validator active release requirements authority differs")
+if value["restart_invocation_id"] != expected_invocation:
+    raise SystemExit("validator active release requirements invocation differs")
+if value["commits_by_root"]:
+    raise SystemExit("validator initial release requirements unexpectedly contain gateway roots")
+print(value["selection_hash"])
+PY
+}
+
+validate_gateway_final_release_authority() {
+  run_local_readiness_python \
+    "$commit" "$branch_commit" "$active_release_restart_invocation_id" \
+    "$validator_initial_requirements_local" \
+    "$gateway_final_requirements_local" \
+    "$gateway_final_lineage_local" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+expected_commit = sys.argv[1]
+expected_authority = sys.argv[2]
+expected_invocation = sys.argv[3]
+max_document_bytes = 4 * 1024 * 1024
+documents = []
+for raw_path in sys.argv[4:]:
+    try:
+        descriptor = os.open(
+            raw_path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise SystemExit(
+            f"paired active release authority cannot be opened securely: {exc}"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > max_document_bytes
+        ):
+            raise SystemExit(
+                "paired active release authority is not a bounded regular file"
+            )
+        raw = os.read(descriptor, max_document_bytes + 1)
+        if len(raw) != metadata.st_size or len(raw) > max_document_bytes:
+            raise SystemExit(
+                "paired active release authority changed during its bounded read"
+            )
+    finally:
+        os.close(descriptor)
+    documents.append(json.loads(raw))
+initial = validate_active_release_requirements_v2(documents[0])
+final = validate_active_release_requirements_v2(documents[1])
+lineage = validate_compact_release_lineage_v2(
+    documents[2],
+    expected_current_commit=expected_commit,
+)
+if initial["candidate_commit_sha"] != expected_commit \
+        or final["candidate_commit_sha"] != expected_commit:
+    raise SystemExit("paired active release authority candidate differs")
+if initial["authority_commit_sha"] != expected_authority \
+        or final["authority_commit_sha"] != expected_authority:
+    raise SystemExit("paired active release authority controller differs")
+if initial["restart_invocation_id"] != expected_invocation \
+        or final["restart_invocation_id"] != expected_invocation:
+    raise SystemExit("paired active release authority invocation differs")
+if initial["ancestry_lineage_id"] != final["ancestry_lineage_id"]:
+    raise SystemExit("paired active release authority lineage differs")
+if not set(initial["required_commits"]).issubset(final["required_commits"]):
+    raise SystemExit("gateway active release authority omits validator requirements")
+if set(final["required_commits"]) != set(lineage["releases"]):
+    raise SystemExit("gateway active release requirements differ from compact lineage")
+print(final["selection_hash"] + " " + lineage["lineage_hash"])
+PY
+}
+
+fetch_validator_initial_release_requirements() {
+  rm -f -- "$validator_initial_requirements_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:$validator_initial_requirements_remote" \
+    "$validator_initial_requirements_local"
+  chmod 600 "$validator_initial_requirements_local"
+  validate_validator_initial_release_requirements >/dev/null
+  echo "Verified validator active release requirements for the paired restart"
+}
+
+prepare_running_validator_release_requirements() {
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     cd '$VALIDATOR_REPO_ROOT'
+     test \"\$(git rev-parse --verify HEAD)\" = '$commit'
+     running_commit=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' leadpoet-validator-main | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p')
+     test \"\$running_commit\" = '$commit'
+     lineage_id=\$(PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id; print(_lineage_id())')
+     sudo env PYTHONPATH='$VALIDATOR_REPO_ROOT' \
+       AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
+       python3 -m gateway.tee.prepare_active_release_lineage_v2 \
+       --phase validator-initial \
+       --candidate-commit '$commit' \
+       --authority-commit '$branch_commit' \
+       --restart-invocation-id '$active_release_restart_invocation_id' \
+       --running-validator-commit \"\$running_commit\" \
+       --journal '$VALIDATOR_REPO_ROOT/validator_weights/authoritative_weight_publication_v2.json' \
+       --validator-hotkey-config '$VALIDATOR_V2_HOTKEY_CONFIG_PATH' \
+       --chain-signing-profile '$VALIDATOR_CHAIN_SIGNING_PROFILE_PATH' \
+       --repository '$VALIDATOR_REPO_ROOT' \
+       --lineage-id \"\$lineage_id\" \
+       --bucket leadpoet-attested-v2-artifacts-493765492819 \
+       --prefix '$RELEASE_PREFIX' \
+       --requirements-output '$validator_initial_requirements_remote'
+     sudo chown \"\$(id -u):\$(id -g)\" '$validator_initial_requirements_remote'
+     chmod 600 '$validator_initial_requirements_remote'"
+  fetch_validator_initial_release_requirements
+}
+
+install_gateway_validator_release_requirements() {
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$validator_initial_requirements_local" \
+    "$GATEWAY_HOST:$gateway_validator_requirements_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     test -s '$gateway_validator_requirements_remote.tmp'
+     chmod 600 '$gateway_validator_requirements_remote.tmp'
+     mv -f -- '$gateway_validator_requirements_remote.tmp' '$gateway_validator_requirements_remote'"
+}
+
+fetch_and_install_gateway_counterpart_lineage() {
+  rm -f -- "$validator_counterpart_lineage_local"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$VALIDATOR_HOST:/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json" \
+    "$validator_counterpart_lineage_local"
+  chmod 600 "$validator_counterpart_lineage_local"
+  run_local_readiness_python \
+    "$commit" "$validator_counterpart_lineage_local" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+max_document_bytes = 4 * 1024 * 1024
+
+
+def load_bounded_json(path: str, label: str):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise SystemExit(f"{label} cannot be opened securely: {exc}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SystemExit(f"{label} is not a regular file")
+        if metadata.st_size <= 0 or metadata.st_size > max_document_bytes:
+            raise SystemExit(f"{label} exceeds the bounded document size")
+        payload = os.read(fd, max_document_bytes + 1)
+        if len(payload) != metadata.st_size or len(payload) > max_document_bytes:
+            raise SystemExit(f"{label} changed during its bounded read")
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
+
+
+validate_compact_release_lineage_v2(
+    load_bounded_json(sys.argv[2], "validator counterpart lineage"),
+    expected_current_commit=sys.argv[1],
+)
+PY
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$validator_counterpart_lineage_local" \
+    "$GATEWAY_HOST:$gateway_counterpart_lineage_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     test -s '$gateway_counterpart_lineage_remote.tmp'
+     chmod 600 '$gateway_counterpart_lineage_remote.tmp'
+     mv -f -- '$gateway_counterpart_lineage_remote.tmp' '$gateway_counterpart_lineage_remote'"
+}
+
+fetch_gateway_final_release_authority() {
+  rm -f -- "$gateway_final_requirements_local" "$gateway_final_lineage_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH" \
+    "$gateway_final_requirements_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH" \
+    "$gateway_final_lineage_local"
+  chmod 600 "$gateway_final_requirements_local" "$gateway_final_lineage_local"
+  validate_gateway_final_release_authority >/dev/null
+  echo "Verified identical bounded active release authority from the restarted gateway"
+}
+
+bind_component_validator_to_gateway_release_authority() {
+  rm -f -- "$gateway_final_requirements_local" "$gateway_final_lineage_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH" \
+    "$gateway_final_requirements_local"
+  scp "${scp_common[@]}" -i "$GATEWAY_KEY" \
+    "$GATEWAY_HOST:$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH" \
+    "$gateway_final_lineage_local"
+  chmod 600 "$gateway_final_requirements_local" "$gateway_final_lineage_local"
+  active_release_restart_invocation_id="$(
+    run_local_readiness_python \
+      "$commit" "$branch_commit" \
+      "$gateway_final_requirements_local" \
+      "$gateway_final_lineage_local" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+expected_commit, expected_authority = sys.argv[1:3]
+max_document_bytes = 4 * 1024 * 1024
+
+
+def load_bounded_json(path: str, label: str):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise SystemExit(f"{label} cannot be opened securely: {exc}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SystemExit(f"{label} is not a regular file")
+        if metadata.st_size <= 0 or metadata.st_size > max_document_bytes:
+            raise SystemExit(f"{label} exceeds the bounded document size")
+        payload = os.read(fd, max_document_bytes + 1)
+        if len(payload) != metadata.st_size or len(payload) > max_document_bytes:
+            raise SystemExit(f"{label} changed during its bounded read")
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
+
+
+requirements = validate_active_release_requirements_v2(
+    load_bounded_json(sys.argv[3], "gateway active release requirements")
+)
+lineage = validate_compact_release_lineage_v2(
+    load_bounded_json(sys.argv[4], "gateway active release lineage"),
+    expected_current_commit=expected_commit,
+)
+if requirements["candidate_commit_sha"] != expected_commit:
+    raise SystemExit("gateway active release candidate differs")
+if requirements["authority_commit_sha"] != expected_authority:
+    raise SystemExit("gateway active release controller differs")
+if set(requirements["required_commits"]) != set(lineage["releases"]):
+    raise SystemExit("gateway active release requirements differ from lineage")
+print(requirements["restart_invocation_id"])
+PY
+  )"
+  if ! [[ "$active_release_restart_invocation_id" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
+    echo "ERROR: gateway active release invocation identity is invalid" >&2
+    return 1
+  fi
+  echo "Bound validator-only restart to the running gateway active release invocation"
+}
+
+install_validator_final_release_authority() {
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$gateway_final_requirements_local" \
+    "$VALIDATOR_HOST:$validator_final_requirements_remote.tmp"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$gateway_final_lineage_local" \
+    "$VALIDATOR_HOST:$validator_final_lineage_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     test -s '$validator_final_requirements_remote.tmp'
+     test -s '$validator_final_lineage_remote.tmp'
+     chmod 600 '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote.tmp'
+     mv -f -- '$validator_final_requirements_remote.tmp' '$validator_final_requirements_remote'
+     mv -f -- '$validator_final_lineage_remote.tmp' '$validator_final_lineage_remote'"
+}
+
+report_restart_job_early_exit() {
+  local label="$1"
+  local process_id="$2"
+  local status=0
+  wait "$process_id" || status="$?"
+  echo "ERROR: $label restart exited before coordinated completion (status $status)" >&2
+}
+
+run_validator_restart_against_active_gateway() {
+  local validator_log="$temporary_root/validator-restart.log"
+  (
+    VALIDATOR_RESTART_EXEC_SSH=1 run_validator_restart
+  ) > >(tee "$validator_log") 2>&1 &
+  validator_job="$!"
+
+  local requirements_ready=0
+  local requirements_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$requirements_deadline" ]; do
+    if grep -Fq \
+        "Prepared validator active release requirements sidecar" \
+        "$validator_log"; then
+      requirements_ready=1
+      break
+    fi
+    if ! kill -0 "$validator_job" 2>/dev/null; then
+      report_restart_job_early_exit validator "$validator_job"
+      return 1
+    fi
+    sleep 1
+  done
+  if [ "$requirements_ready" != "1" ]; then
+    echo "ERROR: validator did not prepare its active release requirements" >&2
+    return 1
+  fi
+  fetch_validator_initial_release_requirements
+  fetch_gateway_final_release_authority
+  install_validator_final_release_authority
+  local completion_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
+  while kill -0 "$validator_job" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$completion_deadline" ]; then
+      echo "ERROR: validator component restart exceeded the shared deadline" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  wait "$validator_job"
+  validator_job=""
+}
+
 gateway_handoff_remote_command() {
   local value="$1"
   case "$value" in
@@ -910,6 +1379,31 @@ publish_gateway_handoff_value() {
     "$remote_command"
 }
 
+paired_gateway_handoff_remote_command() {
+  local value="$1"
+  case "$value" in
+    "$commit"|"failed:$commit") ;;
+    *)
+      echo "ERROR: invalid paired gateway handoff value" >&2
+      return 2
+      ;;
+  esac
+  printf '%s\n' \
+    "set -Eeuo pipefail
+     umask 077
+     marker='$paired_gateway_handoff_file.tmp'
+     printf '%s %s\\n' '$value' '$paired_gateway_handoff_nonce' > \"\$marker\"
+     chmod 600 \"\$marker\"
+     mv -f -- \"\$marker\" '$paired_gateway_handoff_file'"
+}
+
+publish_paired_gateway_handoff_value() {
+  local remote_command
+  remote_command="$(paired_gateway_handoff_remote_command "$1")"
+  ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+    "$remote_command"
+}
+
 gateway_active_commit() {
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
     "curl -fsS --connect-timeout 5 --max-time 15 \
@@ -925,15 +1419,75 @@ validator_active_commit() {
 }
 
 build_gateway_restart_command() {
-  local secret_environment=""
   local bootstrap_command=""
   local bootstrap_command_b64=""
+  local bootstrap_prefix="gateway-restart-controller-bootstrap"
+  local gateway_counterpart_path=""
+  local gateway_secret_id="${GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
+  local miner_bootstrap_arguments=""
+  local miner_candidate_prepare=""
+  local paired_required=0
   gateway_restart_command=()
-  if [ -n "$GATEWAY_ENV_SECRET_ID" ]; then
-    secret_environment="LEADPOET_GATEWAY_ENV_SECRET_ID='$GATEWAY_ENV_SECRET_ID'"
+  if [ "$component" = "all" ]; then
+    paired_required=1
+  elif [ "$component" = "gateway" ]; then
+    gateway_counterpart_path="$gateway_counterpart_lineage_remote"
   fi
   if [ "$disable_miner_submissions_before_restart" = "1" ]; then
-    bootstrap_command="
+    bootstrap_prefix="gateway-miner-maintenance-bootstrap"
+    miner_bootstrap_arguments="
+          --miner-maintenance-bootstrap-plan \"\$bootstrap_root/plan.json\" \\
+          --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
+          --miner-maintenance-handoff-file '$gateway_handoff_file' \\
+          --miner-maintenance-handoff-nonce '$gateway_handoff_nonce'"
+    miner_candidate_prepare="
+      candidate_root=\"\$bootstrap_root/candidate\"
+      mkdir -m 700 \"\$candidate_root\"
+      prepared_candidate_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$commit' --plan-file \"\$bootstrap_root/plan.json\" --manifest-file \"\$bootstrap_root/candidate-manifest.json\" --last-good-file \"\$bootstrap_root/candidate-last-good-unused.json\")
+      test \"\$prepared_candidate_sha\" = '$commit'
+      GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive \"\$prepared_candidate_sha\" | tar -xf - -C \"\$candidate_root\"
+      run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/plan.json\" --materialized-root \"\$candidate_root\" --phase prepared_archive --strict-extras >/dev/null
+      find \"\$candidate_root\" -type f -exec chmod 400 {} +
+      find \"\$candidate_root\" -type d -exec chmod 500 {} +
+      controller_root='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT'
+      controller_release=\"\$controller_root/releases/$branch_commit\"
+      controller_stage=\"\$bootstrap_root/controller-stage\"
+      mkdir -p \"\$controller_root/releases\"
+      chmod 700 \"\$(dirname \"\$controller_root\")\" \"\$controller_root\" \"\$controller_root/releases\"
+      mkdir -m 700 \"\$controller_stage\"
+      mkdir -m 700 \"\$controller_stage/Leadpoet\" \"\$controller_stage/Leadpoet/utils\" \"\$controller_stage/gateway\" \"\$controller_stage/gateway/tee\" \"\$controller_stage/scripts\"
+      install -m 700 \"\$authority_root/gw_restart.sh\" \"\$controller_stage/gw_restart.sh\"
+      install -m 600 \"\$authority_root/scripts/gateway_git_deploy.py\" \"\$controller_stage/scripts/gateway_git_deploy.py\"
+      install -m 600 \"\$authority_root/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\"
+      install -m 600 \"\$authority_root/gateway/tee/host_memory_guard_v2.py\" \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\"
+      if [ -e \"\$controller_release\" ] || [ -L \"\$controller_release\" ]; then
+        test -d \"\$controller_release\" && test ! -L \"\$controller_release\"
+        test \"\$(stat -c '%u:%g:%a' \"\$controller_release\")\" = \"\$(id -u):\$(id -g):700\"
+        test \"\$(stat -c '%u:%g:%a' \"\$controller_release/gw_restart.sh\")\" = \"\$(id -u):\$(id -g):700\"
+        test \"\$(stat -c '%u:%g:%a' \"\$controller_release/scripts/gateway_git_deploy.py\")\" = \"\$(id -u):\$(id -g):600\"
+        test \"\$(stat -c '%u:%g:%a' \"\$controller_release/Leadpoet/utils/exact_commit_restart_v2.py\")\" = \"\$(id -u):\$(id -g):600\"
+        test \"\$(stat -c '%u:%g:%a' \"\$controller_release/gateway/tee/host_memory_guard_v2.py\")\" = \"\$(id -u):\$(id -g):600\"
+        cmp -s \"\$controller_stage/gw_restart.sh\" \"\$controller_release/gw_restart.sh\"
+        cmp -s \"\$controller_stage/scripts/gateway_git_deploy.py\" \"\$controller_release/scripts/gateway_git_deploy.py\"
+        cmp -s \"\$controller_stage/Leadpoet/utils/exact_commit_restart_v2.py\" \"\$controller_release/Leadpoet/utils/exact_commit_restart_v2.py\"
+        cmp -s \"\$controller_stage/gateway/tee/host_memory_guard_v2.py\" \"\$controller_release/gateway/tee/host_memory_guard_v2.py\"
+        rm -rf -- \"\$controller_stage\"
+      else
+        mv -- \"\$controller_stage\" \"\$controller_release\"
+      fi
+      controller_link=\"\$controller_root/.current.\$\$\"
+      rm -f -- \"\$controller_link\"
+      ln -s \"releases/$branch_commit\" \"\$controller_link\"
+      mv -Tf -- \"\$controller_link\" \"\$controller_root/current\"
+      host_wrapper_temporary=\$(mktemp \"\$(dirname '$GATEWAY_RESTART')/.gw_restart.sh.XXXXXX\")
+      install -m 700 \"\$authority_root/gw_restart.sh\" \"\$host_wrapper_temporary\"
+      mv -f -- \"\$host_wrapper_temporary\" '$GATEWAY_RESTART'
+      host_wrapper_temporary=''
+      test \"\$(readlink -- \"\$controller_root/current\")\" = 'releases/$branch_commit'
+      test \"\$(stat -c '%u:%g:%a' '$GATEWAY_RESTART')\" = \"\$(id -u):\$(id -g):700\"
+      cmp -s '$GATEWAY_RESTART' \"\$controller_release/gw_restart.sh\""
+  fi
+  bootstrap_command="
       set -Eeuo pipefail
       umask 077
       unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
@@ -947,56 +1501,60 @@ build_gateway_restart_command() {
       unset AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY
       unset ALL_PROXY http_proxy https_proxy all_proxy
       export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
-      bootstrap_root=\$(mktemp -d /tmp/gateway-miner-maintenance-bootstrap.XXXXXX)
-      trap 'rm -rf -- \"\$bootstrap_root\"' EXIT
+      export PYTHONDONTWRITEBYTECODE=1
+      host_wrapper_temporary=''
+      bootstrap_root=\$(mktemp -d /tmp/$bootstrap_prefix.XXXXXX)
+      trap '[ -z \"\$host_wrapper_temporary\" ] || rm -f -- \"\$host_wrapper_temporary\"; chmod -R u+w \"\$bootstrap_root\" 2>/dev/null || true; rm -rf -- \"\$bootstrap_root\"' EXIT
       chmod 700 \"\$bootstrap_root\"
-      candidate_root="\$bootstrap_root/candidate"
-      mkdir -m 700 "\$candidate_root"
+      authority_root=\"\$bootstrap_root/authority\"
+      mkdir -m 700 \"\$authority_root\"
       controller_current='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT'
       run_verified_gateway_git_helper() {
-        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, \"<exact-installed-controller-verifier>\", \"exec\"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current "\$controller_current" --host-restart-path '$GATEWAY_RESTART' --expected-controller-commit '$expected_controller_commit' --expected-commit '$commit' --exec-helper scripts/gateway_git_deploy.py -- "\$@"
+        printf '%s' '$controller_verifier_b64' | '$GATEWAY_PYTHON_BIN' -I -S -c 'import base64,sys; source=base64.b64decode(sys.stdin.buffer.read(), validate=True); exec(compile(source, \"<exact-installed-controller-verifier>\", \"exec\"))' --repo-root '$GATEWAY_REPO_ROOT' --controller-current \"\$controller_current\" --host-restart-path '$GATEWAY_RESTART' --expected-controller-commit '$expected_controller_commit' --expected-commit '$branch_commit' --exec-helper scripts/gateway_git_deploy.py -- \"\$@\"
       }
-      prepared_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$commit' --plan-file "\$bootstrap_root/plan.json" --manifest-file "\$bootstrap_root/manifest.json" --last-good-file "\$bootstrap_root/last-good-unused.json")
-      test "\$prepared_sha" = '$commit'
-      GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive "\$prepared_sha" | tar -xf - -C "\$candidate_root"
-      run_verified_gateway_git_helper verify-tree --plan-file "\$bootstrap_root/plan.json" --materialized-root "\$candidate_root" --phase prepared_archive --strict-extras >/dev/null
+      prepared_authority_sha=\$(run_verified_gateway_git_helper prepare --repo-root '$GATEWAY_REPO_ROOT' --repo-url https://github.com/leadpoet/leadpoet.git --branch main --deploy-commit '$branch_commit' --plan-file \"\$bootstrap_root/authority-plan.json\" --manifest-file \"\$bootstrap_root/authority-manifest.json\" --last-good-file \"\$bootstrap_root/authority-last-good-unused.json\")
+      test \"\$prepared_authority_sha\" = '$branch_commit'
+      GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive \"\$prepared_authority_sha\" | tar -xf - -C \"\$authority_root\"
+      run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/authority-plan.json\" --materialized-root \"\$authority_root\" --phase prepared_archive --strict-extras >/dev/null
+      find \"\$authority_root\" -type f -exec chmod 400 {} +
+      find \"\$authority_root\" -type d -exec chmod 500 {} +
+$miner_candidate_prepare
       exec env \\
         LEADPOET_REPO_ROOT='$GATEWAY_REPO_ROOT' \\
         GATEWAY_ROOT='$GATEWAY_REPO_ROOT/gateway' \\
         GATEWAY_PYTHON_BIN='$GATEWAY_PYTHON_BIN' \\
         GATEWAY_HOST_RESTART_SCRIPT='$GATEWAY_RESTART' \\
         GATEWAY_RESTART_CONTROLLER_ROOT='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT' \\
-        LEADPOET_GATEWAY_ENV_SECRET_ID='leadpoet/prod/gateway/env' \\
+        GATEWAY_RESTART_AUTHORITY_ROOT=\"\$authority_root\" \\
+        GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit' \\
+        GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID='$active_release_restart_invocation_id' \\
+        GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED='$paired_required' \\
+        GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE='$paired_gateway_handoff_file' \\
+        GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE='$paired_gateway_handoff_nonce' \\
+        GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \\
+        LEADPOET_GATEWAY_ENV_SECRET_ID='$gateway_secret_id' \\
         GATEWAY_V2_RELEASE_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET='leadpoet-attested-v2-artifacts-493765492819' \\
         GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
+        GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS='$gateway_validator_requirements_remote' \\
+        GATEWAY_COUNTERPART_RELEASE_LINEAGE='$gateway_counterpart_path' \\
+        GATEWAY_V2_RELEASE_REQUIREMENTS='$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH' \\
+        GATEWAY_V2_RELEASE_LINEAGE='$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH' \\
         AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \\
-        bash \"\$candidate_root/gw_restart.sh\" \\
-          --commit '$commit' \\
-          --miner-maintenance-bootstrap-plan \"\$bootstrap_root/plan.json\" \\
-          --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
-          --miner-maintenance-handoff-file '$gateway_handoff_file' \\
-          --miner-maintenance-handoff-nonce '$gateway_handoff_nonce'"
-    bootstrap_command_b64="$(
-      printf '%s' "$bootstrap_command" | base64 | tr -d '\n'
-    )"
-    case "$bootstrap_command_b64" in
-      *[!A-Za-z0-9+/=]*|'')
-        echo "ERROR: miner-maintenance bootstrap transport encoding failed" >&2
-        return 1
-        ;;
-    esac
-    gateway_restart_command=(
-      ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST"
-      "exec bash -c \"\$(printf '%s' '$bootstrap_command_b64' | base64 --decode)\""
-    )
-    return
-  fi
+        bash \"\$authority_root/gw_restart.sh\" \\
+          --commit '$commit'$miner_bootstrap_arguments"
+  bootstrap_command_b64="$(
+    printf '%s' "$bootstrap_command" | base64 | tr -d '\n'
+  )"
+  case "$bootstrap_command_b64" in
+    *[!A-Za-z0-9+/=]*|'')
+      echo "ERROR: gateway authority bootstrap transport encoding failed" >&2
+      return 1
+      ;;
+  esac
   gateway_restart_command=(
     ssh -tt "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST"
-    "exec env $secret_environment \
-      GATEWAY_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \
-      bash '$GATEWAY_RESTART' --commit '$commit'"
+    "exec bash -c \"\$(printf '%s' '$bootstrap_command_b64' | base64 --decode)\""
   )
 }
 
@@ -1057,52 +1615,76 @@ os.execvp(command[0], command)
 }
 
 run_validator_restart() {
+  local bootstrap_command=""
+  local bootstrap_command_b64=""
   local coordination_environment=""
-  local expected_forward_commit=""
-  local launcher_command=""
-  local launcher_command_quoted=""
-  local restart_arguments=""
   local command=()
   if [ -n "$coordination_file" ]; then
     coordination_environment="$coordination_file"
   fi
-  if [ "$commit" != "$branch_commit" ]; then
-    # Historical rollback releases retain the installed controller and use
-    # its exact-commit compatibility handoff. A forward release at the frozen
-    # public tip uses the normal N-1 -> N pull/re-exec path so the candidate
-    # launcher can prepare in parallel and install itself after success.
-    restart_arguments="--commit '$commit'"
-    launcher_command="exec bash '$VALIDATOR_RESTART' $restart_arguments"
-  else
-    expected_forward_commit="$commit"
-    # On the first N-1 -> N attempt, the installed launcher owns the Git
-    # handoff. If a prior attempt already completed that handoff but failed
-    # before installing N, retry the exact candidate launcher from its clean
-    # Git blob instead of silently falling back to the stale installed copy.
-    launcher_command="
-      candidate_launcher='$VALIDATOR_REPO_ROOT/validator_restart.sh'
-      observed_head=\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse --verify HEAD)
-      if [ \"\$observed_head\" = '$commit' ]; then
-        if [ ! -r \"\$candidate_launcher\" ] \
-            || ! git -C '$VALIDATOR_REPO_ROOT' diff --quiet '$commit' -- validator_restart.sh; then
-          echo 'ERROR: selected validator launcher is not the exact candidate Git blob' >&2
-          exit 1
-        fi
-        exec bash \"\$candidate_launcher\"
+  bootstrap_command="
+    set -Eeuo pipefail
+    umask 077
+    unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR
+    unset GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_PARAMETERS
+    unset GIT_CONFIG_SYSTEM GIT_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+    unset GIT_REPLACE_REF_BASE GIT_WORK_TREE
+    export GIT_CONFIG_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 GIT_TERMINAL_PROMPT=0
+    export PYTHONDONTWRITEBYTECODE=1
+    git -C '$VALIDATOR_REPO_ROOT' fetch origin main
+    test \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse --verify origin/main^{commit})\" = '$branch_commit'
+    git -C '$VALIDATOR_REPO_ROOT' cat-file -e '$commit^{commit}'
+    git -C '$VALIDATOR_REPO_ROOT' merge-base --is-ancestor '$commit' '$branch_commit'
+    test -z \"\$(git -C '$VALIDATOR_REPO_ROOT' for-each-ref --format='%(refname)' refs/replace)\"
+    for authority_path in info/grafts objects/info/alternates; do
+      resolved=\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse --git-path \"\$authority_path\")
+      case \"\$resolved\" in /*) ;; *) resolved='$VALIDATOR_REPO_ROOT/'\"\$resolved\" ;; esac
+      if [ -e \"\$resolved\" ] && { [ ! -f \"\$resolved\" ] || [ -L \"\$resolved\" ] || [ -s \"\$resolved\" ]; }; then
+        echo 'ERROR: validator Git authority contains graft or alternate objects' >&2
+        exit 1
       fi
-      exec bash '$VALIDATOR_RESTART'"
-  fi
-  printf -v launcher_command_quoted '%q' "$launcher_command"
+    done
+    bootstrap_root=\$(mktemp -d /tmp/validator-restart-controller-bootstrap.XXXXXX)
+    trap 'chmod -R u+w \"\$bootstrap_root\" 2>/dev/null || true; rm -rf -- \"\$bootstrap_root\"' EXIT
+    chmod 700 \"\$bootstrap_root\"
+    authority_root=\"\$bootstrap_root/authority\"
+    mkdir -m 700 \"\$authority_root\"
+    GIT_NO_REPLACE_OBJECTS=1 git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit' | tar -xf - -C \"\$authority_root\"
+    test -r \"\$authority_root/validator_restart.sh\"
+    test -r \"\$authority_root/gateway/tee/prepare_active_release_lineage_v2.py\"
+    test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/validator_restart.sh\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:validator_restart.sh')\"
+    find \"\$authority_root\" -type f -exec chmod 400 {} +
+    find \"\$authority_root\" -type d -exec chmod 500 {} +
+    exec env \\
+      VALIDATOR_ROOT='$VALIDATOR_REPO_ROOT' \\
+      VALIDATOR_HOST_RESTART_SCRIPT='$VALIDATOR_RESTART' \\
+      VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=\"\$authority_root\" \\
+      VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit' \\
+      VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID='$active_release_restart_invocation_id' \\
+      VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1 \\
+      VALIDATOR_V2_HOTKEY_CONFIG='$VALIDATOR_V2_HOTKEY_CONFIG_PATH' \\
+      VALIDATOR_CHAIN_SIGNING_PROFILE='$VALIDATOR_CHAIN_SIGNING_PROFILE_PATH' \\
+      VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE='$coordination_environment' \\
+      VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS='$VALIDATOR_COORDINATION_ATTEMPTS' \\
+      VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \\
+      VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT='$validator_initial_requirements_remote' \\
+      VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT='$validator_final_requirements_remote' \\
+      VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT='$validator_final_lineage_remote' \\
+      LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \\
+      VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
+      bash \"\$authority_root/validator_restart.sh\" --commit '$commit'"
+  bootstrap_command_b64="$(
+    printf '%s' "$bootstrap_command" | base64 | tr -d '\n'
+  )"
+  case "$bootstrap_command_b64" in
+    *[!A-Za-z0-9+/=]*|'')
+      echo "ERROR: validator authority bootstrap transport encoding failed" >&2
+      return 1
+      ;;
+  esac
   command=(
     ssh -tt "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST"
-    "exec env \
-      VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE='$coordination_environment' \
-      VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS='$VALIDATOR_COORDINATION_ATTEMPTS' \
-      VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS='$VALIDATOR_COORDINATION_TIMEOUT_SECONDS' \
-      VALIDATOR_COORDINATED_EXPECTED_COMMIT='$expected_forward_commit' \
-      LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \
-      VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \
-      bash -c $launcher_command_quoted"
+    "exec bash -c \"\$(printf '%s' '$bootstrap_command_b64' | base64 --decode)\""
   )
   if [ "${VALIDATOR_RESTART_EXEC_SSH:-0}" = "1" ]; then
     exec "${command[@]}"
@@ -1495,8 +2077,13 @@ case "$component" in
       exit 1
     fi
     verify_validator_release "$validator_evidence"
+    prepare_running_validator_release_requirements
+    install_gateway_validator_release_requirements
+    fetch_and_install_gateway_counterpart_lineage
     invalidate_deploy_readiness
+    verify_local_readiness_python_binding
     run_gateway_restart
+    fetch_gateway_final_release_authority
     ;;
   validator)
     observed_gateway="$(gateway_active_commit)"
@@ -1505,22 +2092,30 @@ case "$component" in
       exit 1
     fi
     verify_gateway_release "$gateway_evidence"
+    bind_component_validator_to_gateway_release_authority
     invalidate_deploy_readiness
-    run_validator_restart
+    verify_local_readiness_python_binding
+    run_validator_restart_against_active_gateway
     ;;
   all)
     validator_log="$temporary_root/validator-restart.log"
+    gateway_restart_log="$temporary_root/gateway-restart.log"
     coordination_file="/tmp/leadpoet-coordinated-restart.$(basename "$temporary_root").ready"
+    paired_gateway_handoff_file="/tmp/leadpoet-gateway-paired-restart.$(basename "$temporary_root").ready"
     if [ "$disable_miner_submissions_before_restart" = "1" ]; then
-      gateway_restart_log="$temporary_root/gateway-restart.log"
       gateway_handoff_file="/tmp/leadpoet-gateway-miner-maintenance-handoff.$(basename "$temporary_root").ready"
-      ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
-        "rm -f -- '$gateway_handoff_file'"
+    fi
+    paired_restart_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
+    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+      "rm -f -- '$coordination_file' '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'"
+    ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
+      "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$paired_gateway_handoff_file' '$paired_gateway_handoff_file.tmp' '$gateway_handoff_file' '$gateway_handoff_file.tmp'"
+
+    if [ "$disable_miner_submissions_before_restart" = "1" ]; then
       echo "Starting exact-candidate miner maintenance before readiness invalidation"
       start_gateway_restart_job > >(tee "$gateway_restart_log") 2>&1
-
       gateway_bootstrap_ready=0
-      for _ in $(seq 1 300); do
+      while [ "$SECONDS" -lt "$paired_restart_deadline" ]; do
         if grep -Fq \
             "Prepared exact-candidate miner maintenance under the canonical restart lock" \
             "$gateway_restart_log"; then
@@ -1528,7 +2123,7 @@ case "$component" in
           break
         fi
         if ! kill -0 "$gateway_job" 2>/dev/null; then
-          wait "$gateway_job"
+          report_restart_job_early_exit gateway "$gateway_job"
           exit 1
         fi
         sleep 1
@@ -1539,46 +2134,113 @@ case "$component" in
       fi
       echo "Exact-candidate miner maintenance is prepared under the canonical restart lock"
     fi
-    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-      "rm -f -- '$coordination_file'"
+
     invalidate_deploy_readiness
-    echo "Starting validator preparation in parallel with the paired gateway restart"
+    verify_local_readiness_python_binding
+    echo "Starting exact-authority validator and gateway preparation in parallel"
     (
       VALIDATOR_RESTART_EXEC_SSH=1 run_validator_restart
     ) > >(tee "$validator_log") 2>&1 &
     validator_job="$!"
+    if [ "$disable_miner_submissions_before_restart" != "1" ]; then
+      start_gateway_restart_job > >(tee "$gateway_restart_log") 2>&1
+    fi
 
     capture_ready=0
-    for _ in $(seq 1 120); do
+    while [ "$SECONDS" -lt "$paired_restart_deadline" ]; do
       if grep -Fq \
-          "Acquiring the independently built V2 release channel" \
+          "Prepared validator active release requirements sidecar" \
           "$validator_log"; then
         capture_ready=1
         break
       fi
       if ! kill -0 "$validator_job" 2>/dev/null; then
-        wait "$validator_job"
+        report_restart_job_early_exit validator "$validator_job"
+        exit 1
+      fi
+      if ! kill -0 "$gateway_job" 2>/dev/null; then
+        report_restart_job_early_exit gateway "$gateway_job"
         exit 1
       fi
       sleep 1
     done
     if [ "$capture_ready" != "1" ]; then
-      echo "ERROR: validator did not capture a valid restart start" >&2
+      echo "ERROR: validator did not prepare its active release requirements" >&2
       exit 1
     fi
 
-    echo "Validator restart start captured; restarting the gateway while validator preparation continues"
+    fetch_validator_initial_release_requirements
+    install_gateway_validator_release_requirements
     if [ "$disable_miner_submissions_before_restart" = "1" ]; then
       publish_gateway_handoff_value "$commit"
-      wait "$gateway_job"
-      gateway_job=""
-      gateway_job_pgid=""
-    else
-      run_gateway_restart
     fi
+
+    gateway_handoff_ready=0
+    while [ "$SECONDS" -lt "$paired_restart_deadline" ]; do
+      if ! kill -0 "$validator_job" 2>/dev/null; then
+        publish_paired_gateway_handoff_value "failed:$commit" || true
+        report_restart_job_early_exit validator "$validator_job"
+        exit 1
+      fi
+      if grep -Fq \
+          "Gateway pre-shutdown checks complete; awaiting paired validator liveness handoff" \
+          "$gateway_restart_log"; then
+        gateway_handoff_ready=1
+        break
+      fi
+      if ! kill -0 "$gateway_job" 2>/dev/null; then
+        report_restart_job_early_exit gateway "$gateway_job"
+        exit 1
+      fi
+      sleep 1
+    done
+    if [ "$gateway_handoff_ready" != "1" ]; then
+      echo "ERROR: gateway did not reach its paired pre-shutdown handoff" >&2
+      exit 1
+    fi
+    publish_paired_gateway_handoff_value "$commit"
+
+    while kill -0 "$gateway_job" 2>/dev/null; do
+      if ! kill -0 "$validator_job" 2>/dev/null; then
+        publish_paired_gateway_handoff_value "failed:$commit" || true
+        report_restart_job_early_exit validator "$validator_job"
+        exit 1
+      fi
+      if [ "$SECONDS" -ge "$paired_restart_deadline" ]; then
+        echo "ERROR: gateway restart exceeded the shared paired deadline" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+	    if wait "$gateway_job"; then
+	      :
+	    else
+	      gateway_status="$?"
+	      echo "ERROR: gateway restart exited before coordinated completion (status $gateway_status)" >&2
+	      exit 1
+	    fi
+    gateway_job=""
+    gateway_job_pgid=""
+
+    fetch_gateway_final_release_authority
+    install_validator_final_release_authority
     publish_coordination_value "$commit"
     echo "Gateway restart completed; releasing exact-SHA validator activation"
-    wait "$validator_job"
+
+    while kill -0 "$validator_job" 2>/dev/null; do
+      if [ "$SECONDS" -ge "$paired_restart_deadline" ]; then
+        echo "ERROR: validator restart exceeded the shared paired deadline" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+	    if wait "$validator_job"; then
+	      :
+	    else
+	      validator_status="$?"
+	      echo "ERROR: validator restart exited before coordinated completion (status $validator_status)" >&2
+	      exit 1
+	    fi
     validator_job=""
     ;;
 esac

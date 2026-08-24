@@ -19,6 +19,9 @@ from gateway.tee.release_channel_v2 import (
     build_release_channel_v2,
     build_release_lineage_v2,
 )
+from gateway.tee.active_release_requirements_v2 import (
+    build_active_release_requirements_v2,
+)
 from gateway.tee.topology import ROLE_SPECS
 from tests.test_release_channel_v2 import _gateway_manifest, _validator_manifest
 
@@ -123,7 +126,7 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE" in source
     assert "VALIDATOR_COORDINATION_ATTEMPTS=3000" in source
     assert "VALIDATOR_COORDINATION_TIMEOUT_SECONDS=9300" in source
-    assert "Acquiring the independently built V2 release channel" in source
+    assert "Prepared validator active release requirements sidecar" in source
     assert "gw_restart.sh" in source
     assert "validator_restart.sh" in source
     assert "gateway_exact_release_ready" in source
@@ -137,7 +140,7 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert 'sys.path.append(str(site_packages))' in source
     assert "leadpoet.local_readiness_python.v1" in source
     assert "pure readiness imports loaded the validator wallet dependency" in source
-    assert source.count("run_local_readiness_python ") == 5
+    assert source.count("run_local_readiness_python ") == 9
     assert 'PYTHONPATH="$ROOT" python3' not in source
     assert "/health/v2-authority" in source
     assert "attestation = get('/attest')" in source
@@ -165,12 +168,16 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         "base64 --decode)\\\""
         in source
     )
-    assert 'if [ "$commit" != "$branch_commit" ]; then' in source
-    assert 'restart_arguments="--commit \'$commit\'"' in source
-    assert "VALIDATOR_COORDINATED_EXPECTED_COMMIT" in source
-    assert "selected validator launcher is not the exact candidate Git blob" in source
-    assert "git -C '$VALIDATOR_REPO_ROOT' diff --quiet" in source
-    assert source.index("    run_gateway_restart\n") < source.index(
+    assert "GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit'" in source
+    assert "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit'" in source
+    assert r'bash \"\$authority_root/gw_restart.sh\"' in source
+    assert r'bash \"\$authority_root/validator_restart.sh\"' in source
+    assert r"""bash \"\$authority_root/validator_restart.sh\" --commit '$commit'""" in source
+    assert "git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit'" in source
+    assert "gateway-restart-controller-bootstrap" in source
+    assert "--validator-hotkey-config '$VALIDATOR_V2_HOTKEY_CONFIG_PATH'" in source
+    assert "--chain-signing-profile '$VALIDATOR_CHAIN_SIGNING_PROFILE_PATH'" in source
+    assert source.index("    fetch_gateway_final_release_authority\n") < source.index(
         '    publish_coordination_value "$commit"\n'
     )
     assert source.index('kill -TERM "$validator_job"') < source.index(
@@ -180,6 +187,14 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         'for _ in $(seq 1 "$VALIDATOR_FAILURE_CLEANUP_ATTEMPTS")'
     )
     assert "VALIDATOR_FAILURE_MARKER_ATTEMPTS" in source
+    component_case = source.index('case "$component" in')
+    paired_start = source.index("  all)\n", component_case)
+    paired = source[paired_start : source.index("\nesac\n", paired_start)]
+    assert paired.count(
+        "paired_restart_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))"
+    ) == 1
+    assert "validator_completion_deadline" not in paired
+    assert '[ "$SECONDS" -ge "$paired_restart_deadline" ]' in paired
 
 
 def test_miner_maintenance_bootstrap_command_is_shell_parseable() -> None:
@@ -193,6 +208,8 @@ def test_miner_maintenance_bootstrap_command_is_shell_parseable() -> None:
     shell_program = f"""
 set -Eeuo pipefail
 commit={shlex.quote(commit)}
+branch_commit={shlex.quote(commit)}
+component=all
 disable_miner_submissions_before_restart=1
 GATEWAY_ENV_SECRET_ID=''
 controller_verifier_b64='YQ=='
@@ -205,6 +222,14 @@ GATEWAY_RESTART='/home/ec2-user/gw_restart.sh'
 RELEASE_PREFIX='weights/v2/release-evidence'
 gateway_handoff_file='/tmp/handoff'
 gateway_handoff_nonce='{'2' * 64}'
+gateway_validator_requirements_remote='/tmp/validator-requirements.json'
+gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+active_release_restart_invocation_id='restart-fixture'
+paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
+paired_gateway_handoff_nonce='{'4' * 64}'
+VALIDATOR_COORDINATION_TIMEOUT_SECONDS=9300
+GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH='/tmp/gateway-requirements.json'
+GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH='/tmp/gateway-lineage.json'
 GATEWAY_KEY='/tmp/key'
 GATEWAY_HOST='gateway.invalid'
 ssh_common=('-o' 'BatchMode=yes')
@@ -235,6 +260,27 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
     )
     assert "--expected-controller-commit" in bootstrap_command
     assert "3" * 40 in bootstrap_command
+    assert "--deploy-commit '" + commit + "'" in bootstrap_command
+    assert "GATEWAY_RESTART_AUTHORITY_COMMIT='" + commit + "'" in bootstrap_command
+    assert 'authority_root="$bootstrap_root/authority"' in bootstrap_command
+    assert 'candidate_root="$bootstrap_root/candidate"' in bootstrap_command
+    assert '--plan-file "$bootstrap_root/authority-plan.json"' in bootstrap_command
+    assert '--plan-file "$bootstrap_root/plan.json"' in bootstrap_command
+    assert 'GATEWAY_RESTART_AUTHORITY_ROOT="$authority_root"' in bootstrap_command
+    controller_install = bootstrap_command.index(
+        "controller_release=\"$controller_root/releases/" + commit + "\""
+    )
+    controller_activation = bootstrap_command.index(
+        'mv -Tf -- "$controller_link" "$controller_root/current"'
+    )
+    authority_exec = bootstrap_command.index('bash "$authority_root/gw_restart.sh"')
+    assert controller_install < controller_activation < authority_exec
+    assert "chmod 700 \"$(dirname \"$controller_root\")\"" in bootstrap_command
+    assert "stat -c '%u:%g:%a' \"$controller_release/gw_restart.sh\"" in bootstrap_command
+    assert "stat -c '%u:%g:%a' '/home/ec2-user/gw_restart.sh'" in bootstrap_command
+    assert "cmp -s '/home/ec2-user/gw_restart.sh' \"$controller_release/gw_restart.sh\"" in bootstrap_command
+    assert 'bash "$authority_root/gw_restart.sh"' in bootstrap_command
+    assert "--commit '" + commit + "'" in bootstrap_command
     syntax = subprocess.run(
         ["bash", "-n", "-c", bootstrap_command],
         check=False,
@@ -243,6 +289,114 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
         timeout=5,
     )
     assert syntax.returncode == 0, syntax.stderr
+
+
+def test_general_rollback_bootstraps_current_authority_before_target_runtime() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    function_start = source.index("build_gateway_restart_command() {")
+    function_end = source.index(
+        "\n}\n\nrun_gateway_restart()", function_start
+    ) + 2
+    function_source = source[function_start:function_end]
+    target_commit = "1" * 40
+    authority_commit = "2" * 40
+    shell_program = f"""
+set -Eeuo pipefail
+commit={shlex.quote(target_commit)}
+branch_commit={shlex.quote(authority_commit)}
+component=all
+disable_miner_submissions_before_restart=0
+GATEWAY_ENV_SECRET_ID=''
+controller_verifier_b64='YQ=='
+expected_controller_commit='{'3' * 40}'
+GATEWAY_PYTHON_BIN='/usr/bin/python3.11'
+GATEWAY_REPO_ROOT='/home/ec2-user/leadpoet_repo'
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT='/controller/current'
+PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT='/controller'
+GATEWAY_RESTART='/home/ec2-user/gw_restart.sh'
+RELEASE_PREFIX='weights/v2/release-evidence'
+gateway_handoff_file=''
+gateway_handoff_nonce=''
+gateway_validator_requirements_remote='/tmp/validator-requirements.json'
+gateway_counterpart_lineage_remote='/tmp/counterpart-lineage.json'
+active_release_restart_invocation_id='restart-fixture'
+paired_gateway_handoff_file='/tmp/leadpoet-gateway-paired-restart.fixture.ready'
+paired_gateway_handoff_nonce='{'4' * 64}'
+VALIDATOR_COORDINATION_TIMEOUT_SECONDS=9300
+GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH='/tmp/gateway-requirements.json'
+GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH='/tmp/gateway-lineage.json'
+GATEWAY_KEY='/tmp/key'
+GATEWAY_HOST='gateway.invalid'
+ssh_common=('-o' 'BatchMode=yes')
+{function_source}
+build_gateway_restart_command
+printf '%s\\0' "${{gateway_restart_command[@]}}"
+"""
+    rendered = subprocess.run(
+        ["bash", "-c", shell_program],
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr.decode("utf-8", "replace")
+    remote_command = rendered.stdout.rstrip(b"\0").split(b"\0")[-1]
+    encoded_match = re.search(
+        rb"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode",
+        remote_command,
+    )
+    assert encoded_match is not None
+    bootstrap_command = base64.b64decode(
+        encoded_match.group(1), validate=True
+    ).decode("utf-8")
+
+    assert "gateway-restart-controller-bootstrap" in bootstrap_command
+    assert "--deploy-commit '" + authority_commit + "'" in bootstrap_command
+    assert (
+        "test \"$prepared_authority_sha\" = '" + authority_commit + "'"
+        in bootstrap_command
+    )
+    assert (
+        "GATEWAY_RESTART_AUTHORITY_COMMIT='" + authority_commit + "'"
+        in bootstrap_command
+    )
+    assert 'bash "$authority_root/gw_restart.sh"' in bootstrap_command
+    assert "--commit '" + target_commit + "'" in bootstrap_command
+    assert "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED='1'" in bootstrap_command
+    assert "miner-maintenance-bootstrap" not in bootstrap_command
+    assert "--miner-maintenance-bootstrap-plan" not in bootstrap_command
+    assert 'candidate_root="$bootstrap_root/candidate"' not in bootstrap_command
+    syntax = subprocess.run(
+        ["bash", "-n", "-c", bootstrap_command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+
+def test_controller_authority_sidecars_use_bounded_nofollow_reads() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    for function_name in (
+        "validate_validator_initial_release_requirements",
+        "validate_gateway_final_release_authority",
+        "fetch_and_install_gateway_counterpart_lineage",
+        "bind_component_validator_to_gateway_release_authority",
+    ):
+        start = source.index(f"{function_name}() {{")
+        end = source.index("\n}\n", start)
+        function = source[start:end]
+
+        assert "os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW" in function
+        assert "stat.S_ISREG(metadata.st_mode)" in function
+        assert "max_document_bytes = 4 * 1024 * 1024" in function
+        assert re.search(
+            r"os\.read\([A-Za-z_][A-Za-z0-9_]*, max_document_bytes \+ 1\)",
+            function,
+        )
+        assert ".read_text(" not in function
+        assert ".read_bytes(" not in function
 
 
 def test_attested_release_restart_operator_rejects_invalid_input() -> None:
@@ -538,10 +692,46 @@ def _fake_operator_commands(
     bin_dir.mkdir()
     events = tmp_path / "events"
     barrier = tmp_path / "barrier"
+    gateway_handoff = tmp_path / "gateway-handoff"
     gateway_started = tmp_path / "gateway-started"
     gateway_complete = tmp_path / "gateway-complete"
     gateway_observation, validator_observation = _fake_readiness_observations(
         tmp_path, commit
+    )
+    release_channel = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(commit),
+        validator_release_manifest=_validator_manifest(commit),
+    )
+    active_requirements = build_active_release_requirements_v2(
+        candidate_commit_sha=commit,
+        authority_commit_sha=commit,
+        restart_invocation_id="restart-fixture",
+        transition_commit_shas=(commit,),
+        active_graphs={},
+        expected_lineage_id="sha256:" + "a" * 64,
+        boot_verifier=lambda identity: identity,
+    )
+    initial_requirements = tmp_path / "validator-active-release-requirements.json"
+    final_requirements = tmp_path / "gateway-active-release-requirements.json"
+    final_lineage = tmp_path / "gateway-active-release-lineage.json"
+    initial_requirements.write_text(
+        json.dumps(active_requirements, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    final_requirements.write_text(
+        json.dumps(active_requirements, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    final_lineage.write_text(
+        json.dumps(
+            build_release_lineage_v2(
+                (release_channel,),
+                current_commit=commit,
+            ),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     (tmp_path / "sitecustomize.py").write_text(
         "from leadpoet_canonical import attested_v2\n"
@@ -581,6 +771,7 @@ if [[ " $* " == *" rev-parse "* ]]; then
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*)
       printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
       exit 0
@@ -593,6 +784,7 @@ if [[ " $* " == *" hash-object --no-filters "* ]]; then
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_canonical/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"leadpoet_observability/*|\
     "$FAKE_OPERATOR_REPO_ROOT/"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_REPO_ROOT/"scripts/verify_installed_gateway_controller_v1.py|\
     "$FAKE_OPERATOR_REPO_ROOT/"validator_tee/*)
       if [ -e "$FAKE_OPERATOR_SOURCE_DRIFT_MARKER" ]; then
         printf '%s\\n' "$FAKE_OPERATOR_DRIFTED_SOURCE_BLOB"
@@ -617,6 +809,9 @@ record() {
   printf '%s\\n' "$1" >> "$FAKE_OPERATOR_EVENTS"
 }
 case "$command" in
+  *"readlink --"*restart-controller*)
+    printf 'releases/%s\n' "$FAKE_OPERATOR_SELECTED_COMMIT"
+    ;;
   *"'readiness-transition' <<'PY'"*)
     record readiness_invalidated
     if [ "${FAKE_RETARGET_LOCAL_PYTHON_AFTER_TRANSITION:-0}" = "1" ]; then
@@ -629,21 +824,28 @@ case "$command" in
   *"'readiness-final' <<'PY'"*)
     record readiness_finalized
     ;;
-  *validator_restart.sh*)
-    bash -n -c "$command"
+  *prepare_active_release_lineage_v2*validator-initial*)
+    record validator_requirements_prepared
+    ;;
+  *"base64 --decode"*)
+    encoded="$(printf '%s\n' "$command" | sed -E -n "s/.*printf '%s' '([A-Za-z0-9+/=]*)'.*/\\1/p")"
+    if [ -z "$encoded" ]; then
+      record invalid_bootstrap_transport
+      exit 72
+    fi
+    decoded="$(printf '%s' "$encoded" | base64 --decode)"
+    bash -n -c "$decoded"
+    if [[ "$decoded" == *validator_restart.sh* ]]; then
     record validator_command_syntax
     record validator_start
     trap 'record validator_cancelled; record validator_cleanup; exit 143' HUP INT TERM
-    if [[ "$command" == *" --commit "* ]]; then
-      record validator_exact_commit_handoff
-    else
-      record validator_forward_handoff
-    fi
+    record validator_exact_commit_handoff
     record validator_prepare_started
     printf '%s\\n' "Capturing the official subnet restart start before release acquisition"
     printf '%s\\n' "Acquiring the independently built V2 release channel"
+    printf '%s\\n' "Prepared validator active release requirements sidecar"
     record validator_captured
-    if [[ "$command" == *"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=''"* ]]; then
+    if [[ "$decoded" == *"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=''"* ]]; then
       record validator_image_prepared
       record validator_activation
       record validator_complete
@@ -657,6 +859,11 @@ case "$command" in
       sleep 0.01
     done
     for _ in $(seq 1 500); do
+      if [ "${FAKE_VALIDATOR_EXIT_AFTER_GATEWAY_HANDOFF:-0}" = "1" ] \
+          && [ -e "$FAKE_OPERATOR_GATEWAY_HANDOFF" ]; then
+        record validator_exit_after_gateway_handoff
+        exit 78
+      fi
       if [ -e "$FAKE_OPERATOR_BARRIER" ]; then
         marker="$(cat "$FAKE_OPERATOR_BARRIER")"
         if [ "$marker" = "$FAKE_VALIDATOR_COMMIT" ]; then
@@ -676,17 +883,45 @@ case "$command" in
     done
     record validator_barrier_timeout
     exit 70
-    ;;
-  *gw_restart.sh*)
+    fi
     record gateway_start
+    trap 'record gateway_cancelled; exit 143' HUP INT TERM
     touch "$FAKE_OPERATOR_GATEWAY_STARTED"
-    sleep 0.10
+    if [[ "$decoded" == *"GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED='1'"* ]]; then
+      printf '%s\n' "Gateway pre-shutdown checks complete; awaiting paired validator liveness handoff"
+      for _ in $(seq 1 500); do
+        if [ -e "$FAKE_OPERATOR_GATEWAY_HANDOFF" ]; then
+          record gateway_handoff_received
+          break
+        fi
+        sleep 0.01
+      done
+      if [ ! -e "$FAKE_OPERATOR_GATEWAY_HANDOFF" ]; then
+        record gateway_handoff_timeout
+        exit 70
+      fi
+      if [ "${FAKE_VALIDATOR_EXIT_AFTER_GATEWAY_HANDOFF:-0}" = "1" ]; then
+        sleep 3
+      fi
+    fi
+    record gateway_destructive_started
     if [ "${FAKE_GATEWAY_RESTART_FAIL:-0}" = "1" ]; then
       record gateway_failed
       exit 73
     fi
     touch "$FAKE_OPERATOR_GATEWAY_COMPLETE"
     record gateway_complete
+    ;;
+  *leadpoet-gateway-paired-restart*"mv -f --"*)
+    if [[ "$command" == *"failed:"* ]]; then
+      record paired_gateway_failure_handoff
+    else
+      record paired_gateway_handoff_released
+    fi
+    touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
+    ;;
+  *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*)
+    record active_release_authority_installed
     ;;
   *"mv -f --"*)
     if [[ "$command" == *"failed:"* ]]; then
@@ -727,7 +962,7 @@ case "$command" in
     record gateway_active_probe
     ;;
   *"rm -f --"*)
-    rm -f "$FAKE_OPERATOR_BARRIER"
+    rm -f "$FAKE_OPERATOR_BARRIER" "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     record barrier_cleanup
     ;;
   *)
@@ -739,8 +974,35 @@ esac
 """,
         encoding="utf-8",
     )
+    scp = bin_dir / "scp"
+    scp.write_text(
+        """#!/bin/bash
+set -euo pipefail
+source_path="${@: -2:1}"
+destination_path="${@: -1}"
+case "$destination_path" in
+  *:*) ;;
+  *)
+    case "$source_path" in
+      *leadpoet-validator-active-release-requirements*)
+        cp "$FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS" "$destination_path"
+        ;;
+      *gateway-v2-release-requirements.json*)
+        cp "$FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS" "$destination_path"
+        ;;
+      *gateway-v2-release-lineage.json*)
+        cp "$FAKE_GATEWAY_ACTIVE_RELEASE_LINEAGE" "$destination_path"
+        ;;
+    esac
+    ;;
+esac
+printf '%s\\n' active_release_authority_transferred >> "$FAKE_OPERATOR_EVENTS"
+""",
+        encoding="utf-8",
+    )
     git.chmod(0o755)
     ssh.chmod(0o755)
+    scp.chmod(0o755)
     (tmp_path / "pyvenv.cfg").write_text(
         "home = test-local-readiness-adapter\n",
         encoding="utf-8",
@@ -805,6 +1067,7 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
             (
                 f"FAKE_OPERATOR_EVENTS={events}",
                 f"FAKE_OPERATOR_BARRIER={barrier}",
+                f"FAKE_OPERATOR_GATEWAY_HANDOFF={gateway_handoff}",
                 f"FAKE_OPERATOR_GATEWAY_STARTED={gateway_started}",
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
@@ -812,6 +1075,9 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_OPERATOR_SELECTED_COMMIT={commit}",
                 f"FAKE_GATEWAY_OBSERVATION={gateway_observation}",
                 f"FAKE_VALIDATOR_OBSERVATION={validator_observation}",
+                f"FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS={initial_requirements}",
+                f"FAKE_GATEWAY_ACTIVE_RELEASE_REQUIREMENTS={final_requirements}",
+                f"FAKE_GATEWAY_ACTIVE_RELEASE_LINEAGE={final_lineage}",
                 f"FAKE_OPERATOR_SITE_ROOT={tmp_path}",
                 f"FAKE_OPERATOR_REAL_PYTHON={real_python}",
                 f"FAKE_OPERATOR_REAL_VENV={real_venv}",
@@ -838,6 +1104,7 @@ def _operator_env(tmp_path: Path, bin_dir: Path, commit: str) -> dict[str, str]:
         "LEADPOET_VALIDATOR_SSH_KEY": str(tmp_path / "validator.pem"),
         "FAKE_GATEWAY_COMMIT": commit,
         "FAKE_VALIDATOR_COMMIT": commit,
+        "LEADPOET_ACTIVE_RELEASE_RESTART_INVOCATION_ID": "restart-fixture",
         "FAKE_OPERATOR_EXACT_HELPER": str(
             ROOT / "Leadpoet" / "utils" / "exact_commit_restart_v2.py"
         ),
@@ -898,7 +1165,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     observed = events.read_text(encoding="utf-8").splitlines()
     required = [
         "readiness_invalidated",
-        "validator_forward_handoff",
+        "validator_exact_commit_handoff",
         "validator_command_syntax",
         "validator_prepare_started",
         "validator_captured",
@@ -931,7 +1198,7 @@ def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
         < positions["readiness_finalized"]
     )
     assert "barrier_before_gateway" not in observed
-    assert "validator_exact_commit_handoff" not in observed
+    assert "validator_forward_handoff" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
 
 
@@ -1300,11 +1567,12 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
         env=environment,
     )
 
-    assert result.returncode == 73
+    assert result.returncode == 1
+    assert "gateway restart exited before coordinated completion (status 73)" in result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     required = [
         "readiness_invalidated",
-        "validator_forward_handoff",
+        "validator_exact_commit_handoff",
         "validator_prepare_started",
         "validator_captured",
         "gateway_start",
@@ -1330,6 +1598,50 @@ def test_paired_operator_failure_marker_cleans_prepared_validator(
     assert "validator_verified" not in observed
     assert "readiness_finalized" not in observed
     assert "barrier_cleanup" in observed
+
+
+def test_paired_operator_cancels_gateway_when_validator_exits_after_liveness_handoff(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_VALIDATOR_EXIT_AFTER_GATEWAY_HANDOFF"] = "1"
+
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "validator restart exited before coordinated completion (status 78)" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    for event in (
+        "paired_gateway_handoff_released",
+        "gateway_handoff_received",
+        "validator_exit_after_gateway_handoff",
+        "gateway_cancelled",
+    ):
+        assert event in observed
+    assert observed.index("paired_gateway_handoff_released") < observed.index(
+        "validator_exit_after_gateway_handoff"
+    )
+    assert observed.index("validator_exit_after_gateway_handoff") < observed.index(
+        "gateway_cancelled"
+    )
+    assert "gateway_destructive_started" not in observed
+    assert "gateway_complete" not in observed
+    assert "readiness_finalized" not in observed
 
 
 @pytest.mark.parametrize(

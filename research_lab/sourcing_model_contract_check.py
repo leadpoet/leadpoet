@@ -91,6 +91,12 @@ CONTRACT_V68_PATH = Path(__file__).with_name("sourcing_model_contract_v68.json")
 PARITY_FIXTURE_V28_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures_v28.json"
 )
+CONTRACT_V68_A6F_PATH = Path(__file__).with_name(
+    "sourcing_model_contract_v68_a6f.json"
+)
+PARITY_FIXTURE_V28_A6F_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v28_a6f.json"
+)
 ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID = (
     "leadpoet-sourcing-wrapper-contract-v68"
 )
@@ -104,6 +110,7 @@ ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256 = (
     "sha256:bcbd1d629d1328d43a56e2b3585d776d0b9e8b6c8b9af465aff915d3788239db"
 )
 ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION = "routing-compiler-v5"
+MAX_ADDITIONAL_TYPED_DISPATCH_PROFILES = 32
 CONTRACT_V66_37B_PATH = Path(__file__).with_name(
     "sourcing_model_contract_v66_37b.json"
 )
@@ -1880,6 +1887,228 @@ def _ast_sha256(node: ast.AST) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _typed_dispatch_reviewed_profiles_v1(
+    policy: Mapping[str, Any],
+) -> tuple[Dict[str, Any], ...]:
+    """Return the closed reviewed custody-v3 contract generations.
+
+    The original v68 pair remains the rollback anchor.  Later signed model
+    releases may add model-owned contract/parity material, but they receive a
+    separate exact profile only when every changed consumer-owned semantic
+    slice is reviewed.  A contract from one profile and parity from another
+    never form an admissible pair.
+    """
+
+    dispatch = policy.get("additive_dispatch_custody_v3")
+    if not isinstance(dispatch, Mapping):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch policy is invalid"
+        )
+    primary = {
+        "profile_id": "typed-dispatch-v68-base",
+        "contract_id": dispatch.get("contract_id"),
+        "contract_sha256": dispatch.get("contract_sha256"),
+        "parity_sha256": dispatch.get("parity_sha256"),
+        "contract_snapshot_path": dispatch.get("contract_snapshot_path"),
+        "parity_snapshot_path": dispatch.get("parity_snapshot_path"),
+        "exact_constants": {},
+        "critical_binding_slices": {},
+        "import_time_binding_slices": {},
+    }
+    additional = dispatch.get("additional_reviewed_profiles")
+    if (
+        not isinstance(additional, list)
+        or len(additional) > MAX_ADDITIONAL_TYPED_DISPATCH_PROFILES
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch profiles are invalid"
+        )
+    profile_fields = {
+        "profile_id",
+        "profile_sha256",
+        "contract_id",
+        "contract_sha256",
+        "parity_sha256",
+        "contract_snapshot_path",
+        "parity_snapshot_path",
+        "exact_constants",
+        "critical_binding_slices",
+        "import_time_binding_slices",
+    }
+    normalized_additional: list[Dict[str, Any]] = []
+    for value in additional:
+        if not isinstance(value, Mapping) or set(value) != profile_fields:
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch profile is invalid"
+            )
+        profile = deepcopy(dict(value))
+        profile_id = profile.get("profile_id")
+        profile_hash = profile.get("profile_sha256")
+        hashed_profile = {
+            key: item for key, item in profile.items() if key != "profile_sha256"
+        }
+        if (
+            not isinstance(profile_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", profile_id)
+            is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(profile_hash or "")
+            )
+            is None
+            or profile_hash != _sha256_json(hashed_profile)
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                str(profile.get("contract_id") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(profile.get("contract_sha256") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(profile.get("parity_sha256") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"research_lab/sourcing_model_contract_[A-Za-z0-9._-]+\.json",
+                str(profile.get("contract_snapshot_path") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"research_lab/sourcing_model_parity_fixtures_[A-Za-z0-9._-]+\.json",
+                str(profile.get("parity_snapshot_path") or ""),
+            )
+            is None
+        ):
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch profile identity is invalid"
+            )
+        normalized_additional.append(profile)
+
+    profiles = (primary, *normalized_additional)
+    profile_ids = {str(profile["profile_id"]) for profile in profiles}
+    pair_identities = {
+        (
+            str(profile["contract_id"]),
+            str(profile["contract_sha256"]),
+            str(profile["parity_sha256"]),
+        )
+        for profile in profiles
+    }
+    snapshot_pairs = {
+        (
+            str(profile["contract_snapshot_path"]),
+            str(profile["parity_snapshot_path"]),
+        )
+        for profile in profiles
+    }
+    if (
+        len(profile_ids) != len(profiles)
+        or len(pair_identities) != len(profiles)
+        or len(snapshot_pairs) != len(profiles)
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility typed dispatch profiles are ambiguous"
+        )
+
+    merged_exact_constants = deepcopy(dict(policy.get("exact_constants") or {}))
+    for relative, constants in (dispatch.get("exact_constants") or {}).items():
+        current = dict(merged_exact_constants.get(relative) or {})
+        current.update(dict(constants))
+        merged_exact_constants[str(relative)] = current
+    merged_critical = deepcopy(dict(policy.get("critical_binding_slices") or {}))
+    merged_critical.update(
+        deepcopy(dict(dispatch.get("critical_binding_slices") or {}))
+    )
+    merged_import_time = deepcopy(
+        dict(dispatch.get("import_time_binding_slices") or {})
+    )
+    hash_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+    for profile in profiles:
+        exact_overrides = profile.get("exact_constants")
+        critical_overrides = profile.get("critical_binding_slices")
+        import_overrides = profile.get("import_time_binding_slices")
+        if (
+            not isinstance(exact_overrides, Mapping)
+            or not isinstance(critical_overrides, Mapping)
+            or not isinstance(import_overrides, Mapping)
+        ):
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch overrides are invalid"
+            )
+        for relative, constants in exact_overrides.items():
+            allowed = merged_exact_constants.get(relative)
+            if (
+                not isinstance(constants, Mapping)
+                or not isinstance(allowed, Mapping)
+                or not set(constants).issubset(allowed)
+            ):
+                raise ValueError(
+                    "semantic sourcing compatibility typed dispatch constants are invalid"
+                )
+        for relative, specification in critical_overrides.items():
+            allowed = merged_critical.get(relative)
+            if (
+                not isinstance(specification, Mapping)
+                or set(specification) != {"roots", "sha256"}
+                or not isinstance(allowed, Mapping)
+                or specification.get("roots") != allowed.get("roots")
+                or hash_pattern.fullmatch(
+                    str(specification.get("sha256") or "")
+                )
+                is None
+            ):
+                raise ValueError(
+                    "semantic sourcing compatibility typed dispatch slices are invalid"
+                )
+        if not set(import_overrides).issubset(merged_import_time) or any(
+            hash_pattern.fullmatch(str(digest or "")) is None
+            for digest in import_overrides.values()
+        ):
+            raise ValueError(
+                "semantic sourcing compatibility typed dispatch imports are invalid"
+            )
+        for key, expected_hash in (
+            ("contract_snapshot_path", profile["contract_sha256"]),
+            ("parity_snapshot_path", profile["parity_sha256"]),
+        ):
+            snapshot_path = Path(__file__).with_name(
+                Path(str(profile[key])).name
+            )
+            try:
+                observed_hash = _snapshot_sha256(snapshot_path)
+            except OSError as exc:
+                raise ValueError(
+                    "semantic sourcing compatibility typed dispatch snapshot is unavailable"
+                ) from exc
+            if observed_hash != expected_hash:
+                raise ValueError(
+                    "semantic sourcing compatibility typed dispatch snapshot differs"
+                )
+    return tuple(deepcopy(profile) for profile in profiles)
+
+
+def _typed_dispatch_profile_for_pair_v1(
+    policy: Mapping[str, Any],
+    *,
+    contract_id: str,
+    contract_sha256: str,
+    parity_sha256: str,
+) -> Dict[str, Any] | None:
+    matching = [
+        profile
+        for profile in _typed_dispatch_reviewed_profiles_v1(policy)
+        if profile["contract_id"] == contract_id
+        and profile["contract_sha256"] == contract_sha256
+        and profile["parity_sha256"] == parity_sha256
+    ]
+    if len(matching) > 1:
+        raise ValueError("typed dispatch reviewed profiles are ambiguous")
+    return deepcopy(matching[0]) if matching else None
+
+
 def semantic_compatibility_policy_v1() -> Dict[str, Any]:
     """Load the consumer-owned semantic admission policy.
 
@@ -2083,6 +2312,7 @@ def semantic_compatibility_policy_v1() -> Dict[str, Any]:
         raise ValueError(
             "semantic sourcing compatibility typed dispatch metadata policy is invalid"
         )
+    _typed_dispatch_reviewed_profiles_v1(document)
     return document
 
 
@@ -2562,6 +2792,27 @@ def validate_source_tree_compatibility_receipt_v1(
         )
         for snapshot in reviewed_consumer_profiles()
     )
+    typed_dispatch_profile = _typed_dispatch_profile_for_pair_v1(
+        resolved_policy,
+        contract_id=str(normalized.get("contract_id") or ""),
+        contract_sha256=str(normalized.get("contract_hash") or ""),
+        parity_sha256=str(normalized.get("parity_hash") or ""),
+    )
+    bindings = normalized.get("bindings")
+    typed_dispatch_binding_valid = True
+    if typed_dispatch_profile is not None:
+        typed_dispatch_binding_valid = (
+            isinstance(bindings, Mapping)
+            and bindings.get("typed_dispatch_profile_id")
+            == typed_dispatch_profile["profile_id"]
+        )
+    elif isinstance(bindings, Mapping):
+        typed_dispatch_binding_valid = not any(
+            key in bindings
+            for key in {
+                "typed_dispatch_profile_id",
+            }
+        )
     mode_identity_valid = normalized.get("admission_mode") == (
         "legacy_exact" if profiled_legacy_source else "semantic_v1"
     )
@@ -2583,6 +2834,7 @@ def validate_source_tree_compatibility_receipt_v1(
         or normalized.get("contract_schema_major")
         != resolved_policy.get("contract_schema_major")
         or not isinstance(normalized.get("bindings"), Mapping)
+        or not typed_dispatch_binding_valid
         or normalized.get("receipt_hash") != _sha256_json(body)
         or not legacy_identity_valid
         or not mode_identity_valid
@@ -2699,8 +2951,10 @@ def _typed_dispatch_custody_v3_requested(
 
 def _merge_typed_dispatch_policy(
     policy: Mapping[str, Any],
+    *,
+    profile: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Overlay v3 requirements while preserving its reviewed v2 runner ABI."""
+    """Overlay v3 requirements and one exact reviewed release profile."""
 
     merged = deepcopy(dict(policy))
     dispatch_v3 = dict(policy["additive_dispatch_custody_v3"])
@@ -2740,6 +2994,30 @@ def _merge_typed_dispatch_policy(
         if relative not in required_files:
             required_files.append(relative)
     merged["required_files"] = required_files
+    if profile is not None:
+        exact_constants = deepcopy(dict(merged.get("exact_constants") or {}))
+        for relative, values in (profile.get("exact_constants") or {}).items():
+            current = dict(exact_constants.get(relative) or {})
+            current.update(deepcopy(dict(values)))
+            exact_constants[str(relative)] = current
+        merged["exact_constants"] = exact_constants
+
+        critical_slices = deepcopy(
+            dict(merged.get("critical_binding_slices") or {})
+        )
+        for relative, values in (
+            profile.get("critical_binding_slices") or {}
+        ).items():
+            critical_slices[str(relative)] = deepcopy(dict(values))
+        merged["critical_binding_slices"] = critical_slices
+
+        import_time_slices = deepcopy(
+            dict(merged.get("import_time_binding_slices") or {})
+        )
+        import_time_slices.update(
+            deepcopy(dict(profile.get("import_time_binding_slices") or {}))
+        )
+        merged["import_time_binding_slices"] = import_time_slices
     return merged
 
 
@@ -2961,13 +3239,14 @@ def verify_semantic_source_tree_compatibility_v1(
 
     contract_hash = _snapshot_sha256(contract_file) if contract_file.is_file() else ""
     parity_hash = _snapshot_sha256(parity_file) if parity_file.is_file() else ""
+    reviewed_profile: Dict[str, Any] | None = None
     typed_dispatch_requested = _typed_dispatch_custody_v3_requested(
         contract,
         policy=policy,
         root=root,
     )
     if typed_dispatch_requested:
-        dispatch_v3 = policy["additive_dispatch_custody_v3"]
+        reviewed_profiles = _typed_dispatch_reviewed_profiles_v1(policy)
         exact_signatures = contract.get("exact_signatures")
         exact_signatures_valid = isinstance(exact_signatures, list) and all(
             isinstance(item, str) for item in exact_signatures
@@ -2976,46 +3255,75 @@ def verify_semantic_source_tree_compatibility_v1(
             violations.append(
                 "model compatibility exact signatures declaration is invalid"
             )
-        if contract_id != str(dispatch_v3["contract_id"]):
+        contract_id_approved = any(
+            contract_id == str(profile["contract_id"])
+            for profile in reviewed_profiles
+        )
+        contract_snapshot_approved = any(
+            contract_id == str(profile["contract_id"])
+            and contract_hash == str(profile["contract_sha256"])
+            for profile in reviewed_profiles
+        )
+        parity_snapshot_approved = any(
+            parity_hash == str(profile["parity_sha256"])
+            for profile in reviewed_profiles
+        )
+        reviewed_profile = _typed_dispatch_profile_for_pair_v1(
+            policy,
+            contract_id=contract_id,
+            contract_sha256=contract_hash,
+            parity_sha256=parity_hash,
+        )
+        if not contract_id_approved:
             violations.append("typed dispatch contract identity is not approved")
-        if contract_hash != str(dispatch_v3["contract_sha256"]):
+        if not contract_snapshot_approved:
             violations.append("typed dispatch contract snapshot differs")
-        if parity_hash != str(dispatch_v3["parity_sha256"]):
+        if not parity_snapshot_approved:
             violations.append("typed dispatch parity snapshot differs")
-        reviewed_snapshots_match = True
-        for snapshot_path, observed_path, label in (
-            (
-                dispatch_v3["contract_snapshot_path"],
-                contract_file,
-                "typed dispatch contract",
-            ),
-            (
-                dispatch_v3["parity_snapshot_path"],
-                parity_file,
-                "typed dispatch parity",
-            ),
+        if (
+            contract_snapshot_approved
+            and parity_snapshot_approved
+            and reviewed_profile is None
         ):
-            expected_path = Path(__file__).with_name(Path(snapshot_path).name)
-            try:
-                if (
-                    not expected_path.is_file()
-                    or not observed_path.is_file()
-                    or expected_path.read_bytes() != observed_path.read_bytes()
-                ):
+            violations.append("typed dispatch reviewed profile differs")
+        reviewed_snapshots_match = reviewed_profile is not None
+        if reviewed_profile is not None:
+            for snapshot_path, observed_path, label in (
+                (
+                    reviewed_profile["contract_snapshot_path"],
+                    contract_file,
+                    "typed dispatch contract",
+                ),
+                (
+                    reviewed_profile["parity_snapshot_path"],
+                    parity_file,
+                    "typed dispatch parity",
+                ),
+            ):
+                expected_path = Path(__file__).with_name(Path(snapshot_path).name)
+                try:
+                    if (
+                        not expected_path.is_file()
+                        or not observed_path.is_file()
+                        or expected_path.read_bytes() != observed_path.read_bytes()
+                    ):
+                        reviewed_snapshots_match = False
+                        violations.append(
+                            f"{label} does not match reviewed snapshot"
+                        )
+                except OSError:
                     reviewed_snapshots_match = False
-                    violations.append(f"{label} does not match reviewed snapshot")
-            except OSError:
-                reviewed_snapshots_match = False
-                violations.append(f"{label} snapshot is unreadable")
+                    violations.append(f"{label} snapshot is unreadable")
         typed_dispatch_verified = (
             exact_signatures_valid
-            and contract_id == str(dispatch_v3["contract_id"])
-            and contract_hash == str(dispatch_v3["contract_sha256"])
-            and parity_hash == str(dispatch_v3["parity_sha256"])
+            and reviewed_profile is not None
             and reviewed_snapshots_match
         )
         if typed_dispatch_verified:
-            policy = _merge_typed_dispatch_policy(policy)
+            policy = _merge_typed_dispatch_policy(
+                policy,
+                profile=reviewed_profile,
+            )
 
     for relative in (canonical_path, parity_path):
         required_path = root / relative
@@ -3237,6 +3545,14 @@ def verify_semantic_source_tree_compatibility_v1(
             adapter_constants["SCORING_ADAPTER_VERSION"]
         ),
     }
+    if reviewed_profile is not None:
+        bindings.update(
+            {
+                "typed_dispatch_profile_id": str(
+                    reviewed_profile["profile_id"]
+                ),
+            }
+        )
     return [], _semantic_compatibility_receipt(
         mode="semantic_v1",
         consumer_api_version=str(policy["consumer_api_version"]),
@@ -3900,6 +4216,11 @@ def source_tree_compatibility_admission_v1(
     """
 
     root = Path(root)
+    if _qualification_protocol_entrypoint_declared_v2(root):
+        raise ValueError(
+            "qualification protocol v2 source must use unified compatibility "
+            "admission"
+        )
     manifest_document = deepcopy(_manifest_document(manifest))
     policy, policy_hash = semantic_compatibility_policy_identity_v1()
     consumer_api_version = str(policy["consumer_api_version"])

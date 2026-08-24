@@ -13,6 +13,7 @@ VALIDATOR_TELEMETRY_PYTHON_BIN="$VALIDATOR_PYTHON_BIN"
 VALIDATOR_TELEMETRY_CACHE_ROOT="${VALIDATOR_TELEMETRY_CACHE_ROOT:-$HOME/.cache/leadpoet-observability/validator-host}"
 VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
 VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
+VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="${VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS:-/home/ec2-user/.config/leadpoet/gateway-v2-release-requirements.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS="${VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS:-86400}"
@@ -24,7 +25,11 @@ VALIDATOR_RESTART_CONTROLLER_CURRENT="$VALIDATOR_RESTART_CONTROLLER_ROOT/current
 VALIDATOR_HOST_RESTART_SCRIPT="${VALIDATOR_HOST_RESTART_SCRIPT:-/home/ec2-user/validator_restart.sh}"
 VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
 VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
-if [ -r "$VALIDATOR_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py" ]; then
+if [ -n "${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-}" ] \
+    && [ -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" ]; then
+  VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
+  VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+elif [ -r "$VALIDATOR_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py" ]; then
   VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py"
   VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_RESTART_CONTROLLER_CURRENT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
 fi
@@ -37,6 +42,10 @@ VALIDATOR_DOCKER_LOCK_ACQUIRED=0
 VALIDATOR_DEPLOY_STAGE="${VALIDATOR_DEPLOY_STAGE:-bootstrap}"
 VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$}"
+VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-}"
+VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT:-}"
+VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$VALIDATOR_RESTART_INVOCATION_ID}"
+VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="${VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}"
 VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 VALIDATOR_RESTART_TIMING_FILE="${VALIDATOR_RESTART_TIMING_FILE:-$VALIDATOR_RESTART_TIMING_DIR/validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$.jsonl}"
@@ -45,6 +54,10 @@ VALIDATOR_RELEASE_SUPERSESSION_COUNT="${VALIDATOR_RELEASE_SUPERSESSION_COUNT:-0}
 VALIDATOR_RELEASE_SUPERSESSION_MAX="${VALIDATOR_RELEASE_SUPERSESSION_MAX:-20}"
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
+VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="${VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT:-}"
+VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="${VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT:-}"
+VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="${VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT:-}"
+VALIDATOR_ACTIVE_PUBLICATION_JOURNAL="$VALIDATOR_ROOT/validator_weights/authoritative_weight_publication_v2.json"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 VALIDATOR_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 VALIDATOR_USE_CAPTURED_RESTART_START="${LEADPOET_USE_CAPTURED_RESTART_START:-0}"
@@ -60,6 +73,27 @@ REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-
 unset VALIDATOR_COORDINATED_EXPECTED_COMMIT
 export VALIDATOR_RESTART_INVOCATION_ID
 export LEADPOET_RESTART_INVOCATION_ID="$VALIDATOR_RESTART_INVOCATION_ID"
+
+if [ -n "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" ]; then
+  if ! [[ "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" =~ ^/tmp/validator-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
+      || ! [[ "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+      || [ ! -r "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh" ] \
+      || [ -L "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT/validator_restart.sh" ]; then
+    echo "ERROR: validator active release authority controller is invalid" >&2
+    exit 2
+  fi
+fi
+case "$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" in
+  0|1) ;;
+  *)
+    echo "ERROR: VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+if ! [[ "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
+  echo "ERROR: validator active release restart invocation identity is invalid" >&2
+  exit 2
+fi
 
 run_bounded_validator_restart_artifact_cleanup() {
   local gateway_build_root validator_build_root
@@ -137,6 +171,77 @@ fi
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     && [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
   echo "ERROR: coordinated forward commit conflicts with exact-commit rollback" >&2
+  exit 2
+fi
+
+validate_validator_active_release_handoff_path() {
+  local variable_name="$1"
+  local path="$2"
+  if [ -z "$path" ]; then
+    echo "ERROR: $variable_name is required for the paired active release handoff" >&2
+    return 1
+  fi
+  if ! [[ "$path" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
+    echo "ERROR: $variable_name must be one exact controller-owned /tmp/leadpoet-*.json path" >&2
+    return 1
+  fi
+  if [ -L "$path" ] || [ -d "$path" ]; then
+    echo "ERROR: $variable_name must not resolve to a symlink or directory" >&2
+    return 1
+  fi
+}
+
+active_release_handoff_count=0
+for handoff_value in \
+  "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
+  "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+  "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT"; do
+  [ -n "$handoff_value" ] \
+    && active_release_handoff_count=$((active_release_handoff_count + 1))
+done
+if [ "$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ] \
+    && [ "$active_release_handoff_count" -ne 3 ]; then
+  echo "ERROR: paired validator active release handoff is incomplete" >&2
+  exit 2
+fi
+if [ "$active_release_handoff_count" -ne 0 ] \
+    && [ "$active_release_handoff_count" -ne 3 ]; then
+  echo "ERROR: validator active release handoff paths must be supplied together" >&2
+  exit 2
+fi
+if [ "$active_release_handoff_count" -eq 3 ]; then
+  validate_validator_active_release_handoff_path \
+    VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT \
+    "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" || exit 2
+  validate_validator_active_release_handoff_path \
+    VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT \
+    "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" || exit 2
+  validate_validator_active_release_handoff_path \
+    VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT \
+    "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" || exit 2
+else
+  VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="/tmp/leadpoet-validator-standalone-initial.$$.json"
+  VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS"
+  VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+fi
+if [ "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" = "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+    || [ "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" = "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
+    || [ "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" = "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ]; then
+  echo "ERROR: validator active release handoff paths must be distinct" >&2
+  exit 2
+fi
+for stable_path in \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"; do
+  if [ -z "$stable_path" ] || [[ "$stable_path" != /* ]] \
+      || [ "$stable_path" = "/" ] || [[ "$stable_path" == *"/../"* ]] \
+      || [[ "$stable_path" == */.. ]]; then
+    echo "ERROR: validator stable active release path is unsafe" >&2
+    exit 2
+  fi
+done
+if [ "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" = "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
+  echo "ERROR: validator active release requirements and lineage paths must differ" >&2
   exit 2
 fi
 
@@ -382,6 +487,14 @@ cleanup_validator_restart_preparation() {
     rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
     VALIDATOR_PINNED_GATEWAY_VERIFIER=""
   fi
+  for handoff_path in \
+    "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
+    "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+    "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT"; do
+    if [[ "$handoff_path" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
+      rm -f -- "$handoff_path" || true
+    fi
+  done
 }
 
 cleanup() {
@@ -447,7 +560,6 @@ fi
 echo "Pulling latest GitHub main before stopping validator"
 before_head="$(git rev-parse HEAD)"
 fetch_validator_origin_with_retry
-VALIDATOR_LINEAGE_AUTHORITY_SHA="$(git rev-parse origin/main)"
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   if ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: VALIDATOR_DEPLOY_COMMIT must be a full 40-character SHA" >&2
@@ -503,12 +615,20 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_COORDINATED_EXPECTED_COMMIT="$REQUESTED_COORDINATED_EXPECTED_COMMIT" \
     VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
     VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" \
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+    VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
     VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
     VALIDATOR_RELEASE_SUPERSESSION_COUNT="$VALIDATOR_RELEASE_SUPERSESSION_COUNT" \
     VALIDATOR_RELEASE_SUPERSESSION_MAX="$VALIDATOR_RELEASE_SUPERSESSION_MAX" \
+    VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
+    VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+    VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
     bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
@@ -531,6 +651,99 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   chmod 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
 fi
 capture_validator_restart_controller
+
+if [ -z "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" ]; then
+  VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$(
+    git -C "$VALIDATOR_ROOT" rev-parse --verify 'origin/main^{commit}'
+  )"
+fi
+if ! [[ "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+    || ! git -C "$VALIDATOR_ROOT" merge-base --is-ancestor \
+      "$(git -C "$VALIDATOR_ROOT" rev-parse HEAD)" \
+      "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT"; then
+  echo "ERROR: validator active release authority is incompatible with the selected runtime" >&2
+  exit 1
+fi
+VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT="${VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT:-$VALIDATOR_ROOT}"
+VALIDATOR_ACTIVE_RELEASE_PREPARER="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT/gateway/tee/prepare_active_release_lineage_v2.py"
+if [ ! -r "$VALIDATOR_ACTIVE_RELEASE_PREPARER" ]; then
+  echo "ERROR: selected validator release lacks bounded active release lineage support" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+if [ "$active_release_handoff_count" -eq 0 ]; then
+  if [ ! -s "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      || [ ! -s "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
+      || [ -L "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      || [ -L "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ]; then
+    echo "ERROR: standalone validator compact-lineage fallback is unavailable" >&2
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 1
+  fi
+  VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$(
+    PYTHONDONTWRITEBYTECODE=1 \
+      PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT" \
+      "$VALIDATOR_PYTHON_BIN" - \
+        "$(git -C "$VALIDATOR_ROOT" rev-parse HEAD)" \
+        "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+        "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+        "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+expected_commit, expected_authority = sys.argv[1:3]
+max_document_bytes = 4 * 1024 * 1024
+
+
+def load_bounded_json(path: str, label: str):
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise SystemExit(f"{label} cannot be opened securely: {exc}") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SystemExit(f"{label} is not a regular file")
+        if metadata.st_size <= 0 or metadata.st_size > max_document_bytes:
+            raise SystemExit(f"{label} exceeds the bounded document size")
+        payload = os.read(fd, max_document_bytes + 1)
+        if len(payload) != metadata.st_size or len(payload) > max_document_bytes:
+            raise SystemExit(f"{label} changed during its bounded read")
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
+
+
+requirements = validate_active_release_requirements_v2(
+    load_bounded_json(sys.argv[3], "standalone validator requirements")
+)
+lineage = validate_compact_release_lineage_v2(
+    load_bounded_json(sys.argv[4], "standalone validator lineage"),
+    expected_current_commit=expected_commit,
+)
+if requirements["candidate_commit_sha"] != expected_commit:
+    raise SystemExit("standalone validator active release candidate differs")
+if requirements["authority_commit_sha"] != expected_authority:
+    raise SystemExit("standalone validator active release controller differs")
+if set(requirements["required_commits"]) != set(lineage["releases"]):
+    raise SystemExit("standalone validator active release requirements differ")
+print(requirements["restart_invocation_id"])
+PY
+  )"
+fi
 
 follow_superseding_validator_release() {
   local helper latest_sha next_count
@@ -582,6 +795,10 @@ follow_superseding_validator_release() {
     VALIDATOR_HOST_RESTART_SCRIPT="$VALIDATOR_HOST_RESTART_SCRIPT" \
     VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
     VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" \
+    VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+    VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED="$VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
@@ -592,6 +809,10 @@ follow_superseding_validator_release() {
     VALIDATOR_V2_RELEASE_PREFIX="$VALIDATOR_V2_RELEASE_PREFIX" \
     VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="$VALIDATOR_V2_RELEASE_ARCHIVE_ROOT" \
     VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
+    VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+    VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
     VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY="$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" \
     LEADPOET_USE_CAPTURED_RESTART_START=1 \
     VALIDATOR_RESTART_REEXECED=0 \
@@ -629,7 +850,15 @@ raw = src.read_text()
 cache_excluded_keys = {
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
+    "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
+    "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
+    "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
     "VALIDATOR_RESTART_INVOCATION_ID",
+    "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS",
 }
 
 try:
@@ -677,13 +906,21 @@ skip_keys = {
     "AWS_PROFILE",
     "VALIDATOR_COORDINATED_EXPECTED_COMMIT",
     "VALIDATOR_DEPLOY_COMMIT",
+    "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT",
+    "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT",
+    "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "VALIDATOR_EXACT_RELEASE_PINNED",
+    "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
+    "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE",
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS",
     "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
     "VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES",
     "VALIDATOR_RESTART_INVOCATION_ID",
+    "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS",
     "LEADPOET_RESTART_INVOCATION_ID",
     "LEADPOET_SENTRY_API_TOKEN",
 }
@@ -906,10 +1143,7 @@ for attempt in $(seq 1 300); do
       --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
       --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
       --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
-      --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
-      --lineage-repository "$VALIDATOR_ROOT" \
-      --lineage-authority-commit "$VALIDATOR_LINEAGE_AUTHORITY_SHA"; then
+      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
     if follow_superseding_validator_release; then
       VALIDATOR_V2_RELEASE_READY=1
       break
@@ -927,7 +1161,6 @@ record_validator_restart_timing "release_ready"
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
   "$VALIDATOR_V2_RELEASE_MANIFEST" \
   "$VALIDATOR_V2_HOTKEY_CONFIG" \
   "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
@@ -954,6 +1187,120 @@ PY
   exit 75
 fi
 
+VALIDATOR_ANCESTRY_LINEAGE_ID="$(
+  PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" - <<'PY'
+from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    derive_ancestry_lineage_id_v2,
+)
+
+cutover = load_subnet_epoch_cutover()
+print(
+    derive_ancestry_lineage_id_v2(
+        cutover_mapping_hash=str(cutover.mapping_hash),
+        network_genesis_hash=str(cutover.network_genesis_hash),
+        netuid=int(cutover.netuid),
+    )
+)
+PY
+)"
+if ! [[ "$VALIDATOR_ANCESTRY_LINEAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: validator ancestry lineage identity is invalid" >&2
+  exit 1
+fi
+
+if ! VALIDATOR_RUNNING_DEPLOY_SHA="$(
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+      leadpoet-validator-main \
+      | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'
+  )"; then
+  echo "ERROR: running validator release identity is unavailable" >&2
+  exit 1
+fi
+if ! [[ "$VALIDATOR_RUNNING_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: running validator release identity is invalid or duplicated" >&2
+  exit 1
+fi
+if [ -e "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ] \
+    || [ -L "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ]; then
+  echo "ERROR: validator initial active release output already exists" >&2
+  exit 1
+fi
+
+run_validator_active_release_phase() {
+  sudo env \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT" \
+    AWS_REGION="$AWS_REGION" \
+    AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+    "$VALIDATOR_PYTHON_BIN" \
+    -m gateway.tee.prepare_active_release_lineage_v2 "$@"
+}
+
+echo "Preparing the running validator active release requirements"
+VALIDATOR_DEPLOY_STAGE="active_release_initial"
+run_validator_active_release_phase \
+  --phase validator-initial \
+  --candidate-commit "$VALIDATOR_DEPLOY_SHA" \
+  --authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+  --restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+  --running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA" \
+  --journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL" \
+  --validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE" \
+  --repository "$VALIDATOR_ROOT" \
+  --lineage-id "$VALIDATOR_ANCESTRY_LINEAGE_ID" \
+  --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
+  --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
+  --requirements-output "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"
+if [ ! -s "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ] \
+    || [ ! -f "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ] \
+    || [ -L "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ]; then
+  echo "ERROR: validator initial active release requirements are unavailable" >&2
+  exit 1
+fi
+sudo chown -- "$(id -u):$(id -g)" \
+  "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"
+chmod 600 "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"
+record_validator_restart_timing "active_release_initial_ready"
+echo "Prepared validator active release requirements sidecar"
+
+echo "Waiting for the paired gateway active release handoff while the validator remains running"
+VALIDATOR_DEPLOY_STAGE="active_release_handoff"
+VALIDATOR_ACTIVE_RELEASE_HANDOFF_READY=0
+VALIDATOR_ACTIVE_RELEASE_HANDOFF_TIMEOUT_SECONDS="${VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS:-9300}"
+if ! [[ "$VALIDATOR_ACTIVE_RELEASE_HANDOFF_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$VALIDATOR_ACTIVE_RELEASE_HANDOFF_TIMEOUT_SECONDS" -gt 10800 ]; then
+  echo "ERROR: validator active release handoff timeout is invalid" >&2
+  exit 2
+fi
+VALIDATOR_ACTIVE_RELEASE_HANDOFF_DEADLINE=$((SECONDS + VALIDATOR_ACTIVE_RELEASE_HANDOFF_TIMEOUT_SECONDS))
+while [ "$SECONDS" -lt "$VALIDATOR_ACTIVE_RELEASE_HANDOFF_DEADLINE" ]; do
+  if [ -L "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      || [ -L "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
+      || [ -d "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      || [ -d "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ]; then
+    echo "ERROR: validator final active release handoff is not a pair of plain files" >&2
+    exit 1
+  fi
+  if [ -s "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      && [ -f "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      && [ -r "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
+      && [ -s "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
+      && [ -f "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
+      && [ -r "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ]; then
+    VALIDATOR_ACTIVE_RELEASE_HANDOFF_READY=1
+    break
+  fi
+  sleep 1
+done
+if [ "$VALIDATOR_ACTIVE_RELEASE_HANDOFF_READY" != "1" ]; then
+  echo "ERROR: paired gateway active release handoff did not arrive" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+record_validator_restart_timing "active_release_handoff_ready"
+
 echo "Refreshing public validator hotkey measurements for the selected release"
 python3 -m validator_tee.host.refresh_hotkey_config_v2 \
   --config "$VALIDATOR_V2_HOTKEY_CONFIG" \
@@ -977,16 +1324,6 @@ python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
   --lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
   --output-dir "$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
   --allow-download >/dev/null
-echo "Validating the exact validator V2 release before production shutdown"
-python3 -m validator_tee.host.restart_preflight_v2 \
-  --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
-  --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
-  --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-  --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
-  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
-  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
-  --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-  --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
 echo "Validating the measured chain signing profile against the live runtime"
 python3 -m validator_tee.host.verify_chain_signing_profile_v2 \
@@ -1028,6 +1365,67 @@ if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   record_validator_restart_timing "pre_shutdown_gateway_aligned"
 fi
 
+echo "Independently verifying the paired active release lineage before shutdown"
+VALIDATOR_DEPLOY_STAGE="active_release_final"
+prepare_validator_final_active_release_lineage() {
+  run_validator_active_release_phase \
+    --phase validator-final \
+    --candidate-commit "$VALIDATOR_DEPLOY_SHA" \
+    --authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+    --restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --initial-requirements "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
+    --final-requirements-input "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
+    --lineage-input "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    --journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL" \
+    --validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+    --chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE" \
+    --repository "$VALIDATOR_ROOT" \
+    --lineage-id "$VALIDATOR_ANCESTRY_LINEAGE_ID" \
+    --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
+    --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
+    --requirements-output "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+    --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+}
+prepare_validator_final_active_release_lineage
+
+VALIDATOR_V2_MISSING_INPUTS=()
+for required_file in \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"; do
+  if [ ! -s "$required_file" ] || [ ! -f "$required_file" ] \
+      || [ -L "$required_file" ]; then
+    VALIDATOR_V2_MISSING_INPUTS+=("$required_file")
+  fi
+done
+if [ "${#VALIDATOR_V2_MISSING_INPUTS[@]}" -gt 0 ]; then
+  echo "ERROR: verified validator active release outputs are unavailable" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+sudo chown -- "$(id -u):$(id -g)" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+chmod 600 \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+VALIDATOR_FINAL_ACTIVE_RELEASE_HASHES="$(
+  sha256sum \
+    "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+    "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+)"
+record_validator_restart_timing "active_release_lineage_ready"
+
+echo "Validating the exact validator V2 release before production shutdown"
+python3 -m validator_tee.host.restart_preflight_v2 \
+  --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
+  --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
+  --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
+  --host-hotkey-directory "$HOST_HOTKEY_DIR"
+
 if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
   echo "ERROR: validator Docker operation lock helper is unavailable" >&2
   exit 1
@@ -1041,6 +1439,26 @@ PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
   --timeout-seconds 1800 \
   --interval-seconds 3
 run_bounded_validator_restart_artifact_cleanup
+
+echo "Rechecking publication journal and compact lineage immediately before validator shutdown"
+VALIDATOR_DEPLOY_STAGE="active_release_final_recheck"
+prepare_validator_final_active_release_lineage
+sudo chown -- "$(id -u):$(id -g)" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+chmod 600 \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+if [ "$(
+    sha256sum \
+      "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
+      "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+  )" != "$VALIDATOR_FINAL_ACTIVE_RELEASE_HASHES" ]; then
+  echo "ERROR: validator active release authority changed before shutdown" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 1
+fi
+record_validator_restart_timing "active_release_lineage_rechecked"
 
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"

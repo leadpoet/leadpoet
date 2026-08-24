@@ -250,6 +250,7 @@ PROTECTED_SYMBOLS = {
     "validator_tee/host/publication_journal_v2.py": (
         "validate_publication_journal_v2",
         "_validate_compact_publication_journal_v2",
+        "publication_journal_release_requirements_v2",
         "AuthoritativeWeightPublicationJournalV2",
     ),
     "neurons/validator.py": (

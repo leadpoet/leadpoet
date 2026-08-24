@@ -22,10 +22,23 @@ EXPECTED_AWS_ACCOUNT="493765492819"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
+GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
+GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
+GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
+GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
+GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE:-}"
+GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE:-}"
+GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="${GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS:-9300}"
 GATEWAY_GIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py"
 GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
 GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
-if [ -r "$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py" ]; then
+if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ] \
+    && [ -r "$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/gateway_git_deploy.py" ]; then
+  GATEWAY_GIT_HELPER_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/scripts/gateway_git_deploy.py"
+  GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
+  GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$GATEWAY_RESTART_AUTHORITY_ROOT/gateway/tee/host_memory_guard_v2.py"
+elif [ -r "$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py" ]; then
   GATEWAY_GIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py"
   GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py"
   GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/gateway/tee/host_memory_guard_v2.py"
@@ -44,6 +57,7 @@ GATEWAY_V2_HEALTH_DEADLINE_SECONDS="${GATEWAY_V2_HEALTH_DEADLINE_SECONDS:-600}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
+GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$GATEWAY_RESTART_INVOCATION_ID}"
 GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
@@ -52,6 +66,49 @@ GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
 GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
 GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE=""
+
+if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
+  if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$|^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
+      || ! [[ "$GATEWAY_RESTART_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+      || [ ! -r "$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh" ] \
+      || [ -L "$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh" ]; then
+    echo "ERROR: gateway restart authority controller is invalid" >&2
+    exit 2
+  fi
+fi
+case "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" in
+  0|1) ;;
+  *)
+    echo "ERROR: GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+case "$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" in
+  standalone|cutover|full-parity) ;;
+  *)
+    echo "ERROR: unsupported active release fallback context" >&2
+    exit 2
+    ;;
+esac
+paired_handoff_count=0
+[ -n "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] && paired_handoff_count=$((paired_handoff_count + 1))
+[ -n "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" ] && paired_handoff_count=$((paired_handoff_count + 1))
+if [ "$paired_handoff_count" -ne 0 ] && [ "$paired_handoff_count" -ne 2 ]; then
+  echo "ERROR: paired gateway destructive handoff authority is incomplete" >&2
+  exit 2
+fi
+if [ "$paired_handoff_count" -eq 2 ]; then
+  if ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-paired-restart\.[A-Za-z0-9._-]+\.ready$ ]] \
+      || ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" =~ ^[0-9a-f]{64}$ ]] \
+      || ! [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+      || [ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" -gt 10800 ]; then
+    echo "ERROR: paired gateway destructive handoff authority is invalid" >&2
+    exit 2
+  fi
+elif [ "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ]; then
+  echo "ERROR: paired gateway restart requires a destructive handoff" >&2
+  exit 2
+fi
 
 gateway_restart_invocation_id_from_timing_file() {
   local ledger_name ledger_epoch ledger_pid expected_ledger
@@ -179,11 +236,18 @@ RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
 GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
+GATEWAY_V2_RELEASE_REQUIREMENTS="${GATEWAY_V2_RELEASE_REQUIREMENTS:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-requirements.json}"
 # Release acquisition happens while the existing gateway is still serving.
 # Keep candidate evidence restart-scoped so its fail-closed verifier remains
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
 GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
+GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="${GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-requirements.json}"
+# The paired restart controller installs the validator's independently selected
+# active authority here before starting this controller. It is intentionally
+# required rather than inferred from a lifetime release catalog.
+GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="${GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS:-}"
+GATEWAY_COUNTERPART_RELEASE_LINEAGE="${GATEWAY_COUNTERPART_RELEASE_LINEAGE:-}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
@@ -210,11 +274,25 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_RESTART_GIT_SSH_COMMAND
   LEADPOET_GATEWAY_ENV_SECRET_ID
   GATEWAY_RESTART_CONTROLLER_ROOT
+  GATEWAY_RESTART_AUTHORITY_ROOT
+  GATEWAY_RESTART_AUTHORITY_COMMIT
+  GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID
+  GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED
+  GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS
   GATEWAY_RESTART_RECOVERY_LOCK_FILE
   LEADPOET_DOCKER_OPERATION_LOCK_FILE
   GATEWAY_V2_CONFIG_DIR
   GATEWAY_V2_RELEASE_MANIFEST
   GATEWAY_V2_RELEASE_LINEAGE
+  GATEWAY_V2_RELEASE_REQUIREMENTS
+  GATEWAY_PREPARED_V2_RELEASE_MANIFEST
+  GATEWAY_PREPARED_V2_RELEASE_LINEAGE
+  GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS
+  GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS
+  GATEWAY_COUNTERPART_RELEASE_LINEAGE
   GATEWAY_V2_ARTIFACT_POLICY
   GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST
   GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
@@ -580,6 +658,16 @@ start_gateway_offline_artifact_prepare() {
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
+    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
+    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
+    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     python3 -c '
 import os
 import sys
@@ -717,6 +805,14 @@ follow_superseding_gateway_release() {
     LEADPOET_GATEWAY_ENV_SECRET_ID="$LEADPOET_GATEWAY_ENV_SECRET_ID" \
     GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
     GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
+    GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
+    GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
+    GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
+    GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
+    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
+    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" \
+    GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" \
     GATEWAY_GIT_HELPER="$superseding_tree/scripts/gateway_git_deploy.py" \
     GATEWAY_EXACT_COMMIT_HELPER="$superseding_tree/Leadpoet/utils/exact_commit_restart_v2.py" \
     GATEWAY_HOST_MEMORY_GUARD_PATH="$superseding_tree/gateway/tee/host_memory_guard_v2.py" \
@@ -743,6 +839,12 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
     GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
     GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
+    GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
+    GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+    GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
+    GATEWAY_COUNTERPART_RELEASE_LINEAGE="$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
     GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
@@ -894,6 +996,16 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
+    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
+    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
+    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     python3 -c '
 import os
 import sys
@@ -947,7 +1059,6 @@ wait_for_gateway_ancestry_checkpoint_bootstrap() {
   GATEWAY_ANCESTRY_CHECKPOINT_PID=""
   rm -f -- "${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
   cat "$GATEWAY_ANCESTRY_CHECKPOINT_LOG"
-  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
   case "$status" in
     0)
       GATEWAY_ANCESTRY_CHECKPOINT_STATE="passed"
@@ -1386,6 +1497,7 @@ validate_gateway_aws_authority() {
 
 on_gateway_restart_exit() {
   local status="$?"
+  local -a active_release_cleanup_paths=()
   if [ "$status" -ne 0 ]; then
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
@@ -1395,9 +1507,20 @@ on_gateway_restart_exit() {
   cancel_gateway_ancestry_checkpoint_bootstrap
   cleanup_gateway_miner_maintenance_bootstrap
   rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
+  if [[ "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
+    active_release_cleanup_paths+=("$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS")
+  fi
+  if [[ "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
+    active_release_cleanup_paths+=("$GATEWAY_COUNTERPART_RELEASE_LINEAGE")
+  fi
+  if [[ "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-paired-restart\.[A-Za-z0-9._-]+\.ready$ ]]; then
+    active_release_cleanup_paths+=("$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE")
+  fi
   rm -f -- \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
     "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+    "${active_release_cleanup_paths[@]}" \
     2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
@@ -1449,15 +1572,255 @@ run_prepared_gateway_module() {
   )
 }
 
+run_gateway_active_release_controller_module() {
+  local authority_root
+  authority_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$GATEWAY_PREFLIGHT_TREE}"
+  if [ -z "$authority_root" ] || [ ! -r "$authority_root/gateway/tee/prepare_active_release_lineage_v2.py" ]; then
+    echo "ERROR: exact active release authority controller is unavailable" >&2
+    return 1
+  fi
+  (
+    cd "$authority_root"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$authority_root" \
+      "$GATEWAY_PYTHON_BIN" -m "$@"
+  )
+}
+
+prepare_gateway_active_release_lineage() {
+  local authority_commit fallback_context lineage_id running_gateway_manifest
+  local -a validator_authority_args=()
+
+  if [ -n "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ]; then
+    if ! [[ "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
+        || [ ! -f "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ] \
+        || [ -L "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ] \
+        || [ ! -r "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ]; then
+      echo "ERROR: paired validator active release requirements are unavailable" >&2
+      return 1
+    fi
+    validator_authority_args=(
+      --validator-requirements "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS"
+    )
+  elif [ "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ]; then
+    echo "ERROR: paired validator active release requirements are unavailable" >&2
+    return 1
+  else
+    if [ ! -s "$GATEWAY_V2_RELEASE_LINEAGE" ] \
+        || [ ! -f "$GATEWAY_V2_RELEASE_LINEAGE" ] \
+        || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
+      echo "ERROR: standalone gateway compact-lineage fallback is unavailable" >&2
+      return 1
+    fi
+    fallback_context="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT"
+    if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ] \
+        && [ "$fallback_context" = "standalone" ]; then
+      fallback_context="cutover"
+    fi
+    validator_authority_args=(
+      --fallback-lineage "$GATEWAY_V2_RELEASE_LINEAGE"
+      --fallback-context "$fallback_context"
+    )
+  fi
+  if ! [[ "$GATEWAY_ANCESTRY_SAFE_EPOCH" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: active release selection lacks a proven-safe epoch" >&2
+    return 1
+  fi
+
+  running_gateway_manifest="$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+  if [ ! -s "$running_gateway_manifest" ]; then
+    running_gateway_manifest="$GATEWAY_V2_RELEASE_MANIFEST"
+  fi
+  if [ ! -r "$running_gateway_manifest" ]; then
+    echo "ERROR: running gateway release authority is unavailable" >&2
+    return 1
+  fi
+
+  lineage_id="$(
+    set -a
+    . "$ENV_CLONE"
+    set +a
+    cd "$GATEWAY_PREFLIGHT_TREE"
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - <<'PY'
+from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id
+
+print(_lineage_id())
+PY
+  )" || {
+    echo "ERROR: immutable active ancestry lineage identity is unavailable" >&2
+    return 1
+  }
+  if ! [[ "$lineage_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "ERROR: immutable active ancestry lineage identity is invalid" >&2
+    return 1
+  fi
+  authority_commit="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+  if [ -z "$authority_commit" ]; then
+    authority_commit="$(
+      git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
+    )" || return 1
+  fi
+  if ! [[ "$authority_commit" =~ ^[0-9a-f]{40}$ ]] \
+      || ! [[ "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
+    echo "ERROR: active release controller authority is invalid" >&2
+    return 1
+  fi
+
+  rm -f -- \
+    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"
+  if ! (
+      set -a
+      . "$ENV_CLONE"
+      set +a
+      run_gateway_active_release_controller_module \
+        gateway.tee.prepare_active_release_lineage_v2 \
+        --phase gateway-final \
+        --candidate-commit "$PREPARED_GATEWAY_SHA" \
+        --authority-commit "$authority_commit" \
+        --restart-invocation-id "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+        --running-gateway-manifest "$running_gateway_manifest" \
+        "${validator_authority_args[@]}" \
+        --epoch "$GATEWAY_ANCESTRY_SAFE_EPOCH" \
+        --netuid "${BITTENSOR_NETUID:-71}" \
+        --repository "$LEADPOET_REPO_ROOT" \
+        --lineage-id "$lineage_id" \
+        --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
+        --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+        --requirements-output "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+        --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"
+    ); then
+    echo "ERROR: compact active release lineage could not be prepared" >&2
+    return 1
+  fi
+  if [ ! -s "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" ] \
+      || [ ! -s "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" ]; then
+    echo "ERROR: compact active release lineage outputs are unavailable" >&2
+    return 1
+  fi
+  if [ -n "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ]; then
+    if ! [[ "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
+        || [ ! -s "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ] \
+        || [ ! -f "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ] \
+        || [ -L "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" ]; then
+      echo "ERROR: component-only counterpart compact lineage is unavailable" >&2
+      return 1
+    fi
+    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${GATEWAY_RESTART_AUTHORITY_ROOT:-$GATEWAY_PREFLIGHT_TREE}" \
+        "$GATEWAY_PYTHON_BIN" - \
+          "$PREPARED_GATEWAY_SHA" \
+          "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
+          "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" <<'PY'
+import json
+import os
+import stat
+import sys
+
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+
+expected = sys.argv[1]
+max_document_bytes = 4 * 1024 * 1024
+
+
+def load_bounded_json(path: str, label: str):
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+    except OSError as exc:
+        raise SystemExit(f"{label} cannot be opened securely: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > max_document_bytes
+        ):
+            raise SystemExit(f"{label} is not a bounded regular file")
+        payload = os.read(descriptor, max_document_bytes + 1)
+        if len(payload) != metadata.st_size or len(payload) > max_document_bytes:
+            raise SystemExit(f"{label} changed during its bounded read")
+    finally:
+        os.close(descriptor)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
+
+
+counterpart = validate_compact_release_lineage_v2(
+    load_bounded_json(sys.argv[2], "component counterpart compact lineage"),
+    expected_current_commit=expected,
+)
+selected = validate_compact_release_lineage_v2(
+    load_bounded_json(sys.argv[3], "selected compact lineage"),
+    expected_current_commit=expected,
+)
+if counterpart != selected:
+    raise SystemExit("component-only counterpart compact lineage differs")
+PY
+    then
+      echo "ERROR: component-only restart would diverge from the running validator lineage" >&2
+      return 1
+    fi
+  fi
+  echo "Prepared exact compact active release lineage"
+}
+
+wait_for_paired_gateway_destructive_handoff() {
+  local deadline marker_commit marker_nonce
+  if [ -z "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
+    return 0
+  fi
+  deadline=$((SECONDS + GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS))
+  echo "Gateway pre-shutdown checks complete; awaiting paired validator liveness handoff"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -L "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] \
+        || [ -d "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
+      echo "ERROR: paired gateway destructive handoff is not a plain file" >&2
+      return 1
+    fi
+    if [ -s "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ] \
+        && [ -f "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" ]; then
+      read -r marker_commit marker_nonce < "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" || true
+      case "$marker_commit" in
+        "$PREPARED_GATEWAY_SHA")
+          if [ "$marker_nonce" != "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" ]; then
+            echo "ERROR: paired gateway destructive handoff nonce differs" >&2
+            return 1
+          fi
+          rm -f -- "$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE"
+          echo "Paired validator liveness handoff accepted immediately before gateway shutdown"
+          return 0
+          ;;
+        "failed:$PREPARED_GATEWAY_SHA")
+          echo "ERROR: paired validator exited before gateway shutdown" >&2
+          return 1
+          ;;
+        *)
+          echo "ERROR: paired gateway destructive handoff commit differs" >&2
+          return 1
+          ;;
+      esac
+    fi
+    sleep 1
+  done
+  echo "ERROR: paired validator liveness handoff did not arrive before timeout" >&2
+  return 1
+}
+
 ensure_activated_gateway_release_lineage() {
   local authority_commit
 
-  authority_commit="$(
-    git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
-  )" || {
-    echo "ERROR: activated gateway cannot resolve the fetched main authority" >&2
-    return 1
-  }
+  authority_commit="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+  if [ -z "$authority_commit" ]; then
+    authority_commit="$(
+      git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
+    )" || {
+      echo "ERROR: activated gateway cannot resolve the fetched main authority" >&2
+      return 1
+    }
+  fi
   if ! [[ "$authority_commit" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: fetched main authority is not an exact commit" >&2
     return 1
@@ -1468,21 +1831,140 @@ ensure_activated_gateway_release_lineage() {
     return 1
   fi
 
-  # A deployed N-1 restart controller may predate release-lineage output. The
-  # activated candidate therefore reacquires and verifies the immutable
-  # release channel and its bounded main-branch lineage before any enclave is
-  # bootstrapped. This is intentionally fail-closed and never synthesizes
-  # release evidence.
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.release_channel_v2 \
-    --ensure \
-    --expected-commit "$GATEWAY_DEPLOY_SHA" \
-    --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
-    --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-    --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST" \
-    --lineage-output "$GATEWAY_V2_RELEASE_LINEAGE" \
-    --lineage-repository "$LEADPOET_REPO_ROOT" \
-    --lineage-authority-commit "$authority_commit"
+  # The old runtime selected and twice verified the exact active authority
+  # before shutdown. Revalidate those hash-bound candidate files under the
+  # activated code, then atomically install them without listing the lifetime
+  # release catalog or changing the selected authority set.
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - \
+    "$GATEWAY_DEPLOY_SHA" \
+    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    "$GATEWAY_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_V2_RELEASE_REQUIREMENTS" \
+    "$GATEWAY_V2_RELEASE_LINEAGE" <<'PY'
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+from gateway.tee.release_manifest_v2 import validate_release_manifest
+from leadpoet_canonical.attested_v2 import canonical_json
+
+(
+    expected_commit,
+    prepared_manifest_path,
+    prepared_requirements_path,
+    prepared_lineage_path,
+    manifest_output_path,
+    requirements_output_path,
+    lineage_output_path,
+) = sys.argv[1:]
+
+
+def read_document(path_value: str, label: str) -> tuple[bytes, dict]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path_value, flags)
+    except OSError as exc:
+        raise SystemExit(f"{label} is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4 * 1024 * 1024:
+            raise SystemExit(f"{label} is not a bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(4 * 1024 * 1024 + 1)
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{label} is invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} must be an object")
+    return raw, value
+
+
+raw_manifest, manifest_value = read_document(
+    prepared_manifest_path, "prepared gateway release manifest"
+)
+raw_requirements, requirements_value = read_document(
+    prepared_requirements_path, "prepared active release requirements"
+)
+raw_lineage, lineage_value = read_document(
+    prepared_lineage_path, "prepared compact release lineage"
+)
+manifest = validate_release_manifest(manifest_value)
+requirements = validate_active_release_requirements_v2(requirements_value)
+lineage = validate_compact_release_lineage_v2(
+    lineage_value,
+    expected_current_commit=expected_commit,
+    expected_current_gateway_release_hash=str(manifest.get("release_hash") or ""),
+)
+if manifest.get("commit_sha") != expected_commit:
+    raise SystemExit("prepared gateway release manifest commit differs")
+if requirements.get("candidate_commit_sha") != expected_commit:
+    raise SystemExit("prepared active release requirements commit differs")
+if set(lineage["releases"]) != set(requirements["required_commits"]):
+    raise SystemExit("prepared compact lineage differs from active requirements")
+
+documents = (
+    (
+        raw_manifest,
+        manifest,
+        Path(manifest_output_path),
+        "prepared gateway release manifest",
+    ),
+    (
+        raw_requirements,
+        requirements,
+        Path(requirements_output_path),
+        "prepared active release requirements",
+    ),
+    (
+        raw_lineage,
+        lineage,
+        Path(lineage_output_path),
+        "prepared compact release lineage",
+    ),
+)
+staged: list[tuple[Path, Path]] = []
+try:
+    for raw, normalized, destination, label in documents:
+        encoded = (canonical_json(normalized) + "\n").encode("utf-8")
+        if raw != encoded:
+            raise SystemExit(f"{label} is not exact canonical JSON")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=str(destination.parent)
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        staged.append((temporary, destination))
+    for temporary, destination in staged:
+        os.replace(temporary, destination)
+    for directory in {destination.parent for _, destination in staged}:
+        directory_descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+finally:
+    for temporary, _ in staged:
+        temporary.unlink(missing_ok=True)
+
+print("Installed exact compact active release lineage")
+PY
 }
 trap on_gateway_restart_exit EXIT
 
@@ -1518,6 +2000,7 @@ enforce_deployment_environment() {
   export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
+  export GATEWAY_V2_RELEASE_REQUIREMENTS
   export GATEWAY_V2_ARTIFACT_POLICY
   export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
@@ -1541,10 +2024,11 @@ enforce_deployment_environment() {
 
 install_successful_restart_script() {
   local controller_sha release_dir temporary_dir temporary_link
-  local source_script
+  local controller_source_root source_script
   local target_script="$GATEWAY_HOST_RESTART_SCRIPT"
   local target_dir temporary
-  controller_sha="$GATEWAY_DEPLOY_SHA"
+  controller_sha="${GATEWAY_RESTART_AUTHORITY_COMMIT:-$GATEWAY_DEPLOY_SHA}"
+  controller_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
   mkdir -p "$GATEWAY_RESTART_CONTROLLER_ROOT/releases"
   chmod 700 \
     "$(dirname "$GATEWAY_RESTART_CONTROLLER_ROOT")" \
@@ -1556,14 +2040,14 @@ install_successful_restart_script() {
     "$temporary_dir/Leadpoet/utils" \
     "$temporary_dir/gateway/tee" \
     "$temporary_dir/scripts"
-  install -m 700 "$LEADPOET_REPO_ROOT/gw_restart.sh" \
+  install -m 700 "$controller_source_root/gw_restart.sh" \
     "$temporary_dir/gw_restart.sh"
-  install -m 600 "$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py" \
+  install -m 600 "$controller_source_root/scripts/gateway_git_deploy.py" \
     "$temporary_dir/scripts/gateway_git_deploy.py"
   install -m 600 \
-    "$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+    "$controller_source_root/Leadpoet/utils/exact_commit_restart_v2.py" \
     "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
-  install -m 600 "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
+  install -m 600 "$controller_source_root/gateway/tee/host_memory_guard_v2.py" \
     "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     if [ ! -d "$release_dir" ] \
@@ -1985,7 +2469,10 @@ if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
   export PYTHONDONTWRITEBYTECODE=1
   export PYTHONPATH="$bootstrap_candidate_root"
   cd /
-  exec "$GATEWAY_PYTHON_BIN" \
+  exec env \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    "$GATEWAY_PYTHON_BIN" \
     -P -m gateway.tee.gateway_miner_maintenance_restart_v1 \
     --bootstrap-exec \
     --expected-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT" \
@@ -2052,6 +2539,14 @@ restart_only_keys = {
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_COMMIT",
+    "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
@@ -2069,6 +2564,12 @@ restart_only_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
+    "GATEWAY_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
+    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -2175,6 +2676,14 @@ skip_keys = {
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_COMMIT",
+    "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
@@ -2186,6 +2695,12 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
+    "GATEWAY_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
+    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -2322,6 +2837,14 @@ skip_keys = {
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_ROOT",
+    "GATEWAY_RESTART_AUTHORITY_COMMIT",
+    "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
+    "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
     "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
@@ -2333,6 +2856,12 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
     "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
+    "GATEWAY_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS",
+    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
+    "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -2618,10 +3147,7 @@ for attempt in $(seq 1 300); do
       --expected-commit "$PREPARED_GATEWAY_SHA" \
       --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
       --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-      --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-      --lineage-repository "$LEADPOET_REPO_ROOT" \
-      --lineage-authority-commit "$ORIGIN_MAIN_GATEWAY_SHA"; then
+      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
     if follow_superseding_gateway_release; then
       V2_RELEASE_READY=1
       break
@@ -2907,6 +3433,18 @@ wait_for_foreign_docker_builds
 wait_for_gateway_build_memory
 record_gateway_restart_timing "pre_shutdown_checks_complete"
 
+if ! wait_for_paired_gateway_destructive_handoff; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+echo "Selecting the exact active release authority immediately before shutdown"
+GATEWAY_DEPLOY_STAGE="active_release_lineage_selection"
+export GATEWAY_DEPLOY_STAGE
+if ! prepare_gateway_active_release_lineage; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -2956,6 +3494,16 @@ if [ "$ACTIVATED_GATEWAY_SHA" != "$PREPARED_GATEWAY_SHA" ]; then
 fi
 echo "Activated gateway commit: $ACTIVATED_GATEWAY_SHA"
 
+GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT="$LEADPOET_REPO_ROOT/gw_restart.sh"
+if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
+  GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT="$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh"
+fi
+if [ ! -r "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" ] \
+    || [ -L "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" ]; then
+  echo "ERROR: exact restart authority disappeared before post-activation reexec" >&2
+  exit 1
+fi
+
 GATEWAY_DEPLOY_STAGE="restart_reexec"
 export GATEWAY_DEPLOY_STAGE
 unset GATEWAY_DEPLOY_COMMIT
@@ -2973,6 +3521,14 @@ exec env \
   GATEWAY_RESTART_GIT_SSH_COMMAND="$GATEWAY_RESTART_GIT_SSH_COMMAND" \
   GATEWAY_GIT_HELPER="$GATEWAY_GIT_HELPER" \
   GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
+  GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
+  GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
+  GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+  GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
+  GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE" \
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE" \
+  GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS="$GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS" \
   GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
   GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
   GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
@@ -2999,6 +3555,12 @@ exec env \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
+  GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
+  GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+  GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+  GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
+  GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
+  GATEWAY_COUNTERPART_RELEASE_LINEAGE="$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
   GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
   GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
@@ -3006,7 +3568,7 @@ exec env \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
   VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
   GATEWAY_DEPLOY_STAGE="$GATEWAY_DEPLOY_STAGE" \
-  bash "$LEADPOET_REPO_ROOT/gw_restart.sh" "$@"
+  bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
 fi
 
 GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
@@ -3233,6 +3795,16 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
+    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
+    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
+    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
@@ -3251,6 +3823,16 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+    -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
+    -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
+    -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
+    -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
+    -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
@@ -3439,6 +4021,16 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
+  -u GATEWAY_RESTART_AUTHORITY_ROOT \
+  -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+  -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
+  -u GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED \
+  -u GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT \
+  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE \
+  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE \
+  -u GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS \
+  -u GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS \
+  -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
   9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &

@@ -572,7 +572,7 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:ad97167426adc5afa4370ce2ca25ca6af8b70f453b390609f2a55bc42ba68067",
+      "ast_sha256": "sha256:2eda73128cea01ebf2f63027474b651a3626080296d87997330c399cc0b0dc29",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -7187,12 +7187,12 @@
       "symbol": "QUALIFICATION_PROTOCOL_REQUIRED_ENTRYPOINTS_V2"
     },
     {
-      "ast_sha256": "sha256:0e654e2583734e226c4a6fc6b74e9fc6d8b1a98e1811919e152489046006b53f",
+      "ast_sha256": "sha256:65133e1596c01fdddd9ed4b5790dd43d69afc89f2b8b300c410ddce78fb87df3",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS"
     },
     {
-      "ast_sha256": "sha256:6354cc83ed195a01c08c83046632650bf5400991090256774d93243c5c4952c3",
+      "ast_sha256": "sha256:dc115b6492457c46be16980175dcf6b3b519028976e3abc2a8e09f461f85819a",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "REVIEWED_CONSUMER_SNAPSHOT_SPECS"
     },
@@ -7432,7 +7432,7 @@
       "symbol": "_unique_literal_binding_v1"
     },
     {
-      "ast_sha256": "sha256:3e579630d561a00ef5a4788623bba3ba3e9fed475d69e8d23d0050035fb63495",
+      "ast_sha256": "sha256:4532d97890412504d65ae4b05e98fb1fa61de57df7faffcac5dea0e4622f9829",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_verify_source_tree_contract_document"
     },
@@ -7807,7 +7807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:e4fe3df7b10f59bf88c0ff4b1415b90d6b803b7e2634da7ac8192024fdcbae39",
-  "protected_source_commit": "c9ce06994ef4e0bb396c22960c0867b38daab4a3",
+  "manifest_hash": "sha256:8b50a5417332641c4915c7cd6946440f360651f487a4456def1895eb3e47a4bc",
+  "protected_source_commit": "19bfca1e678e73107acea3cc6eb74236b31dec26",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

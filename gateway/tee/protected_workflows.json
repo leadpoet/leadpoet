@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "58651a47cc0f5ff47d439c82dde600095559e7c9",
+  "baseline_commit": "af031e0bc2ff79f8ed170654072b726ecdc27d77",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -7537,7 +7537,7 @@
       "symbol": "validate_typed_dispatch_custody_v3_runtime_metadata_v1"
     },
     {
-      "ast_sha256": "sha256:8800977f430590ef21990d359f7beb1f380a054f9080a579033c380abfb4c16d",
+      "ast_sha256": "sha256:36516af96915df74404d16290330a600e09d062dfce37898d9d2bd6e3f9017de",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_semantic_source_tree_compatibility_v1"
     },
@@ -7812,7 +7812,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:2c8daafdac8ef6b517c145ed7c5608de19f6a2d3aab94a604a1608fc8f9b79d5",
-  "protected_source_commit": "0534cb9bdc71633bd1b880570146de303e920ef4",
+  "manifest_hash": "sha256:9393555d8935c20b1b36d24800b0c2d5f273f082cc318a088555c5211baa696b",
+  "protected_source_commit": "af031e0bc2ff79f8ed170654072b726ecdc27d77",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

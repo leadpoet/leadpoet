@@ -243,7 +243,7 @@ def test_v10_exact_dispatch_metadata_is_accepted() -> None:
     )
 
 
-def test_v10_runtime_dispatch_metadata_allows_only_signed_release_identity() -> None:
+def test_v10_runtime_dispatch_metadata_allows_model_release_identity() -> None:
     expected = _expected_v10_dispatch_custody_metadata()
     release_contract_sha256 = "a" * 64
     current_release = deepcopy(expected)
@@ -251,12 +251,12 @@ def test_v10_runtime_dispatch_metadata_allows_only_signed_release_identity() -> 
         release_contract_sha256
     )
 
-    assert compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
-        current_release,
-        expected_legacy_v2_consumer_contract_sha256=(
-            "sha256:" + release_contract_sha256
-        ),
-    ) == current_release
+    assert (
+        compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
+            current_release
+        )
+        == current_release
+    )
     with pytest.raises(
         ValueError,
         match="typed dispatch custody metadata differs",
@@ -291,34 +291,6 @@ def test_v10_runtime_dispatch_metadata_rejects_malformed_release_identity(
         )
 
 
-def test_v10_runtime_dispatch_metadata_binds_signed_release_identity() -> None:
-    metadata = _expected_v10_dispatch_custody_metadata()
-    metadata["legacy_v2_consumer_contract_sha256"] = "a" * 64
-
-    with pytest.raises(
-        ValueError,
-        match="typed dispatch custody runtime metadata differs",
-    ):
-        compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
-            metadata,
-            expected_legacy_v2_consumer_contract_sha256="sha256:" + "b" * 64,
-        )
-
-
-def test_v10_runtime_dispatch_metadata_rejects_malformed_signed_identity() -> None:
-    metadata = _expected_v10_dispatch_custody_metadata()
-    metadata["legacy_v2_consumer_contract_sha256"] = "a" * 64
-
-    with pytest.raises(
-        ValueError,
-        match="typed dispatch custody runtime metadata differs",
-    ):
-        compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
-            metadata,
-            expected_legacy_v2_consumer_contract_sha256="sha256:",
-        )
-
-
 def test_v10_runtime_dispatch_metadata_keeps_wire_abi_exact() -> None:
     metadata = _expected_v10_dispatch_custody_metadata()
     metadata["legacy_v2_consumer_contract_sha256"] = "a" * 64
@@ -329,8 +301,7 @@ def test_v10_runtime_dispatch_metadata_keeps_wire_abi_exact() -> None:
         match="typed dispatch custody runtime metadata differs",
     ):
         compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
-            metadata,
-            expected_legacy_v2_consumer_contract_sha256="sha256:" + "a" * 64,
+            metadata
         )
 
 

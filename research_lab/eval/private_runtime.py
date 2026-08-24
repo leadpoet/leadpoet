@@ -2079,7 +2079,6 @@ def validate_sourcing_adapter_metadata(
     expected_semantic_bindings: Mapping[str, str] | None = None,
     require_company_fit_contract: bool = False,
     expected_scoring_adapter_version: str = "",
-    expected_typed_dispatch_legacy_contract_sha256: str = "",
 ) -> dict[str, Any]:
     """Run the deterministic consumer-owned runtime invariant probe.
 
@@ -2153,12 +2152,7 @@ def validate_sourcing_adapter_metadata(
                 "private model v10 adapter metadata lacks typed dispatch custody"
             )
         try:
-            validate_typed_dispatch_custody_v3_runtime_metadata_v1(
-                dispatch_custody,
-                expected_legacy_v2_consumer_contract_sha256=(
-                    expected_typed_dispatch_legacy_contract_sha256
-                ),
-            )
+            validate_typed_dispatch_custody_v3_runtime_metadata_v1(dispatch_custody)
         except ValueError as exc:
             raise PrivateModelRuntimeError(
                 "private model v10 dispatch custody metadata differs"

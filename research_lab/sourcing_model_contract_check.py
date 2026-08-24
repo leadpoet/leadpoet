@@ -2200,15 +2200,16 @@ def validate_typed_dispatch_custody_v3_metadata_v1(
 
 def validate_typed_dispatch_custody_v3_runtime_metadata_v1(
     value: Any,
-    *,
-    expected_legacy_v2_consumer_contract_sha256: str = "",
 ) -> Dict[str, Any]:
     """Validate the stable custody-v3 ABI without pinning release identity.
 
-    The legacy consumer-contract hash legitimately changes between compatible
-    signed model releases.  It is bound to the artifact manifest here while
-    every host-consumed encoding, framing, schema, field set, and entrypoint
-    remains byte-exact to the reviewed ABI.
+    The legacy-v2 hash is a model-owned protocol identity, not the raw hash of
+    the current signed compatibility-contract file.  Its authenticity comes
+    from the already verified immutable image/source/parity release tuple, and
+    the complete returned metadata is hash-bound into the admission/runtime
+    receipts.  The value may therefore change between compatible signed model
+    releases, while every host-consumed encoding, framing, schema, field set,
+    and entrypoint remains byte-exact to the reviewed ABI.
     """
 
     expected = approved_typed_dispatch_custody_v3_metadata_v1()
@@ -2223,18 +2224,6 @@ def validate_typed_dispatch_custody_v3_runtime_metadata_v1(
         or hash_pattern.fullmatch(contract_hash) is None
     ):
         raise ValueError("typed dispatch custody runtime metadata differs")
-    expected_contract_identity = str(
-        expected_legacy_v2_consumer_contract_sha256 or ""
-    )
-    if expected_contract_identity:
-        expected_contract_hash = expected_contract_identity.removeprefix(
-            "sha256:"
-        )
-        if (
-            hash_pattern.fullmatch(expected_contract_hash) is None
-            or contract_hash != expected_contract_hash
-        ):
-            raise ValueError("typed dispatch custody runtime metadata differs")
     normalized["legacy_v2_consumer_contract_sha256"] = expected[
         "legacy_v2_consumer_contract_sha256"
     ]

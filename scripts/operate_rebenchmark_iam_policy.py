@@ -43,6 +43,7 @@ SSH_KEY = Path("/Users/pranav/Downloads/leadpoet-2026-07-28.pem")
 SSH_KNOWN_HOSTS = Path("/Users/pranav/.ssh/known_hosts")
 GIT_BIN = "/usr/bin/git"
 SSH_BIN = "/usr/bin/ssh"
+REMOTE_PYTHON = "/home/ec2-user/venv311/bin/python"
 EXPECTED_ORIGIN_URL = "https://github.com/leadpoet/leadpoet.git"
 EXPECTED_REGION = "us-east-1"
 EXPECTED_ACCOUNT_ID = "493765492819"
@@ -3297,7 +3298,7 @@ def _remote_call(
         "sources": list(sources),
         "bridge_source_hash": source_hash,
     }
-    command = "python3 -I -c " + shlex.quote(REMOTE_LOADER)
+    command = shlex.quote(REMOTE_PYTHON) + " -I -c " + shlex.quote(REMOTE_LOADER)
     output = _run(
         SSH_BIN,
         "-i",

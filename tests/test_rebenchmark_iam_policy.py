@@ -1564,6 +1564,45 @@ def test_local_command_environment_drops_every_aws_selector(monkeypatch):
     assert 'os.environ.pop(name, None)' in operator.REMOTE_LOADER
 
 
+def test_gateway_bridge_uses_isolated_production_python(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["input_value"] = kwargs["input_value"]
+        return json.dumps(
+            {
+                "schema_version": operator.AUTHORITY_SCHEMA,
+                "status": "authority_ready",
+                "origin_main_sha": COMMIT,
+                "bridge_source_hash": SOURCE_HASH,
+                "account_id": ACCOUNT,
+                "caller_arn": CALLER,
+                "route": "gateway_bridge",
+                "local_chain": "ignored_non_authority",
+                "secret_values_printed": False,
+                "policy_material_printed": False,
+            }
+        ).encode()
+
+    monkeypatch.setattr(operator, "_validate_ssh_key", lambda: None)
+    monkeypatch.setattr(operator, "_run", fake_run)
+
+    receipt = operator._remote_call(
+        "probe",
+        None,
+        commit=COMMIT,
+        sources=[],
+        source_hash=SOURCE_HASH,
+    )
+
+    assert receipt["status"] == "authority_ready"
+    command = captured["args"][-1]
+    assert isinstance(command, str)
+    assert command.startswith(operator.REMOTE_PYTHON + " -I -c ")
+    assert captured["input_value"]
+
+
 def test_exact_source_gate_rejects_origin_alias_and_untracked_bytes(monkeypatch):
     monkeypatch.setattr(
         operator,

@@ -1298,6 +1298,7 @@ def _wire_policy_change_request(
     *,
     commit: str,
     source_hash: str,
+    allow_historical_plan: bool = False,
 ) -> dict[str, Any]:
     """Serialize one locally validated request back to the public wire shape."""
 
@@ -1322,8 +1323,8 @@ def _wire_policy_change_request(
     wire = {field: value[field] for field in wire_fields}
     reparsed = _validate_request(
         wire,
-        commit=commit,
-        source_hash=source_hash,
+        commit=None if allow_historical_plan else commit,
+        source_hash=None if allow_historical_plan else source_hash,
         require_intent=True,
     )
     if reparsed != dict(value):
@@ -2919,6 +2920,7 @@ def _reconcile_policy(
     caller_arn: str,
     prewrite_condition_documents_loader: Any | None = None,
     condition_documents_loader: Any | None = None,
+    before_only: bool = False,
 ) -> dict[str, Any]:
     target = request["target"]
     raw_loader = (
@@ -2962,6 +2964,16 @@ def _reconcile_policy(
                 default_new=True,
             )
             is not None
+        )
+    if before_only:
+        return _reconciliation_receipt(
+            status="before" if exact_before else "ambiguous",
+            state=state,
+            request=request,
+            source_hash=source_hash,
+            commit=commit,
+            account_id=account_id,
+            caller_arn=caller_arn,
         )
     if exact_before and plan["prior_document_hash"] != plan["desired_document_hash"]:
         return _reconciliation_receipt(
@@ -3072,9 +3084,16 @@ def _remote_entry(
             raise OperationError("IAM policy operation is unsupported")
         validated = _validate_request(
             request,
-            commit=commit,
-            source_hash=source_hash,
+            commit=None if operation == "reconcile" else commit,
+            source_hash=None if operation == "reconcile" else source_hash,
             require_intent=True,
+        )
+        historical_plan = bool(
+            operation == "reconcile"
+            and (
+                validated["plan"].get("origin_main_sha") != commit
+                or validated["plan"].get("bridge_source_hash") != source_hash
+            )
         )
         authority_loader = (
             (lambda: _inline_state(iam, validated["target"]))
@@ -3148,6 +3167,7 @@ def _remote_entry(
                     prewrite_condition_documents_loader
                 ),
                 condition_documents_loader=condition_documents_loader,
+                before_only=historical_plan,
             )
         if validated["intent"]["status"] != "reserved":
             raise OperationError("IAM apply intent is not reserved")
@@ -3649,36 +3669,33 @@ def _execute_intent_operation(
         raise OperationError("IAM intent operation is invalid")
     record = _read_operation_record(ledger, request)
     generation = request["intent"]["ledger_generation"]
-    if record is not None and record["state"] == "outcome":
-        cached = dict(record["receipt"])
-        if cached.get("schema_version") == RECEIPT_SCHEMA:
+    if operation == "apply" and record is not None:
+        if (
+            record["state"] == "outcome"
+            and record["receipt"].get("schema_version") == RECEIPT_SCHEMA
+        ):
             return _validate_remote_receipt(
                 operation,
-                cached,
+                dict(record["receipt"]),
                 request=request,
                 commit=commit,
                 source_hash=source_hash,
             )
-        if record["attempt_generation"] == generation:
-            if operation != "reconcile":
-                raise OperationError(
-                    "IAM reconciliation result must be recorded before another apply"
-                )
-            return _validate_remote_receipt(
-                operation,
-                cached,
-                request=request,
-                commit=commit,
-                source_hash=source_hash,
-            )
-    if (
-        record is not None
-        and record["attempt_generation"] == generation
-        and record["state"] == "pending"
-        and operation == "apply"
-    ):
         raise OperationError(
-            "IAM apply outcome is unknown; read-only reconciliation is required"
+            "IAM operation was already attempted; read-only reconciliation is required"
+        )
+    if (
+        operation == "reconcile"
+        and record is not None
+        and record["attempt_generation"] == generation
+        and record["state"] == "outcome"
+    ):
+        return _validate_remote_receipt(
+            operation,
+            dict(record["receipt"]),
+            request=request,
+            commit=commit,
+            source_hash=source_hash,
         )
     _write_operation_record(
         ledger, request, attempt_operation=operation, receipt=None
@@ -3704,6 +3721,7 @@ def _validate_active_ledger(
     required_plan_hash: str | None = None,
     require_intent: bool = False,
     allowed_statuses: frozenset[str] = frozenset({"running"}),
+    allow_historical_plan: bool = False,
     _lock_held: bool = False,
 ) -> Mapping[str, Any]:
     if not _lock_held:
@@ -3715,6 +3733,7 @@ def _validate_active_ledger(
                 required_plan_hash=required_plan_hash,
                 require_intent=require_intent,
                 allowed_statuses=allowed_statuses,
+                allow_historical_plan=allow_historical_plan,
                 _lock_held=True,
             )
     try:
@@ -3800,6 +3819,20 @@ def _validate_active_ledger(
         or not isinstance(routes, list)
         or not routes
         or routes[-1] != route
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("schema_version") != AUTHORITY_SCHEMA
+            or item.get("status") != "authority_ready"
+            or SHA_RE.fullmatch(str(item.get("origin_main_sha") or "")) is None
+            or HASH_RE.fullmatch(str(item.get("bridge_source_hash") or "")) is None
+            or item.get("account_id") != EXPECTED_ACCOUNT_ID
+            or item.get("caller_arn") != EXPECTED_CALLER_ARN
+            or item.get("route") != "gateway_bridge"
+            or item.get("local_chain") != "ignored_non_authority"
+            or item.get("secret_values_printed") is not False
+            or item.get("policy_material_printed") is not False
+            for item in routes
+        )
         or not isinstance(plan_history, list)
         or not isinstance(plans, list)
         or not isinstance(changes, list)
@@ -3825,8 +3858,18 @@ def _validate_active_ledger(
         if len(matching) != 1:
             raise OperationError("typed IAM policy plan ledger gate is not satisfied")
         plan = _validate_plan_receipt(
-            matching[0], commit=commit, source_hash=source_hash
+            matching[0],
+            commit=None if allow_historical_plan else commit,
+            source_hash=None if allow_historical_plan else source_hash,
         )
+        if allow_historical_plan and not any(
+            item.get("origin_main_sha") == plan["origin_main_sha"]
+            and item.get("bridge_source_hash") == plan["bridge_source_hash"]
+            for item in routes
+        ):
+            raise OperationError(
+                "typed IAM policy plan historical authority is unavailable"
+            )
         if any(
             isinstance(item, Mapping)
             and item.get("plan_hash") == required_plan_hash
@@ -3856,11 +3899,21 @@ def _remote_call(
     source_hash: str,
 ) -> dict[str, Any]:
     _validate_ssh_key()
+    historical_plan = bool(
+        operation == "reconcile"
+        and isinstance(request, Mapping)
+        and isinstance(request.get("plan"), Mapping)
+        and (
+            request["plan"].get("origin_main_sha") != commit
+            or request["plan"].get("bridge_source_hash") != source_hash
+        )
+    )
     wire_request = (
         _wire_policy_change_request(
             request,
             commit=commit,
             source_hash=source_hash,
+            allow_historical_plan=historical_plan,
         )
         if operation in {"apply", "reconcile"}
         else request
@@ -3968,6 +4021,19 @@ def _validate_remote_receipt(
         ):
             raise OperationError("gateway IAM plan receipt request binding differs")
         return plan
+    historical_plan = bool(
+        operation == "reconcile"
+        and isinstance(request, Mapping)
+        and isinstance(request.get("plan"), Mapping)
+        and (
+            request["plan"].get("origin_main_sha") != commit
+            or request["plan"].get("bridge_source_hash") != source_hash
+        )
+    )
+    if historical_plan and value.get("schema_version") != RECONCILIATION_SCHEMA:
+        raise OperationError(
+            "historical IAM reconciliation receipt schema differs"
+        )
     if operation == "reconcile" and value.get("schema_version") == RECONCILIATION_SCHEMA:
         expected_keys = {
             "schema_version",
@@ -4181,7 +4247,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 required_plan_hash = None
             else:
                 request = _validate_request(
-                    raw_request, commit=commit, source_hash=source_hash
+                    raw_request,
+                    commit=None if args.command == "reconcile" else commit,
+                    source_hash=(
+                        None if args.command == "reconcile" else source_hash
+                    ),
                 )
                 required_plan_hash = request["plan"]["plan_hash"]
             if args.command == "plan":
@@ -4214,6 +4284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 if args.command == "apply"
                                 else frozenset({"running", "stop_requested"})
                             ),
+                            allow_historical_plan=args.command == "reconcile",
                             _lock_held=True,
                         )
                         active = [

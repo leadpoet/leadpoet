@@ -197,6 +197,24 @@ validate the same strict contract again. A regression test asserts the exact
 field inventory and round trip. Internal convenience fields must never expand
 or loosen the remote request surface.
 
+If exact `origin/main` advances while an IAM intent remains active, the typed
+ledger appends the fresh exact-main authority route without rewriting the
+intent or its plan. The current commissioner may reconcile the plan only
+against its exact retained historical route. That historical mode is
+before-only: it reads stable live inventory, returns `before` only for the
+exact plan base, classifies every desired, staged, unstable, or third state as
+ambiguous, and performs no simulation, cleanup, policy write, or historical
+apply. This prevents a release fix from orphaning an in-flight intent without
+weakening current-source authority.
+
+Each durable IAM operation ID permits at most one remote apply dispatch for its
+entire lifetime, including across authority refreshes and later source reverts.
+Any pending or reconciliation record permanently bars another remote apply;
+an exact validated policy outcome may only be replayed locally. A newer ledger
+generation may supersede stale operation evidence only with another read-only
+reconciliation. Historical reconciliation accepts only its dedicated
+before/ambiguous receipt schema, never an applied-policy receipt.
+
 Authority and reconciliation inventory reads use bounded retries, and all
 failures cross the bridge only as fixed typed diagnostics; they never trigger a
 request for operator credentials or manual IAM work. For managed

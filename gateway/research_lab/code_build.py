@@ -1462,16 +1462,25 @@ def _candidate_private_test_env(
     *,
     repo_dir: Path,
 ) -> dict[str, str]:
-    """Bind private-test imports to the exact candidate workspace."""
+    """Bind private tests to the exact candidate and gateway interpreter."""
 
     result = dict(env)
     candidate_root = str(repo_dir.resolve())
-    existing = [
+    existing_pythonpath = [
         item
         for item in str(result.get("PYTHONPATH") or "").split(os.pathsep)
         if item and item != candidate_root
     ]
-    result["PYTHONPATH"] = os.pathsep.join((candidate_root, *existing))
+    result["PYTHONPATH"] = os.pathsep.join(
+        (candidate_root, *existing_pythonpath)
+    )
+    interpreter_bin = str(Path(sys.executable).parent)
+    existing_path = [
+        item
+        for item in str(result.get("PATH") or "").split(os.pathsep)
+        if item and item != interpreter_bin
+    ]
+    result["PATH"] = os.pathsep.join((interpreter_bin, *existing_path))
     return result
 
 

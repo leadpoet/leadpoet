@@ -792,6 +792,37 @@ def test_candidate_private_test_imports_exact_workspace_with_safe_path(tmp_path)
         str(candidate_root.resolve()),
         str(inherited_root),
     ]
+    assert env["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).parent)
+
+
+def test_candidate_private_test_uses_verified_process_interpreter(
+    tmp_path,
+    monkeypatch,
+):
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir()
+    interpreter_bin = tmp_path / "verified-venv" / "bin"
+    interpreter_bin.mkdir(parents=True)
+    monkeypatch.setattr(
+        code_build.sys,
+        "executable",
+        str(interpreter_bin / "python3.11"),
+    )
+
+    env = code_build._candidate_private_test_env(
+        {
+            "PATH": os.pathsep.join(
+                ("/usr/bin", str(interpreter_bin), "/bin")
+            ),
+        },
+        repo_dir=candidate_root,
+    )
+
+    assert env["PATH"].split(os.pathsep) == [
+        str(interpreter_bin),
+        "/usr/bin",
+        "/bin",
+    ]
 
 
 def test_git_apply_accepts_exact_replacement_hunk_without_trailing_context(tmp_path):

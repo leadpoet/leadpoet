@@ -772,7 +772,7 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
 
 
 @pytest.mark.asyncio
-async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
+async def test_model_compatibility_reboot_reuses_durable_authority(
     monkeypatch,
 ):
     release = _release()
@@ -876,9 +876,13 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     )
     durable_proof = dict(first["ancestry_compact_proof"])
     original_clock = client.manager._clock
+    client = _Client(
+        release,
+        executor=execute_compatibility,
+    )
     with client.manager._lock:
-        client.manager._jobs.clear()
         client.manager._clock = lambda: original_clock() + 10.0
+    common["client"] = client
 
     second = await execute_scoring_v2(**common)
 
@@ -896,6 +900,12 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     )
     assert observed_current_receipts[0]["enclave_signature"] != (
         observed_current_receipts[1]["enclave_signature"]
+    )
+    assert observed_current_receipts[0]["boot_identity_hash"] != (
+        observed_current_receipts[1]["boot_identity_hash"]
+    )
+    assert observed_current_receipts[0]["enclave_pubkey"] != (
+        observed_current_receipts[1]["enclave_pubkey"]
     )
     assert len(persisted_graphs) == 1
     assert second["replay_status"] == "durable_model_compatibility_exact"

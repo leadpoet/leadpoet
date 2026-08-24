@@ -133,6 +133,9 @@ _RECEIPT_IDEMPOTENCY_FIELDS_V2 = (
     "config_hash",
 )
 _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
+    # Per-boot identity and signer fields intentionally differ after an
+    # enclave restart; each receipt and the stored graph are verified
+    # independently before semantic reuse.
     "schema_version",
     "role",
     "purpose",
@@ -144,7 +147,6 @@ _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
     "build_manifest_hash",
     "dependency_lock_hash",
     "config_hash",
-    "boot_identity_hash",
     "input_root",
     "output_root",
     "transport_root",
@@ -153,7 +155,6 @@ _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
     "parent_receipt_hashes",
     "status",
     "failure_code",
-    "enclave_pubkey",
 )
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {

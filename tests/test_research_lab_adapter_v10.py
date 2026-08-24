@@ -305,6 +305,20 @@ def test_v10_runtime_dispatch_metadata_binds_signed_release_identity() -> None:
         )
 
 
+def test_v10_runtime_dispatch_metadata_rejects_malformed_signed_identity() -> None:
+    metadata = _expected_v10_dispatch_custody_metadata()
+    metadata["legacy_v2_consumer_contract_sha256"] = "a" * 64
+
+    with pytest.raises(
+        ValueError,
+        match="typed dispatch custody runtime metadata differs",
+    ):
+        compatibility.validate_typed_dispatch_custody_v3_runtime_metadata_v1(
+            metadata,
+            expected_legacy_v2_consumer_contract_sha256="sha256:",
+        )
+
+
 def test_v10_runtime_dispatch_metadata_keeps_wire_abi_exact() -> None:
     metadata = _expected_v10_dispatch_custody_metadata()
     metadata["legacy_v2_consumer_contract_sha256"] = "a" * 64

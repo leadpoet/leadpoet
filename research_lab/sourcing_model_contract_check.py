@@ -1972,14 +1972,18 @@ def validate_typed_dispatch_custody_v3_runtime_metadata_v1(
         or hash_pattern.fullmatch(contract_hash) is None
     ):
         raise ValueError("typed dispatch custody runtime metadata differs")
-    expected_contract_hash = str(
+    expected_contract_identity = str(
         expected_legacy_v2_consumer_contract_sha256 or ""
-    ).removeprefix("sha256:")
-    if expected_contract_hash and (
-        hash_pattern.fullmatch(expected_contract_hash) is None
-        or contract_hash != expected_contract_hash
-    ):
-        raise ValueError("typed dispatch custody runtime metadata differs")
+    )
+    if expected_contract_identity:
+        expected_contract_hash = expected_contract_identity.removeprefix(
+            "sha256:"
+        )
+        if (
+            hash_pattern.fullmatch(expected_contract_hash) is None
+            or contract_hash != expected_contract_hash
+        ):
+            raise ValueError("typed dispatch custody runtime metadata differs")
     normalized["legacy_v2_consumer_contract_sha256"] = expected[
         "legacy_v2_consumer_contract_sha256"
     ]

@@ -182,6 +182,11 @@ def admit_current_signed_artifact(
         selection=selection,
         spec=spec,
     )
+    final_pointer_raw = _read_s3_bytes(s3_client, POINTER_URI)
+    if final_pointer_raw != pointer_raw:
+        raise SignedArtifactAdmissionError(
+            "signed current pointer changed during artifact admission"
+        )
     return {
         "schema_version": "leadpoet.signed_sourcing_artifact_admission.v1",
         "status": "passed",
@@ -194,6 +199,7 @@ def admit_current_signed_artifact(
         ],
         "network": "none",
         "provider_credentials_forwarded": False,
+        "pointer_stable_through_admission": True,
     }
 
 

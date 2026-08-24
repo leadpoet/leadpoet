@@ -50,6 +50,20 @@ class _S3:
         return {"Body": BytesIO(value)}
 
 
+class _PromotingS3(_S3):
+    def __init__(self, pointer: bytes, promoted: bytes):
+        super().__init__(pointer)
+        self.promoted = promoted
+        self.pointer_reads = 0
+
+    def get_object(self, *, Bucket, Key):  # noqa: N803
+        if Key.endswith("current.json"):
+            self.pointer_reads += 1
+            value = self.pointer if self.pointer_reads == 1 else self.promoted
+            return {"Body": BytesIO(value)}
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+
 def test_current_signed_artifact_uses_exact_no_spend_production_preflight(
     monkeypatch,
 ):
@@ -85,11 +99,43 @@ def test_current_signed_artifact_uses_exact_no_spend_production_preflight(
     assert receipt["status"] == "passed"
     assert receipt["network"] == "none"
     assert receipt["provider_credentials_forwarded"] is False
+    assert receipt["pointer_stable_through_admission"] is True
     assert observed["selection"] is selection
     assert observed["spec"].network_disabled is True
     assert observed["spec"].env_passthrough == ()
     assert observed["spec"].extra_env == {}
     assert observed["spec"].image_digest == document["image_digest"]
+
+
+def test_pointer_promotion_during_preflight_invalidates_admission(monkeypatch):
+    document = _manifest_document()
+    pointer = (json.dumps(document, sort_keys=True) + "\n").encode()
+    promoted_document = _manifest_document(
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/"
+            "leadpoet/sourcing-model@sha256:" + "6" * 64
+        )
+    )
+    promoted = (json.dumps(promoted_document, sort_keys=True) + "\n").encode()
+    monkeypatch.setattr(
+        admission,
+        "select_official_baseline_release",
+        lambda artifact: SimpleNamespace(
+            selection_document={
+                "protocol_generation_sha256": "sha256:" + "5" * 64,
+            },
+        ),
+    )
+
+    with pytest.raises(
+        admission.SignedArtifactAdmissionError,
+        match="changed during artifact admission",
+    ):
+        admission.admit_current_signed_artifact(
+            s3_client=_PromotingS3(pointer, promoted),
+            signature_verifier=lambda *_args, **_kwargs: {"verified": True},
+            protocol_preflight=lambda **_kwargs: None,
+        )
 
 
 def test_current_pointer_must_equal_immutable_archive_bytes(monkeypatch):

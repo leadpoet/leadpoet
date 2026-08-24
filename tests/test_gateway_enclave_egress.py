@@ -3695,6 +3695,7 @@ def test_enclave_proxy_health_exposes_bounded_clean_tunnel_summary():
     upstream.sendall(b"server hello")
     upstream.shutdown(socket.SHUT_WR)
     assert client.recv(64) == b"server hello"
+    assert client.recv(1) == b""
     client.shutdown(socket.SHUT_WR)
     thread.join(timeout=2)
 

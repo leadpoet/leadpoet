@@ -177,15 +177,50 @@ intentionally changes one of those declared AWS capabilities or its ECR, KMS,
 S3, Secrets Manager, or role layout. Exact artifact and commit admission stays
 fail closed without coupling policy changes to every source release.
 
-The August 2026 rebenchmark incident was an IAM simulator inventory and
-classification failure, not missing operator access and not a Sourcing_model
-commit failure. AWS can return `MissingContextValues` at both aggregate and
-resource-specific levels, including keys from statements that do not apply to
-the simulated action. For managed parity-controller changes, the commissioner
-evaluates those keys against the complete live principal-policy inventory:
-unknown or action-applicable missing context fails closed, while a known key
-belonging only to action-inapplicable statements does not create a false
-denial.
+The August 2026 rebenchmark recovery exposed mechanism defects, not missing
+operator access and not a Sourcing_model commit failure. First, AWS can return
+`MissingContextValues` at both aggregate and resource-specific levels,
+including keys from statements that do not apply to the simulated action. For
+managed parity-controller changes, the commissioner evaluates those keys
+against the complete live principal-policy inventory: unknown or
+action-applicable missing context fails closed, while a known key belonging
+only to action-inapplicable statements does not create a false denial.
+
+Second, the local bridge once sent its validated internal request projection,
+including derived precondition fields, where the remote trust boundary accepts
+only the public request contract. After caller-identity verification, the
+remote correctly rejected that shape before any target-policy read or write,
+but the rejection surfaced as a generic SSH failure. The bridge now has one
+explicit lossless serializer from the internal projection back to the public
+wire contract, reparses that wire form locally, and then lets the remote
+validate the same strict contract again. A regression test asserts the exact
+field inventory and round trip. Internal convenience fields must never expand
+or loosen the remote request surface.
+
+If exact `origin/main` advances while an IAM intent remains active, the typed
+ledger appends the fresh exact-main authority route without rewriting the
+intent or its plan. The current commissioner may reconcile the plan only
+against its exact retained route. A commit-only advance with the same exact
+operator/setup closure hash is IAM-authority-equivalent: reconciliation may
+verify exact-applied state with simulations and emit a current-route receipt,
+but it performs no new policy write. If that closure hash changed, remote
+historical mode is before-only: it reads stable live inventory, returns
+`before` only for the exact plan base, classifies every desired, staged,
+unstable, or third state as ambiguous, and performs no simulation, cleanup,
+policy write, or historical apply. This prevents an unrelated release from
+orphaning an in-flight intent without letting changed code reinterpret an old
+write authority.
+
+Each durable IAM operation ID permits at most one remote apply dispatch for its
+entire lifetime, including across authority refreshes and later source reverts.
+Any pending or reconciliation record permanently bars another remote apply;
+an exact validated policy outcome is monotonic and may only be replayed
+locally, byte-for-byte, against its retained route. That zero-remote replay is
+not a historical apply and must never be overwritten by weaker inventory
+evidence. A newer ledger generation may supersede other stale operation
+evidence only with another read-only reconciliation. Changed-authority remote
+reconciliation accepts only its dedicated before/ambiguous receipt schema,
+never an applied-policy receipt.
 
 Authority and reconciliation inventory reads use bounded retries, and all
 failures cross the bridge only as fixed typed diagnostics; they never trigger a

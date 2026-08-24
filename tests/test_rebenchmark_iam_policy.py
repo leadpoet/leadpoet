@@ -1100,6 +1100,49 @@ def test_managed_reconciliation_is_idempotent_and_staged_state_is_ambiguous():
     assert len(iam.events) == applied_event_count
 
 
+def test_historical_managed_reconciliation_is_strictly_before_only():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+
+    before = operator._reconcile_policy(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        before_only=True,
+    )
+    assert before["status"] == "before"
+    assert iam.events == []
+    assert iam.simulation_calls == 0
+    assert iam.principal_simulation_calls == 0
+
+    iam.create_policy_version(
+        PolicyArn=MANAGED_ARN,
+        PolicyDocument=operator._json(operator._canonical_policy(AFTER)),
+        SetAsDefault=False,
+    )
+    iam.set_default_policy_version(PolicyArn=MANAGED_ARN, VersionId="v2")
+    event_count = len(iam.events)
+    applied = operator._reconcile_policy(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        before_only=True,
+    )
+    assert applied["status"] == "ambiguous"
+    assert len(iam.events) == event_count
+    assert iam.simulation_calls == 0
+    assert iam.principal_simulation_calls == 0
+
+
 def test_managed_capacity_fails_before_irreversible_prune_or_write():
     iam = FakeManagedIam(version_count=5)
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
@@ -3021,6 +3064,166 @@ def test_gateway_bridge_uses_isolated_production_python(monkeypatch):
     assert captured["input_value"]
 
 
+def test_gateway_bridge_round_trips_validated_policy_request_as_wire_shape(
+    monkeypatch,
+):
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    request = _bound_request(external)
+    state = operator._managed_state(iam, target)
+    receipt = operator._reconciliation_receipt(
+        status="before",
+        state=state,
+        request=request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        payload = json.loads(kwargs["input_value"])
+        captured["request"] = payload["request"]
+        return operator._json(receipt).encode()
+
+    monkeypatch.setattr(operator, "_validate_ssh_key", lambda: None)
+    monkeypatch.setattr(operator, "_run", fake_run)
+
+    observed = operator._remote_call(
+        "reconcile",
+        request,
+        commit=COMMIT,
+        sources=[],
+        source_hash=SOURCE_HASH,
+    )
+
+    wire = captured["request"]
+    assert isinstance(wire, dict)
+    assert set(wire) == {
+        "schema_version",
+        "change_id",
+        "target",
+        "desired_document",
+        "task_scope",
+        "simulations",
+        "plan",
+        "prune_managed_version",
+        "intent",
+    }
+    assert operator._validate_request(
+        wire,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+        require_intent=True,
+    ) == request
+    assert observed["status"] == "before"
+
+
+def test_policy_wire_round_trip_allows_historical_plan_only_when_explicit():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    plan = dict(external["plan"])
+    plan["origin_main_sha"] = "c" * 40
+    plan["bridge_source_hash"] = "sha256:" + "d" * 64
+    plan_material = dict(plan)
+    plan_material.pop("plan_hash")
+    plan["plan_hash"] = operator._sha256_json(plan_material)
+    external["plan"] = plan
+    request = operator._validate_request(external)
+    request["intent"] = _test_intent(plan)
+
+    with pytest.raises(operator.OperationError, match="plan receipt differs"):
+        operator._wire_policy_change_request(
+            request,
+            commit=COMMIT,
+            source_hash=SOURCE_HASH,
+        )
+
+    wire = operator._wire_policy_change_request(
+        request,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+        allow_historical_plan=True,
+    )
+    assert operator._validate_request(wire, require_intent=True) == request
+
+
+@pytest.mark.parametrize(
+    ("plan_source_hash", "expected_before_only"),
+    (
+        ("sha256:" + "d" * 64, True),
+        (SOURCE_HASH, False),
+    ),
+)
+def test_remote_entry_routes_reconcile_by_exact_bridge_authority(
+    monkeypatch,
+    plan_source_hash: str,
+    expected_before_only: bool,
+):
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    plan = dict(external["plan"])
+    plan["origin_main_sha"] = "c" * 40
+    plan["bridge_source_hash"] = plan_source_hash
+    plan_material = dict(plan)
+    plan_material.pop("plan_hash")
+    plan["plan_hash"] = operator._sha256_json(plan_material)
+    external["plan"] = plan
+    normalized = operator._validate_request(external)
+    normalized["intent"] = _test_intent(plan)
+    wire = operator._wire_policy_change_request(
+        normalized,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+        allow_historical_plan=True,
+    )
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        operator, "_validate_setup_managed_authority", lambda _setup: {}
+    )
+    monkeypatch.setattr(
+        operator,
+        "_gateway_clients",
+        lambda _setup: (FakeSts(), iam, ACCOUNT, CALLER),
+    )
+    monkeypatch.setattr(
+        operator,
+        "_validate_target_policy_authority",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def reconcile(_iam, request, *, before_only, **_kwargs):
+        observed["request"] = request
+        observed["before_only"] = before_only
+        return {"status": "historical-before-only"}
+
+    monkeypatch.setattr(operator, "_reconcile_policy", reconcile)
+
+    assert operator._remote_entry(
+        "reconcile",
+        wire,
+        {},
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+    ) == {"status": "historical-before-only"}
+    assert observed["request"] == normalized
+    assert observed["before_only"] is expected_before_only
+
+    with pytest.raises(operator.OperationError, match="plan receipt differs"):
+        operator._remote_entry(
+            "apply",
+            wire,
+            {},
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+        )
+
+
 def test_exact_source_gate_rejects_origin_alias_and_untracked_bytes(monkeypatch):
     monkeypatch.setattr(
         operator,
@@ -3340,6 +3543,368 @@ def test_unknown_apply_outcome_requires_reconciliation_before_retry(
     assert calls == ["apply", "reconcile"]
 
 
+def test_historical_reconcile_never_persists_a_policy_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    plan = dict(external["plan"])
+    plan["origin_main_sha"] = "c" * 40
+    plan["bridge_source_hash"] = "sha256:" + "d" * 64
+    plan_material = dict(plan)
+    plan_material.pop("plan_hash")
+    plan["plan_hash"] = operator._sha256_json(plan_material)
+    external["plan"] = plan
+    request = _bound_request(external)
+    desired = operator._canonical_policy(request["desired_document"])
+    policy_receipt = operator._apply_managed(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    assert policy_receipt["schema_version"] == operator.RECEIPT_SCHEMA
+
+    monkeypatch.setattr(operator, "_validate_ssh_key", lambda: None)
+    monkeypatch.setattr(
+        operator,
+        "_run",
+        lambda *_args, **_kwargs: operator._json(policy_receipt).encode(),
+    )
+
+    with pytest.raises(
+        operator.OperationError, match="historical IAM reconciliation receipt schema"
+    ):
+        operator._execute_intent_operation(
+            "reconcile",
+            request,
+            ledger=ledger,
+            commit=COMMIT,
+            sources=[],
+            source_hash=SOURCE_HASH,
+        )
+
+    record = operator._read_operation_record(ledger, request)
+    assert record is not None
+    assert record["state"] == "pending"
+    assert record["attempt_operation"] == "reconcile"
+    assert record["receipt"] is None
+
+
+def test_commit_only_reconcile_accepts_current_receipt_for_identical_authority():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    plan = dict(external["plan"])
+    plan["origin_main_sha"] = "c" * 40
+    plan_material = dict(plan)
+    plan_material.pop("plan_hash")
+    plan["plan_hash"] = operator._sha256_json(plan_material)
+    external["plan"] = plan
+    request = _bound_request(external)
+    desired = operator._canonical_policy(request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+
+    validated = operator._validate_remote_receipt(
+        "reconcile",
+        receipt,
+        request=request,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+    )
+
+    assert validated == receipt
+
+
+def test_stale_generation_is_bypassed_only_by_fresh_read_only_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=None,
+    )
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    current_commit = "c" * 40
+    current_source = "sha256:" + "d" * 64
+    calls: list[str] = []
+
+    def reconcile(operation, call_request, **_kwargs):
+        calls.append(operation)
+        return operator._reconciliation_receipt(
+            status="before",
+            state=operator._managed_state(iam, target),
+            request=call_request,
+            source_hash=current_source,
+            commit=current_commit,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+        )
+
+    monkeypatch.setattr(operator, "_remote_call", reconcile)
+    receipt = operator._execute_intent_operation(
+        "reconcile",
+        current_request,
+        ledger=ledger,
+        commit=current_commit,
+        sources=[],
+        source_hash=current_source,
+    )
+
+    assert receipt["status"] == "before"
+    assert calls == ["reconcile"]
+    record = operator._read_operation_record(ledger, current_request)
+    assert record is not None
+    assert record["attempt_generation"] == current_request["intent"][
+        "ledger_generation"
+    ]
+    assert record["attempt_operation"] == "reconcile"
+    assert record["receipt"]["schema_version"] == operator.RECONCILIATION_SCHEMA
+
+
+@pytest.mark.parametrize(
+    ("current_commit", "current_source"),
+    (
+        ("c" * 40, SOURCE_HASH),
+        ("c" * 40, "sha256:" + "d" * 64),
+    ),
+)
+def test_historical_reconcile_preserves_a_stale_valid_policy_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current_commit: str,
+    current_source: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    desired = operator._canonical_policy(old_request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        old_request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=receipt,
+    )
+    record_path = operator._operation_record_path(ledger, old_request["intent"])
+    before = record_path.read_bytes()
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    replay = operator._execute_intent_operation(
+        "reconcile",
+        current_request,
+        ledger=ledger,
+        commit=current_commit,
+        sources=[],
+        source_hash=current_source,
+    )
+
+    assert replay == receipt
+    assert calls == []
+    assert record_path.read_bytes() == before
+
+
+def test_corrupt_stale_policy_outcome_fails_closed_without_remote_or_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    desired = operator._canonical_policy(old_request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        old_request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=receipt,
+    )
+    record_path = operator._operation_record_path(ledger, old_request["intent"])
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["receipt"]["readback_document_hash"] = "sha256:" + "9" * 64
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    record_path.chmod(0o600)
+    before = record_path.read_bytes()
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    with pytest.raises(operator.OperationError, match="policy receipt differs"):
+        operator._execute_intent_operation(
+            "reconcile",
+            current_request,
+            ledger=ledger,
+            commit="c" * 40,
+            sources=[],
+            source_hash="sha256:" + "d" * 64,
+        )
+
+    assert calls == []
+    assert record_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("record_kind", ("pending", "reconciliation"))
+def test_stale_operation_record_can_never_trigger_another_remote_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record_kind: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    receipt = None
+    if record_kind == "reconciliation":
+        receipt = operator._reconciliation_receipt(
+            status="before",
+            state=operator._managed_state(iam, target),
+            request=old_request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+        )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation=("apply" if receipt is None else "reconcile"),
+        receipt=receipt,
+    )
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    with pytest.raises(operator.OperationError, match="already attempted"):
+        operator._execute_intent_operation(
+            "apply",
+            current_request,
+            ledger=ledger,
+            commit=COMMIT,
+            sources=[],
+            source_hash=SOURCE_HASH,
+        )
+
+    assert calls == []
+
+
+def test_stale_policy_outcome_replays_without_another_remote_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    desired = operator._canonical_policy(old_request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        old_request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=receipt,
+    )
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    replay = operator._execute_intent_operation(
+        "apply",
+        current_request,
+        ledger=ledger,
+        commit=COMMIT,
+        sources=[],
+        source_hash=SOURCE_HASH,
+    )
+
+    assert replay == receipt
+    assert calls == []
+
+
 def test_active_ledger_apply_requires_exact_run_generation_and_intent(
     tmp_path: Path,
 ) -> None:
@@ -3406,6 +3971,95 @@ def test_active_ledger_apply_requires_exact_run_generation_and_intent(
             source_hash=SOURCE_HASH,
             required_plan_hash=plan["plan_hash"],
             require_intent=True,
+        )
+
+
+def test_active_ledger_reconcile_accepts_only_retained_historical_plan_route(
+    tmp_path: Path,
+) -> None:
+    iam = FakeInlineIam()
+    target = {"kind": "inline_role", "role_name": ROLE, "policy_name": POLICY_NAME}
+    request = _request(iam, operator._inline_state(iam, target), target=target)
+    plan = request["plan"]
+    intent = _test_intent(plan)
+    current_commit = "c" * 40
+    current_source = "sha256:" + "d" * 64
+
+    def route(commit: str, source_hash: str) -> dict[str, object]:
+        return {
+            "schema_version": operator.AUTHORITY_SCHEMA,
+            "status": "authority_ready",
+            "origin_main_sha": commit,
+            "bridge_source_hash": source_hash,
+            "account_id": ACCOUNT,
+            "caller_arn": CALLER,
+            "route": "gateway_bridge",
+            "local_chain": "ignored_non_authority",
+            "secret_values_printed": False,
+            "policy_material_printed": False,
+        }
+
+    intent["ledger_generation"] = 6
+    value = {
+        "schema_version": operator.LEDGER_SCHEMA,
+        "status": "running",
+        "repo": str(tmp_path),
+        "generation": 6,
+        "control_run_id": intent["control_run_id"],
+        "invocation_id": intent["invocation_id"],
+        "started_at": "2026-08-23T00:00:00Z",
+        "updated_at": "2026-08-23T00:00:01Z",
+        "stages": [],
+        "iam_authority_route": route(current_commit, current_source),
+        "iam_authority_routes": [
+            route(COMMIT, SOURCE_HASH),
+            route(current_commit, current_source),
+        ],
+        "iam_policy_plan_history": [],
+        "iam_policy_plans": [plan],
+        "iam_policy_changes": [],
+        "iam_policy_intents": [intent],
+        "iam_never_pause_invariant": {
+            "schema_version": operator.NEVER_PAUSE_SCHEMA,
+            "status": "enforced",
+            "local_chain_failure_disposition": "ignored_non_authority",
+            "blocks_recovery": False,
+            "operator_iam_request_allowed": False,
+        },
+    }
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps(value), encoding="utf-8")
+    ledger.chmod(0o600)
+
+    loaded = operator._validate_active_ledger(
+        ledger,
+        commit=current_commit,
+        source_hash=current_source,
+        required_plan_hash=plan["plan_hash"],
+        require_intent=True,
+        allow_historical_plan=True,
+    )
+    assert loaded["iam_policy_intents"] == [intent]
+
+    with pytest.raises(operator.OperationError, match="plan receipt differs"):
+        operator._validate_active_ledger(
+            ledger,
+            commit=current_commit,
+            source_hash=current_source,
+            required_plan_hash=plan["plan_hash"],
+            require_intent=True,
+        )
+
+    value["iam_authority_routes"] = [route(current_commit, current_source)]
+    ledger.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(operator.OperationError, match="historical authority"):
+        operator._validate_active_ledger(
+            ledger,
+            commit=current_commit,
+            source_hash=current_source,
+            required_plan_hash=plan["plan_hash"],
+            require_intent=True,
+            allow_historical_plan=True,
         )
 
 

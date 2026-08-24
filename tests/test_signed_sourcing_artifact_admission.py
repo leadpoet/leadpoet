@@ -153,7 +153,9 @@ def _compatible_v10_metadata() -> dict:
     metadata = _compatible_v9_metadata()
     metadata["adapter_version"] = "sourcing-model-research-lab-adapter:v10"
     dispatch_custody = approved_typed_dispatch_custody_v3_metadata_v1()
-    dispatch_custody["legacy_v2_consumer_contract_sha256"] = "8" * 64
+    # This model-owned legacy-v2 protocol identity intentionally differs from
+    # the manifest's raw current-contract file hash ("8" * 64).
+    dispatch_custody["legacy_v2_consumer_contract_sha256"] = "7" * 64
     metadata["dispatch_custody"] = dispatch_custody
     metadata["routing"]["compiler_version"] = (
         ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION
@@ -277,12 +279,15 @@ def test_current_producer_shaped_legacy_artifact_uses_network_none_metadata(
     assert observed["spec"].extra_env == {}
 
 
-def test_current_v10_artifact_accepts_signed_release_specific_contract(
+def test_current_v10_artifact_accepts_distinct_model_and_file_contract_hashes(
     monkeypatch,
 ):
     document, _config_metadata = _legacy_manifest_document()
     metadata = _compatible_v10_metadata()
     _bind_manifest_config_to_metadata(document, metadata)
+    assert metadata["dispatch_custody"][
+        "legacy_v2_consumer_contract_sha256"
+    ] != document["compatibility_contract"]["sha256"].removeprefix("sha256:")
     raw = (json.dumps(document, sort_keys=True) + "\n").encode()
 
     class _Runner:
@@ -306,20 +311,41 @@ def test_current_v10_artifact_accepts_signed_release_specific_contract(
     assert receipt["container_metadata_sha256"] == sha256_json(metadata)
 
 
-@pytest.mark.parametrize("mutation", ("contract", "wire"))
-def test_current_v10_artifact_rejects_unsigned_or_wire_metadata_drift(
+def test_v10_model_contract_identity_is_committed_in_metadata_receipt():
+    document, _config_metadata = _legacy_manifest_document()
+    metadata = _compatible_v10_metadata()
+    _bind_manifest_config_to_metadata(document, metadata)
+    artifact = admission.PrivateModelArtifactManifest.from_mapping(document)
+
+    first = admission._legacy_receipt_fields(
+        artifact=artifact,
+        selection=admission.select_official_baseline_release(artifact),
+        metadata=metadata,
+    )
+    successor = deepcopy(metadata)
+    successor["dispatch_custody"][
+        "legacy_v2_consumer_contract_sha256"
+    ] = "6" * 64
+    second = admission._legacy_receipt_fields(
+        artifact=artifact,
+        selection=admission.select_official_baseline_release(artifact),
+        metadata=successor,
+    )
+
+    assert first["container_metadata_sha256"] == sha256_json(metadata)
+    assert second["container_metadata_sha256"] == sha256_json(successor)
+    assert first["container_metadata_sha256"] != second[
+        "container_metadata_sha256"
+    ]
+
+
+def test_current_v10_artifact_rejects_wire_metadata_drift(
     monkeypatch,
-    mutation,
 ):
     document, _config_metadata = _legacy_manifest_document()
     metadata = _compatible_v10_metadata()
     _bind_manifest_config_to_metadata(document, metadata)
-    if mutation == "contract":
-        metadata["dispatch_custody"][
-            "legacy_v2_consumer_contract_sha256"
-        ] = "7" * 64
-    else:
-        metadata["dispatch_custody"]["kind_ids"]["start"] = "forged-start"
+    metadata["dispatch_custody"]["kind_ids"]["start"] = "forged-start"
     raw = (json.dumps(document, sort_keys=True) + "\n").encode()
 
     class _Runner:

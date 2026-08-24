@@ -80,21 +80,10 @@ def _validate_legacy_container_metadata(
     artifact: PrivateModelArtifactManifest,
     metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
-    compatibility_contract = artifact.compatibility_contract or {}
-    expected_legacy_contract_sha256 = str(
-        compatibility_contract.get("sha256") or ""
-    )
-    if _HASH_RE.fullmatch(expected_legacy_contract_sha256) is None:
-        raise SignedArtifactAdmissionError(
-            "signed legacy artifact compatibility contract differs"
-        )
     try:
         validated = validate_sourcing_adapter_metadata(
             metadata,
             expected_scoring_adapter_version=artifact.scoring_adapter_version,
-            expected_typed_dispatch_legacy_contract_sha256=(
-                expected_legacy_contract_sha256
-            ),
         )
     except PrivateModelRuntimeError as exc:
         raise SignedArtifactAdmissionError(

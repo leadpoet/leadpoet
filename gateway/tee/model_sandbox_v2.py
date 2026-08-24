@@ -3921,6 +3921,10 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     == "qualification_protocol_v2"
                     else ""
                 ),
+                expected_typed_dispatch_legacy_contract_sha256=str(
+                    dict(artifact.compatibility_contract or {}).get("sha256")
+                    or ""
+                ),
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(

@@ -2198,6 +2198,52 @@ def validate_typed_dispatch_custody_v3_metadata_v1(
     return deepcopy(value)
 
 
+def validate_typed_dispatch_custody_v3_runtime_metadata_v1(
+    value: Any,
+    *,
+    expected_legacy_v2_consumer_contract_sha256: str = "",
+) -> Dict[str, Any]:
+    """Validate the stable custody-v3 ABI without pinning release identity.
+
+    The legacy consumer-contract hash legitimately changes between compatible
+    signed model releases.  It is bound to the artifact manifest here while
+    every host-consumed encoding, framing, schema, field set, and entrypoint
+    remains byte-exact to the reviewed ABI.
+    """
+
+    expected = approved_typed_dispatch_custody_v3_metadata_v1()
+    if type(value) is not dict or set(value) != set(expected):
+        raise ValueError("typed dispatch custody runtime metadata differs")
+    normalized = deepcopy(value)
+    hash_pattern = re.compile(r"[0-9a-f]{64}")
+
+    contract_hash = value.get("legacy_v2_consumer_contract_sha256")
+    if (
+        not isinstance(contract_hash, str)
+        or hash_pattern.fullmatch(contract_hash) is None
+    ):
+        raise ValueError("typed dispatch custody runtime metadata differs")
+    expected_contract_identity = str(
+        expected_legacy_v2_consumer_contract_sha256 or ""
+    )
+    if expected_contract_identity:
+        expected_contract_hash = expected_contract_identity.removeprefix(
+            "sha256:"
+        )
+        if (
+            hash_pattern.fullmatch(expected_contract_hash) is None
+            or contract_hash != expected_contract_hash
+        ):
+            raise ValueError("typed dispatch custody runtime metadata differs")
+    normalized["legacy_v2_consumer_contract_sha256"] = expected[
+        "legacy_v2_consumer_contract_sha256"
+    ]
+
+    if not _same_json_literal(normalized, expected):
+        raise ValueError("typed dispatch custody runtime metadata differs")
+    return deepcopy(value)
+
+
 def semantic_compatibility_policy_hash_v1() -> str:
     """Return the complete consumer admission-policy identity.
 

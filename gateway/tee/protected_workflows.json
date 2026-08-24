@@ -782,7 +782,7 @@
       "symbol": "reconcile_champion_reward_statuses"
     },
     {
-      "ast_sha256": "sha256:3574a9baf5cefb043fd2e8895509b2df6b1b633e9bd5e4bc9fe34b5f5d3bdc1f",
+      "ast_sha256": "sha256:955afa833e6aace506d2437e1c7736a70b2f1fda3b180f05707ba27f4b262906",
       "path": "gateway/research_lab/model_authority_v2.py",
       "symbol": "AttestedPrivateModelRunnerV2"
     },
@@ -4362,12 +4362,12 @@
       "symbol": "RUNSC_FAILURE_CODES_V1"
     },
     {
-      "ast_sha256": "sha256:fa919799cca4b0a137eaac4b6861aa9e6cf5309f1e830e019a38af608527a8f2",
+      "ast_sha256": "sha256:8f8928e7fb4ce2823d989c9e9b223877ce553d14b20aee250a630c35c858ea3e",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
     {
-      "ast_sha256": "sha256:164fb0724d1e2303fbf492c657e14aafdf55285327d2504cb29b01f85e85f6c6",
+      "ast_sha256": "sha256:f045d3ce44e704392f2ce8658fcc488d014db7e411abf9e40ce3c03b2e5477ce",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2._run_metadata_compatibility"
     },
@@ -6932,7 +6932,7 @@
       "symbol": "validate_qualification_route_completion_receipt_v1"
     },
     {
-      "ast_sha256": "sha256:1561dd056b19ab2068adc884ad5a025928479f062d6826ff3b4d114db5caa1ae",
+      "ast_sha256": "sha256:a9dcc4613cfe2025fc64be528a3e55578aa786d978f5d804e457a07980d95417",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_sourcing_adapter_metadata"
     },
@@ -7532,7 +7532,12 @@
       "symbol": "validate_typed_dispatch_custody_v3_metadata_v1"
     },
     {
-      "ast_sha256": "sha256:36516af96915df74404d16290330a600e09d062dfce37898d9d2bd6e3f9017de",
+      "ast_sha256": "sha256:199902e1fffb26a6ac162851023b7556ae784743e4f3e7aea70524cca7deffa9",
+      "path": "research_lab/sourcing_model_contract_check.py",
+      "symbol": "validate_typed_dispatch_custody_v3_runtime_metadata_v1"
+    },
+    {
+      "ast_sha256": "sha256:8800977f430590ef21990d359f7beb1f380a054f9080a579033c380abfb4c16d",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "verify_semantic_source_tree_compatibility_v1"
     },
@@ -7807,7 +7812,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:705ef6adff4fd855cc54ab2b1dc2b1415e6db2136d522e95deb30ffdd7de2107",
-  "protected_source_commit": "58651a47cc0f5ff47d439c82dde600095559e7c9",
+  "manifest_hash": "sha256:2c8daafdac8ef6b517c145ed7c5608de19f6a2d3aab94a604a1608fc8f9b79d5",
+  "protected_source_commit": "0534cb9bdc71633bd1b880570146de303e920ef4",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

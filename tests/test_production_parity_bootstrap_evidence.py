@@ -651,9 +651,12 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "git bundle verify" in script
     assert "bundle_size_bytes=" in script
     assert "bundle_sha256=" in script
-    assert "bundle-sha256=$bundle_sha256" in script
-    assert "bundle-size-bytes=$bundle_size_bytes" in script
-    assert "candidate-sha=$CANDIDATE_SHA" in script
+    assert 'bundle_binding="$PARITY_TEMP/candidate-bundle-binding.json"' in script
+    assert '"bundle-sha256": sys.argv[3]' in script
+    assert '"bundle-size-bytes": sys.argv[4]' in script
+    assert '"candidate-sha": sys.argv[2]' in script
+    assert "candidate-bundle-binding.json" in script
+    assert script.count("aws s3 cp") == 2
     assert 'printf \'sha256=%s\\nsize_bytes=%s\\n\'' in script
     assert "--all" not in script
 
@@ -662,7 +665,7 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
         for step in steps
         if step.get("name") == "Start candidate production paths"
     )["run"]
-    assert "MAX_METADATA_BYTES = 4096" in execute
+    assert "MAX_BINDING_BYTES = 4096" in execute
     assert "object_pairs_hook=exact_object" in execute
     metadata_stage = execute.split(
         "failure_stage=candidate-bundle-metadata", 1
@@ -670,17 +673,17 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     download_stage = execute.split(
         "failure_stage=candidate-bundle-download", 1
     )[1].split("failure_stage=candidate-bundle-metadata", 1)[0]
-    assert "aws s3api get-object" in download_stage
-    assert "--query Metadata" in download_stage
-    assert "--output json" in download_stage
+    assert download_stage.count("aws s3api get-object") == 2
+    assert "candidate-bundle-binding.json" in download_stage
     assert '"$candidate_bundle"' in download_stage
-    assert '> "$candidate_bundle_metadata"' in download_stage
+    assert '"$candidate_bundle_binding"' in download_stage
+    assert "--query Metadata" not in download_stage
     assert "head-object" not in execute
-    assert '"$candidate_bundle_metadata"' in metadata_stage
+    assert '"$candidate_bundle_binding"' in metadata_stage
     assert "os.O_NOFOLLOW" in execute
     assert "stat.S_ISREG(metadata.st_mode)" in execute
     assert "--output text" not in metadata_stage
-    assert 'rm -f "$candidate_bundle_metadata"' in metadata_stage
+    assert 'rm -f "$candidate_bundle_binding"' in metadata_stage
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -735,14 +738,19 @@ with open(os.environ["AWS_CALLS"], "a", encoding="utf-8") as handle:
 if arguments[:2] == ["s3api", "get-object"]:
     destination = Path(arguments[-1])
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
-    if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
-        symlink_target = destination.with_name(destination.name + ".payload")
-        symlink_target.write_bytes(payload)
-        destination.symlink_to(symlink_target)
+    key = arguments[arguments.index("--key") + 1]
+    if key.endswith("/candidate.bundle"):
+        payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
+        if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
+            symlink_target = destination.with_name(destination.name + ".payload")
+            symlink_target.write_bytes(payload)
+            destination.symlink_to(symlink_target)
+        else:
+            destination.write_bytes(payload)
+    elif key.endswith("/candidate-bundle-binding.json"):
+        destination.write_text(os.environ["METADATA_RAW_JSON"], encoding="utf-8")
     else:
-        destination.write_bytes(payload)
-    sys.stdout.write(os.environ["METADATA_RAW_JSON"])
+        raise SystemExit(2)
 elif arguments[:2] == ["s3api", "put-object"]:
     if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
         raise SystemExit(73)
@@ -954,12 +962,12 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
         "authority": "host",
     }
     assert not (tmp_path / "work" / "candidate.bundle").exists()
-    assert not list((tmp_path / "work").glob("candidate-bundle-metadata.*"))
+    assert not list((tmp_path / "work").glob("candidate-bundle-binding.*"))
     assert result.stdout == ""
     assert result.stderr == ""
 
 
-def test_rendered_ssm_downloads_body_and_metadata_in_one_get(
+def test_rendered_ssm_downloads_bundle_and_exact_binding(
     tmp_path: Path,
 ) -> None:
     result, _capture = _run_rendered_ssm(tmp_path)
@@ -972,9 +980,18 @@ def test_rendered_ssm_downloads_body_and_metadata_in_one_get(
         ).splitlines()
     ]
     reads = [call for call in calls if call[:2] == ["s3api", "get-object"]]
-    assert len(reads) == 1
-    assert reads[0][reads[0].index("--query") + 1] == "Metadata"
+    assert len(reads) == 2
+    assert reads[0][reads[0].index("--key") + 1].endswith(
+        "/candidate.bundle"
+    )
     assert reads[0][-1] == str(tmp_path / "work" / "candidate.bundle")
+    assert reads[1][reads[1].index("--key") + 1].endswith(
+        "/candidate-bundle-binding.json"
+    )
+    assert reads[1][-1].startswith(
+        str(tmp_path / "work" / "candidate-bundle-binding.")
+    )
+    assert all("--query" not in call for call in reads)
     assert not any(call[:2] == ["s3api", "head-object"] for call in calls)
 
 

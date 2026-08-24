@@ -1412,6 +1412,468 @@ def test_revocation_plan_rechecks_cutoff_after_simulation_latency(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("aggregate_resource", "decision"),
+    (
+        ("arn:${Partition}:s3:::${BucketName}/${KeyName}", "allowed"),
+        ("*", "implicitDeny"),
+        (None, "explicitDeny"),
+    ),
+    ids=("template-allowed", "star-implicit", "omitted-explicit"),
+)
+def test_single_resource_simulation_binds_safe_aggregate_to_request(
+    aggregate_resource,
+    decision,
+):
+    resource = f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/current.json"
+    case = {
+        "name": "signed-pointer-read",
+        "action": "s3:GetObject",
+        "resources": [resource],
+        "context": {},
+        "expected": decision,
+    }
+
+    operator._check_simulation_response(
+        {
+            "EvaluationResults": [
+                {
+                    "EvalActionName": case["action"].swapcase(),
+                    "EvalDecision": decision,
+                    "MissingContextValues": [],
+                    **(
+                        {"EvalResourceName": aggregate_resource}
+                        if aggregate_resource is not None
+                        else {}
+                    ),
+                }
+            ]
+        },
+        case,
+        label="custom-policy",
+    )
+
+
+def test_multi_resource_simulation_uses_exact_resource_specific_rows():
+    resources = [
+        f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/current.json",
+        f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/archive.json",
+    ]
+    case = {
+        "name": "signed-object-reads",
+        "action": "s3:GetObject",
+        "resources": resources,
+        "context": {},
+        "expected": "allowed",
+    }
+
+    operator._check_simulation_response(
+        {
+            "EvaluationResults": [
+                {
+                    "EvalActionName": case["action"],
+                    "EvalResourceName": (
+                        "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                    ),
+                    "EvalDecision": "allowed",
+                    "MissingContextValues": [],
+                    "ResourceSpecificResults": [
+                        {
+                            "EvalResourceName": resource,
+                            "EvalResourceDecision": "allowed",
+                            "MissingContextValues": [],
+                        }
+                        for resource in resources
+                    ],
+                }
+            ]
+        },
+        case,
+        label="custom-policy",
+    )
+
+
+def test_multi_resource_simulation_preserves_legacy_flat_rows():
+    resources = [
+        f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/current.json",
+        f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/archive.json",
+    ]
+    results = [
+        {
+            "EvalActionName": "s3:GetObject",
+            "EvalResourceName": resource,
+            "EvalDecision": "allowed",
+            "MissingContextValues": [],
+        }
+        for resource in reversed(resources)
+    ]
+    case = {
+        "name": "legacy-flat-rows",
+        "action": "s3:GetObject",
+        "resources": resources,
+        "context": {},
+        "expected": "allowed",
+    }
+
+    operator._check_simulation_response(
+        {"EvaluationResults": results}, case, label="custom-policy"
+    )
+    observed = operator._normalize_simulation_results(
+        results,
+        action=case["action"],
+        requested_resources=resources,
+    )
+    assert observed == parity_setup._normalize_simulation_results(
+        results,
+        action=case["action"],
+        requested_resources=resources,
+    )
+
+
+def test_multi_resource_legacy_flat_denial_is_not_misattributed_per_resource():
+    resources = [RESOURCE, f"{RESOURCE}archive"]
+    results = [
+        {
+            "EvalActionName": "s3:GetObject",
+            "EvalResourceName": resource,
+            "EvalDecision": "implicitDeny",
+        }
+        for resource in resources
+    ]
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            results,
+            action="s3:GetObject",
+            requested_resources=resources,
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_AGGREGATE"
+
+
+@pytest.mark.parametrize("specific", (pytest.param("omitted"), pytest.param([])))
+def test_single_resource_flat_result_accepts_omitted_or_empty_specific_rows(specific):
+    result = {
+        "EvalActionName": "s3:GetObject",
+        "EvalResourceName": RESOURCE,
+        "EvalDecision": "allowed",
+    }
+    if specific != "omitted":
+        result["ResourceSpecificResults"] = specific
+    case = {
+        "name": "flat-specific-optional",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    operator._check_simulation_response(
+        {"EvaluationResults": [result]}, case, label="custom-policy"
+    )
+
+
+def test_single_resource_simulation_rejects_wrong_concrete_aggregate_resource():
+    case = {
+        "name": "wrong-concrete-resource",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._check_simulation_response(
+            {
+                "EvaluationResults": [
+                    {
+                        "EvalActionName": case["action"],
+                        "EvalResourceName": f"{RESOURCE}-other",
+                        "EvalDecision": "allowed",
+                    }
+                ]
+            },
+            case,
+            label="custom-policy",
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_EXPECTATION"
+
+
+@pytest.mark.parametrize(
+    "results",
+    (
+        [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": RESOURCE,
+                "EvalDecision": "allowed",
+                "MissingContextValues": None,
+            }
+        ],
+        [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": RESOURCE,
+                "EvalDecision": "allowed",
+                "ResourceSpecificResults": None,
+            }
+        ],
+        [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": "arn:${Partition}:s3:::${BucketName}/${KeyName}",
+                "EvalDecision": "allowed",
+                "ResourceSpecificResults": [
+                    {
+                        "EvalResourceName": RESOURCE,
+                        "EvalResourceDecision": "allowed",
+                        "MissingContextValues": None,
+                    }
+                ],
+            }
+        ],
+    ),
+    ids=("null-missing-context", "null-specific-rows", "null-nested-context"),
+)
+def test_simulation_rejects_explicit_null_contract_fields(results):
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            results,
+            action="s3:GetObject",
+            requested_resources=[RESOURCE],
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_RESULT_SHAPE"
+
+
+def test_simulation_rejects_mixed_flat_and_nested_representations():
+    results = [
+        {
+            "EvalActionName": "s3:GetObject",
+            "EvalResourceName": RESOURCE,
+            "EvalDecision": "allowed",
+        },
+        {
+            "EvalActionName": "s3:GetObject",
+            "EvalResourceName": "arn:${Partition}:s3:::${BucketName}/${KeyName}",
+            "EvalDecision": "allowed",
+            "ResourceSpecificResults": [
+                {
+                    "EvalResourceName": f"{RESOURCE}archive",
+                    "EvalResourceDecision": "allowed",
+                }
+            ],
+        },
+    ]
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            results,
+            action="s3:GetObject",
+            requested_resources=[RESOURCE, f"{RESOURCE}archive"],
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_RESOURCE_ROWS"
+
+
+def test_simulation_rejects_nested_aggregate_decision_mismatch():
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            [
+                {
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": (
+                        "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                    ),
+                    "EvalDecision": "implicitDeny",
+                    "ResourceSpecificResults": [
+                        {
+                            "EvalResourceName": RESOURCE,
+                            "EvalResourceDecision": "allowed",
+                        }
+                    ],
+                }
+            ],
+            action="s3:GetObject",
+            requested_resources=[RESOURCE],
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_AGGREGATE"
+
+
+def test_simulation_accepts_most_restrictive_nested_aggregate():
+    allowed = RESOURCE
+    denied = f"{RESOURCE}archive"
+    decisions, missing = operator._normalize_simulation_results(
+        [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": (
+                    "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                ),
+                "EvalDecision": "implicitDeny",
+                "ResourceSpecificResults": [
+                    {
+                        "EvalResourceName": allowed,
+                        "EvalResourceDecision": "allowed",
+                    },
+                    {
+                        "EvalResourceName": denied,
+                        "EvalResourceDecision": "implicitDeny",
+                    },
+                ],
+            }
+        ],
+        action="s3:GetObject",
+        requested_resources=[allowed, denied],
+    )
+    assert decisions == {allowed: "allowed", denied: "implicitDeny"}
+    assert missing == set()
+
+
+@pytest.mark.parametrize(
+    ("resource", "decision"),
+    (("", "allowed"), (RESOURCE, "unknown"), (None, "allowed")),
+)
+def test_simulation_rejects_malformed_flat_resource_or_decision(resource, decision):
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            [
+                {
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": resource,
+                    "EvalDecision": decision,
+                }
+            ],
+            action="s3:GetObject",
+            requested_resources=[RESOURCE],
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_RESULT_SHAPE"
+
+
+@pytest.mark.parametrize(
+    ("specific_rows", "message"),
+    (
+        (
+            [
+                {
+                    "EvalResourceName": RESOURCE,
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": [],
+                },
+                {
+                    "EvalResourceName": RESOURCE,
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": [],
+                },
+            ],
+            "ambiguous",
+        ),
+        (
+            [
+                {
+                    "EvalResourceName": f"{RESOURCE}-unexpected",
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": [],
+                }
+            ],
+            "differs",
+        ),
+        (
+            [
+                {
+                    "EvalResourceName": RESOURCE,
+                    "EvalResourceDecision": "allowed",
+                    "MissingContextValues": ["aws:RequestedRegion"],
+                }
+            ],
+            "differs",
+        ),
+    ),
+    ids=("duplicate", "unexpected", "missing-context"),
+)
+def test_resource_specific_simulation_rejects_unbound_rows(
+    specific_rows,
+    message,
+):
+    case = {
+        "name": "resource-specific-negative",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    with pytest.raises(operator.OperationError, match=message):
+        operator._check_simulation_response(
+            {
+                "EvaluationResults": [
+                    {
+                        "EvalActionName": case["action"],
+                        "EvalResourceName": (
+                            "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                        ),
+                        "EvalDecision": "allowed",
+                        "MissingContextValues": [],
+                        "ResourceSpecificResults": specific_rows,
+                    }
+                ]
+            },
+            case,
+            label="principal-policy",
+        )
+
+
+def test_multi_resource_simulation_accepts_aggregate_only_allowed_result():
+    case = {
+        "name": "aggregate-only-multi-resource",
+        "action": "s3:GetObject",
+        "resources": [RESOURCE, f"{RESOURCE}archive"],
+        "context": {},
+        "expected": "allowed",
+    }
+
+    operator._check_simulation_response(
+        {
+            "EvaluationResults": [
+                {
+                    "EvalActionName": case["action"],
+                    "EvalResourceName": (
+                        "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                    ),
+                    "EvalDecision": "allowed",
+                    "MissingContextValues": [],
+                }
+            ]
+        },
+        case,
+        label="custom-policy",
+    )
+
+
+@pytest.mark.parametrize("decision", ("implicitDeny", "explicitDeny"))
+def test_multi_resource_simulation_rejects_aggregate_only_denial(decision):
+    resources = [RESOURCE, f"{RESOURCE}archive"]
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._normalize_simulation_results(
+            [
+                {
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": "*",
+                    "EvalDecision": decision,
+                }
+            ],
+            action="s3:GetObject",
+            requested_resources=resources,
+        )
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_AGGREGATE"
+
+
+def test_simulation_api_failure_has_only_fixed_diagnostic_category():
+    class BrokenIam:
+        def simulate_custom_policy(self, **kwargs):
+            del kwargs
+            raise RuntimeError(f"private resource: {RESOURCE}")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._simulate_custom(BrokenIam(), operator._canonical_policy(AFTER), _simulation())
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_API_CALL"
+    assert RESOURCE not in str(failure.value)
+
+
 def test_plan_window_has_apply_liveness_and_revocation_safety_margin():
     assert operator.PLAN_VALIDITY_SECONDS == 60
     assert (
@@ -1630,6 +2092,48 @@ def test_local_command_environment_drops_every_aws_selector(monkeypatch):
     assert operator._run("test-command") == b"ok"
     assert not (set(captured["env"]) & operator._AWS_SELECTORS)
     assert 'os.environ.pop(name, None)' in operator.REMOTE_LOADER
+
+
+def test_local_command_surfaces_only_exact_allowlisted_remote_diagnostic(monkeypatch):
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b"REMOTE_REBENCHMARK_IAM_ERROR:IAM_SIM_RESULT_SHAPE\n",
+        )
+
+    monkeypatch.setattr(operator.subprocess, "run", fake_run)
+    with pytest.raises(operator.OperationError, match="IAM_SIM_RESULT_SHAPE"):
+        operator._run(
+            "test-command",
+            redacted_error_codes=operator.REMOTE_DIAGNOSTIC_CODES,
+        )
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    (
+        b"REMOTE_REBENCHMARK_IAM_ERROR:UNKNOWN_CODE\n",
+        b"REMOTE_REBENCHMARK_IAM_ERROR:IAM_SIM_RESULT_SHAPE\nssh noise\n",
+        b"REMOTE_REBENCHMARK_IAM_ERROR:IAM_SIM_RESULT_SHAPE:private-value\n",
+        b"arbitrary private resource material\n",
+    ),
+)
+def test_local_command_never_surfaces_unknown_or_noisy_remote_stderr(
+    monkeypatch, stderr
+):
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=stderr)
+
+    monkeypatch.setattr(operator.subprocess, "run", fake_run)
+    with pytest.raises(operator.OperationError, match="^command failed: test-command$") as failure:
+        operator._run(
+            "test-command",
+            redacted_error_codes=operator.REMOTE_DIAGNOSTIC_CODES,
+        )
+    assert stderr.decode("utf-8", errors="replace") not in str(failure.value)
 
 
 def test_gateway_bridge_uses_isolated_production_python(monkeypatch):

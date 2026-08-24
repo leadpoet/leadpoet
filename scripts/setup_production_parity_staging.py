@@ -1462,10 +1462,35 @@ def _simulation_context(values: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _aws_aggregate_resource(value: Any) -> bool:
+    return (
+        value == "*"
+        or (
+            isinstance(value, str)
+            and 1 <= len(value) <= 2048
+            and value.startswith("arn:")
+            and not any(character.isspace() for character in value)
+            and re.search(r"\$\{[A-Za-z][A-Za-z0-9]*\}", value) is not None
+        )
+    )
+
+
 def _normalize_simulation_results(
-    results: Any, *, action: str
+    results: Any,
+    *,
+    action: str,
+    requested_resources: Sequence[str],
 ) -> tuple[dict[str, str], set[str]]:
-    if not isinstance(results, list) or not results:
+    if (
+        not isinstance(results, list)
+        or not results
+        or not requested_resources
+        or len(requested_resources) != len(set(requested_resources))
+        or any(
+            not isinstance(resource, str) or not resource
+            for resource in requested_resources
+        )
+    ):
         raise SetupError("controller IAM simulation response differs")
 
     decisions: dict[str, str] = {}
@@ -1481,21 +1506,29 @@ def _normalize_simulation_results(
         missing_context.update(values)
 
     def add_decision(resource: Any, decision: Any) -> str:
-        resource_name = str(resource or "")
-        decision_name = str(decision or "")
         if (
-            not resource_name
-            or decision_name not in valid_decisions
-            or resource_name in decisions
+            not isinstance(resource, str)
+            or not resource
+            or decision not in valid_decisions
+            or resource in decisions
         ):
             raise SetupError("controller IAM simulation response differs")
-        decisions[resource_name] = decision_name
-        return decision_name
+        decisions[resource] = decision
+        return decision
 
     for result in results:
+        if not isinstance(result, Mapping):
+            raise SetupError("controller IAM simulation response differs")
+        returned_action = result.get("EvalActionName")
         if (
-            not isinstance(result, Mapping)
-            or str(result.get("EvalActionName") or "") != action
+            not isinstance(returned_action, str)
+            or returned_action.lower() != action.lower()
+        ):
+            raise SetupError("controller IAM simulation response differs")
+        has_top_resource = "EvalResourceName" in result
+        if has_top_resource and (
+            not isinstance(result["EvalResourceName"], str)
+            or not result["EvalResourceName"]
         ):
             raise SetupError("controller IAM simulation response differs")
         specific = result.get("ResourceSpecificResults", [])
@@ -1508,9 +1541,23 @@ def _normalize_simulation_results(
         add_missing(result.get("MissingContextValues", []))
 
         if current == "flat":
-            add_decision(
-                result.get("EvalResourceName"), result.get("EvalDecision")
+            resource = result.get("EvalResourceName")
+            decision = result.get("EvalDecision")
+            aggregate_only = len(results) == 1 and (
+                not has_top_resource or _aws_aggregate_resource(resource)
             )
+            if aggregate_only:
+                if decision not in valid_decisions:
+                    raise SetupError("controller IAM simulation response differs")
+                if len(requested_resources) == 1:
+                    add_decision(requested_resources[0], decision)
+                elif decision == "allowed":
+                    for requested_resource in requested_resources:
+                        add_decision(requested_resource, decision)
+                else:
+                    raise SetupError("controller IAM simulation response differs")
+                continue
+            add_decision(resource, decision)
             continue
         if len(results) != 1:
             raise SetupError("controller IAM simulation response differs")
@@ -1526,10 +1573,27 @@ def _normalize_simulation_results(
                 item.get("EvalResourceDecision"),
             ))
             add_missing(item.get("MissingContextValues", []))
-        if nested_decisions != {aggregate}:
+        expected_aggregate = (
+            "explicitDeny"
+            if "explicitDeny" in nested_decisions
+            else (
+                "implicitDeny"
+                if "implicitDeny" in nested_decisions
+                else "allowed"
+            )
+        )
+        if aggregate != expected_aggregate:
             raise SetupError("controller IAM simulation response differs")
 
     if not decisions:
+        raise SetupError("controller IAM simulation response differs")
+    if representation == "flat" and len(results) > 1 and set(
+        decisions.values()
+    ) != {"allowed"}:
+        # Historical N-row responses repeated one aggregate decision rather
+        # than reporting per-resource decisions.  Aggregate allowed proves all
+        # requested resources allowed; an aggregate denial cannot prove every
+        # negative resource was denied.
         raise SetupError("controller IAM simulation response differs")
     return decisions, missing_context
 
@@ -2033,7 +2097,9 @@ def _simulate_controller_policy(
             raise SetupError(f"controller IAM simulation {name} was truncated")
         try:
             decisions, missing_context = _normalize_simulation_results(
-                response.get("EvaluationResults"), action=action
+                response.get("EvaluationResults"),
+                action=action,
+                requested_resources=resources,
             )
         except SetupError as exc:
             raise SetupError(

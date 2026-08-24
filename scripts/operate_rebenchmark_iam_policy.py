@@ -235,6 +235,29 @@ class OperationError(RuntimeError):
     """A policy authority, identity, concurrency, or readback gate failed."""
 
 
+REMOTE_DIAGNOSTIC_MESSAGES = {
+    "IAM_SIM_API_CALL": "IAM simulation API call failed",
+    "IAM_SIM_TRUNCATED": "IAM simulation was truncated",
+    "IAM_SIM_RESULT_SHAPE": "IAM simulation response is invalid",
+    "IAM_SIM_ACTION": "IAM simulation response action is invalid",
+    "IAM_SIM_RESOURCE_ROWS": "IAM simulation response is ambiguous",
+    "IAM_SIM_AGGREGATE": "IAM simulation response is ambiguous",
+    "IAM_SIM_MISSING_CONTEXT": "IAM simulation expectation differs",
+    "IAM_SIM_EXPECTATION": "IAM simulation expectation differs",
+}
+REMOTE_DIAGNOSTIC_CODES = frozenset(REMOTE_DIAGNOSTIC_MESSAGES)
+
+
+class RemoteDiagnosticError(OperationError):
+    """A fixed, non-sensitive failure category safe to cross the SSH bridge."""
+
+    def __init__(self, code: str):
+        if code not in REMOTE_DIAGNOSTIC_CODES:
+            raise OperationError("IAM remote diagnostic code is invalid")
+        self.remote_diagnostic_code = code
+        super().__init__(REMOTE_DIAGNOSTIC_MESSAGES[code])
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -1403,53 +1426,175 @@ def _context_entries(context: Mapping[str, Mapping[str, Any]]) -> list[dict[str,
     ]
 
 
+def _aws_aggregate_resource(value: Any) -> bool:
+    return (
+        value == "*"
+        or (
+            isinstance(value, str)
+            and 1 <= len(value) <= 2048
+            and value.startswith("arn:")
+            and not any(character.isspace() for character in value)
+            and re.search(r"\$\{[A-Za-z][A-Za-z0-9]*\}", value) is not None
+        )
+    )
+
+
+def _normalize_simulation_results(
+    results: Any,
+    *,
+    action: str,
+    requested_resources: Sequence[str],
+) -> tuple[dict[str, str], set[str]]:
+    """Normalize the flat and resource-specific IAM simulator contracts."""
+
+    if not isinstance(results, list) or not results:
+        raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+
+    decisions: dict[str, str] = {}
+    missing_context: set[str] = set()
+    representation: str | None = None
+    valid_decisions = {"allowed", "explicitDeny", "implicitDeny"}
+
+    def add_missing(values: Any) -> None:
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values
+        ):
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        missing_context.update(values)
+
+    def add_decision(resource: Any, decision: Any) -> str:
+        if (
+            not isinstance(resource, str)
+            or not resource
+            or decision not in valid_decisions
+        ):
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        if resource in decisions:
+            raise RemoteDiagnosticError("IAM_SIM_RESOURCE_ROWS")
+        decisions[resource] = decision
+        return decision
+
+    for result in results:
+        if not isinstance(result, Mapping):
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        returned_action = result.get("EvalActionName")
+        if (
+            not isinstance(returned_action, str)
+            or returned_action.lower() != action.lower()
+        ):
+            raise RemoteDiagnosticError("IAM_SIM_ACTION")
+        has_top_resource = "EvalResourceName" in result
+        if has_top_resource and (
+            not isinstance(result["EvalResourceName"], str)
+            or not result["EvalResourceName"]
+        ):
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        specific = result.get("ResourceSpecificResults", [])
+        if not isinstance(specific, list):
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        current = "nested" if specific else "flat"
+        if representation is not None and representation != current:
+            raise RemoteDiagnosticError("IAM_SIM_RESOURCE_ROWS")
+        representation = current
+        add_missing(result.get("MissingContextValues", []))
+
+        if current == "flat":
+            resource = result.get("EvalResourceName")
+            decision = result.get("EvalDecision")
+            aggregate_only = len(results) == 1 and (
+                not has_top_resource or _aws_aggregate_resource(resource)
+            )
+            if aggregate_only:
+                if decision not in valid_decisions:
+                    raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+                if len(requested_resources) == 1:
+                    add_decision(requested_resources[0], decision)
+                elif decision == "allowed":
+                    for requested_resource in requested_resources:
+                        add_decision(requested_resource, decision)
+                else:
+                    raise RemoteDiagnosticError("IAM_SIM_AGGREGATE")
+                continue
+            add_decision(resource, decision)
+            continue
+
+        if len(results) != 1:
+            raise RemoteDiagnosticError("IAM_SIM_RESOURCE_ROWS")
+        aggregate = result.get("EvalDecision")
+        if aggregate not in valid_decisions:
+            raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+        nested_decisions: set[str] = set()
+        for item in specific:
+            if not isinstance(item, Mapping):
+                raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+            nested_decisions.add(
+                add_decision(
+                    item.get("EvalResourceName"),
+                    item.get("EvalResourceDecision"),
+                )
+            )
+            add_missing(item.get("MissingContextValues", []))
+        expected_aggregate = (
+            "explicitDeny"
+            if "explicitDeny" in nested_decisions
+            else (
+                "implicitDeny"
+                if "implicitDeny" in nested_decisions
+                else "allowed"
+            )
+        )
+        if aggregate != expected_aggregate:
+            raise RemoteDiagnosticError("IAM_SIM_AGGREGATE")
+
+    if not decisions:
+        raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+    if representation == "flat" and len(results) > 1 and set(
+        decisions.values()
+    ) != {"allowed"}:
+        # Historical N-row responses repeated one aggregate decision rather
+        # than reporting per-resource decisions.  Aggregate allowed proves all
+        # requested resources allowed; an aggregate denial cannot prove that
+        # every negative/decoy resource was denied.
+        raise RemoteDiagnosticError("IAM_SIM_AGGREGATE")
+    return decisions, missing_context
+
+
 def _check_simulation_response(
     response: Mapping[str, Any], case: Mapping[str, Any], *, label: str
 ) -> None:
+    del label  # Expose only fixed structural codes, never case or policy material.
     if response.get("IsTruncated"):
-        raise OperationError(f"IAM {label} simulation was truncated")
-    results = response.get("EvaluationResults")
-    if not isinstance(results, list) or not results:
-        raise OperationError(f"IAM {label} simulation response is invalid")
-    decisions: dict[str, str] = {}
-    missing: set[str] = set()
-    for result in results:
-        if not isinstance(result, Mapping) or result.get("EvalActionName") != case["action"]:
-            raise OperationError(f"IAM {label} simulation response is invalid")
-        missing.update(str(value) for value in result.get("MissingContextValues", []))
-        specific = result.get("ResourceSpecificResults") or []
-        if specific:
-            for item in specific:
-                resource = str(item.get("EvalResourceName") or "")
-                decision = str(item.get("EvalResourceDecision") or "")
-                if resource in decisions:
-                    raise OperationError(f"IAM {label} simulation response is ambiguous")
-                decisions[resource] = decision
-        else:
-            resource = str(result.get("EvalResourceName") or "")
-            decision = str(result.get("EvalDecision") or "")
-            if resource in decisions:
-                raise OperationError(f"IAM {label} simulation response is ambiguous")
-            decisions[resource] = decision
+        raise RemoteDiagnosticError("IAM_SIM_TRUNCATED")
+    requested_resources = list(case["resources"])
+    if len(requested_resources) != len(set(requested_resources)):
+        raise RemoteDiagnosticError("IAM_SIM_EXPECTATION")
+    decisions, missing = _normalize_simulation_results(
+        response.get("EvaluationResults"),
+        action=case["action"],
+        requested_resources=requested_resources,
+    )
+    if missing:
+        raise RemoteDiagnosticError("IAM_SIM_MISSING_CONTEXT")
     if (
-        missing
-        or set(decisions) != set(case["resources"])
-        or len(case["resources"]) != len(set(case["resources"]))
+        set(decisions) != set(requested_resources)
         or set(decisions.values()) != {case["expected"]}
     ):
-        raise OperationError(f"IAM {label} simulation {case['name']} differs")
+        raise RemoteDiagnosticError("IAM_SIM_EXPECTATION")
 
 
 def _simulate_custom(
     iam: Any, document: Mapping[str, Any], cases: Sequence[Mapping[str, Any]]
 ) -> None:
     for case in cases:
-        response = iam.simulate_custom_policy(
-            PolicyInputList=[_json(document)],
-            ActionNames=[case["action"]],
-            ResourceArns=list(case["resources"]),
-            ContextEntries=_context_entries(case["context"]),
-        )
+        try:
+            response = iam.simulate_custom_policy(
+                PolicyInputList=[_json(document)],
+                ActionNames=[case["action"]],
+                ResourceArns=list(case["resources"]),
+                ContextEntries=_context_entries(case["context"]),
+            )
+        except Exception as exc:
+            raise RemoteDiagnosticError("IAM_SIM_API_CALL") from exc
         _check_simulation_response(response, case, label="custom-policy")
 
 
@@ -1460,12 +1605,15 @@ def _simulate_principals(
 ) -> None:
     for principal_arn in principal_arns:
         for case in cases:
-            response = iam.simulate_principal_policy(
-                PolicySourceArn=principal_arn,
-                ActionNames=[case["action"]],
-                ResourceArns=list(case["resources"]),
-                ContextEntries=_context_entries(case["context"]),
-            )
+            try:
+                response = iam.simulate_principal_policy(
+                    PolicySourceArn=principal_arn,
+                    ActionNames=[case["action"]],
+                    ResourceArns=list(case["resources"]),
+                    ContextEntries=_context_entries(case["context"]),
+                )
+            except Exception as exc:
+                raise RemoteDiagnosticError("IAM_SIM_API_CALL") from exc
             _check_simulation_response(response, case, label="principal-policy")
 
 
@@ -2695,13 +2843,26 @@ try:
     if stdout.getvalue() or stderr.getvalue():
         raise RuntimeError("unexpected output")
     sys.stdout.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
-except Exception:
-    sys.stderr.write("REMOTE_REBENCHMARK_IAM_ERROR\n")
+except Exception as exc:
+    code = getattr(exc, "remote_diagnostic_code", "")
+    allowed = (
+        operator.get("REMOTE_DIAGNOSTIC_CODES", frozenset())
+        if "operator" in locals() else frozenset()
+    )
+    if code in allowed:
+        sys.stderr.write("REMOTE_REBENCHMARK_IAM_ERROR:" + code + "\n")
+    else:
+        sys.stderr.write("REMOTE_REBENCHMARK_IAM_ERROR\n")
     raise SystemExit(1)
 '''.strip()
 
 
-def _run(*args: str, input_value: bytes | None = None, timeout: int = 120) -> bytes:
+def _run(
+    *args: str,
+    input_value: bytes | None = None,
+    timeout: int = 120,
+    redacted_error_codes: frozenset[str] = frozenset(),
+) -> bytes:
     environment = {
         name: os.environ[name]
         for name in ("PATH", "HOME", "LANG", "LC_ALL")
@@ -2730,6 +2891,16 @@ def _run(*args: str, input_value: bytes | None = None, timeout: int = 120) -> by
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise OperationError(f"command failed: {args[0]}") from exc
     if result.returncode != 0:
+        match = re.fullmatch(
+            rb"REMOTE_REBENCHMARK_IAM_ERROR:([A-Z0-9_]+)\r?\n?",
+            result.stderr,
+        )
+        if match is not None:
+            code = match.group(1).decode("ascii")
+            if code in redacted_error_codes:
+                raise OperationError(
+                    f"gateway IAM operation failed with redacted code {code}"
+                )
         raise OperationError(f"command failed: {args[0]}")
     return result.stdout
 
@@ -3329,6 +3500,7 @@ def _remote_call(
         command,
         input_value=_json(payload).encode("utf-8"),
         timeout=180,
+        redacted_error_codes=REMOTE_DIAGNOSTIC_CODES,
     )
     try:
         value = json.loads(output)

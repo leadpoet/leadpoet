@@ -725,6 +725,7 @@ def test_simulator_normalizes_aws_resource_specific_results():
             ],
         }],
         action="ec2:RunInstances",
+        requested_resources=[image, instance],
     )
     assert decisions == {image: "allowed", instance: "allowed"}
     assert missing == set()
@@ -754,7 +755,9 @@ def test_simulator_normalizes_aws_resource_specific_results():
 def test_simulator_rejects_malformed_results(results):
     with pytest.raises(setup.SetupError, match="simulation response differs"):
         setup._normalize_simulation_results(
-            results, action="ec2:RunInstances"
+            results,
+            action="ec2:RunInstances",
+            requested_resources=["arn:aws:ec2:us-east-1:1:instance/i-1"],
         )
 
 
@@ -780,7 +783,88 @@ def test_simulator_rejects_duplicate_resource_results():
                 ],
             }],
             action="ec2:RunInstances",
+            requested_resources=[resource],
         )
+
+
+def test_simulator_rejects_legacy_multi_resource_aggregate_denial():
+    resources = [
+        "arn:aws:s3:::leadpoet-one/object",
+        "arn:aws:s3:::leadpoet-two/object",
+    ]
+    with pytest.raises(setup.SetupError, match="simulation response differs"):
+        setup._normalize_simulation_results(
+            [
+                {
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": resource,
+                    "EvalDecision": "implicitDeny",
+                }
+                for resource in resources
+            ],
+            action="s3:GetObject",
+            requested_resources=resources,
+        )
+
+
+def test_simulator_accepts_most_restrictive_resource_specific_aggregate():
+    allowed = "arn:aws:s3:::leadpoet-one/object"
+    denied = "arn:aws:s3:::leadpoet-two/object"
+    decisions, missing = setup._normalize_simulation_results(
+        [
+            {
+                "EvalActionName": "s3:GetObject",
+                "EvalResourceName": (
+                    "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                ),
+                "EvalDecision": "implicitDeny",
+                "ResourceSpecificResults": [
+                    {
+                        "EvalResourceName": allowed,
+                        "EvalResourceDecision": "allowed",
+                    },
+                    {
+                        "EvalResourceName": denied,
+                        "EvalResourceDecision": "implicitDeny",
+                    },
+                ],
+            }
+        ],
+        action="s3:GetObject",
+        requested_resources=[allowed, denied],
+    )
+    assert decisions == {allowed: "allowed", denied: "implicitDeny"}
+    assert missing == set()
+
+
+def test_simulator_accepts_safe_aggregate_only_decisions():
+    resources = [
+        "arn:aws:s3:::leadpoet-one/object",
+        "arn:aws:s3:::leadpoet-two/object",
+    ]
+    decisions, missing = setup._normalize_simulation_results(
+        [
+            {
+                "EvalActionName": "S3:gEToBJECT",
+                "EvalResourceName": (
+                    "arn:${Partition}:s3:::${BucketName}/${KeyName}"
+                ),
+                "EvalDecision": "allowed",
+            }
+        ],
+        action="s3:GetObject",
+        requested_resources=resources,
+    )
+    assert decisions == {resource: "allowed" for resource in resources}
+    assert missing == set()
+
+    decisions, missing = setup._normalize_simulation_results(
+        [{"EvalActionName": "s3:GetObject", "EvalDecision": "implicitDeny"}],
+        action="s3:GetObject",
+        requested_resources=[resources[0]],
+    )
+    assert decisions == {resources[0]: "implicitDeny"}
+    assert missing == set()
 
 
 @pytest.mark.parametrize("mixed", ("representation", "decision"))
@@ -809,7 +893,9 @@ def test_simulator_rejects_mixed_results(mixed):
         })
     with pytest.raises(setup.SetupError, match="simulation response differs"):
         setup._normalize_simulation_results(
-            results, action="ec2:RunInstances"
+            results,
+            action="ec2:RunInstances",
+            requested_resources=[resource],
         )
 
 

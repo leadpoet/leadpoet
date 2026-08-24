@@ -424,16 +424,24 @@ def _statement_map(document: Mapping[str, Any] | None) -> dict[str, dict[str, An
         return {}
     output: dict[str, dict[str, Any]] = {}
     seen_sids: set[str] = set()
-    for index, statement in enumerate(document["Statement"]):
+    for statement in document["Statement"]:
         sid = statement.get("Sid")
         if sid is None:
-            key = f"index:{index}"
+            selector = {
+                name: statement[name]
+                for name in ("Effect", "Action", "Resource")
+            }
+            key = f"unsided:{_sha256_json(selector)}"
         elif isinstance(sid, str) and sid and sid not in seen_sids:
             seen_sids.add(sid)
             key = f"sid:{sid}"
         else:
             raise OperationError(
                 "scoped IAM policy changes require unique statement Sids"
+            )
+        if key in output:
+            raise OperationError(
+                "scoped IAM policy changes require unique statements"
             )
         output[key] = dict(statement)
     return output

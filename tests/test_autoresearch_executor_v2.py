@@ -1980,6 +1980,83 @@ def test_measured_host_rejects_structural_git_patch_metadata(
         )
 
 
+def test_measured_host_accepts_content_patch_from_read_only_source(tmp_path):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    source_context = CodeEditCandidateBuilder(
+        _config()
+    ).prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    target = source_context.source_root / "sourcing_model/runtime.py"
+    target.chmod(0o444)
+    patch = (
+        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        "--- a/sourcing_model/runtime.py\n"
+        "+++ b/sourcing_model/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+
+    source_hash, paths = _HostCandidateBuilder._apply_measured_patch(
+        context=source_context,
+        unified_diff=patch,
+        label="Git-tree generated draft",
+    )
+
+    assert source_hash.startswith("sha256:")
+    assert paths == frozenset({"sourcing_model/runtime.py"})
+
+
+def test_measured_host_rejects_content_patch_that_gains_executable_bit(
+    tmp_path,
+    monkeypatch,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    source_context = CodeEditCandidateBuilder(
+        _config()
+    ).prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    patch = (
+        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        "--- a/sourcing_model/runtime.py\n"
+        "+++ b/sourcing_model/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    real_apply = _run_git_apply
+
+    def _apply_and_change_mode(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        if not kwargs.get("check"):
+            target = Path(kwargs["cwd"]) / "sourcing_model/runtime.py"
+            target.chmod(target.stat().st_mode | 0o100)
+        return result
+
+    monkeypatch.setattr(
+        "gateway.tee.autoresearch_executor_v2._run_git_apply",
+        _apply_and_change_mode,
+    )
+
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="changed source file type or mode",
+    ):
+        _HostCandidateBuilder._apply_measured_patch(
+            context=source_context,
+            unified_diff=patch,
+            label="Git-tree generated draft",
+        )
+
+
 def test_host_git_tree_rejects_semantically_substituted_cumulative_patch(
     tmp_path,
 ):

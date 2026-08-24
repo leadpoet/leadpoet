@@ -1210,7 +1210,10 @@ class _HostCandidateBuilder:
                     raise AutoresearchExecutorV2Error(
                         f"{label} does not target an existing regular file"
                     )
-                original_modes[path] = source_path.stat().st_mode & 0o7777
+                # Git tracks only the executable bit for regular files. A
+                # content-only apply can normalize read/write permissions on
+                # a measured read-only source copy without changing Git mode.
+                original_modes[path] = source_path.stat().st_mode & 0o111
             _initialize_temporary_git_repo(staging)
             diff_path = Path(tmp) / "candidate.diff"
             diff_path.write_text(unified_diff, encoding="utf-8")
@@ -1238,7 +1241,7 @@ class _HostCandidateBuilder:
                 if (
                     result_path.is_symlink()
                     or not result_path.is_file()
-                    or result_path.stat().st_mode & 0o7777 != original_mode
+                    or result_path.stat().st_mode & 0o111 != original_mode
                 ):
                     raise AutoresearchExecutorV2Error(
                         f"{label} changed source file type or mode"

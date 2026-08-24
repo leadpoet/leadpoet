@@ -947,6 +947,11 @@
       "symbol": "_validate_compact_publication_journal_v2"
     },
     {
+      "ast_sha256": "sha256:80b6c340dac26b57f6a8dd217c6e17e37ac798fc2276638b367078093b107f71",
+      "path": "validator_tee/host/publication_journal_v2.py",
+      "symbol": "publication_journal_release_requirements_v2"
+    },
+    {
       "ast_sha256": "sha256:3228a19f06f8c4564567276214779e9da2897a9fff5cc4c03cdb48ac7e9c48a7",
       "path": "validator_tee/host/publication_journal_v2.py",
       "symbol": "validate_publication_journal_v2"
@@ -1017,7 +1022,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:7c03d5ba0091e5612ea70ea7ac4b2fe1168e118de3e78c02698a3a5771928048",
-  "protected_source_commit": "2541f2e435c6c3d8d1089207ff1bfca9cc3371cc",
+  "manifest_hash": "sha256:a302fcbda326bfd48855379a439859a481db22d3fafa9f2d7ab86b7b1e0237a7",
+  "protected_source_commit": "9ad261d75ab6d625f512cc661920632dad096e90",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

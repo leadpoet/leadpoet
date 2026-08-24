@@ -37,6 +37,8 @@ jobs:
     env:
       AWS_REGION: us-east-1
       AWS_ACCOUNT_ID: "493765492819"
+      LEADPOET_DOCKER_OPERATION_LOCK_FILE: ${{ runner.temp }}/leadpoet-docker-operation-v2.lock
+      LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE: ${{ runner.temp }}/leadpoet-docker-operation-v2.admission.lock
 
     steps:
       - name: Check out exact Lead consumer

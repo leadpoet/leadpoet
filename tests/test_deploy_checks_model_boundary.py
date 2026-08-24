@@ -31,6 +31,14 @@ def test_trusted_main_push_admits_signed_artifact_without_private_checkout() -> 
     assert "persist-credentials: false" in job
     assert "LEADPOET_PARITY_AWS_ROLE_ARN" in job
     assert "scripts/verify_signed_sourcing_artifact_admission.py" in job
+    assert (
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE: "
+        "${{ runner.temp }}/leadpoet-docker-operation-v2.lock"
+    ) in job
+    assert (
+        "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE: "
+        "${{ runner.temp }}/leadpoet-docker-operation-v2.admission.lock"
+    ) in job
     assert "branches/leadpoet-lab/current.json" in job
     assert "ecr:BatchGetImage" in job
     assert "kms:Verify" in job

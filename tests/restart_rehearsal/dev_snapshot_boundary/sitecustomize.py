@@ -1076,8 +1076,9 @@ if _state_path_raw and not _spawn_gate_invocation:
                 miss_policy=MISS_POLICY_STRICT,
             ).items():
                 env_args.extend(("-e", f"{name}={value}"))
-            if _compatibility_receipt.get("admission_mode") == (
-                "qualification_protocol_v2"
+            if (
+                str(_compatibility_receipt.get("admission_mode") or "")
+                == "qualification_protocol_v2"
             ):
                 env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             for group in PROVIDER_KEY_GROUPS:
@@ -1118,8 +1119,9 @@ if _state_path_raw and not _spawn_gate_invocation:
             for name in private_runtime.private_model_env_passthrough():
                 if name in environment:
                     env_args.extend(("-e", name))
-            if _compatibility_receipt.get("admission_mode") == (
-                "qualification_protocol_v2"
+            if (
+                str(_compatibility_receipt.get("admission_mode") or "")
+                == "qualification_protocol_v2"
             ):
                 env_args.extend(("-e", "LEADPOET_QUALIFICATION_PROTOCOL_V2=1"))
             base = [
@@ -1213,10 +1215,19 @@ if _state_path_raw and not _spawn_gate_invocation:
             cwd=str(_champion_root),
             check=False,
         )
+        failure_match = re.search(
+            r'research_lab_private_runtime_failure '
+            r'\{"exception_class_hash":"(sha256:[0-9a-f]{64})",'
+            r'"schema_version":"research_lab\.private_runtime_failure\.v1"\}',
+            str(completed.stderr or ""),
+        )
         _event(
             "provider_container",
             bootstrap_kind,
             returncode=int(completed.returncode),
+            failure_class_hash=(
+                failure_match.group(1) if failure_match is not None else None
+            ),
             network_disabled=read_only,
             reuse_existing=reuse_existing,
             bootstrap_hash=bootstrap_hash,

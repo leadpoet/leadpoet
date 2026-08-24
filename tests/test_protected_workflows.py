@@ -385,7 +385,10 @@ def test_scoring_receipt_failure_policy_is_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
+        "_DEV_EVALUATION_JOB_SCOPES",
+        "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
+        "MAX_DEV_EVALUATION_INPUT_BYTES",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
@@ -508,6 +511,15 @@ def test_git_tree_source_authority_boundaries_are_protected():
         "_HostGitTreeRepository",
         "_HostCandidateBuilder",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])
+    assert {
+        "_snapshot_compatibility_identity",
+        "_tree_evaluator_commitment",
+        "_tree_authority_evaluator_commitment",
+        "ResearchLabHostedWorker._load_tree_snapshot_readiness",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/worker.py"])
+    assert "compatibility_admission_mode_policy_identity" in PROTECTED_SYMBOLS[
+        "research_lab/sourcing_model_contract_check.py"
+    ]
 
 
 def test_model_sandbox_launcher_boundaries_are_protected():

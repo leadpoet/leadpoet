@@ -127,6 +127,9 @@ from research_lab.probe_catalog import (
     default_probe_catalog,
     validate_probe_catalog,
 )
+from research_lab.sourcing_model_contract_check import (
+    compatibility_admission_mode_policy_identity,
+)
 
 
 AUTORESEARCH_REQUEST_SCHEMA_VERSION = "leadpoet.autoresearch_request.v2"
@@ -3043,6 +3046,9 @@ class AutoresearchExecutorV2:
             "champion_image_digest",
             "source_commit",
             "model_config_hash",
+            "compatibility_admission_mode",
+            "compatibility_policy_hash",
+            "compatibility_admission_hash",
             "provider_model_ids",
             "miss_policy",
             "score_version",
@@ -3068,8 +3074,23 @@ class AutoresearchExecutorV2:
             "rolling_window_hash",
             "private_model_manifest_hash",
             "model_config_hash",
+            "compatibility_policy_hash",
+            "compatibility_admission_hash",
         ):
             _hash(evaluator_commitment.get(field), field)
+        compatibility_admission_mode = str(
+            evaluator_commitment.get("compatibility_admission_mode") or ""
+        )
+        try:
+            _compatibility_policy, current_compatibility_policy_hash = (
+                compatibility_admission_mode_policy_identity(
+                    compatibility_admission_mode
+                )
+            )
+        except ValueError as exc:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree evaluator compatibility mode is unsupported"
+            ) from exc
         provider_model_ids = evaluator_commitment.get("provider_model_ids")
         resolved_snapshot_uri = str(
             evaluator_commitment.get("resolved_snapshot_uri") or ""
@@ -3081,7 +3102,7 @@ class AutoresearchExecutorV2:
             _hash(snapshot_pointer_hash, "snapshot pointer hash")
         if (
             evaluator_commitment.get("schema_version")
-            != "research_lab.git_tree_evaluator_commitment.v3"
+            != "research_lab.git_tree_evaluator_commitment.v4"
             or not resolved_snapshot_uri
             or resolved_snapshot_uri.endswith("/current.json")
             or evaluator_commitment.get("miss_policy") != "strict"
@@ -3100,6 +3121,8 @@ class AutoresearchExecutorV2:
             or not str(evaluator_commitment.get("champion_image_digest") or "")
             or not str(evaluator_commitment.get("source_commit") or "")
             or not str(evaluator_commitment.get("score_version") or "")
+            or evaluator_commitment.get("compatibility_policy_hash")
+            != current_compatibility_policy_hash
             or not isinstance(provider_model_ids, list)
             or any(not isinstance(item, str) or not item for item in provider_model_ids)
             or int(evaluator_commitment.get("evaluation_timeout_seconds") or 0) < 30

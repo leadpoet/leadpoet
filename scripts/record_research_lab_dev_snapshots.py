@@ -47,6 +47,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import shutil
 import subprocess
@@ -87,6 +88,7 @@ SNAPSHOT_RECORD_CANCELLED_EXIT_CODE = 75
 DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS = 900
 SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS = 30
 SNAPSHOT_RECORD_FINALIZATION_RESERVE_SECONDS = 300
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 PROVIDER_KEY_GROUPS = (
     ("EXA_API_KEY",),
@@ -97,6 +99,18 @@ PROVIDER_KEY_GROUPS = (
 
 class SnapshotRecordingCancelled(RuntimeError):
     """Raised only at an ICP boundary when the controller supersedes a run."""
+
+
+class SnapshotQualificationIncomplete(RuntimeError):
+    """A validated model-owned qualification result is not complete."""
+
+    def __init__(self, envelope: Mapping[str, Any]) -> None:
+        receipt = dict(envelope["route_completion_receipt"])
+        self.retryable = bool(receipt["retryable"])
+        self.disposition = str(receipt["disposition"])
+        self.failure_classes = tuple(str(item) for item in receipt["failure_classes"])
+        self.partial_company_count = len(envelope["companies"])
+        super().__init__("qualification outcome is incomplete")
 
 
 def _raise_if_snapshot_record_cancelled(cancel_file: Path | None) -> None:
@@ -172,13 +186,16 @@ def _load_snapshot_adapter_authority(
     source_commit: str,
     model_config_hash: str,
     manifest_hash: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     """Select the host-owned model ABI from an exact artifact-bound receipt."""
 
     from gateway.tee.model_sandbox_v2 import (
         _model_adapter_bootstrap_for_compatibility_receipt_v1,
     )
     from research_lab.eval.artifacts import PrivateModelArtifactManifest
+    from research_lab.sourcing_model_contract_check import (
+        compatibility_admission_policy_identity,
+    )
 
     artifact_doc = _load_json_file(artifact_path)
     receipt = _load_json_file(compatibility_receipt_path)
@@ -196,7 +213,14 @@ def _load_snapshot_adapter_authority(
         receipt,
         artifact=artifact,
     )
-    return bootstrap, str(receipt.get("admission_mode") or "")
+    _policy, policy_hash = compatibility_admission_policy_identity(receipt)
+    admission_mode = str(receipt.get("admission_mode") or "")
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    if _SHA256_RE.fullmatch(policy_hash) is None:
+        raise ValueError("snapshot compatibility policy hash is invalid")
+    if _SHA256_RE.fullmatch(receipt_hash) is None:
+        raise ValueError("snapshot compatibility receipt hash is invalid")
+    return bootstrap, admission_mode, policy_hash, receipt_hash
 
 
 def _decode_adapter_companies(value: Any, *, admission_mode: str) -> list[Mapping[str, Any]]:
@@ -209,7 +233,7 @@ def _decode_adapter_companies(value: Any, *, admission_mode: str) -> list[Mappin
 
         envelope = validate_qualification_outcome_envelope_v2(value)
         if envelope["completion_state"] != "complete":
-            raise RuntimeError("qualification outcome is incomplete")
+            raise SnapshotQualificationIncomplete(envelope)
         return list(envelope["companies"])
     if not isinstance(value, list):
         raise RuntimeError("champion adapter must return a JSON array")
@@ -575,6 +599,19 @@ def _record_icp_with_retries(
                 adapter_bootstrap=adapter_bootstrap,
                 admission_mode=admission_mode,
             )
+        except SnapshotQualificationIncomplete as exc:
+            if not exc.retryable or attempt >= max_attempts:
+                raise
+            _raise_if_snapshot_record_cancelled(cancel_file)
+            delay = SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS[
+                min(attempt - 1, len(SNAPSHOT_RECORD_RETRY_DELAYS_SECONDS) - 1)
+            ]
+            print(
+                "WARNING: retryable qualification outcome incomplete for daily "
+                f"ICP {item_index}/{item_count} on attempt "
+                f"{attempt}/{max_attempts}; retrying after {delay:g}s"
+            )
+            time.sleep(delay)
         except Exception:  # noqa: BLE001 - bounded retry remains fail closed
             if attempt >= max_attempts:
                 raise
@@ -1075,7 +1112,12 @@ def main() -> int:
         print("ERROR: daily baseline model manifest differs from the active champion")
         return 1
     try:
-        adapter_bootstrap, admission_mode = _load_snapshot_adapter_authority(
+        (
+            adapter_bootstrap,
+            admission_mode,
+            compatibility_policy_hash,
+            compatibility_admission_hash,
+        ) = _load_snapshot_adapter_authority(
             artifact_path=args.private_model_artifact,
             compatibility_receipt_path=args.compatibility_receipt,
             image_digest=args.champion_image,
@@ -1236,6 +1278,9 @@ def main() -> int:
                 "private_model_manifest_hash": str(
                     args.private_model_manifest_hash
                 ),
+                "compatibility_admission_mode": admission_mode,
+                "compatibility_policy_hash": compatibility_policy_hash,
+                "compatibility_admission_hash": compatibility_admission_hash,
                 "provider_model_ids": provider_model_ids,
                 "replay_output_hashes": replay_output_hashes,
             },

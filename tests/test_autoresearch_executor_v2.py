@@ -86,6 +86,9 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
+from research_lab.sourcing_model_contract_check import (
+    compatibility_admission_mode_policy_identity,
+)
 from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     PrivateModelArtifactManifest,
@@ -370,6 +373,12 @@ def test_v2_build_result_rejects_self_consistent_forged_image_build_manifest(
 def _payload(tmp_path: Path):
     source_bundle, artifact = _source_and_artifact(tmp_path)
     tree_policy = TreePolicy(mode="active")
+    compatibility_admission_mode = "qualification_protocol_v2"
+    _, compatibility_policy_hash = (
+        compatibility_admission_mode_policy_identity(
+            compatibility_admission_mode
+        )
+    )
     run_id = "run-v2-1"
     queue_event_hash = "sha256:" + "a" * 64
     privacy_proof_doc = {"status": "verified"}
@@ -483,7 +492,7 @@ def _payload(tmp_path: Path):
                 "policy": tree_policy.to_dict(),
                 "evaluator_enabled": True,
                 "evaluator_commitment": {
-                    "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+                    "schema_version": "research_lab.git_tree_evaluator_commitment.v4",
                     "resolved_snapshot_uri": (
                         "s3://private-dev-snapshots/"
                         + "7" * 64
@@ -507,6 +516,9 @@ def _payload(tmp_path: Path):
                     "champion_image_digest": artifact["image_digest"],
                     "source_commit": artifact["git_commit_sha"],
                     "model_config_hash": "sha256:" + "a" * 64,
+                    "compatibility_admission_mode": compatibility_admission_mode,
+                    "compatibility_policy_hash": compatibility_policy_hash,
+                    "compatibility_admission_hash": "sha256:" + "4" * 64,
                     "provider_model_ids": [],
                     "miss_policy": "strict",
                     "score_version": "research_lab.dev_eval.v2",
@@ -1289,6 +1301,42 @@ def test_autoresearch_executor_rejects_obsolete_component_registry_purpose(
             ValueError,
             match="missing required purpose research_lab.model_compatibility.v2",
         ):
+            executor._validate_request(payload)
+    finally:
+        executor.close()
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    (
+        (
+            {"compatibility_admission_mode": "unsupported_mode_v9"},
+            "compatibility mode is unsupported",
+        ),
+        (
+            {"compatibility_policy_hash": "sha256:" + "0" * 64},
+            "commitment is not production eligible",
+        ),
+    ),
+)
+def test_autoresearch_executor_rejects_noncurrent_snapshot_admission(
+    tmp_path,
+    updates,
+    message,
+):
+    payload = _payload(tmp_path)
+    payload["budget_context"]["tree_policy"]["evaluator_commitment"].update(
+        updates
+    )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(AutoresearchExecutorV2Error, match=message):
             executor._validate_request(payload)
     finally:
         executor.close()

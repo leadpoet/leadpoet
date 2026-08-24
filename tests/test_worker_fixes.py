@@ -42,6 +42,9 @@ from research_lab.eval.private_runtime import (
     INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
     INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
 )
+from research_lab.sourcing_model_contract_check import (
+    compatibility_admission_mode_policy_identity,
+)
 from tests.v2_epoch_test_utils import epoch_test_environment
 
 
@@ -51,6 +54,11 @@ GUARD_SQL_PATH = ROOT / "scripts" / "59-research-lab-heartbeat-claim-guard.sql"
 RUN_ID = "33333333-3333-4333-8333-333333333333"
 TICKET_ID = "44444444-4444-4444-8444-444444444444"
 MINER_HOTKEY = "5F3sa2TJAWMqDhXG6jhV4N8ko9SxwGy8TpaNS1repo5EYjQX"
+COMPATIBILITY_ADMISSION_MODE = "qualification_protocol_v2"
+_, COMPATIBILITY_POLICY_HASH = compatibility_admission_mode_policy_identity(
+    COMPATIBILITY_ADMISSION_MODE
+)
+COMPATIBILITY_ADMISSION_HASH = "sha256:" + "7" * 64
 
 
 @pytest.fixture
@@ -735,15 +743,54 @@ def test_tree_evaluator_commitment_requires_immutable_resolved_snapshot(
         )
 
     readiness["resolved_snapshot_uri"] = "s3://private-dev/snapshots/" + "2" * 64
+    readiness.update(
+        compatibility_admission_mode=COMPATIBILITY_ADMISSION_MODE,
+        compatibility_policy_hash=COMPATIBILITY_POLICY_HASH,
+        compatibility_admission_hash=COMPATIBILITY_ADMISSION_HASH,
+    )
     commitment = worker_mod._tree_evaluator_commitment(
         readiness,
         policy=hosted_worker.tree_policy,
     )
     assert commitment["schema_version"] == (
-        "research_lab.git_tree_evaluator_commitment.v3"
+        "research_lab.git_tree_evaluator_commitment.v4"
     )
     assert commitment["resolved_snapshot_uri"] == readiness["resolved_snapshot_uri"]
     assert commitment["snapshot_pointer_hash"] == readiness["pointer_hash"]
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    (
+        ({"compatibility_admission_hash": ""}, "evidence is invalid"),
+        (
+            {"compatibility_admission_mode": "unsupported_mode_v9"},
+            "mode is unsupported",
+        ),
+        (
+            {"compatibility_policy_hash": "sha256:" + "0" * 64},
+            "policy is stale",
+        ),
+    ),
+)
+def test_tree_evaluator_commitment_rejects_noncurrent_compatibility_evidence(
+    hosted_worker,
+    updates,
+    message,
+):
+    readiness = {
+        "resolved_snapshot_uri": "s3://private-dev/snapshots/" + "2" * 64,
+        "compatibility_admission_mode": COMPATIBILITY_ADMISSION_MODE,
+        "compatibility_policy_hash": COMPATIBILITY_POLICY_HASH,
+        "compatibility_admission_hash": COMPATIBILITY_ADMISSION_HASH,
+        **updates,
+    }
+
+    with pytest.raises(worker_mod.HostedResearchLabWorkerError, match=message):
+        worker_mod._tree_evaluator_commitment(
+            readiness,
+            policy=hosted_worker.tree_policy,
+        )
 
 
 async def test_existing_tree_restores_exact_pinned_evaluator_commitment(
@@ -755,9 +802,12 @@ async def test_existing_tree_restores_exact_pinned_evaluator_commitment(
         manifest_hash="sha256:" + "2" * 64,
     )
     commitment = {
-        "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+        "schema_version": "research_lab.git_tree_evaluator_commitment.v4",
         "resolved_snapshot_uri": "s3://private-dev/snapshots/" + "3" * 64,
         "snapshot_pointer_hash": "sha256:" + "4" * 64,
+        "compatibility_admission_mode": COMPATIBILITY_ADMISSION_MODE,
+        "compatibility_policy_hash": COMPATIBILITY_POLICY_HASH,
+        "compatibility_admission_hash": COMPATIBILITY_ADMISSION_HASH,
     }
 
     async def fake_select_one(table, *, columns="*", filters=()):
@@ -812,6 +862,49 @@ async def test_legacy_tree_requires_one_replacement_for_snapshot_pinning(
                     "schema_version": "research_lab.git_tree_evaluator_commitment.v2"
                 }
             },
+            "current_event_type": "checkpoint_committed",
+            "current_event_hash": "sha256:" + "5" * 64,
+        }
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    resolution = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc=None,
+    )
+
+    assert resolution.evaluator_commitment is None
+    assert resolution.requires_evaluator_replacement is True
+
+
+async def test_stale_v4_tree_requires_one_compatibility_replacement(
+    monkeypatch,
+    hosted_worker,
+):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    commitment = {
+        "schema_version": "research_lab.git_tree_evaluator_commitment.v4",
+        "resolved_snapshot_uri": "s3://private-dev/snapshots/" + "3" * 64,
+        "compatibility_admission_mode": COMPATIBILITY_ADMISSION_MODE,
+        "compatibility_policy_hash": "sha256:" + "0" * 64,
+        "compatibility_admission_hash": COMPATIBILITY_ADMISSION_HASH,
+    }
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_autoresearch_run_tree_current"
+        return {
+            "tree_id": "sha256:" + "3" * 64,
+            "run_id": RUN_ID,
+            "tree_generation": 0,
+            "replaces_tree_id": None,
+            "root_artifact_hash": artifact.model_artifact_hash,
+            "root_manifest_hash": artifact.manifest_hash,
+            "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "evaluator_commitment_hash": worker_mod.sha256_json(commitment),
+            "tree_doc": {"evaluator_commitment": commitment},
             "current_event_type": "checkpoint_committed",
             "current_event_hash": "sha256:" + "5" * 64,
         }

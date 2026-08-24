@@ -25,6 +25,9 @@ IMAGE = "123456789.dkr.ecr.test/model@sha256:" + "a" * 64
 COMMIT = "b" * 40
 CONFIG_HASH = "sha256:" + "c" * 64
 MODEL_MANIFEST_HASH = "sha256:" + "f" * 64
+COMPATIBILITY_MODE = "qualification_protocol_v2"
+COMPATIBILITY_POLICY_HASH = "sha256:" + "8" * 64
+COMPATIBILITY_ADMISSION_HASH = "sha256:" + "9" * 64
 
 
 def _active(
@@ -57,6 +60,9 @@ def _ready(**overrides: Any) -> dict[str, Any]:
         "source_commit": COMMIT,
         "model_config_hash": CONFIG_HASH,
         "private_model_manifest_hash": MODEL_MANIFEST_HASH,
+        "compatibility_admission_mode": COMPATIBILITY_MODE,
+        "compatibility_policy_hash": COMPATIBILITY_POLICY_HASH,
+        "compatibility_admission_hash": COMPATIBILITY_ADMISSION_HASH,
         **overrides,
     }
 
@@ -399,10 +405,48 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
         snapshot_refresh,
         "_active_model_compatibility_receipt",
         lambda _active_model: {
-            "admission_mode": "qualification_protocol_v2",
-            "receipt_hash": "sha256:" + "9" * 64,
+            "admission_mode": COMPATIBILITY_MODE,
+            "policy_hash": COMPATIBILITY_POLICY_HASH,
+            "receipt_hash": COMPATIBILITY_ADMISSION_HASH,
         },
     )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "compatibility_admission_policy_identity",
+        lambda receipt: ({}, str(receipt["policy_hash"])),
+    )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "compatibility_admission_mode_policy_identity",
+        lambda _mode: ({}, COMPATIBILITY_POLICY_HASH),
+    )
+
+
+def test_active_model_compatibility_receipt_uses_exact_artifact(monkeypatch):
+    active = _active()
+    expected = {
+        "admission_mode": COMPATIBILITY_MODE,
+        "policy_hash": COMPATIBILITY_POLICY_HASH,
+        "receipt_hash": COMPATIBILITY_ADMISSION_HASH,
+    }
+    observed: dict[str, Any] = {}
+
+    def load_receipt(artifact: Any, *, timeout_seconds: int) -> dict[str, Any]:
+        observed["artifact"] = artifact
+        observed["timeout_seconds"] = timeout_seconds
+        return expected
+
+    monkeypatch.setattr(
+        "gateway.research_lab.model_authority_v2."
+        "private_model_compatibility_receipt_v2",
+        load_receipt,
+    )
+
+    assert snapshot_refresh._active_model_compatibility_receipt(active) is expected
+    assert observed == {
+        "artifact": active.artifact,
+        "timeout_seconds": snapshot_refresh.DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
+    }
 
 
 def test_cancellation_keeps_refresh_lock_and_workdir_until_command_is_gone(
@@ -599,6 +643,22 @@ def test_any_paid_worker_can_refresh_under_shared_lock(monkeypatch, tmp_path):
 def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     calls: list[Sequence[str]] = []
+    compatibility_calls = 0
+
+    def compatibility_receipt(_active_model: Any) -> dict[str, str]:
+        nonlocal compatibility_calls
+        compatibility_calls += 1
+        return {
+            "admission_mode": COMPATIBILITY_MODE,
+            "policy_hash": COMPATIBILITY_POLICY_HASH,
+            "receipt_hash": COMPATIBILITY_ADMISSION_HASH,
+        }
+
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_active_model_compatibility_receipt",
+        compatibility_receipt,
+    )
 
     async def active_loader(*_args: Any, **_kwargs: Any):
         return _active()
@@ -618,21 +678,114 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
             active_loader=active_loader,
         )
     )
-    second = asyncio.run(
+    subsequent = [
+        asyncio.run(
+            snapshot_refresh.maybe_refresh_dev_snapshot(
+                SimpleNamespace(),
+                worker_index=worker_index,
+                tree_policy=TreePolicy(mode="active"),
+                now=1100 + worker_index,
+                command_runner=command_runner,
+                readiness_loader=lambda _uri, **_kwargs: _ready(),
+                active_loader=active_loader,
+            )
+        )
+        for worker_index in range(1, 10)
+    ]
+    assert first["status"] == "healthy"
+    assert all(
+        result == {"status": "skipped", "reason": "check_not_due"}
+        for result in subsequent
+    )
+    assert not calls
+    assert compatibility_calls == 1
+    assert (tmp_path / "state.json").is_file()
+
+
+def test_recent_snapshot_is_refreshed_when_admission_receipt_changes(
+    monkeypatch,
+    tmp_path,
+):
+    _configure(monkeypatch, tmp_path)
+    current_receipt = {
+        "admission_mode": COMPATIBILITY_MODE,
+        "policy_hash": COMPATIBILITY_POLICY_HASH,
+        "receipt_hash": COMPATIBILITY_ADMISSION_HASH,
+    }
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_active_model_compatibility_receipt",
+        lambda _active_model: dict(current_receipt),
+    )
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "compatibility_admission_mode_policy_identity",
+        lambda _mode: ({}, str(current_receipt["policy_hash"])),
+    )
+    commands: list[list[str]] = []
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    first = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
             SimpleNamespace(),
-            worker_index=6,
+            worker_index=0,
             tree_policy=TreePolicy(mode="active"),
-            now=1100,
-            command_runner=command_runner,
+            now=1000,
             readiness_loader=lambda _uri, **_kwargs: _ready(),
             active_loader=active_loader,
         )
     )
     assert first["status"] == "healthy"
-    assert second == {"status": "skipped", "reason": "check_not_due"}
-    assert not calls
-    assert (tmp_path / "state.json").is_file()
+
+    new_policy_hash = "sha256:" + "6" * 64
+    new_receipt_hash = "sha256:" + "7" * 64
+    current_receipt.update(
+        policy_hash=new_policy_hash,
+        receipt_hash=new_receipt_hash,
+    )
+    readiness = iter(
+        [
+            _ready(),
+            _ready(
+                compatibility_policy_hash=new_policy_hash,
+                compatibility_admission_hash=new_receipt_hash,
+            ),
+            _ready(
+                compatibility_policy_hash=new_policy_hash,
+                compatibility_admission_hash=new_receipt_hash,
+            ),
+        ]
+    )
+
+    def command_runner(
+        command: Sequence[str],
+        _env: Mapping[str, str],
+        _timeout: int,
+    ) -> str:
+        commands.append(list(command))
+        return _pipeline_output(command)
+
+    second = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=1,
+            tree_policy=TreePolicy(mode="active"),
+            now=1001,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
+        )
+    )
+
+    assert second["status"] == "refreshed"
+    assert second["refresh_reason"] == (
+        "snapshot_compatibility_provenance_mismatch"
+    )
+    assert second["compatibility_policy_hash"] == new_policy_hash
+    assert second["compatibility_admission_hash"] == new_receipt_hash
+    assert len(commands) == 4
 
 
 def test_recent_model_a_check_does_not_delay_model_b_refresh(monkeypatch, tmp_path):
@@ -1087,6 +1240,75 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
     assert result["status"] == "failed"
     assert "active private model changed" in result["last_error"]
     assert len(commands) == 2
+    assert not any(
+        command[1].endswith("publish_research_lab_dev_snapshot.py")
+        and "--skip-current-pointer" not in command
+        for command in commands
+    )
+
+
+def test_compatibility_change_keeps_existing_pointer_untouched(
+    monkeypatch,
+    tmp_path,
+):
+    _configure(monkeypatch, tmp_path)
+    commands: list[list[str]] = []
+    receipt_calls = 0
+
+    def compatibility_receipt(_active_model: Any) -> dict[str, Any]:
+        nonlocal receipt_calls
+        receipt_calls += 1
+        return {
+            "admission_mode": COMPATIBILITY_MODE,
+            "policy_hash": COMPATIBILITY_POLICY_HASH,
+            "receipt_hash": (
+                COMPATIBILITY_ADMISSION_HASH
+                if receipt_calls <= 1
+                else "sha256:" + "7" * 64
+            ),
+        }
+
+    monkeypatch.setattr(
+        snapshot_refresh,
+        "_active_model_compatibility_receipt",
+        compatibility_receipt,
+    )
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(
+        command: Sequence[str],
+        _env: Mapping[str, str],
+        _timeout: int,
+    ) -> str:
+        commands.append(list(command))
+        return _pipeline_output(command)
+
+    readiness = iter(
+        [
+            _ready(ready=False, reason="snapshot_not_ready"),
+            _ready(),
+        ]
+    )
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert "compatibility authority changed" in result["last_error"]
+    assert receipt_calls == 2
+    assert len(commands) == 3
+    assert commands[2][1].endswith("publish_research_lab_dev_snapshot.py")
+    assert "--skip-current-pointer" in commands[2]
     assert not any(
         command[1].endswith("publish_research_lab_dev_snapshot.py")
         and "--skip-current-pointer" not in command

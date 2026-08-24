@@ -10474,9 +10474,23 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
     return {
         "numeric_observation_with_web_evidence_matched": True,
         "raw_observation_committed": True,
-        "explicit_false_remained_mismatch": True,
+        "contradictory_boolean_failed_closed": True,
         "malformed_range_decimal_negative_failed_closed": True,
     }
+
+
+def _company_fit_numeric_observation_projection_evidence_is_complete(
+    evidence: Mapping[str, Any],
+) -> bool:
+    return all(
+        evidence.get(field) is True
+        for field in (
+            "numeric_observation_with_web_evidence_matched",
+            "raw_observation_committed",
+            "contradictory_boolean_failed_closed",
+            "malformed_range_decimal_negative_failed_closed",
+        )
+    )
 
 
 def _exercise_measured_raw_provider_transport(
@@ -16362,26 +16376,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             is True
         ),
         "company_fit_numeric_observation_projection_verified": (
-            behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("numeric_observation_with_web_evidence_matched")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("raw_observation_committed")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("explicit_false_remained_mismatch")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("malformed_range_decimal_negative_failed_closed")
-            is True
+            _company_fit_numeric_observation_projection_evidence_is_complete(
+                behavior_evidence.get(
+                    "company-fit-numeric-observation-projection",
+                    {},
+                )
+            )
         ),
         "measured_assigned_proxy_raw_transport_verified": (
             behavior_evidence.get(

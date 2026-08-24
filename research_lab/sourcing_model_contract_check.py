@@ -2588,6 +2588,26 @@ COMPATIBILITY_ADMISSION_POLICY_PROFILE_REGISTRY = (
 )
 
 
+def compatibility_admission_mode_policy_identity(
+    admission_mode: str,
+) -> tuple[Dict[str, Any], str]:
+    """Resolve the current policy for one supported admission mode."""
+
+    profiles = {
+        profile
+        for profile_key, profile in COMPATIBILITY_ADMISSION_POLICY_PROFILE_REGISTRY
+        if profile_key[2] == str(admission_mode or "")
+    }
+    if len(profiles) != 1:
+        raise ValueError("compatibility admission mode is unsupported")
+    profile = next(iter(profiles))
+    if profile == "semantic_policy_v1":
+        return semantic_compatibility_policy_identity_v1()
+    if profile == "qualification_policy_v2":
+        return qualification_protocol_policy_identity_v2()
+    raise ValueError("compatibility admission policy profile is unsupported")
+
+
 def compatibility_admission_policy_identity(
     receipt: Mapping[str, Any],
 ) -> tuple[Dict[str, Any], str]:

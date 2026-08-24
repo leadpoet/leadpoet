@@ -90,6 +90,19 @@ def _rehash_role_contract(declaration: dict) -> None:
     })
 
 
+def _upgrade_role_contract_v2(declaration: dict) -> None:
+    contract = declaration["champion_execution"]["runner_role_contract"]
+    contract["schema_version"] = "model-runner-role-contract:v2"
+    for entry in contract["roles"].values():
+        signature = entry["consumer_signature"]
+        signature["required_positional_parameters"] = list(
+            signature["positional_parameters"]
+        )
+        signature["defaulted_positional_parameters"] = []
+        entry["consumer_signature_sha256"] = _bare_wire_hash(signature)
+    _rehash_role_contract(declaration)
+
+
 def _company(name: str = "Acme") -> dict:
     return {
         "company_name": name,
@@ -1724,6 +1737,110 @@ def test_signed_optional_consumer_parameter_preserves_stable_interface():
     assert generation.member(role) == member
 
 
+def test_signed_defaulted_positional_parameter_preserves_stable_interface():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    _upgrade_role_contract_v2(declaration)
+    role = "provider_prepare"
+    entry = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ][role]
+    member = entry["adapter_member"]
+    # The stable interface still requires only ``action``. The exact signed
+    # artifact signature adds a trailing positional parameter, so the model's
+    # role contract declares that parameter defaulted for the stable host call.
+    declaration["consumer_contract"]["functions"][member].append(
+        "future_optional"
+    )
+    declaration["consumer_contract"]["full_parameters"][member].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["positional_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["defaulted_positional_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["full_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature_sha256"] = _bare_wire_hash(
+        entry["consumer_signature"]
+    )
+    _rehash_role_contract(declaration)
+
+    generation = ArtifactRunnerProtocolGeneration.from_declaration(
+        declaration,
+        expected_consumer_contract_sha256="e" * 64,
+    )
+
+    assert generation.member(role) == member
+
+
+def test_legacy_role_contract_rejects_unsigned_trailing_positional_parameter():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    role = "provider_prepare"
+    entry = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ][role]
+    member = entry["adapter_member"]
+    declaration["consumer_contract"]["functions"][member].append(
+        "future_optional"
+    )
+    declaration["consumer_contract"]["full_parameters"][member].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["positional_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature"]["full_parameters"].append(
+        "future_optional"
+    )
+    entry["consumer_signature_sha256"] = _bare_wire_hash(
+        entry["consumer_signature"]
+    )
+    _rehash_role_contract(declaration)
+
+    with pytest.raises(ModelRunnerHostError, match="host call differs"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            declaration,
+            expected_consumer_contract_sha256="e" * 64,
+        )
+
+
+def test_signed_required_trailing_positional_fails_before_provider_spend():
+    declaration = runner_declaration(
+        "v3", contract_hash="e" * 64, official_baseline=True
+    )
+    _upgrade_role_contract_v2(declaration)
+    role = "provider_response_ingestion"
+    entry = declaration["champion_execution"]["runner_role_contract"][
+        "roles"
+    ][role]
+    member = entry["adapter_member"]
+    for collection in (
+        declaration["consumer_contract"]["functions"][member],
+        declaration["consumer_contract"]["full_parameters"][member],
+        entry["consumer_signature"]["positional_parameters"],
+        entry["consumer_signature"]["required_positional_parameters"],
+        entry["consumer_signature"]["full_parameters"],
+    ):
+        collection.append("required_after_spend")
+    entry["consumer_signature_sha256"] = _bare_wire_hash(
+        entry["consumer_signature"]
+    )
+    _rehash_role_contract(declaration)
+
+    with pytest.raises(ModelRunnerHostError, match="host call differs"):
+        ArtifactRunnerProtocolGeneration.from_declaration(
+            declaration,
+            expected_consumer_contract_sha256="e" * 64,
+        )
+
+
 @pytest.mark.parametrize("failure", ("top_level", "unnamespaced_extension"))
 def test_consumer_contract_additions_are_bounded_to_namespaced_extensions(
     failure,
@@ -1751,6 +1868,7 @@ def test_consumer_contract_additions_are_bounded_to_namespaced_extensions(
         "major",
         "unknown_required",
         "renamed_host_parameter",
+        "new_required_positional_parameter",
         "new_required_parameter",
         "async_kind",
     ),
@@ -1801,6 +1919,12 @@ def test_required_role_drift_fails_closed(failure):
             signature["full_parameters"] = ["request"]
             consumer["functions"][member] = ["request"]
             consumer["full_parameters"][member] = ["request"]
+        elif failure == "new_required_positional_parameter":
+            interface["positional_parameters"].append("required_option")
+            signature["positional_parameters"].append("required_option")
+            signature["full_parameters"].append("required_option")
+            consumer["functions"][member].append("required_option")
+            consumer["full_parameters"][member].append("required_option")
         elif failure == "new_required_parameter":
             signature["full_parameters"].append("required_option")
             signature["required_keyword_only"] = ["required_option"]

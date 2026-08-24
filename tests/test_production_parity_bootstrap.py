@@ -66,6 +66,12 @@ def _condition_matches(
                 )
                 if not all(str(value) in expected_values for value in actual_values):
                     return False
+            elif operator == "ForAnyValue:StringEquals":
+                expected_values = (
+                    expected if isinstance(expected, list) else [expected]
+                )
+                if not any(str(value) in expected_values for value in actual_values):
+                    return False
             elif operator in {"StringEquals", "ArnEquals", "Bool"}:
                 if not all(
                     _matches(str(value), expected, pattern=False)

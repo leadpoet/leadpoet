@@ -1358,9 +1358,15 @@ class DockerPrivateModelSpec:
     env_passthrough: tuple[str, ...] = DEFAULT_ENV_PASSTHROUGH
     extra_env: Mapping[str, str] = field(default_factory=dict)
     pull_before_run: bool = True
+    network_disabled: bool = False
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "DockerPrivateModelSpec":
+        network_disabled = data.get("network_disabled", False)
+        if type(network_disabled) is not bool:
+            raise PrivateModelRuntimeError(
+                "docker private model network_disabled must be boolean"
+            )
         return cls(
             image_digest=str(data["image_digest"]),
             module_name=str(data.get("module_name") or "research_lab_adapter"),
@@ -1371,6 +1377,7 @@ class DockerPrivateModelSpec:
             env_passthrough=tuple(str(item) for item in data.get("env_passthrough", DEFAULT_ENV_PASSTHROUGH)),
             extra_env={str(k): str(v) for k, v in dict(data.get("extra_env") or {}).items()},
             pull_before_run=bool(data.get("pull_before_run", True)),
+            network_disabled=network_disabled,
         )
 
 
@@ -1556,6 +1563,7 @@ class DockerPrivateModelRunner:
             "leadpoet-private-model-" + uuid.uuid4().hex,
             "-i",
             *_docker_platform_args(self.spec),
+            *(["--network", "none"] if self.spec.network_disabled else []),
             *_docker_env_args(self.spec),
             *provider_cost_args,
             *evidence_cache_args,
@@ -1990,6 +1998,12 @@ def _build_docker_process_env(spec: DockerPrivateModelSpec) -> dict[str, str]:
         "PATH": os.environ.get("PATH", ""),
         "PYTHONUNBUFFERED": "1",
     }
+    # Docker client authentication is host-owned and may use an ephemeral
+    # config written by CI. Preserve only its locator for the Docker process;
+    # it is never converted into a container ``-e`` argument.
+    for name in ("HOME", "DOCKER_CONFIG"):
+        if name in os.environ:
+            env[name] = os.environ[name]
     for name in spec.env_passthrough:
         if name in os.environ:
             env[name] = os.environ[name]

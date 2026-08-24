@@ -19,9 +19,6 @@ permissions:
 
 env:
   CI: "true"
-  # One immutable source identity is shared by checkout verification and the
-  # adapter-v10 tests. Do not replace this with a branch or a short ref.
-  SOURCING_MODEL_SOURCE_SHA: "82921b51af8aa7ed097f01964f23cc9d16b5e3d6"
   DISABLE_BACKGROUND_TASKS: "true"
   ENABLE_FULFILLMENT: "false"
   LANGFUSE_ENABLED: "false"
@@ -60,38 +57,6 @@ jobs:
         with:
           ref: ${{ github.event.deployment.ref || github.ref }}
           fetch-depth: 0
-
-      - name: Check out exact Sourcing_model source
-        uses: actions/checkout@v4
-        with:
-          repository: leadpoet/Sourcing_model
-          ref: ${{ env.SOURCING_MODEL_SOURCE_SHA }}
-          path: .ci/sourcing-model
-          fetch-depth: 1
-          token: ${{ secrets.SOURCING_MODEL_READ_TOKEN }}
-          persist-credentials: false
-
-      - name: Verify exact Sourcing_model source
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_root="$GITHUB_WORKSPACE/.ci/sourcing-model"
-          expected_sha="$SOURCING_MODEL_SOURCE_SHA"
-          test -d "$source_root/.git"
-          test "$(git -C "$source_root" rev-parse HEAD)" = "$expected_sha"
-          test -z "$(git -C "$source_root" symbolic-ref -q HEAD || true)"
-          test -z "$(git -C "$source_root" status --porcelain=v1 --untracked-files=all)"
-          test "$(git -C "$source_root" ls-files -m -o --exclude-standard)" = ""
-          test -f "$source_root/sourcing_model/consumer_contract.json"
-          test -f "$source_root/sourcing_model/consumer_parity_fixtures.json"
-          test "$(sha256sum "$source_root/sourcing_model/consumer_contract.json" | cut -d' ' -f1)" = "960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
-          test "$(sha256sum "$source_root/sourcing_model/consumer_parity_fixtures.json" | cut -d' ' -f1)" = "deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
-          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "25f940cace660965841a514b08af84e9abf52a7f561a702ede11a31b10c83117"
-          test "$(sha256sum "$source_root/research_lab_adapter.py" | cut -d' ' -f1)" = "58ce3c7e56d87d4311dce43df148f752e5c90cbab93346b42f9f7b0cd3d32104"
-          {
-            echo "SOURCING_MODEL_SOURCE_ROOT=$source_root"
-            echo "SOURCING_MODEL_SOURCE_SHA=$expected_sha"
-          } >> "$GITHUB_ENV"
 
       - name: Verify repository instruction parity
         run: cmp --silent AGENTS.md CLAUDE.md
@@ -173,18 +138,11 @@ jobs:
           # Driver for the concurrent claim no-double-assign integration test.
           python -m pip install psycopg2-binary
 
-      - name: Run exact Sourcing_model custody and consumer tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          cd "$SOURCING_MODEL_SOURCE_ROOT"
-          python -m pytest -q -p no:cacheprovider \
-            tests/test_consumer_contract.py \
-            tests/test_model_runner.py \
-            tests/test_model_runner_custody_v3.py \
-            tests/test_research_lab_adapter.py
-
       - name: Run pytest suite
+        # This public-repository lane owns generic consumer, custody, and
+        # pre-spend compatibility checks. Exact private model source is tested
+        # by Sourcing_model. The parallel trusted-main Production Parity Fast
+        # lane admits its signed immutable artifact without a repository token.
         run: |
           python -m pytest -q \
             --cov=Leadpoet \
@@ -196,23 +154,6 @@ jobs:
             --cov=validator_models \
             --cov-report=term-missing \
             --cov-report=xml
-
-      - name: Verify exact Sourcing_model source remained immutable
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_root="$GITHUB_WORKSPACE/.ci/sourcing-model"
-          expected_sha="$SOURCING_MODEL_SOURCE_SHA"
-          test -d "$source_root/.git"
-          test "$(git -C "$source_root" rev-parse HEAD)" = "$expected_sha"
-          test -z "$(git -C "$source_root" symbolic-ref -q HEAD || true)"
-          test -z "$(git -C "$source_root" status --porcelain=v1 --untracked-files=all)"
-          test "$(git -C "$source_root" ls-files -m -o --exclude-standard)" = ""
-          test "$(sha256sum "$source_root/sourcing_model/consumer_contract.json" | cut -d' ' -f1)" = "960c3ce752f1b978ebe0eb67be5db432fc4698b2a328d1f40ef6b0c52d38f7ab"
-          test "$(sha256sum "$source_root/sourcing_model/consumer_parity_fixtures.json" | cut -d' ' -f1)" = "deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003"
-          test "$(sha256sum "$source_root/sourcing_model/model_runner.py" | cut -d' ' -f1)" = "25f940cace660965841a514b08af84e9abf52a7f561a702ede11a31b10c83117"
-          test "$(sha256sum "$source_root/research_lab_adapter.py" | cut -d' ' -f1)" = "58ce3c7e56d87d4311dce43df148f752e5c90cbab93346b42f9f7b0cd3d32104"
 
       - name: Upload coverage report
         if: always()

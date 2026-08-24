@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import ast
 from copy import deepcopy
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -13,48 +10,6 @@ import textwrap
 import pytest
 
 import research_lab.sourcing_model_contract_check as compatibility
-
-
-def _required_source_root() -> Path:
-    raw_source_root = os.environ.get("SOURCING_MODEL_SOURCE_ROOT")
-    if not raw_source_root:
-        pytest.fail(
-            "SOURCING_MODEL_SOURCE_ROOT must name the exact typed-custody "
-            "source tree"
-        )
-    source_root = Path(raw_source_root)
-    if not source_root.is_dir():
-        pytest.fail(
-            "SOURCING_MODEL_SOURCE_ROOT typed-custody source tree is unavailable"
-        )
-    expected_source_sha = os.environ.get("SOURCING_MODEL_SOURCE_SHA") or ""
-    if len(expected_source_sha) != 40 or any(
-        character not in "0123456789abcdef"
-        for character in expected_source_sha
-    ):
-        pytest.fail(
-            "SOURCING_MODEL_SOURCE_SHA must name the exact lowercase source commit"
-        )
-    result = subprocess.run(
-        [
-            "git",
-            "-c",
-            f"safe.directory={source_root.resolve().as_posix()}",
-            "-C",
-            str(source_root),
-            "rev-parse",
-            "HEAD",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    if result.returncode != 0 or result.stdout.strip() != expected_source_sha:
-        pytest.fail(
-            "SOURCING_MODEL_SOURCE_ROOT does not match SOURCING_MODEL_SOURCE_SHA"
-        )
-    return source_root
 
 
 def _expected_v10_dispatch_custody_metadata() -> dict[str, object]:
@@ -97,69 +52,6 @@ def _expected_v10_dispatch_custody_metadata() -> dict[str, object]:
     return expected
 
 
-def _copy_semantic_source_tree(source_root: Path, destination: Path) -> Path:
-    policy = compatibility.semantic_compatibility_policy_v1()
-    dispatch = policy["additive_dispatch_custody_v3"]
-    required_paths = {
-        *policy["required_files"],
-        *dispatch["required_files"],
-        policy["canonical_contract_path"],
-        policy["canonical_parity_path"],
-    }
-    for section in (
-        "callables",
-        "critical_binding_slices",
-        "exact_constants",
-        "import_time_binding_slices",
-        "opaque_constants",
-        "required_imports",
-    ):
-        required_paths.update((policy.get(section) or {}).keys())
-        required_paths.update((dispatch.get(section) or {}).keys())
-    for relative in sorted(required_paths):
-        source = source_root / relative
-        assert source.is_file(), relative
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-    return destination
-
-
-def _remove_top_level_function(path: Path, name: str) -> None:
-    source = path.read_text(encoding="utf-8")
-    node = next(
-        item
-        for item in ast.parse(source).body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and item.name == name
-    )
-    lines = source.splitlines(keepends=True)
-    del lines[node.lineno - 1 : node.end_lineno]
-    path.write_text("".join(lines), encoding="utf-8")
-
-
-def _rename_top_level_function_parameter(
-    path: Path,
-    *,
-    name: str,
-    old: str,
-    new: str,
-) -> None:
-    source = path.read_text(encoding="utf-8")
-    node = next(
-        item
-        for item in ast.parse(source).body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and item.name == name
-    )
-    lines = source.splitlines(keepends=True)
-    header_end = node.body[0].lineno - 1
-    header = "".join(lines[node.lineno - 1 : header_end])
-    assert old in header
-    lines[node.lineno - 1 : header_end] = [header.replace(old, new, 1)]
-    path.write_text("".join(lines), encoding="utf-8")
-
-
 def test_v10_reviewed_snapshots_are_byte_exact() -> None:
     assert compatibility._snapshot_sha256(compatibility.CONTRACT_V68_PATH) == (
         compatibility.ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256
@@ -179,23 +71,6 @@ def test_v10_reviewed_snapshots_are_byte_exact() -> None:
     )
     assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v68"
     assert parity["fixture_set_id"] == "routerverse-cross-consumer-parity-v28"
-
-
-def test_v10_source_root_is_bound_to_exact_commit(monkeypatch) -> None:
-    # Establish that CI supplied a usable checkout before changing only the
-    # expected identity. This keeps the negative case about an SHA mismatch,
-    # rather than an absent or arbitrary local tree.
-    _required_source_root()
-    monkeypatch.setenv("SOURCING_MODEL_SOURCE_SHA", "0" * 40)
-
-    with pytest.raises(
-        pytest.fail.Exception,
-        match=(
-            "SOURCING_MODEL_SOURCE_ROOT does not match "
-            "SOURCING_MODEL_SOURCE_SHA"
-        ),
-    ):
-        _required_source_root()
 
 
 def test_v10_policy_freezes_complete_typed_dispatch_surface() -> None:
@@ -509,136 +384,3 @@ def test_v10_private_runtime_applies_exact_dispatch_metadata_gate() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr or result.stdout
-
-
-def test_v10_exact_source_runtime_metadata_is_accepted() -> None:
-    source_root = _required_source_root()
-    script = textwrap.dedent(
-        """
-        import sys
-        import types
-        from copy import deepcopy
-
-        fcntl = types.ModuleType("fcntl")
-        fcntl.LOCK_EX = 2
-        fcntl.LOCK_NB = 4
-        fcntl.LOCK_SH = 1
-        fcntl.LOCK_UN = 8
-        fcntl.flock = lambda *_args, **_kwargs: None
-        sys.modules["fcntl"] = fcntl
-
-        from research_lab.eval.private_runtime import (
-            PrivateModelRuntimeError,
-            validate_sourcing_adapter_metadata,
-        )
-
-        sys.path.insert(0, sys.argv[1])
-        import research_lab_adapter
-
-        raw_metadata = research_lab_adapter.adapter_metadata()
-        metadata = validate_sourcing_adapter_metadata(raw_metadata)
-        assert metadata["adapter_version"] == (
-            "sourcing-model-research-lab-adapter:v10"
-        )
-
-        forged = deepcopy(raw_metadata)
-        forged["routing"]["compiler_version"] = "routing-compiler-v4"
-        forged["runtime_routing"]["compiler_version"] = "routing-compiler-v4"
-        try:
-            validate_sourcing_adapter_metadata(forged)
-        except PrivateModelRuntimeError as exc:
-            assert str(exc) == (
-                "private model routing compiler version is unsupported"
-            )
-        else:
-            raise AssertionError("v10 routing compiler hybrid was accepted")
-        """
-    )
-    result = subprocess.run(
-        [sys.executable, "-B", "-c", script, str(source_root)],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr or result.stdout
-
-
-def test_v10_source_tree_semantic_admission_is_accepted() -> None:
-    source_root = _required_source_root()
-    violations, receipt = compatibility.verify_semantic_source_tree_compatibility_v1(
-        source_root
-    )
-    assert violations == []
-    assert receipt is not None
-    assert receipt["bindings"]["adapter_version"] == (
-        "sourcing-model-research-lab-adapter:v10"
-    )
-
-
-def test_v10_existing_runner_abi_mutations_fail_closed(
-    tmp_path: Path,
-) -> None:
-    source_root = _required_source_root()
-    model_runner_relative = Path("sourcing_model/model_runner.py")
-
-    missing_root = _copy_semantic_source_tree(
-        source_root,
-        tmp_path / "missing",
-    )
-    _remove_top_level_function(
-        missing_root / model_runner_relative,
-        "build_model_start_request",
-    )
-    missing_violations, missing_receipt = (
-        compatibility.verify_semantic_source_tree_compatibility_v1(
-            missing_root
-        )
-    )
-    assert missing_receipt is None
-    assert (
-        "missing function sourcing_model/model_runner.py:build_model_start_request"
-        in missing_violations
-    )
-
-    drift_root = _copy_semantic_source_tree(
-        source_root,
-        tmp_path / "signature-drift",
-    )
-    _rename_top_level_function_parameter(
-        drift_root / model_runner_relative,
-        name="validate_model_start_request",
-        old="value",
-        new="payload",
-    )
-    drift_violations, drift_receipt = (
-        compatibility.verify_semantic_source_tree_compatibility_v1(drift_root)
-    )
-    assert drift_receipt is None
-    assert any(
-        violation.startswith(
-            "full parameter drift "
-            "sourcing_model/model_runner.py:validate_model_start_request:"
-        )
-        for violation in drift_violations
-    )
-
-    projection_root = _copy_semantic_source_tree(
-        source_root,
-        tmp_path / "projection-missing",
-    )
-    _remove_top_level_function(
-        projection_root / "research_lab_adapter.py",
-        "project_icp_request",
-    )
-    projection_violations, projection_receipt = (
-        compatibility.verify_semantic_source_tree_compatibility_v1(
-            projection_root
-        )
-    )
-    assert projection_receipt is None
-    assert (
-        "missing function research_lab_adapter.py:project_icp_request"
-        in projection_violations
-    )

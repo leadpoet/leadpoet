@@ -318,7 +318,12 @@ _V3_OFFICIAL_BASELINE_METADATA_KEYS = frozenset(
     _V3_OFFICIAL_BASELINE_CONTRACT_KEYS
 ) | _V3_OFFICIAL_BASELINE_HASH_KEYS
 
-_RUNNER_ROLE_CONTRACT_SCHEMA_VERSION = "model-runner-role-contract:v1"
+_RUNNER_ROLE_CONTRACT_SCHEMA_V1 = "model-runner-role-contract:v1"
+_RUNNER_ROLE_CONTRACT_SCHEMA_V2 = "model-runner-role-contract:v2"
+_RUNNER_ROLE_CONTRACT_SCHEMA_VERSIONS = frozenset({
+    _RUNNER_ROLE_CONTRACT_SCHEMA_V1,
+    _RUNNER_ROLE_CONTRACT_SCHEMA_V2,
+})
 _RUNNER_ROLE_LEGACY_COMPATIBILITY_MAJOR = 1
 _RUNNER_ROLE_INGESTION_CUSTODY_COMPATIBILITY_MAJOR = 2
 _RUNNER_ROLE_ADDITIVE_COMPATIBILITY = {
@@ -668,6 +673,7 @@ def _validate_runner_role_contract(
         "contract_sha256",
     }
     contract_sha256 = str(role_contract.get("contract_sha256") or "")
+    role_contract_schema = role_contract.get("schema_version")
     extensions = _closed_string_mapping(
         role_contract.get("extensions"),
         label="artifact runner role contract extensions",
@@ -679,8 +685,7 @@ def _validate_runner_role_contract(
     }
     if (
         set(role_contract) != expected_top_fields
-        or role_contract.get("schema_version")
-        != _RUNNER_ROLE_CONTRACT_SCHEMA_VERSION
+        or role_contract_schema not in _RUNNER_ROLE_CONTRACT_SCHEMA_VERSIONS
         or role_contract.get("compatibility_major") != compatibility_major
         or role_contract.get("consumer_contract_id") != consumer_contract_id
         or role_contract.get("canonical_json")
@@ -825,14 +830,20 @@ def _validate_runner_role_contract(
                 f"artifact runner {role} interface keywords differ"
             )
 
-        if set(signature) != {
+        expected_signature_fields = {
             "consumer_contract_id",
             "consumer_contract_path",
             "positional_parameters",
             "full_parameters",
             "required_keyword_only",
             "is_async",
-        }:
+        }
+        if role_contract_schema == _RUNNER_ROLE_CONTRACT_SCHEMA_V2:
+            expected_signature_fields.update({
+                "required_positional_parameters",
+                "defaulted_positional_parameters",
+            })
+        if set(signature) != expected_signature_fields:
             raise ModelRunnerHostError(
                 f"artifact runner {role} consumer signature fields differ"
             )
@@ -850,6 +861,26 @@ def _validate_runner_role_contract(
             signature.get("required_keyword_only"),
             label=f"artifact runner {role} signature keyword-only parameters",
         )
+        signature_required_positional: tuple[str, ...]
+        signature_defaulted_positional: tuple[str, ...]
+        if role_contract_schema == _RUNNER_ROLE_CONTRACT_SCHEMA_V2:
+            signature_required_positional = _string_sequence(
+                signature.get("required_positional_parameters"),
+                label=(
+                    f"artifact runner {role} signature required positional "
+                    "parameters"
+                ),
+            )
+            signature_defaulted_positional = _string_sequence(
+                signature.get("defaulted_positional_parameters"),
+                label=(
+                    f"artifact runner {role} signature defaulted positional "
+                    "parameters"
+                ),
+            )
+        else:
+            signature_required_positional = signature_positional
+            signature_defaulted_positional = ()
         if (
             signature.get("consumer_contract_id") != consumer_contract_id
             or len(path_parts) != 2
@@ -875,6 +906,17 @@ def _validate_runner_role_contract(
             )
             != signature_keyword_only
             or frozen_asyncness.get(member) is not signature.get("is_async")
+            or len(signature_positional) != len(set(signature_positional))
+            or len(signature_required_positional)
+            != len(set(signature_required_positional))
+            or len(signature_defaulted_positional)
+            != len(set(signature_defaulted_positional))
+            or (
+                role_contract_schema == _RUNNER_ROLE_CONTRACT_SCHEMA_V2
+                and signature_required_positional
+                + signature_defaulted_positional
+                != signature_positional
+            )
         ):
             raise ModelRunnerHostError(
                 f"artifact runner {role} exact consumer signature differs"
@@ -899,9 +941,23 @@ def _validate_runner_role_contract(
         stable_required_keywords = tuple(
             expected_interface["required_keyword_only"]
         )
+        if role_contract_schema == _RUNNER_ROLE_CONTRACT_SCHEMA_V1:
+            positional_call_is_compatible = (
+                signature_positional == stable_positional
+            )
+        else:
+            positional_call_is_compatible = (
+                signature_positional[: len(stable_positional)]
+                == stable_positional
+                and len(signature_required_positional)
+                <= len(stable_positional)
+            )
         if (
             interface != expected_interface
-            or signature_positional != stable_positional
+            # V1 has no signed default metadata, so it remains exact. V2 may
+            # add only trailing parameters explicitly signed as defaulted;
+            # every required positional must still fit in the stable call.
+            or not positional_call_is_compatible
             or signature_keyword_only != stable_required_keywords
             or not set(stable_positional + stable_host_keywords).issubset(
                 signature_full

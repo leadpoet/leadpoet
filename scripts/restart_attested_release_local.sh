@@ -748,11 +748,6 @@ if ! [[ "$active_release_restart_invocation_id" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$
   echo "ERROR: active release restart invocation identity generation failed" >&2
   exit 1
 fi
-validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
-gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
-validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
-validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
-gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
 
 echo "Fetching current public V2 compatibility authority"
 git -C "$ROOT" fetch origin main
@@ -789,6 +784,11 @@ echo "Selected release is compatible with current public auditors: $commit"
 echo "Current public V2 authority commit: $branch_commit"
 local_readiness_candidate_bound=1
 preflight_local_readiness_python
+validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
+gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
+validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
+validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
+gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
 ssh_common=(
   -n
   -o BatchMode=yes

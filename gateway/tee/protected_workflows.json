@@ -232,7 +232,7 @@
       "symbol": "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS"
     },
     {
-      "ast_sha256": "sha256:b333b4c82a30777a0c75bc2008b2c9fd1bf0b41cdafb209bb0d1eeb93fbec7be",
+      "ast_sha256": "sha256:94c7fb9181229f924a044037118a020fdae69ee4c264a12f314d5889b05c0d1d",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2"
     },
@@ -7947,7 +7947,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a25f841055853e0c9fef3984660224098f1572b46a63872e15d060f44e2e4d45",
-  "protected_source_commit": "9ad261d75ab6d625f512cc661920632dad096e90",
+  "manifest_hash": "sha256:06e984ce89439fdcc0d0be0b2a86fca23e1903efb54b569152ae9ee71509b55c",
+  "protected_source_commit": "1471885b53ecd23d272ab59fea69decfa5749bd0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

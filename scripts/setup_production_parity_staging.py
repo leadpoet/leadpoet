@@ -2091,6 +2091,10 @@ def _simulate_controller_policy(
             PolicySourceArn=controller_arn,
             ActionNames=[action],
             ResourceArns=resources,
+            # S3 bucket and object ARNs omit their owner account. Keep the
+            # simulator bound to the same account as the controller instead of
+            # relying on an implicit caller-derived default.
+            ResourceOwner=f"arn:aws:iam::{account_id}:root",
             ContextEntries=_simulation_context(context),
         )
         if response.get("IsTruncated"):

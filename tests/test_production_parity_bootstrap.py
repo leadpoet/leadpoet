@@ -586,6 +586,7 @@ def test_setup_simulator_executes_positive_and_adversarial_policy_matrix():
 
         def simulate_principal_policy(self, **kwargs):
             self.calls += 1
+            assert kwargs["ResourceOwner"] == f"arn:aws:iam::{ACCOUNT}:root"
             context: dict[str, object] = {}
             for item in kwargs["ContextEntries"]:
                 values = item["ContextKeyValues"]

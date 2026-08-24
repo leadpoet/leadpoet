@@ -48,6 +48,9 @@ EXPECTED_ORIGIN_URL = "https://github.com/leadpoet/leadpoet.git"
 EXPECTED_REGION = "us-east-1"
 EXPECTED_ACCOUNT_ID = "493765492819"
 EXPECTED_CALLER_ARN = "arn:aws:iam::493765492819:user/pranav-main"
+EXPECTED_RESOURCE_OWNER_ARN = (
+    f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:root"
+)
 AUTHORIZATION_ENV = "LEADPOET_OVERNIGHT_REBENCHMARK_AUTHORIZED"
 DEFAULT_LEDGER = (
     Path.home()
@@ -1591,6 +1594,10 @@ def _simulate_custom(
                 PolicyInputList=[_json(document)],
                 ActionNames=[case["action"]],
                 ResourceArns=list(case["resources"]),
+                # S3 bucket and object ARNs do not encode their owning account.
+                # Bind it explicitly so simulator context does not depend on a
+                # caller default that custom-policy requests do not provide.
+                ResourceOwner=EXPECTED_RESOURCE_OWNER_ARN,
                 ContextEntries=_context_entries(case["context"]),
             )
         except Exception as exc:
@@ -1610,6 +1617,7 @@ def _simulate_principals(
                     PolicySourceArn=principal_arn,
                     ActionNames=[case["action"]],
                     ResourceArns=list(case["resources"]),
+                    ResourceOwner=EXPECTED_RESOURCE_OWNER_ARN,
                     ContextEntries=_context_entries(case["context"]),
                 )
             except Exception as exc:

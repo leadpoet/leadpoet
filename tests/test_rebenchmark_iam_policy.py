@@ -689,6 +689,54 @@ def test_simulation_context_preserves_explicit_iam_data_type():
     assert decoys[0]["resources"] != cases[0]["resources"]
 
 
+def test_simulations_bind_owner_for_resource_arns_without_account_component():
+    resource = f"arn:aws:s3:::leadpoet-test-{ACCOUNT}/artifact.json"
+    case = {
+        "name": "s3-owner-binding",
+        "action": "s3:GetObject",
+        "resources": [resource],
+        "context": {},
+        "expected": "allowed",
+    }
+    calls: list[dict[str, object]] = []
+
+    class IAM:
+        def simulate_custom_policy(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "EvaluationResults": [{
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": resource,
+                    "EvalDecision": "allowed",
+                    "MissingContextValues": [],
+                }]
+            }
+
+        def simulate_principal_policy(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "EvaluationResults": [{
+                    "EvalActionName": "s3:GetObject",
+                    "EvalResourceName": resource,
+                    "EvalDecision": "allowed",
+                    "MissingContextValues": [],
+                }]
+            }
+
+    iam = IAM()
+    operator._simulate_custom(iam, AFTER, [case])
+    operator._simulate_principals(
+        iam,
+        [f"arn:aws:iam::{ACCOUNT}:role/{CONTROLLER_ROLE}"],
+        [case],
+    )
+
+    assert [call["ResourceOwner"] for call in calls] == [
+        f"arn:aws:iam::{ACCOUNT}:root",
+        f"arn:aws:iam::{ACCOUNT}:root",
+    ]
+
+
 def test_exact_global_ecr_grant_uses_fixed_action_decoy():
     before = operator._canonical_policy(
         {

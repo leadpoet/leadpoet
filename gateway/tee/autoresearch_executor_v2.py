@@ -1167,6 +1167,17 @@ class _HostCandidateBuilder:
     def check_patch_applies(self, *args: Any, **kwargs: Any) -> None:
         self._local.check_patch_applies(*args, **kwargs)
 
+    def materialize_source_add_derived_artifacts(
+        self,
+        *,
+        draft: CodeEditDraft,
+        source_context: ParentImageSourceContext,
+    ) -> CodeEditDraft:
+        return self._local.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
     @staticmethod
     def _apply_measured_patch(
         *,

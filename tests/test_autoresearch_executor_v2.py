@@ -1058,6 +1058,71 @@ def test_host_candidate_builder_requeues_signed_infrastructure_failure(tmp_path)
     assert caught.value.failure_stage == "candidate_build_infra_failed"
 
 
+def test_host_candidate_builder_materializes_source_add_derived_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    source_context = CodeEditCandidateBuilder(
+        config
+    ).prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    draft = CodeEditDraft(
+        failure_mode="missing source route",
+        mechanism="register the measured source route",
+        expected_improvement="make the source available to the model",
+        risk="bounded provider integration",
+        lane="query_construction",
+        target_files=("sourcing_model/routing/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/routing/runtime.py "
+            "b/sourcing_model/routing/runtime.py\n"
+            "--- a/sourcing_model/routing/runtime.py\n"
+            "+++ b/sourcing_model/routing/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="register one measured source route",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    builder = _HostCandidateBuilder(
+        config=config,
+        source_context=source_context,
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+    )
+    observed = {}
+
+    def materialize(*, draft, source_context):
+        observed["draft"] = draft
+        observed["source_context"] = source_context
+        return draft
+
+    monkeypatch.setattr(
+        builder._local,
+        "materialize_source_add_derived_artifacts",
+        materialize,
+    )
+
+    result = builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    )
+
+    assert result is draft
+    assert observed == {
+        "draft": draft,
+        "source_context": source_context,
+    }
+
+
 def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path):
     _FakeEngine.instances.clear()
     _artifact_seal.records.clear()

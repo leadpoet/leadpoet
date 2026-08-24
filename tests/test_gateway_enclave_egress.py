@@ -2441,15 +2441,22 @@ def test_company_fit_numeric_observation_rehearsal_scenario(monkeypatch):
         str(Path(__file__).parent / "restart_rehearsal")
     )
     from production_workflow_runner import (
+        _company_fit_numeric_observation_projection_evidence_is_complete,
         _exercise_company_fit_numeric_observation_projection,
     )
 
-    assert _exercise_company_fit_numeric_observation_projection() == {
+    evidence = _exercise_company_fit_numeric_observation_projection()
+    assert evidence == {
         "numeric_observation_with_web_evidence_matched": True,
         "raw_observation_committed": True,
         "contradictory_boolean_failed_closed": True,
         "malformed_range_decimal_negative_failed_closed": True,
     }
+    assert _company_fit_numeric_observation_projection_evidence_is_complete(evidence)
+    for field in evidence:
+        assert not _company_fit_numeric_observation_projection_evidence_is_complete(
+            {**evidence, field: False}
+        )
 
 
 def test_measured_coordinator_raw_transport_scenario(monkeypatch):

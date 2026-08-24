@@ -7532,7 +7532,7 @@
       "symbol": "validate_typed_dispatch_custody_v3_metadata_v1"
     },
     {
-      "ast_sha256": "sha256:be56689a18ee4e21bcb538a1267c4630428e8d9f277edcac5b7937b7b460b704",
+      "ast_sha256": "sha256:199902e1fffb26a6ac162851023b7556ae784743e4f3e7aea70524cca7deffa9",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "validate_typed_dispatch_custody_v3_runtime_metadata_v1"
     },
@@ -7812,7 +7812,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:2d60822d55e0b7a3364bada7576e8154cfa41c3d6640a5c3ff0ca43e66f2a448",
-  "protected_source_commit": "23400e28b118b519d2e6f22eb9c9119616c54985",
+  "manifest_hash": "sha256:2c8daafdac8ef6b517c145ed7c5608de19f6a2d3aab94a604a1608fc8f9b79d5",
+  "protected_source_commit": "0534cb9bdc71633bd1b880570146de303e920ef4",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

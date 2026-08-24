@@ -84,6 +84,10 @@ class _S3:
 def _context(runner) -> OfficialBaselineDependencyContext:
     return OfficialBaselineDependencyContext(
         artifact=runner.artifact,
+        artifact_pointer_uri=(
+            "s3://fixture/model/branches/leadpoet-lab/current.json"
+        ),
+        artifact_pointer_manifest_hash=runner.artifact.manifest_hash,
         selection=runner.selection,
         spec=runner.spec,
         benchmark_date="2026-08-23",
@@ -104,6 +108,115 @@ def test_fresh_daily_attempt_zero_is_a_valid_frozen_context():
     context = replace(_context(runner), benchmark_attempt=0)
 
     context.validate()
+
+
+@pytest.mark.parametrize("branch", ("main", "leadpoet-lab"))
+def test_frozen_context_derives_branch_from_verified_pointer(branch):
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    context = replace(
+        _context(runner),
+        artifact_pointer_uri=(
+            f"s3://fixture/model/branches/{branch}/current.json"
+        ),
+    )
+
+    context.validate()
+
+    assert context.source_branch == branch
+
+
+@pytest.mark.parametrize(
+    "pointer_uri",
+    (
+        "s3://fixture/model/manifest.json",
+        "s3://fixture/model/branches/release-candidate/current.json",
+        (
+            "s3://fixture/model/branches/main/branches/"
+            "leadpoet-lab/current.json"
+        ),
+        "s3://fixture/model/branches/main/not-current.json",
+        "s3://fixture/model/branches/main/current.json?version=1",
+        "https://fixture/model/branches/main/current.json",
+    ),
+)
+def test_frozen_context_rejects_noncanonical_artifact_pointer(pointer_uri):
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    context = replace(_context(runner), artifact_pointer_uri=pointer_uri)
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="artifact pointer identity is invalid",
+    ):
+        context.validate()
+
+
+def test_archive_branch_text_cannot_override_verified_pointer_branch():
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    misleading_artifact = replace(
+        runner.artifact,
+        manifest_uri="s3://fixture/model/branches/main/manifest.json",
+    )
+    context = replace(_context(runner), artifact=misleading_artifact)
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="artifact pointer identity is invalid",
+    ):
+        context.validate()
+
+
+def test_mutable_archive_cannot_supply_exact_branch_provenance():
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    mutable_artifact = replace(
+        runner.artifact,
+        manifest_uri="s3://fixture/model/current.json",
+    )
+    context = replace(_context(runner), artifact=mutable_artifact)
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="artifact pointer identity is invalid",
+    ):
+        context.validate()
+
+
+def test_pointer_manifest_hash_must_bind_the_frozen_artifact():
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    context = replace(
+        _context(runner),
+        artifact_pointer_manifest_hash="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(
+        OfficialBaselineAuthorityUnavailable,
+        match="frozen dependency context differs",
+    ):
+        context.validate()
+
+
+def test_immutable_archive_may_use_independent_storage_topology():
+    runner, _projector, _authority_value, _terminal = _exact_fixture()
+    relocated = replace(
+        runner.artifact,
+        manifest_uri=(
+            "s3://immutable-release-archive/releases/"
+            + runner.artifact.git_commit_sha
+            + ".json"
+        ),
+    )
+    relocated = replace(
+        relocated,
+        manifest_hash=sha256_json(relocated.hash_payload()),
+    )
+    context = replace(
+        _context(runner),
+        artifact=relocated,
+        artifact_pointer_manifest_hash=relocated.manifest_hash,
+    )
+
+    context.validate()
+
+    assert context.source_branch == "leadpoet-lab"
 
 
 class _AttemptStore:

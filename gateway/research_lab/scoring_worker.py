@@ -13822,6 +13822,12 @@ class ResearchLabGatewayScoringWorker:
             )
             dependency_context = OfficialBaselineDependencyContext(
                 artifact=artifact,
+                artifact_pointer_uri=str(
+                    repo_head_sync.get("current_json_pointer_uri") or ""
+                ),
+                artifact_pointer_manifest_hash=str(
+                    repo_head_sync.get("current_json_manifest_hash") or ""
+                ),
                 selection=baseline_release_selection,
                 spec=baseline_model_spec,
                 benchmark_date=today,

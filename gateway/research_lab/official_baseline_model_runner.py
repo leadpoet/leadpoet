@@ -405,6 +405,8 @@ class OfficialBaselineDependencyContext:
     """
 
     artifact: PrivateModelArtifactManifest
+    artifact_pointer_uri: str
+    artifact_pointer_manifest_hash: str
     selection: OfficialBaselineReleaseSelection
     spec: DockerPrivateModelSpec
     benchmark_date: str
@@ -417,6 +419,59 @@ class OfficialBaselineDependencyContext:
     evidence_proxy_url: str
     evidence_proxy_capability_sha256: str
     evidence_proxy_ready_provider_ids: tuple[str, ...]
+
+    @property
+    def source_branch(self) -> str:
+        """Return the branch frozen by the verified mutable pointer."""
+
+        try:
+            pointer = urlsplit(str(self.artifact_pointer_uri or ""))
+            archive = urlsplit(str(self.artifact.manifest_uri or ""))
+            pointer_port = pointer.port
+            archive_port = archive.port
+        except (AttributeError, ValueError) as exc:
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline artifact pointer identity is invalid"
+            ) from exc
+        pointer_parts = tuple(
+            part for part in pointer.path.split("/") if part
+        )
+        archive_parts = tuple(
+            part for part in archive.path.split("/") if part
+        )
+        branch = pointer_parts[-2] if len(pointer_parts) >= 3 else ""
+        commit = str(self.artifact.git_commit_sha or "")
+        if (
+            pointer.scheme != "s3"
+            or archive.scheme != "s3"
+            or not pointer.netloc
+            or not archive.netloc
+            or pointer.username is not None
+            or pointer.password is not None
+            or archive.username is not None
+            or archive.password is not None
+            or pointer_port is not None
+            or archive_port is not None
+            or pointer.query
+            or pointer.fragment
+            or archive.query
+            or archive.fragment
+            or pointer.path != "/" + "/".join(pointer_parts)
+            or archive.path != "/" + "/".join(archive_parts)
+            or len(pointer_parts) < 4
+            or pointer_parts[-3] != "branches"
+            or branch not in {"main", "leadpoet-lab"}
+            or pointer_parts[-1] != "current.json"
+            or pointer_parts.count("branches") != 1
+            or not archive_parts
+            or "branches" in archive_parts
+            or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+            or archive_parts[-1] != f"{commit}.json"
+        ):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline artifact pointer identity is invalid"
+            )
+        return branch
 
     def validate(self) -> None:
         try:
@@ -435,11 +490,18 @@ class OfficialBaselineDependencyContext:
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline frozen artifact is invalid"
             )
+        source_branch = self.source_branch
         expected_selection = select_official_baseline_release(self.artifact)
         if (
             not self.selection.is_exact
             or self.selection != expected_selection
             or self.spec.image_digest != self.artifact.image_digest
+            or _SHA256_RE.fullmatch(
+                str(self.artifact_pointer_manifest_hash or "")
+            )
+            is None
+            or self.artifact_pointer_manifest_hash
+            != self.artifact.manifest_hash
             or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", self.benchmark_date)
             or _SHA256_RE.fullmatch(str(self.rolling_window_hash or "")) is None
             or type(self.benchmark_attempt) is not int
@@ -470,6 +532,7 @@ class OfficialBaselineDependencyContext:
                 _PROVIDER_ID_RE.fullmatch(str(item or "")) is None
                 for item in ready_provider_ids
             )
+            or source_branch not in {"main", "leadpoet-lab"}
         ):
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline frozen dependency context differs"

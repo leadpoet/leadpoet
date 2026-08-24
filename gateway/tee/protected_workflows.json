@@ -6682,7 +6682,7 @@
       "symbol": "DockerPrivateModelRunner._pull_image"
     },
     {
-      "ast_sha256": "sha256:361c49eb00fb6695a49aeb81ca7c6eaa6bc7bbcdb7eca1f2c73459ff5a6f36e3",
+      "ast_sha256": "sha256:03eed881133142c07ca34876333d67e1cd43359c47744a1e692c1873080cd2d4",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "DockerPrivateModelRunner._run_json"
     },
@@ -7082,7 +7082,7 @@
       "symbol": "_validate_provider_response_ingestion_contract"
     },
     {
-      "ast_sha256": "sha256:689602a96110a6d690aa27b8d6cf556174dcf154a63e6603726fa6cb3b0a2bbf",
+      "ast_sha256": "sha256:f3ded1222cba04b3e6bb0ceb252778f9316749d36a2a58f913a458f7b1f11e83",
       "path": "research_lab/model_runner_protocol.py",
       "symbol": "_validate_runner_role_contract"
     },
@@ -7807,7 +7807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:ab258f9e95acf8167476fbf44e30a2439311ada27d5b9ac2d2fe972a645719cc",
-  "protected_source_commit": "5566bcbb854ccc77333e948af550f010e9d762b1",
+  "manifest_hash": "sha256:e4fe3df7b10f59bf88c0ff4b1415b90d6b803b7e2634da7ac8192024fdcbae39",
+  "protected_source_commit": "c9ce06994ef4e0bb396c22960c0867b38daab4a3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

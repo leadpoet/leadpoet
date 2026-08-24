@@ -2972,7 +2972,7 @@
       "symbol": "AutoresearchExecutorV2"
     },
     {
-      "ast_sha256": "sha256:539a3fae40f51f6e0d38695f0d08579684ff84d7449ed24e20e4fe506d014732",
+      "ast_sha256": "sha256:dc637e366fb681f4882dabf76536903755cb1bf1e531069eabd13874149d5162",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "_HostCandidateBuilder"
     },
@@ -7807,7 +7807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8b50a5417332641c4915c7cd6946440f360651f487a4456def1895eb3e47a4bc",
-  "protected_source_commit": "19bfca1e678e73107acea3cc6eb74236b31dec26",
+  "manifest_hash": "sha256:55f0dfb288835274ace2c13318bef257872e905d0b1adba927c9d6f27983c80c",
+  "protected_source_commit": "1ca95516a11b43f7464541a8b22e1ec7a1cc47a4",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

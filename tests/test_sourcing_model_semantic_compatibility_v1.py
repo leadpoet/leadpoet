@@ -343,6 +343,18 @@ def routing_metadata():
         '''
 from .compiler import COMPILER_VERSION
 
+class SourceAddCategoryContract:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+class SourceAddRoutingRegistration:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+SOURCE_ADD_ROUTING_REGISTRATIONS = (
+    SourceAddRoutingRegistration(provider_id="reviewed"),
+)
+
 def runtime_routing_metadata():
     return {
         "compiler_version": COMPILER_VERSION,
@@ -356,7 +368,7 @@ def runtime_routing_metadata():
         '''
 from enum import Enum
 
-CAPABILITY_CONTRACT_VERSION = "sourcing-model-runtime-capabilities:v2"
+CAPABILITY_CONTRACT_VERSION = "sourcing-model-runtime-capabilities:v3"
 
 class HostResolution(str, Enum):
     RESOLVED = "resolved"
@@ -380,6 +392,9 @@ def default_http_fetch(url, *, timeout=10.0, max_bytes=500000, accept=None):
 def default_probe_origin(host):
     return OriginReachability.UNKNOWN
 
+def default_remaining_non_cleanup_physical_exchanges():
+    return None
+
 def default_resolve_host(name):
     return HostResolution.INVALID if not str(name or "").strip() else HostResolution.TIMEOUT
 
@@ -388,6 +403,7 @@ _DEFAULTS = {
     "emit": default_emit,
     "http_fetch": default_http_fetch,
     "probe_origin": default_probe_origin,
+    "remaining_non_cleanup_physical_exchanges": default_remaining_non_cleanup_physical_exchanges,
     "resolve_host": default_resolve_host,
 }
 _registered = {}
@@ -434,6 +450,9 @@ def may_attempt(reachability):
 def probe_origin(host):
     return capability("probe_origin")(host)
 
+def remaining_non_cleanup_physical_exchanges():
+    return capability("remaining_non_cleanup_physical_exchanges")()
+
 def register(name, implementation):
     if name not in _DEFAULTS:
         raise UnknownCapabilityError(name)
@@ -475,6 +494,20 @@ def _install_future_tree(
     if write_source:
         _write_future_source(root)
     policy = deepcopy(compatibility.semantic_compatibility_policy_v1())
+    runtime_tree = ast.parse(
+        (root / "sourcing_model/routing/runtime.py").read_bytes()
+    )
+    source_add_binding = compatibility._binding_nodes(
+        runtime_tree,
+        "SOURCE_ADD_ROUTING_REGISTRATIONS",
+    )[0]
+    source_add_items = source_add_binding.value.elts
+    policy["source_add_routing_extension"]["base_provider_ids"] = [
+        item.keywords[0].value.value for item in source_add_items
+    ]
+    policy["source_add_routing_extension"]["base_item_sha256s"] = [
+        compatibility._ast_sha256(item) for item in source_add_items
+    ]
     for relative, specification in policy["critical_binding_slices"].items():
         observed, violations = compatibility._critical_binding_slice_v1(
             ast.parse((root / relative).read_bytes()),
@@ -486,12 +519,17 @@ def _install_future_tree(
         assert not violations
         specification["sha256"] = observed
     for relative in policy["import_time_binding_slices"]:
+        normalized_literals = set(
+            (policy.get("opaque_constants") or {}).get(relative) or {}
+        )
+        if relative == policy["source_add_routing_extension"]["relative_path"]:
+            normalized_literals.add(
+                policy["source_add_routing_extension"]["binding"]
+            )
         observed, violations = compatibility._critical_binding_slice_v1(
             ast.parse((root / relative).read_bytes()),
             roots=list(policy["callables"][relative]),
-            normalized_literals=set(
-                (policy.get("opaque_constants") or {}).get(relative) or {}
-            ),
+            normalized_literals=normalized_literals,
             strip_function_bodies=True,
         )
         assert not violations
@@ -778,7 +816,7 @@ def test_v47_shape_auto_admits_keyword_only_model_owned_additions(
     assert receipt["contract_id"].endswith("v47")
     assert receipt["bindings"] == {
         "adapter_version": "sourcing-model-research-lab-adapter:v7",
-        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v3",
         "component_registry_version": "sourcing-model-components:v2",
         "routing_compiler_version": "routing-compiler-v3",
         "scoring_adapter_version": "qualification-company-scorer:v1",
@@ -912,6 +950,97 @@ def test_contract_id_is_release_identity_not_a_compatibility_gate(
 
     assert receipt["admission_mode"] == "semantic_v1"
     assert receipt["contract_id"] == contract["contract_id"]
+
+
+def test_source_add_semantic_admission_allows_only_static_additive_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_future_tree(tmp_path, monkeypatch)
+    runtime = tmp_path / "sourcing_model/routing/runtime.py"
+    original = runtime.read_text(encoding="utf-8")
+    runtime.write_text(
+        original.replace(
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n',
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n'
+            '    SourceAddRoutingRegistration(\n'
+            '        provider_id="candidate",\n'
+            '        priority=25,\n'
+            '        capabilities=("intent.provider_evidence",),\n'
+            '    ),\n',
+        ),
+        encoding="utf-8",
+    )
+
+    receipt = _admit(tmp_path, _manifest(tmp_path))
+
+    assert receipt["admission_mode"] == "semantic_v1"
+
+
+@pytest.mark.parametrize(
+    "replacement,match",
+    [
+        (
+            '    SourceAddRoutingRegistration(provider_id="changed"),\n',
+            "reviewed SOURCE_ADD routing registrations changed or reordered",
+        ),
+        (
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n'
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n',
+            "SOURCE_ADD routing provider identities are not unique",
+        ),
+        (
+            '    SourceAddRoutingRegistration(provider_id=str("dynamic")),\n'
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n',
+            "SOURCE_ADD routing registration 0 is not static",
+        ),
+        (
+            '    SourceAddRoutingRegistration(\n'
+            '        provider_id="candidate",\n'
+            '        stage=UNREVIEWED_DYNAMIC,\n'
+            '    ),\n'
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n',
+            "SOURCE_ADD routing registration 0 is not static",
+        ),
+    ],
+)
+def test_source_add_semantic_admission_rejects_non_additive_or_dynamic_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+    match: str,
+) -> None:
+    _install_future_tree(tmp_path, monkeypatch)
+    runtime = tmp_path / "sourcing_model/routing/runtime.py"
+    runtime.write_text(
+        runtime.read_text(encoding="utf-8").replace(
+            '    SourceAddRoutingRegistration(provider_id="reviewed"),\n',
+            replacement,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=match):
+        _admit(tmp_path, _manifest(tmp_path))
+
+
+def test_import_time_slice_accepts_repeated_dotted_package_imports() -> None:
+    tree = ast.parse(
+        "import urllib.error\n"
+        "import urllib.parse\n"
+        "import urllib.request\n"
+        "def consumed():\n"
+        "    return urllib.parse.urlsplit('https://example.com')\n"
+    )
+
+    digest, violations = compatibility._critical_binding_slice_v1(
+        tree,
+        roots=["consumed"],
+        strip_function_bodies=True,
+    )
+
+    assert digest.startswith("sha256:")
+    assert violations == []
 
 
 def test_known_contract_with_modified_parity_uses_source_backed_semantic_admission(
@@ -2144,6 +2273,7 @@ def test_signed_legacy_profiles_and_manifest_identities_are_exact(
         for contract_id, value in compatibility.reviewed_consumer_snapshots().items()
         if value["release_identities"]
     } == {
+        "leadpoet-sourcing-wrapper-contract-v66",
         "leadpoet-sourcing-wrapper-contract-v7",
         "leadpoet-sourcing-wrapper-contract-v8",
         "leadpoet-sourcing-wrapper-contract-v11",
@@ -2156,7 +2286,7 @@ def test_signed_legacy_profiles_and_manifest_identities_are_exact(
     assert sum(
         len(value["release_identities"])
         for value in compatibility.reviewed_consumer_snapshots().values()
-    ) == 13
+    ) == 14
     release = snapshot["release_identities"][0]
     assert compatibility._reviewed_consumer_snapshot_for_source_hash(
         legacy_root,

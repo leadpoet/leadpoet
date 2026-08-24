@@ -1078,6 +1078,9 @@ def _runtime_probe_expected_invariants(
                 "probe_result": dict(
                     capabilities.get("origin_reachability") or {}
                 ).get("UNKNOWN"),
+                "remaining_non_cleanup_physical_exchanges": sentinel.get(
+                    "remaining_non_cleanup_physical_exchanges"
+                ),
             },
             "after_reset_metadata": capability_metadata,
             "defaults": {
@@ -1088,6 +1091,7 @@ def _runtime_probe_expected_invariants(
                 "probe_origin_result": dict(
                     capabilities.get("origin_reachability") or {}
                 ).get("UNKNOWN"),
+                "remaining_non_cleanup_physical_exchanges_is_none": True,
                 "may_attempt_unknown": True,
                 "timeout_is_terminal": False,
                 "nxdomain_is_terminal": True,
@@ -1654,6 +1658,12 @@ else:
         _lp_capabilities.register("http_fetch", _lp_http_fetch)
         _lp_capabilities.register("resolve_host", _lp_resolve)
         _lp_capabilities.register("probe_origin", _lp_probe)
+        _lp_capabilities.register(
+            "remaining_non_cleanup_physical_exchanges",
+            lambda: _lp_sentinel.get(
+                "remaining_non_cleanup_physical_exchanges"
+            ),
+        )
         _lp_registered_metadata = _lp_capability_metadata()
         _lp_deadline = _lp_capabilities.deadline()
         _lp_capabilities.emit(dict(_lp_sentinel.get("emit_event") or {}))
@@ -1668,6 +1678,9 @@ else:
         )
         _lp_probe_result = _lp_capabilities.probe_origin(
             str(_lp_sentinel.get("probe_input") or "")
+        )
+        _lp_remaining_non_cleanup_physical_exchanges = (
+            _lp_capabilities.remaining_non_cleanup_physical_exchanges()
         )
     finally:
         _lp_capabilities.reset()
@@ -1699,6 +1712,9 @@ else:
                 "probe_result": getattr(
                     _lp_probe_result, "value", _lp_probe_result
                 ),
+                "remaining_non_cleanup_physical_exchanges": (
+                    _lp_remaining_non_cleanup_physical_exchanges
+                ),
             },
             "after_reset_metadata": _lp_after_reset_metadata,
             "defaults": {
@@ -1714,6 +1730,10 @@ else:
                 ),
                 "probe_origin_result": getattr(
                     _lp_default_probe, "value", _lp_default_probe
+                ),
+                "remaining_non_cleanup_physical_exchanges_is_none": (
+                    _lp_capabilities.default_remaining_non_cleanup_physical_exchanges()
+                    is None
                 ),
                 "may_attempt_unknown": _lp_capabilities.may_attempt(
                     _lp_capabilities.OriginReachability.UNKNOWN

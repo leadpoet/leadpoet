@@ -1593,6 +1593,15 @@ def _critical_binding_slice_v1(
             if not indexes:
                 continue
             if len(indexes) != 1:
+                if all(
+                    isinstance(nodes[index], (ast.Import, ast.ImportFrom))
+                    for index in indexes
+                ):
+                    # Multiple dotted imports legitimately bind one package
+                    # name. Every import is pinned in this slice, so selecting
+                    # all definitions remains deterministic and fail-closed.
+                    selected.update(indexes)
+                    continue
                 violations.append(
                     f"critical dependency {name} must have one binding, found "
                     f"{len(indexes)}"
@@ -1674,6 +1683,111 @@ def _critical_binding_slice_v1(
         type_ignores=[],
     )
     return _ast_sha256(normalized), violations
+
+
+def _source_add_routing_extension_violations_v1(
+    tree: ast.Module,
+    specification: Mapping[str, Any],
+) -> list[str]:
+    """Admit only static additions to the reviewed SOURCE_ADD tuple."""
+
+    binding = str(specification["binding"])
+    definitions = _binding_nodes(tree, binding)
+    if len(definitions) != 1:
+        return [f"SOURCE_ADD routing binding {binding} must have one definition"]
+    value = getattr(definitions[0], "value", None)
+    if not isinstance(value, ast.Tuple):
+        return ["SOURCE_ADD routing registrations must be a static tuple"]
+
+    constructors = set(str(item) for item in specification["constructors"])
+    expected_hashes = list(specification["base_item_sha256s"])
+    expected_providers = list(specification["base_provider_ids"])
+    reviewed_items = {
+        _ast_sha256(item): item
+        for item in value.elts
+        if _ast_sha256(item) in expected_hashes
+    }
+    approved_names = {
+        node.id
+        for item in reviewed_items.values()
+        for node in ast.walk(item)
+        if isinstance(node, ast.Name)
+    } | set(str(item) for item in specification["additional_static_names"])
+
+    def static_value(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, (str, int, float, bool, type(None)))
+        if isinstance(node, ast.Name):
+            return node.id in approved_names
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return all(static_value(item) for item in node.elts)
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, (ast.UAdd, ast.USub))
+            and isinstance(node.operand, ast.Constant)
+            and type(node.operand.value) in {int, float}
+        ):
+            return True
+        if not isinstance(node, ast.Call):
+            return False
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id not in constructors
+            or node.args
+            or any(keyword.arg is None for keyword in node.keywords)
+        ):
+            return False
+        names = [str(keyword.arg) for keyword in node.keywords]
+        return len(names) == len(set(names)) and all(
+            static_value(keyword.value) for keyword in node.keywords
+        )
+
+    item_hashes: list[str] = []
+    provider_ids: list[str] = []
+    violations: list[str] = []
+    for index, item in enumerate(value.elts):
+        if (
+            not isinstance(item, ast.Call)
+            or not isinstance(item.func, ast.Name)
+            or item.func.id != "SourceAddRoutingRegistration"
+            or not static_value(item)
+        ):
+            violations.append(
+                f"SOURCE_ADD routing registration {index} is not static"
+            )
+            continue
+        provider_keywords = [
+            keyword for keyword in item.keywords if keyword.arg == "provider_id"
+        ]
+        if (
+            len(provider_keywords) != 1
+            or not isinstance(provider_keywords[0].value, ast.Constant)
+            or not isinstance(provider_keywords[0].value.value, str)
+            or not provider_keywords[0].value.value
+        ):
+            violations.append(
+                f"SOURCE_ADD routing registration {index} provider identity is invalid"
+            )
+            continue
+        provider_ids.append(provider_keywords[0].value.value)
+        item_hashes.append(_ast_sha256(item))
+
+    if len(provider_ids) != len(set(provider_ids)):
+        violations.append("SOURCE_ADD routing provider identities are not unique")
+
+    cursor = 0
+    for item_hash, provider_id in zip(item_hashes, provider_ids):
+        if (
+            cursor < len(expected_hashes)
+            and item_hash == expected_hashes[cursor]
+            and provider_id == expected_providers[cursor]
+        ):
+            cursor += 1
+    if cursor != len(expected_hashes):
+        violations.append(
+            "reviewed SOURCE_ADD routing registrations changed or reordered"
+        )
+    return violations
 
 
 def _literal_module_constants(
@@ -1854,6 +1968,44 @@ def semantic_compatibility_policy_v1() -> Dict[str, Any]:
     ):
         raise ValueError(
             "semantic sourcing compatibility import-time binding policy is invalid"
+        )
+    source_add_extension = document.get("source_add_routing_extension")
+    if (
+        not isinstance(source_add_extension, Mapping)
+        or set(source_add_extension)
+        != {
+            "relative_path",
+            "binding",
+            "constructors",
+            "additional_static_names",
+            "base_provider_ids",
+            "base_item_sha256s",
+        }
+        or source_add_extension.get("relative_path")
+        != "sourcing_model/routing/runtime.py"
+        or source_add_extension.get("binding")
+        != "SOURCE_ADD_ROUTING_REGISTRATIONS"
+        or source_add_extension.get("constructors")
+        != ["SourceAddRoutingRegistration", "SourceAddCategoryContract"]
+        or source_add_extension.get("additional_static_names") != ["IDEMPOTENT"]
+        or not isinstance(source_add_extension.get("base_provider_ids"), list)
+        or not source_add_extension["base_provider_ids"]
+        or any(
+            not isinstance(item, str) or not item
+            for item in source_add_extension["base_provider_ids"]
+        )
+        or len(set(source_add_extension["base_provider_ids"]))
+        != len(source_add_extension["base_provider_ids"])
+        or not isinstance(source_add_extension.get("base_item_sha256s"), list)
+        or len(source_add_extension["base_item_sha256s"])
+        != len(source_add_extension["base_provider_ids"])
+        or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or "")) is None
+            for item in source_add_extension["base_item_sha256s"]
+        )
+    ):
+        raise ValueError(
+            "semantic sourcing compatibility SOURCE_ADD extension is invalid"
         )
     dispatch_v3 = document.get("additive_dispatch_custody_v3")
     if not isinstance(dispatch_v3, Mapping):
@@ -2893,6 +3045,22 @@ def verify_semantic_source_tree_compatibility_v1(
     )
     parsed: Dict[str, ast.Module] = {}
 
+    source_add_extension = dict(policy["source_add_routing_extension"])
+    source_add_relative = str(source_add_extension["relative_path"])
+    source_add_tree = _semantic_tree(
+        root,
+        source_add_relative,
+        parsed=parsed,
+        violations=violations,
+    )
+    if source_add_tree is not None:
+        violations.extend(
+            _source_add_routing_extension_violations_v1(
+                source_add_tree,
+                source_add_extension,
+            )
+        )
+
     for relative, requirements in (policy.get("required_imports") or {}).items():
         tree = _semantic_tree(
             root,
@@ -2977,8 +3145,13 @@ def verify_semantic_source_tree_compatibility_v1(
         observed_hash, slice_violations = _critical_binding_slice_v1(
             tree,
             roots=[str(name) for name in policy_callables.get(relative) or ()],
-            normalized_literals=set(
-                (policy.get("opaque_constants") or {}).get(relative) or {}
+            normalized_literals=(
+                set((policy.get("opaque_constants") or {}).get(relative) or {})
+                | (
+                    {str(source_add_extension["binding"])}
+                    if str(relative) == source_add_relative
+                    else set()
+                )
             ),
             strip_function_bodies=True,
         )

@@ -629,7 +629,7 @@ def test_sidless_revoke_condition_has_exact_hash_only_task_scope():
         target=target,
     )
 
-    assert scope["statement_changes"][0]["sid"] == "index:0"
+    assert scope["statement_changes"][0]["sid"].startswith("unsided:sha256:")
     assert scope["statement_changes"][0]["added_actions"] == []
     assert scope["statement_changes"][0]["removed_actions"] == []
     assert scope["statement_changes"][0]["added_resources"] == []
@@ -1491,6 +1491,74 @@ def test_gateway_target_rejects_self_authorized_action_before_simulation():
 
     assert iam.simulation_calls == 0
     assert iam.events == []
+
+
+def test_task_scope_unsided_statement_identity_survives_canonical_reordering():
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    unchanged = {
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": RESOURCE,
+    }
+    before = operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [unchanged],
+        }
+    )
+    after = operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                unchanged,
+                {
+                    "Sid": "AddExactArtifactRead",
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": f"arn:aws:s3:::leadpoet-artifacts-{ACCOUNT}/exact/*",
+                },
+            ],
+        }
+    )
+
+    scope = operator._computed_task_scope(
+        before,
+        after,
+        scope_id="add-exact-artifact-read",
+        target=target,
+    )
+
+    assert len(scope["statement_changes"]) == 1
+    assert scope["statement_changes"][0]["sid"] == "sid:AddExactArtifactRead"
+    assert scope["statement_changes"][0]["operation"] == "add"
+
+
+def test_task_scope_rejects_duplicate_unsided_statements():
+    duplicate = operator._canonical_policy(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": RESOURCE,
+                },
+                {
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": RESOURCE,
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(operator.OperationError, match="unique statements"):
+        operator._computed_task_scope(
+            None,
+            duplicate,
+            scope_id="duplicate-unsided-statements",
+            target={"kind": "managed", "policy_arn": MANAGED_ARN},
+        )
 
 
 def test_managed_postwrite_simulation_failure_restores_prior_default():

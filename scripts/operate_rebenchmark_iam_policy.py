@@ -1293,6 +1293,44 @@ def _validate_request(
     return normalized
 
 
+def _wire_policy_change_request(
+    value: Any,
+    *,
+    commit: str,
+    source_hash: str,
+) -> dict[str, Any]:
+    """Serialize one locally validated request back to the public wire shape."""
+
+    wire_fields = {
+        "schema_version",
+        "change_id",
+        "target",
+        "desired_document",
+        "task_scope",
+        "simulations",
+        "plan",
+        "prune_managed_version",
+        "intent",
+    }
+    normalized_fields = wire_fields | {
+        "expected_prior_document_hash",
+        "expected_inventory_hash",
+        "expected_delta",
+    }
+    if not isinstance(value, Mapping) or set(value) != normalized_fields:
+        raise OperationError("validated IAM policy request fields differ")
+    wire = {field: value[field] for field in wire_fields}
+    reparsed = _validate_request(
+        wire,
+        commit=commit,
+        source_hash=source_hash,
+        require_intent=True,
+    )
+    if reparsed != dict(value):
+        raise OperationError("IAM policy request wire round-trip differs")
+    return wire
+
+
 def _page(iam: Any, method: str, key: str, **kwargs: Any) -> list[Any]:
     output: list[Any] = []
     marker: str | None = None
@@ -3818,9 +3856,18 @@ def _remote_call(
     source_hash: str,
 ) -> dict[str, Any]:
     _validate_ssh_key()
+    wire_request = (
+        _wire_policy_change_request(
+            request,
+            commit=commit,
+            source_hash=source_hash,
+        )
+        if operation in {"apply", "reconcile"}
+        else request
+    )
     payload = {
         "operation": operation,
-        "request": request,
+        "request": wire_request,
         "commit": commit,
         "sources": list(sources),
         "bridge_source_hash": source_hash,

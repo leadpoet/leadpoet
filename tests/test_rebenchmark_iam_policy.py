@@ -3021,6 +3021,63 @@ def test_gateway_bridge_uses_isolated_production_python(monkeypatch):
     assert captured["input_value"]
 
 
+def test_gateway_bridge_round_trips_validated_policy_request_as_wire_shape(
+    monkeypatch,
+):
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    request = _bound_request(external)
+    state = operator._managed_state(iam, target)
+    receipt = operator._reconciliation_receipt(
+        status="before",
+        state=state,
+        request=request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        payload = json.loads(kwargs["input_value"])
+        captured["request"] = payload["request"]
+        return operator._json(receipt).encode()
+
+    monkeypatch.setattr(operator, "_validate_ssh_key", lambda: None)
+    monkeypatch.setattr(operator, "_run", fake_run)
+
+    observed = operator._remote_call(
+        "reconcile",
+        request,
+        commit=COMMIT,
+        sources=[],
+        source_hash=SOURCE_HASH,
+    )
+
+    wire = captured["request"]
+    assert isinstance(wire, dict)
+    assert set(wire) == {
+        "schema_version",
+        "change_id",
+        "target",
+        "desired_document",
+        "task_scope",
+        "simulations",
+        "plan",
+        "prune_managed_version",
+        "intent",
+    }
+    assert operator._validate_request(
+        wire,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+        require_intent=True,
+    ) == request
+    assert observed["status"] == "before"
+
+
 def test_exact_source_gate_rejects_origin_alias_and_untracked_bytes(monkeypatch):
     monkeypatch.setattr(
         operator,

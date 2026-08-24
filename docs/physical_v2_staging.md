@@ -177,15 +177,25 @@ intentionally changes one of those declared AWS capabilities or its ECR, KMS,
 S3, Secrets Manager, or role layout. Exact artifact and commit admission stays
 fail closed without coupling policy changes to every source release.
 
-The August 2026 rebenchmark incident was an IAM simulator inventory and
-classification failure, not missing operator access and not a Sourcing_model
-commit failure. AWS can return `MissingContextValues` at both aggregate and
-resource-specific levels, including keys from statements that do not apply to
-the simulated action. For managed parity-controller changes, the commissioner
-evaluates those keys against the complete live principal-policy inventory:
-unknown or action-applicable missing context fails closed, while a known key
-belonging only to action-inapplicable statements does not create a false
-denial.
+The August 2026 rebenchmark recovery exposed mechanism defects, not missing
+operator access and not a Sourcing_model commit failure. First, AWS can return
+`MissingContextValues` at both aggregate and resource-specific levels,
+including keys from statements that do not apply to the simulated action. For
+managed parity-controller changes, the commissioner evaluates those keys
+against the complete live principal-policy inventory: unknown or
+action-applicable missing context fails closed, while a known key belonging
+only to action-inapplicable statements does not create a false denial.
+
+Second, the local bridge once sent its validated internal request projection,
+including derived precondition fields, where the remote trust boundary accepts
+only the public request contract. After caller-identity verification, the
+remote correctly rejected that shape before any target-policy read or write,
+but the rejection surfaced as a generic SSH failure. The bridge now has one
+explicit lossless serializer from the internal projection back to the public
+wire contract, reparses that wire form locally, and then lets the remote
+validate the same strict contract again. A regression test asserts the exact
+field inventory and round trip. Internal convenience fields must never expand
+or loosen the remote request surface.
 
 Authority and reconciliation inventory reads use bounded retries, and all
 failures cross the bridge only as fixed typed diagnostics; they never trigger a

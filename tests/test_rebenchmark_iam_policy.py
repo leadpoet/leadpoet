@@ -2529,7 +2529,40 @@ def test_managed_inventory_drift_blocks_version_creation_before_write():
     assert iam.events == []
 
 
-def test_managed_inventory_drift_blocks_default_activation_before_write():
+def test_managed_inventory_drift_after_create_cleans_before_default_write():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    inventory_calls = 0
+
+    def drifted_inventory(_principal_arn):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        if inventory_calls == 1:
+            return (operator._canonical_policy(BEFORE),)
+        raise operator.RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+
+    with pytest.raises(operator.RemoteDiagnosticError) as failure:
+        operator._apply_managed(
+            iam,
+            request,
+            source_hash=SOURCE_HASH,
+            commit=COMMIT,
+            account_id=ACCOUNT,
+            caller_arn=CALLER,
+            prewrite_condition_documents_loader=drifted_inventory,
+        )
+
+    assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
+    assert inventory_calls == 2
+    assert iam.default == "v1"
+    assert set(iam.versions) == {"v1"}
+    assert [event[0] for event in iam.events] == ["create", "delete"]
+
+
+def test_managed_resumed_staged_inventory_drift_cleans_before_default_write():
     iam = FakeManagedIam()
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
     request = _bound_request(
@@ -2558,8 +2591,8 @@ def test_managed_inventory_drift_blocks_default_activation_before_write():
 
     assert failure.value.remote_diagnostic_code == "IAM_SIM_PRINCIPAL_INVENTORY"
     assert iam.default == "v1"
-    assert set(iam.versions) == {"v1", "v2"}
-    assert iam.events == []
+    assert set(iam.versions) == {"v1"}
+    assert [event[0] for event in iam.events] == ["delete"]
 
 
 def test_managed_principal_inventory_drift_rolls_back_updated_default():

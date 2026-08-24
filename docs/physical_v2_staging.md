@@ -166,6 +166,34 @@ type, IMDSv2 settings, and encrypted 512-GiB gp3 shape. SSM, EC2 lifecycle, and
 CloudFront mutation are limited to exact account resources carrying all parity
 run, candidate, ephemeral, and Name ownership tags.
 
+### IAM change boundary and recovery
+
+A Sourcing_model, `leadpoet-lab`, or Research Lab source release is not by
+itself an IAM change. Ordinary commits and model versions that retain the
+declared AWS actions, resources, account, region, roles, attachments,
+permissions boundary, prefixes, and tag conditions reuse the existing
+authority without policy mutation. A release needs a new IAM plan only when it
+intentionally changes one of those declared AWS capabilities or its ECR, KMS,
+S3, Secrets Manager, or role layout. Exact artifact and commit admission stays
+fail closed without coupling policy changes to every source release.
+
+The August 2026 rebenchmark incident was an IAM simulator inventory and
+classification failure, not missing operator access and not a Sourcing_model
+commit failure. AWS can return `MissingContextValues` at both aggregate and
+resource-specific levels, including keys from statements that do not apply to
+the simulated action. The commissioner evaluates those keys against the
+complete live principal-policy inventory: unknown or action-applicable missing
+context fails closed, while a known key belonging only to action-inapplicable
+statements does not create a false denial.
+
+Inventory and API reads use bounded retries and return fixed typed diagnostics;
+they never trigger a request for operator credentials or manual IAM work. The
+complete principal inventory is revalidated immediately before each managed
+policy write and after activation. Drift before activation removes only the
+exact plan-bound staged version under guarded readback. If an apply outcome is
+unknown, the same ledger-bound intent must be reconciled to exact-before,
+exact-applied, or ambiguous state; it must never be blindly reapplied.
+
 Migration `156-production-parity-readonly-role.sql` is never pasted into an SQL
 editor and the repository bootstrap does not apply arbitrary SQL. During an
 explicitly authorized overnight rebenchmark run, the Keychain-backed skill

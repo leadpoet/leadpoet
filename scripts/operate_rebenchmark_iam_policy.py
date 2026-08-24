@@ -2708,9 +2708,15 @@ def _apply_managed(
             raise OperationError(
                 "managed IAM policy default guard found a third state"
             )
-        _validate_principal_condition_inventory(
-            principal_arns, prewrite_condition_documents_loader
-        )
+        try:
+            _validate_principal_condition_inventory(
+                principal_arns, prewrite_condition_documents_loader
+            )
+        except RemoteDiagnosticError:
+            clean_staged_addition(
+                new_version, label="managed pre-default inventory cleanup"
+            )
+            raise
         try:
             iam.set_default_policy_version(PolicyArn=arn, VersionId=new_version)
         except Exception as exc:

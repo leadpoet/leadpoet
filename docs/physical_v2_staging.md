@@ -200,20 +200,27 @@ or loosen the remote request surface.
 If exact `origin/main` advances while an IAM intent remains active, the typed
 ledger appends the fresh exact-main authority route without rewriting the
 intent or its plan. The current commissioner may reconcile the plan only
-against its exact retained historical route. That historical mode is
-before-only: it reads stable live inventory, returns `before` only for the
-exact plan base, classifies every desired, staged, unstable, or third state as
-ambiguous, and performs no simulation, cleanup, policy write, or historical
-apply. This prevents a release fix from orphaning an in-flight intent without
-weakening current-source authority.
+against its exact retained route. A commit-only advance with the same exact
+operator/setup closure hash is IAM-authority-equivalent: reconciliation may
+verify exact-applied state with simulations and emit a current-route receipt,
+but it performs no new policy write. If that closure hash changed, remote
+historical mode is before-only: it reads stable live inventory, returns
+`before` only for the exact plan base, classifies every desired, staged,
+unstable, or third state as ambiguous, and performs no simulation, cleanup,
+policy write, or historical apply. This prevents an unrelated release from
+orphaning an in-flight intent without letting changed code reinterpret an old
+write authority.
 
 Each durable IAM operation ID permits at most one remote apply dispatch for its
 entire lifetime, including across authority refreshes and later source reverts.
 Any pending or reconciliation record permanently bars another remote apply;
-an exact validated policy outcome may only be replayed locally. A newer ledger
-generation may supersede stale operation evidence only with another read-only
-reconciliation. Historical reconciliation accepts only its dedicated
-before/ambiguous receipt schema, never an applied-policy receipt.
+an exact validated policy outcome is monotonic and may only be replayed
+locally, byte-for-byte, against its retained route. That zero-remote replay is
+not a historical apply and must never be overwritten by weaker inventory
+evidence. A newer ledger generation may supersede other stale operation
+evidence only with another read-only reconciliation. Changed-authority remote
+reconciliation accepts only its dedicated before/ambiguous receipt schema,
+never an applied-policy receipt.
 
 Authority and reconciliation inventory reads use bounded retries, and all
 failures cross the bridge only as fixed typed diagnostics; they never trigger a

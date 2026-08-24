@@ -3088,12 +3088,9 @@ def _remote_entry(
             source_hash=None if operation == "reconcile" else source_hash,
             require_intent=True,
         )
-        historical_plan = bool(
+        changed_authority = bool(
             operation == "reconcile"
-            and (
-                validated["plan"].get("origin_main_sha") != commit
-                or validated["plan"].get("bridge_source_hash") != source_hash
-            )
+            and validated["plan"].get("bridge_source_hash") != source_hash
         )
         authority_loader = (
             (lambda: _inline_state(iam, validated["target"]))
@@ -3167,7 +3164,7 @@ def _remote_entry(
                     prewrite_condition_documents_loader
                 ),
                 condition_documents_loader=condition_documents_loader,
-                before_only=historical_plan,
+                before_only=changed_authority,
             )
         if validated["intent"]["status"] != "reserved":
             raise OperationError("IAM apply intent is not reserved")
@@ -3669,18 +3666,32 @@ def _execute_intent_operation(
         raise OperationError("IAM intent operation is invalid")
     record = _read_operation_record(ledger, request)
     generation = request["intent"]["ledger_generation"]
+    if (
+        record is not None
+        and record["state"] == "outcome"
+        and record["receipt"].get("schema_version") == RECEIPT_SCHEMA
+    ):
+        # A validated policy outcome is stronger than any later inventory
+        # classification.  It was persisted only after the original exact-
+        # source remote call validated it.  Reconciliation replays it against
+        # that retained plan authority without issuing another remote call;
+        # apply remains bound to current exact-source authority.
+        receipt_commit = (
+            request["plan"]["origin_main_sha"] if operation == "reconcile" else commit
+        )
+        receipt_source_hash = (
+            request["plan"]["bridge_source_hash"]
+            if operation == "reconcile"
+            else source_hash
+        )
+        return _validate_remote_receipt(
+            "apply",
+            dict(record["receipt"]),
+            request=request,
+            commit=receipt_commit,
+            source_hash=receipt_source_hash,
+        )
     if operation == "apply" and record is not None:
-        if (
-            record["state"] == "outcome"
-            and record["receipt"].get("schema_version") == RECEIPT_SCHEMA
-        ):
-            return _validate_remote_receipt(
-                operation,
-                dict(record["receipt"]),
-                request=request,
-                commit=commit,
-                source_hash=source_hash,
-            )
         raise OperationError(
             "IAM operation was already attempted; read-only reconciliation is required"
         )
@@ -4021,16 +4032,13 @@ def _validate_remote_receipt(
         ):
             raise OperationError("gateway IAM plan receipt request binding differs")
         return plan
-    historical_plan = bool(
+    changed_authority = bool(
         operation == "reconcile"
         and isinstance(request, Mapping)
         and isinstance(request.get("plan"), Mapping)
-        and (
-            request["plan"].get("origin_main_sha") != commit
-            or request["plan"].get("bridge_source_hash") != source_hash
-        )
+        and request["plan"].get("bridge_source_hash") != source_hash
     )
-    if historical_plan and value.get("schema_version") != RECONCILIATION_SCHEMA:
+    if changed_authority and value.get("schema_version") != RECONCILIATION_SCHEMA:
         raise OperationError(
             "historical IAM reconciliation receipt schema differs"
         )

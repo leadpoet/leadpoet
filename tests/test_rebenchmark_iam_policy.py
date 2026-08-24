@@ -3151,15 +3151,24 @@ def test_policy_wire_round_trip_allows_historical_plan_only_when_explicit():
     assert operator._validate_request(wire, require_intent=True) == request
 
 
-def test_remote_entry_routes_historical_plan_only_to_before_only_reconcile(
+@pytest.mark.parametrize(
+    ("plan_source_hash", "expected_before_only"),
+    (
+        ("sha256:" + "d" * 64, True),
+        (SOURCE_HASH, False),
+    ),
+)
+def test_remote_entry_routes_reconcile_by_exact_bridge_authority(
     monkeypatch,
+    plan_source_hash: str,
+    expected_before_only: bool,
 ):
     iam = FakeManagedIam()
     target = {"kind": "managed", "policy_arn": MANAGED_ARN}
     external = _request(iam, operator._managed_state(iam, target), target=target)
     plan = dict(external["plan"])
     plan["origin_main_sha"] = "c" * 40
-    plan["bridge_source_hash"] = "sha256:" + "d" * 64
+    plan["bridge_source_hash"] = plan_source_hash
     plan_material = dict(plan)
     plan_material.pop("plan_hash")
     plan["plan_hash"] = operator._sha256_json(plan_material)
@@ -3203,7 +3212,7 @@ def test_remote_entry_routes_historical_plan_only_to_before_only_reconcile(
         commit=COMMIT,
     ) == {"status": "historical-before-only"}
     assert observed["request"] == normalized
-    assert observed["before_only"] is True
+    assert observed["before_only"] is expected_before_only
 
     with pytest.raises(operator.OperationError, match="plan receipt differs"):
         operator._remote_entry(
@@ -3589,11 +3598,42 @@ def test_historical_reconcile_never_persists_a_policy_receipt(
     assert record["receipt"] is None
 
 
-@pytest.mark.parametrize("record_kind", ("pending", "policy"))
+def test_commit_only_reconcile_accepts_current_receipt_for_identical_authority():
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    external = _request(iam, operator._managed_state(iam, target), target=target)
+    plan = dict(external["plan"])
+    plan["origin_main_sha"] = "c" * 40
+    plan_material = dict(plan)
+    plan_material.pop("plan_hash")
+    plan["plan_hash"] = operator._sha256_json(plan_material)
+    external["plan"] = plan
+    request = _bound_request(external)
+    desired = operator._canonical_policy(request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+
+    validated = operator._validate_remote_receipt(
+        "reconcile",
+        receipt,
+        request=request,
+        commit=COMMIT,
+        source_hash=SOURCE_HASH,
+    )
+
+    assert validated == receipt
+
+
 def test_stale_generation_is_bypassed_only_by_fresh_read_only_reconciliation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    record_kind: str,
 ) -> None:
     tmp_path.chmod(0o700)
     ledger = tmp_path / "ledger.json"
@@ -3602,24 +3642,11 @@ def test_stale_generation_is_bypassed_only_by_fresh_read_only_reconciliation(
     old_request = _bound_request(
         _request(iam, operator._managed_state(iam, target), target=target)
     )
-    old_receipt = None
-    if record_kind == "policy":
-        receipt_iam = FakeManagedIam()
-        desired = operator._canonical_policy(old_request["desired_document"])
-        old_receipt = operator._apply_managed(
-            receipt_iam,
-            old_request,
-            source_hash=SOURCE_HASH,
-            commit=COMMIT,
-            account_id=ACCOUNT,
-            caller_arn=CALLER,
-            prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
-        )
     operator._write_operation_record(
         ledger,
         old_request,
         attempt_operation="apply",
-        receipt=old_receipt,
+        receipt=None,
     )
     current_request = json.loads(json.dumps(old_request))
     current_request["intent"]["ledger_generation"] += 1
@@ -3658,6 +3685,123 @@ def test_stale_generation_is_bypassed_only_by_fresh_read_only_reconciliation(
     ]
     assert record["attempt_operation"] == "reconcile"
     assert record["receipt"]["schema_version"] == operator.RECONCILIATION_SCHEMA
+
+
+@pytest.mark.parametrize(
+    ("current_commit", "current_source"),
+    (
+        ("c" * 40, SOURCE_HASH),
+        ("c" * 40, "sha256:" + "d" * 64),
+    ),
+)
+def test_historical_reconcile_preserves_a_stale_valid_policy_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current_commit: str,
+    current_source: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    desired = operator._canonical_policy(old_request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        old_request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=receipt,
+    )
+    record_path = operator._operation_record_path(ledger, old_request["intent"])
+    before = record_path.read_bytes()
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    replay = operator._execute_intent_operation(
+        "reconcile",
+        current_request,
+        ledger=ledger,
+        commit=current_commit,
+        sources=[],
+        source_hash=current_source,
+    )
+
+    assert replay == receipt
+    assert calls == []
+    assert record_path.read_bytes() == before
+
+
+def test_corrupt_stale_policy_outcome_fails_closed_without_remote_or_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    ledger = tmp_path / "ledger.json"
+    iam = FakeManagedIam()
+    target = {"kind": "managed", "policy_arn": MANAGED_ARN}
+    old_request = _bound_request(
+        _request(iam, operator._managed_state(iam, target), target=target)
+    )
+    desired = operator._canonical_policy(old_request["desired_document"])
+    receipt = operator._apply_managed(
+        iam,
+        old_request,
+        source_hash=SOURCE_HASH,
+        commit=COMMIT,
+        account_id=ACCOUNT,
+        caller_arn=CALLER,
+        prewrite_condition_documents_loader=lambda _principal_arn: (desired,),
+    )
+    operator._write_operation_record(
+        ledger,
+        old_request,
+        attempt_operation="apply",
+        receipt=receipt,
+    )
+    record_path = operator._operation_record_path(ledger, old_request["intent"])
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["receipt"]["readback_document_hash"] = "sha256:" + "9" * 64
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    record_path.chmod(0o600)
+    before = record_path.read_bytes()
+    current_request = json.loads(json.dumps(old_request))
+    current_request["intent"]["ledger_generation"] += 1
+    calls: list[str] = []
+    monkeypatch.setattr(
+        operator,
+        "_remote_call",
+        lambda operation, *_args, **_kwargs: calls.append(operation),
+    )
+
+    with pytest.raises(operator.OperationError, match="policy receipt differs"):
+        operator._execute_intent_operation(
+            "reconcile",
+            current_request,
+            ledger=ledger,
+            commit="c" * 40,
+            sources=[],
+            source_hash="sha256:" + "d" * 64,
+        )
+
+    assert calls == []
+    assert record_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("record_kind", ("pending", "reconciliation"))

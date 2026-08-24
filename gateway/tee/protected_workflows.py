@@ -396,6 +396,7 @@ PROTECTED_SYMBOLS = {
         "_same_json_literal",
         "approved_typed_dispatch_custody_v3_metadata_v1",
         "validate_typed_dispatch_custody_v3_metadata_v1",
+        "validate_typed_dispatch_custody_v3_runtime_metadata_v1",
         "semantic_compatibility_policy_hash_v1",
         "semantic_compatibility_policy_identity_v1",
         "qualification_protocol_policy_identity_v2",

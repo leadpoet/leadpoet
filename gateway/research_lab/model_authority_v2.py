@@ -2418,6 +2418,12 @@ class AttestedPrivateModelRunnerV2:
                         == "qualification_protocol_v2"
                         else ""
                     ),
+                    expected_typed_dispatch_legacy_contract_sha256=str(
+                        dict(self.artifact.compatibility_contract or {}).get(
+                            "sha256"
+                        )
+                        or ""
+                    ),
                 )
                 validate_consumer_runtime_probe_v1(
                     probe,

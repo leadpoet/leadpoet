@@ -81,6 +81,7 @@ def test_typed_dispatch_custody_v3_authority_is_protected():
         "_same_json_literal",
         "approved_typed_dispatch_custody_v3_metadata_v1",
         "validate_typed_dispatch_custody_v3_metadata_v1",
+        "validate_typed_dispatch_custody_v3_runtime_metadata_v1",
         "_typed_dispatch_custody_v3_requested",
         "_merge_typed_dispatch_policy",
         "_typed_dispatch_metadata_violations",

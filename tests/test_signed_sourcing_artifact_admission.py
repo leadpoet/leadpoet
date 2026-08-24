@@ -20,6 +20,10 @@ from research_lab.eval import private_runtime
 from research_lab.eval.private_runtime import (
     QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
 )
+from research_lab.sourcing_model_contract_check import (
+    ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION,
+    approved_typed_dispatch_custody_v3_metadata_v1,
+)
 from scripts import verify_signed_sourcing_artifact_admission as admission
 from tests.test_qualification_outcome_protocol_v2 import (
     _ready_v2_adapter_metadata,
@@ -145,6 +149,33 @@ def _compatible_v9_metadata() -> dict:
     return metadata
 
 
+def _compatible_v10_metadata() -> dict:
+    metadata = _compatible_v9_metadata()
+    metadata["adapter_version"] = "sourcing-model-research-lab-adapter:v10"
+    dispatch_custody = approved_typed_dispatch_custody_v3_metadata_v1()
+    dispatch_custody["legacy_v2_consumer_contract_sha256"] = "8" * 64
+    metadata["dispatch_custody"] = dispatch_custody
+    metadata["routing"]["compiler_version"] = (
+        ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION
+    )
+    metadata["runtime_routing"]["compiler_version"] = (
+        ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION
+    )
+    return metadata
+
+
+def _bind_manifest_config_to_metadata(document: dict, metadata: dict) -> None:
+    config = {
+        "component_registry_version": metadata["component_registry_version"],
+        "scoring_adapter_version": metadata["scoring_adapter_version"],
+        "adapter_version": metadata["adapter_version"],
+    }
+    document["config_hash"] = sha256_json(config)
+    document["manifest_hash"] = sha256_json(
+        {key: value for key, value in document.items() if key != "manifest_hash"}
+    )
+
+
 class _S3:
     def __init__(self, pointer: bytes, archive: bytes | None = None):
         self.pointer = pointer
@@ -244,6 +275,71 @@ def test_current_producer_shaped_legacy_artifact_uses_network_none_metadata(
     assert observed["spec"].network_disabled is True
     assert observed["spec"].env_passthrough == ()
     assert observed["spec"].extra_env == {}
+
+
+def test_current_v10_artifact_accepts_signed_release_specific_contract(
+    monkeypatch,
+):
+    document, _config_metadata = _legacy_manifest_document()
+    metadata = _compatible_v10_metadata()
+    _bind_manifest_config_to_metadata(document, metadata)
+    raw = (json.dumps(document, sort_keys=True) + "\n").encode()
+
+    class _Runner:
+        def __init__(self, _spec):
+            pass
+
+        def metadata(self):
+            return dict(metadata)
+
+    monkeypatch.setattr(admission, "DockerPrivateModelRunner", _Runner)
+
+    receipt = admission.admit_current_signed_artifact(
+        s3_client=_S3(raw),
+        signature_verifier=lambda *_args, **_kwargs: {"verified": True},
+        protocol_preflight=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy artifact used exact preflight")
+        ),
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["container_metadata_sha256"] == sha256_json(metadata)
+
+
+@pytest.mark.parametrize("mutation", ("contract", "wire"))
+def test_current_v10_artifact_rejects_unsigned_or_wire_metadata_drift(
+    monkeypatch,
+    mutation,
+):
+    document, _config_metadata = _legacy_manifest_document()
+    metadata = _compatible_v10_metadata()
+    _bind_manifest_config_to_metadata(document, metadata)
+    if mutation == "contract":
+        metadata["dispatch_custody"][
+            "legacy_v2_consumer_contract_sha256"
+        ] = "7" * 64
+    else:
+        metadata["dispatch_custody"]["kind_ids"]["start"] = "forged-start"
+    raw = (json.dumps(document, sort_keys=True) + "\n").encode()
+
+    class _Runner:
+        def __init__(self, _spec):
+            pass
+
+        def metadata(self):
+            return dict(metadata)
+
+    monkeypatch.setattr(admission, "DockerPrivateModelRunner", _Runner)
+
+    with pytest.raises(
+        admission.SignedArtifactAdmissionError,
+        match="container metadata differs",
+    ):
+        admission.admit_current_signed_artifact(
+            s3_client=_S3(raw),
+            signature_verifier=lambda *_args, **_kwargs: {"verified": True},
+            protocol_preflight=lambda **_kwargs: None,
+        )
 
 
 @pytest.mark.parametrize(

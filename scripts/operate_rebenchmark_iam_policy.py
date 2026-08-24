@@ -77,6 +77,7 @@ POLICY_NAME_RE = re.compile(
     r"^(?:Leadpoet[A-Za-z0-9+=,.@_-]{1,120}|leadpoet-[A-Za-z0-9+=,.@_-]{1,119})$"
 )
 CHANGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,119}$")
+POLICY_VARIABLE_RE = re.compile(r"\$\{([A-Za-z0-9:/._-]{1,256})\}")
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_LEDGER_BYTES = 8 * 1024 * 1024
 MAX_POLICY_BYTES = 6144
@@ -84,6 +85,7 @@ MAX_DELTA_ITEMS = 128
 CONCURRENCY_MODEL = "bounded_optimistic_pre_post_hash_checks"
 READBACK_ATTEMPTS = 6
 READBACK_SLEEP_SECONDS = 0.2
+INVENTORY_READ_ATTEMPTS = 3
 FD_READ_TIMEOUT_SECONDS = 30.0
 
 INLINE_TARGET_ALLOWLIST = frozenset(
@@ -115,6 +117,9 @@ MANAGED_TARGET_ALLOWLIST = frozenset(
     for name in MANAGED_POLICY_NAMES
 )
 MANAGED_POLICY_CONTROLLER_ROLE = "leadpoet-production-parity-controller"
+MANAGED_CONTROLLER_REVOKE_POLICY = (
+    "LeadpoetProductionParityRevokeOlderSessions"
+)
 MANAGED_TARGET_PRINCIPAL_ALLOWLIST = {
     arn: frozenset({MANAGED_POLICY_CONTROLLER_ROLE})
     for arn in MANAGED_TARGET_ALLOWLIST
@@ -239,6 +244,12 @@ class OperationError(RuntimeError):
 
 
 REMOTE_DIAGNOSTIC_MESSAGES = {
+    "IAM_AUTHORITY_INVENTORY_API": "IAM authority inventory API call failed",
+    "IAM_AUTHORITY_INVENTORY_SHAPE": "IAM authority inventory response is invalid",
+    "IAM_RECONCILE_INVENTORY_API": "IAM reconciliation inventory API call failed",
+    "IAM_RECONCILE_INVENTORY_SHAPE": (
+        "IAM reconciliation inventory response is invalid"
+    ),
     "IAM_SIM_API_CALL": "IAM simulation API call failed",
     "IAM_SIM_TRUNCATED": "IAM simulation was truncated",
     "IAM_SIM_RESULT_SHAPE": "IAM simulation response is invalid",
@@ -246,6 +257,9 @@ REMOTE_DIAGNOSTIC_MESSAGES = {
     "IAM_SIM_RESOURCE_ROWS": "IAM simulation response is ambiguous",
     "IAM_SIM_AGGREGATE": "IAM simulation response is ambiguous",
     "IAM_SIM_MISSING_CONTEXT": "IAM simulation expectation differs",
+    "IAM_SIM_MISSING_CONTEXT_UNKNOWN": "IAM simulation expectation differs",
+    "IAM_SIM_MISSING_CONTEXT_APPLICABLE": "IAM simulation expectation differs",
+    "IAM_SIM_PRINCIPAL_INVENTORY": "IAM simulation expectation differs",
     "IAM_SIM_EXPECTATION": "IAM simulation expectation differs",
 }
 REMOTE_DIAGNOSTIC_CODES = frozenset(REMOTE_DIAGNOSTIC_MESSAGES)
@@ -259,6 +273,32 @@ class RemoteDiagnosticError(OperationError):
             raise OperationError("IAM remote diagnostic code is invalid")
         self.remote_diagnostic_code = code
         super().__init__(REMOTE_DIAGNOSTIC_MESSAGES[code])
+
+
+def _redacted_inventory_read(loader: Any, *, stage: str) -> dict[str, Any]:
+    """Classify inventory failures without crossing policy material over SSH."""
+
+    if stage not in {"authority", "reconcile"}:
+        raise OperationError("IAM inventory diagnostic stage is invalid")
+    prefix = "IAM_AUTHORITY" if stage == "authority" else "IAM_RECONCILE"
+    last_error: Exception | None = None
+    for attempt in range(INVENTORY_READ_ATTEMPTS):
+        try:
+            state = loader()
+        except RemoteDiagnosticError:
+            raise
+        except OperationError as exc:
+            raise RemoteDiagnosticError(f"{prefix}_INVENTORY_SHAPE") from exc
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < INVENTORY_READ_ATTEMPTS:
+                time.sleep(READBACK_SLEEP_SECONDS * (2**attempt))
+                continue
+            raise RemoteDiagnosticError(f"{prefix}_INVENTORY_API") from exc
+        if not isinstance(state, dict):
+            raise RemoteDiagnosticError(f"{prefix}_INVENTORY_SHAPE")
+        return state
+    raise RemoteDiagnosticError(f"{prefix}_INVENTORY_API") from last_error
 
 
 def _json(value: Any) -> str:
@@ -1562,8 +1602,46 @@ def _normalize_simulation_results(
     return decisions, missing_context
 
 
+def _context_key_authority(
+    documents: Sequence[Mapping[str, Any]], *, action: str
+) -> tuple[set[str], set[str]]:
+    """Return case-folded known and action-applicable context dependencies."""
+
+    all_keys: set[str] = set()
+    applicable_keys: set[str] = set()
+    for raw_document in documents:
+        document = _canonical_policy(raw_document)
+        for statement in document["Statement"]:
+            condition = statement.get("Condition", {})
+            if not isinstance(condition, Mapping):
+                raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+            statement_keys: set[str] = set()
+            for operator_values in condition.values():
+                if not isinstance(operator_values, Mapping) or any(
+                    not isinstance(key, str) or not key
+                    for key in operator_values
+                ):
+                    raise RemoteDiagnosticError("IAM_SIM_RESULT_SHAPE")
+                statement_keys.update(str(key).casefold() for key in operator_values)
+            statement_keys.update(
+                match.group(1).casefold()
+                for match in POLICY_VARIABLE_RE.finditer(_json(statement))
+            )
+            all_keys.update(statement_keys)
+            if any(
+                _action_matches(pattern, action)
+                for pattern in statement["Action"]
+            ):
+                applicable_keys.update(statement_keys)
+    return all_keys, applicable_keys
+
+
 def _check_simulation_response(
-    response: Mapping[str, Any], case: Mapping[str, Any], *, label: str
+    response: Mapping[str, Any],
+    case: Mapping[str, Any],
+    *,
+    label: str,
+    condition_documents: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     del label  # Expose only fixed structural codes, never case or policy material.
     if response.get("IsTruncated"):
@@ -1577,7 +1655,16 @@ def _check_simulation_response(
         requested_resources=requested_resources,
     )
     if missing:
-        raise RemoteDiagnosticError("IAM_SIM_MISSING_CONTEXT")
+        if not condition_documents:
+            raise RemoteDiagnosticError("IAM_SIM_MISSING_CONTEXT")
+        all_keys, applicable_keys = _context_key_authority(
+            condition_documents, action=case["action"]
+        )
+        normalized_missing = {value.casefold() for value in missing}
+        if not normalized_missing.issubset(all_keys):
+            raise RemoteDiagnosticError("IAM_SIM_MISSING_CONTEXT_UNKNOWN")
+        if normalized_missing & applicable_keys:
+            raise RemoteDiagnosticError("IAM_SIM_MISSING_CONTEXT_APPLICABLE")
     if (
         set(decisions) != set(requested_resources)
         or set(decisions.values()) != {case["expected"]}
@@ -1602,15 +1689,32 @@ def _simulate_custom(
             )
         except Exception as exc:
             raise RemoteDiagnosticError("IAM_SIM_API_CALL") from exc
-        _check_simulation_response(response, case, label="custom-policy")
+        _check_simulation_response(
+            response,
+            case,
+            label="custom-policy",
+            condition_documents=(document,),
+        )
 
 
 def _simulate_principals(
     iam: Any,
     principal_arns: Sequence[str],
     cases: Sequence[Mapping[str, Any]],
+    *,
+    condition_documents_loader: Any | None = None,
 ) -> None:
     for principal_arn in principal_arns:
+        condition_documents: tuple[Mapping[str, Any], ...] = ()
+        condition_fingerprint: str | None = None
+        if condition_documents_loader is not None:
+            loaded = condition_documents_loader(principal_arn)
+            if not isinstance(loaded, tuple) or not loaded:
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            condition_documents = tuple(
+                _canonical_policy(document) for document in loaded
+            )
+            condition_fingerprint = _sha256_json(condition_documents)
         for case in cases:
             try:
                 response = iam.simulate_principal_policy(
@@ -1622,7 +1726,23 @@ def _simulate_principals(
                 )
             except Exception as exc:
                 raise RemoteDiagnosticError("IAM_SIM_API_CALL") from exc
-            _check_simulation_response(response, case, label="principal-policy")
+            _check_simulation_response(
+                response,
+                case,
+                label="principal-policy",
+                condition_documents=condition_documents,
+            )
+        if condition_documents_loader is not None:
+            reloaded = condition_documents_loader(principal_arn)
+            if (
+                not isinstance(reloaded, tuple)
+                or not reloaded
+                or _sha256_json(
+                    tuple(_canonical_policy(document) for document in reloaded)
+                )
+                != condition_fingerprint
+            ):
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
 
 
 def _decoy_resource(resource: str, *, action: str) -> str:
@@ -1751,7 +1871,9 @@ def _expected_principal_arns(target: Mapping[str, str]) -> list[str]:
     ]
 
 
-def _validate_setup_managed_authority(setup: Mapping[str, Any]) -> None:
+def _validate_setup_managed_authority(
+    setup: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
     role = setup.get("CONTROLLER_ROLE")
     names = setup.get("CONTROLLER_POLICY_NAMES")
     generator = setup.get("_controller_policy_slices")
@@ -1763,6 +1885,8 @@ def _validate_setup_managed_authority(setup: Mapping[str, Any]) -> None:
         or not callable(generator)
         or setup.get("EXPECTED_ACCOUNT_ID") != EXPECTED_ACCOUNT_ID
         or setup.get("EXPECTED_REGION") != EXPECTED_REGION
+        or setup.get("CONTROLLER_REVOKE_POLICY")
+        != MANAGED_CONTROLLER_REVOKE_POLICY
     ):
         raise OperationError("repository managed IAM authority differs")
     setup_targets = {
@@ -1800,6 +1924,115 @@ def _validate_setup_managed_authority(setup: Mapping[str, Any]) -> None:
     }
     if document_hashes != MANAGED_POLICY_DOCUMENT_HASHES:
         raise OperationError("repository managed IAM document authority differs")
+    return {
+        name: _canonical_policy(documents[name])
+        for name in sorted(documents)
+    }
+
+
+def _managed_principal_condition_documents(
+    iam: Any,
+    setup_documents: Mapping[str, Mapping[str, Any]],
+    principal_arn: str,
+    *,
+    target_policy_arn: str,
+    target_allowed_document_hashes: frozenset[str],
+) -> tuple[Mapping[str, Any], ...]:
+    """Load the exact complete parity-controller policy inventory."""
+
+    expected_principal = (
+        f"arn:aws:iam::{EXPECTED_ACCOUNT_ID}:role/"
+        f"{MANAGED_POLICY_CONTROLLER_ROLE}"
+    )
+    if (
+        principal_arn != expected_principal
+        or target_policy_arn not in MANAGED_TARGET_ALLOWLIST
+        or not isinstance(target_allowed_document_hashes, frozenset)
+        or not 1 <= len(target_allowed_document_hashes) <= 2
+        or any(
+            HASH_RE.fullmatch(value) is None
+            for value in target_allowed_document_hashes
+        )
+    ):
+        raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+    try:
+        role = iam.get_role(RoleName=MANAGED_POLICY_CONTROLLER_ROLE).get(
+            "Role", {}
+        )
+        inline_names = _page(
+            iam,
+            "list_role_policies",
+            "PolicyNames",
+            RoleName=MANAGED_POLICY_CONTROLLER_ROLE,
+        )
+        attached = _page(
+            iam,
+            "list_attached_role_policies",
+            "AttachedPolicies",
+            RoleName=MANAGED_POLICY_CONTROLLER_ROLE,
+        )
+        revoke = iam.get_role_policy(
+            RoleName=MANAGED_POLICY_CONTROLLER_ROLE,
+            PolicyName=MANAGED_CONTROLLER_REVOKE_POLICY,
+        ).get("PolicyDocument")
+        canonical_revoke = _canonical_policy(revoke)
+        _revocation_cutoff(canonical_revoke)
+    except Exception as exc:
+        raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY") from exc
+    attached_arns = [
+        str(item.get("PolicyArn") or "")
+        for item in attached
+        if isinstance(item, Mapping)
+    ]
+    if (
+        not isinstance(role, Mapping)
+        or role.get("Arn") != expected_principal
+        or role.get("PermissionsBoundary") is not None
+        or inline_names != [MANAGED_CONTROLLER_REVOKE_POLICY]
+        or len(attached_arns) != len(attached)
+        or len(attached_arns) != len(set(attached_arns))
+        or set(attached_arns) != MANAGED_TARGET_ALLOWLIST
+        or set(setup_documents) != MANAGED_POLICY_NAMES
+    ):
+        raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+    live_documents: list[Mapping[str, Any]] = []
+    try:
+        for policy_arn in sorted(attached_arns):
+            name = policy_arn.rsplit("/", 1)[-1]
+            expected_document = _canonical_policy(setup_documents[name])
+            policy = iam.get_policy(PolicyArn=policy_arn).get("Policy", {})
+            default_version_id = str(policy.get("DefaultVersionId") or "")
+            if (
+                not isinstance(policy, Mapping)
+                or policy.get("Arn") != policy_arn
+                or policy.get("PolicyName") != name
+                or not default_version_id
+            ):
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            version = iam.get_policy_version(
+                PolicyArn=policy_arn,
+                VersionId=default_version_id,
+            ).get("PolicyVersion", {})
+            if not isinstance(version, Mapping):
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            returned_version_id = version.get("VersionId")
+            if returned_version_id is not None and (
+                returned_version_id != default_version_id
+            ):
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            live_document = _canonical_policy(version.get("Document"))
+            live_hash = _policy_hash(live_document)
+            if policy_arn == target_policy_arn:
+                if live_hash not in target_allowed_document_hashes:
+                    raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            elif live_hash != _policy_hash(expected_document):
+                raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY")
+            live_documents.append(live_document)
+    except RemoteDiagnosticError:
+        raise
+    except Exception as exc:
+        raise RemoteDiagnosticError("IAM_SIM_PRINCIPAL_INVENTORY") from exc
+    return (*live_documents, canonical_revoke)
 
 
 def _simulate_before_write(
@@ -1818,10 +2051,17 @@ def _simulate_after_write(
     cases: Sequence[Mapping[str, Any]],
     decoys: Sequence[Mapping[str, Any]],
     principal_arns: Sequence[str],
+    *,
+    condition_documents_loader: Any | None = None,
 ) -> None:
     combined = list(cases) + list(decoys)
     _simulate_custom(iam, document, combined)
-    _simulate_principals(iam, principal_arns, combined)
+    _simulate_principals(
+        iam,
+        principal_arns,
+        combined,
+        condition_documents_loader=condition_documents_loader,
+    )
 
 
 def _wait_for_state(
@@ -2029,6 +2269,7 @@ def _apply_inline(
     commit: str,
     account_id: str,
     caller_arn: str,
+    condition_documents_loader: Any | None = None,
 ) -> dict[str, Any]:
     target = request["target"]
     before = _inline_state(iam, target)
@@ -2078,6 +2319,7 @@ def _apply_inline(
             request["simulations"],
             decoys,
             principal_arns,
+            condition_documents_loader=condition_documents_loader,
         )
         final = _wait_for_state(
             lambda: _inline_state(iam, target),
@@ -2134,6 +2376,7 @@ def _apply_inline(
             request["simulations"],
             decoys,
             principal_arns,
+            condition_documents_loader=condition_documents_loader,
         )
     except Exception as exc:
         live = _wait_for_state(
@@ -2273,6 +2516,7 @@ def _apply_managed(
     commit: str,
     account_id: str,
     caller_arn: str,
+    condition_documents_loader: Any | None = None,
 ) -> dict[str, Any]:
     target = request["target"]
     arn = target["policy_arn"]
@@ -2355,6 +2599,7 @@ def _apply_managed(
             request["simulations"],
             decoys,
             principal_arns,
+            condition_documents_loader=condition_documents_loader,
         )
         final = _wait_for_state(
             lambda: _managed_state(iam, target),
@@ -2469,6 +2714,7 @@ def _apply_managed(
             request["simulations"],
             decoys,
             principal_arns,
+            condition_documents_loader=condition_documents_loader,
         )
     except Exception as exc:
         live = _wait_for_state(
@@ -2602,13 +2848,15 @@ def _reconcile_policy(
     commit: str,
     account_id: str,
     caller_arn: str,
+    condition_documents_loader: Any | None = None,
 ) -> dict[str, Any]:
     target = request["target"]
-    loader = (
+    raw_loader = (
         (lambda: _inline_state(iam, target))
         if target["kind"] == "inline_role"
         else (lambda: _managed_state(iam, target))
     )
+    loader = lambda: _redacted_inventory_read(raw_loader, stage="reconcile")
     first = loader()
     second = loader()
     if first != second:
@@ -2667,6 +2915,7 @@ def _reconcile_policy(
                 commit=commit,
                 account_id=account_id,
                 caller_arn=caller_arn,
+                condition_documents_loader=condition_documents_loader,
             )
         return _apply_managed(
             iam,
@@ -2675,6 +2924,7 @@ def _reconcile_policy(
             commit=commit,
             account_id=account_id,
             caller_arn=caller_arn,
+            condition_documents_loader=condition_documents_loader,
         )
     return _reconciliation_receipt(
         status="ambiguous",
@@ -2707,7 +2957,7 @@ def _remote_entry(
     source_hash: str,
     commit: str,
 ) -> dict[str, Any]:
-    _validate_setup_managed_authority(setup)
+    setup_documents = _validate_setup_managed_authority(setup)
     sts, iam, account_id, caller_arn = _gateway_clients(setup)
     try:
         if operation == "probe":
@@ -2725,10 +2975,12 @@ def _remote_entry(
             }
         if operation == "plan":
             validated_plan = _validate_plan_request(request)
-            if validated_plan["target"]["kind"] == "inline_role":
-                state = _inline_state(iam, validated_plan["target"])
-            else:
-                state = _managed_state(iam, validated_plan["target"])
+            state_loader = (
+                (lambda: _inline_state(iam, validated_plan["target"]))
+                if validated_plan["target"]["kind"] == "inline_role"
+                else (lambda: _managed_state(iam, validated_plan["target"]))
+            )
+            state = _redacted_inventory_read(state_loader, stage="authority")
             _validate_target_policy_authority(
                 validated_plan["target"],
                 before=state["document"],
@@ -2751,15 +3003,38 @@ def _remote_entry(
             source_hash=source_hash,
             require_intent=True,
         )
-        if validated["target"]["kind"] == "inline_role":
-            authority_state = _inline_state(iam, validated["target"])
-        else:
-            authority_state = _managed_state(iam, validated["target"])
+        authority_loader = (
+            (lambda: _inline_state(iam, validated["target"]))
+            if validated["target"]["kind"] == "inline_role"
+            else (lambda: _managed_state(iam, validated["target"]))
+        )
+        authority_state = _redacted_inventory_read(
+            authority_loader,
+            stage="reconcile" if operation == "reconcile" else "authority",
+        )
         _validate_target_policy_authority(
             validated["target"],
             before=(authority_state["document"] if operation == "apply" else None),
             after=validated["desired_document"],
             phase="reconcile",
+        )
+        condition_documents_loader = (
+            (
+                lambda principal_arn: _managed_principal_condition_documents(
+                    iam,
+                    setup_documents,
+                    principal_arn,
+                    target_policy_arn=validated["target"]["policy_arn"],
+                    # Principal simulation is post-write.  Bind the target to
+                    # the exact desired document; the helper also supports an
+                    # explicit prior/desired set for other transition phases.
+                    target_allowed_document_hashes=frozenset(
+                        {validated["plan"]["desired_document_hash"]}
+                    ),
+                )
+            )
+            if validated["target"]["kind"] == "managed"
+            else None
         )
         if operation == "reconcile":
             if validated["intent"]["status"] not in {
@@ -2775,6 +3050,7 @@ def _remote_entry(
                 commit=commit,
                 account_id=account_id,
                 caller_arn=caller_arn,
+                condition_documents_loader=condition_documents_loader,
             )
         if validated["intent"]["status"] != "reserved":
             raise OperationError("IAM apply intent is not reserved")
@@ -2786,6 +3062,7 @@ def _remote_entry(
                 commit=commit,
                 account_id=account_id,
                 caller_arn=caller_arn,
+                condition_documents_loader=condition_documents_loader,
             )
         return _apply_managed(
             iam,
@@ -2794,6 +3071,7 @@ def _remote_entry(
             commit=commit,
             account_id=account_id,
             caller_arn=caller_arn,
+            condition_documents_loader=condition_documents_loader,
         )
     finally:
         for client in (iam, sts):

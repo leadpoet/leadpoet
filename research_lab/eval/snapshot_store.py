@@ -1683,6 +1683,8 @@ _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
 _RL_DEV_EXA_AGENT_NONTERMINAL_STATUSES = ("queued", "running", "in_progress", "pending")
 _RL_DEV_SCRAPINGDOG_RETRY_STATUSES = (400, 403)
+_RL_DEV_SCRAPINGDOG_PROVIDER_DOMAIN = "scrapingdog.com"
+_RL_DEV_HTTP_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _RL_DEV_SECRET_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
     "DEEPLINE_API_KEY",
@@ -1940,6 +1942,57 @@ def _rl_dev_nonterminal_poll_response(provider, method, endpoint, response):
     )
 
 
+def _rl_dev_scrapingdog_retryable_success_response(provider, response):
+    if provider != "scrapingdog" or not isinstance(response, dict):
+        return False
+    try:
+        status = int(response.get("status") or 0)
+    except (TypeError, ValueError):
+        return False
+    if status != 200:
+        return False
+    headers = response.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    content_type = next(
+        (
+            str(value or "")
+            for name, value in headers.items()
+            if str(name).strip().lower() == "content-type"
+        ),
+        "",
+    )
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        return False
+    try:
+        payload = json.loads(str(response.get("body_text") or ""))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != {"message"}:
+        return False
+    message = payload.get("message")
+    if (
+        not isinstance(message, str)
+        or len(message) > 4096
+        or "scrapingdog" not in message.lower()
+    ):
+        return False
+    # ScrapingDog can encode its own failures as HTTP 200. Require an exact
+    # provider-owned URL so target-owned message-only JSON remains immutable.
+    for candidate in _RL_DEV_HTTP_URL_RE.findall(message):
+        try:
+            hostname = str(
+                urlsplit(candidate.rstrip(".,);]} ")).hostname or ""
+            ).strip().lower()
+        except ValueError:
+            continue
+        if hostname == _RL_DEV_SCRAPINGDOG_PROVIDER_DOMAIN or hostname.endswith(
+            "." + _RL_DEV_SCRAPINGDOG_PROVIDER_DOMAIN
+        ):
+            return True
+    return False
+
+
 def _rl_dev_lookup(method, url, body, params=None):
     provider, request_key, storage_name = _rl_dev_request_identity(method, url, body, params)
     path = _rl_dev_snapshot_path(storage_name)
@@ -2001,6 +2054,7 @@ def _rl_dev_lookup_existing(method, url, body, params=None):
                 provider == "scrapingdog"
                 and status in _RL_DEV_SCRAPINGDOG_RETRY_STATUSES
             )
+            or _rl_dev_scrapingdog_retryable_success_response(provider, response)
         ):
             return None
     return dict(response)

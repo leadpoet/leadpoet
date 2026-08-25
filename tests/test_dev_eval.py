@@ -1361,6 +1361,231 @@ print(json.dumps({{"result": result, "hits": len(hits), "stored": stored}}))
     }
 
 
+def test_record_bootstrap_retry_refreshes_scrapingdog_success_error_envelope(tmp_path):
+    snapshot_dir = tmp_path / "record_set"
+    provider_body = json.dumps(
+        {
+            "message": (
+                "ScrapingDog could not complete this request; see "
+                "https://docs.scrapingdog.com/errors and "
+                "https://api.scrapingdog.com/scrape"
+            )
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    probe = f'''
+import http.server
+import json
+import os
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        body = b'{{"results":["recovered"]}}'
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/retry" % server.server_port
+_rl_dev_provider_for_host = lambda _host: "scrapingdog"
+assert _rl_dev_record(
+    "GET", url, None, 200,
+    {{"content-type": "application/json; charset=utf-8"}},
+    {provider_body!r},
+)
+try:
+    with urllib.request.urlopen(url) as response:
+        result = {{
+            "status": response.status,
+            "body": response.read().decode("utf-8"),
+        }}
+finally:
+    server.shutdown()
+    server.server_close()
+snapshot_path = os.path.join(
+    os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"],
+    "snapshots",
+    os.listdir(os.path.join(
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_DIR"], "snapshots"
+    ))[0],
+)
+with open(snapshot_path, "r", encoding="utf-8") as handle:
+    stored = json.load(handle)["response"]
+print(json.dumps({{"result": result, "hits": len(hits), "stored": stored}}))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            SNAPSHOT_DIR_ENV: str(snapshot_dir),
+            SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+            SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV: "true",
+            "PATH": "",
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "result": {"status": 200, "body": '{"results":["recovered"]}'},
+        "hits": 1,
+        "stored": {
+            "body_text": '{"results":["recovered"]}',
+            "headers": {"content-type": "application/json"},
+            "status": 200,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "retry_transient", "content_type", "body"),
+    [
+        (
+            "scrapingdog",
+            False,
+            "application/json; charset=utf-8",
+            json.dumps(
+                {
+                    "message": (
+                        "ScrapingDog request failed; see "
+                        "https://docs.scrapingdog.com/errors"
+                    )
+                }
+            ),
+        ),
+        (
+            "scrapingdog",
+            True,
+            "application/json",
+            json.dumps({"message": "A valid target-owned message"}),
+        ),
+        (
+            "exa",
+            True,
+            "application/json",
+            json.dumps(
+                {
+                    "message": (
+                        "ScrapingDog request failed; see "
+                        "https://docs.scrapingdog.com/errors"
+                    )
+                }
+            ),
+        ),
+        (
+            "scrapingdog",
+            True,
+            "application/json",
+            json.dumps(
+                {
+                    "message": (
+                        "ScrapingDog request failed; see "
+                        "https://docs.scrapingdog.com/errors"
+                    ),
+                    "data": [],
+                }
+            ),
+        ),
+        (
+            "scrapingdog",
+            True,
+            "text/plain",
+            json.dumps(
+                {
+                    "message": (
+                        "ScrapingDog request failed; see "
+                        "https://docs.scrapingdog.com/errors"
+                    )
+                }
+            ),
+        ),
+    ],
+    ids=(
+        "normal-reuse",
+        "target-message",
+        "other-provider",
+        "provider-data-envelope",
+        "non-json-content",
+    ),
+)
+def test_record_bootstrap_does_not_overclassify_scrapingdog_success_response(
+    tmp_path,
+    provider,
+    retry_transient,
+    content_type,
+    body,
+):
+    snapshot_dir = tmp_path / "record_set"
+    probe = f'''
+import http.server
+import json
+import threading
+import urllib.request
+
+hits = []
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        hits.append(self.path)
+        self.send_response(500)
+        self.end_headers()
+    def log_message(self, *args):
+        return
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+url = "http://127.0.0.1:%d/reuse" % server.server_port
+_rl_dev_provider_for_host = lambda _host: {provider!r}
+assert _rl_dev_record(
+    "GET", url, None, 200, {{"content-type": {content_type!r}}}, {body!r}
+)
+try:
+    with urllib.request.urlopen(url) as response:
+        result = {{
+            "status": response.status,
+            "body": response.read().decode("utf-8"),
+        }}
+finally:
+    server.shutdown()
+    server.server_close()
+print(json.dumps({{"result": result, "hits": len(hits)}}))
+'''
+    environment = {
+        SNAPSHOT_DIR_ENV: str(snapshot_dir),
+        SNAPSHOT_RECORD_REUSE_EXISTING_ENV: "true",
+        "PATH": "",
+    }
+    if retry_transient:
+        environment[SNAPSHOT_RECORD_RETRY_TRANSIENT_ENV] = "true"
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env=environment,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "result": {"status": 200, "body": body},
+        "hits": 0,
+    }
+
+
 def test_record_bootstrap_reuses_existing_transient_http_without_retry(tmp_path):
     snapshot_dir = tmp_path / "record_set"
     probe = r'''

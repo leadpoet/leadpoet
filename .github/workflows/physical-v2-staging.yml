@@ -350,7 +350,6 @@ jobs:
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
           candidate_bundle_binding={q(root + "/candidate-bundle-binding.json")}
-          candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
           candidate_repo={q(root + "/repo")}
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
@@ -461,15 +460,15 @@ jobs:
             printf '%s\n%s HEAD' '# v2 git bundle' \
               {q(required['CANDIDATE_SHA'])}
           )"
-          failure_stage=candidate-bundle-verify
-          git init --bare "$candidate_bundle_verifier" >/dev/null 2>&1
-          git -C "$candidate_bundle_verifier" bundle verify \
-            "$candidate_bundle" >/dev/null 2>&1
           failure_stage=candidate-repository-init
           git init "$candidate_repo" >/dev/null 2>&1
-          failure_stage=candidate-bundle-fetch
+          # Fetching into a newly initialized empty repository verifies the
+          # complete bundle and its object closure without depending on a
+          # second, host-configured bare verification repository.
+          failure_stage=candidate-bundle-verify
           git -C "$candidate_repo" fetch --no-tags \
             "$candidate_bundle" HEAD >/dev/null 2>&1
+          failure_stage=candidate-bundle-fetch
           test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
             {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-checkout

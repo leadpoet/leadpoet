@@ -351,6 +351,7 @@ jobs:
           candidate_bundle={q(root + "/candidate.bundle")}
           candidate_bundle_binding={q(root + "/candidate-bundle-binding.json")}
           candidate_repo={q(root + "/repo")}
+          candidate_git_home={q(root + "/git-home")}
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
           candidate_bundle_binding_sha256={q(candidate_bundle_binding_sha256)}
@@ -360,6 +361,29 @@ jobs:
           {failure_response_cases}
               *) return 1 ;;
             esac
+          }}
+          candidate_git() {{
+            /usr/bin/env \
+              -u GIT_DIR \
+              -u GIT_WORK_TREE \
+              -u GIT_INDEX_FILE \
+              -u GIT_OBJECT_DIRECTORY \
+              -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+              -u GIT_COMMON_DIR \
+              -u GIT_CEILING_DIRECTORIES \
+              -u GIT_DISCOVERY_ACROSS_FILESYSTEM \
+              -u GIT_CONFIG_COUNT \
+              -u GIT_CONFIG_SYSTEM \
+              -u GIT_CONFIG_GLOBAL \
+              -u GIT_SSH \
+              -u GIT_SSH_COMMAND \
+              -u GIT_ASKPASS \
+              -u SSH_ASKPASS \
+              HOME="$candidate_git_home" \
+              XDG_CONFIG_HOME="$candidate_git_home/.config" \
+              GIT_CONFIG_NOSYSTEM=1 \
+              GIT_TERMINAL_PROMPT=0 \
+              /usr/bin/git -c init.templateDir= "$@"
           }}
           retain_failure() {{
             evidence_parent="$(dirname -- "$evidence")" || return 1
@@ -460,36 +484,43 @@ jobs:
             printf '%s\n%s HEAD' '# v2 git bundle' \
               {q(required['CANDIDATE_SHA'])}
           )"
-          failure_stage=candidate-repository-init
-          mkdir -m 0700 -- "$candidate_repo"
+          failure_stage=candidate-repository-directory
+          mkdir -m 0700 -- "$candidate_repo" "$candidate_git_home"
           test -d "$candidate_repo"
           test ! -L "$candidate_repo"
-          git -C "$candidate_repo" init >/dev/null 2>&1
+          test -d "$candidate_git_home"
+          test ! -L "$candidate_git_home"
+          failure_stage=candidate-git-runtime
+          test -x /usr/bin/git
+          candidate_git --version >/dev/null 2>&1
+          failure_stage=candidate-repository-init
+          candidate_git -C "$candidate_repo" init >/dev/null 2>&1
+          failure_stage=candidate-repository-structure
           test -d "$candidate_repo/.git"
           test ! -L "$candidate_repo/.git"
           # Fetching into a newly initialized empty repository verifies the
           # complete bundle and its object closure without depending on a
           # second, host-configured bare verification repository.
           failure_stage=candidate-bundle-verify
-          git -C "$candidate_repo" fetch --no-tags \
+          candidate_git -C "$candidate_repo" fetch --no-tags \
             "$candidate_bundle" HEAD >/dev/null 2>&1
           failure_stage=candidate-bundle-fetch
-          test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
+          test "$(candidate_git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
             {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-checkout
-          git -C "$candidate_repo" checkout --detach \
+          candidate_git -C "$candidate_repo" checkout --detach \
             {q(required['CANDIDATE_SHA'])} >/dev/null 2>&1
-          test "$(git -C "$candidate_repo" rev-parse HEAD)" = \
+          test "$(candidate_git -C "$candidate_repo" rev-parse HEAD)" = \
             {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-remote-rebind
-          git -C "$candidate_repo" remote add origin \
+          candidate_git -C "$candidate_repo" remote add origin \
             https://github.com/leadpoet/leadpoet.git
-          test "$(git -C "$candidate_repo" remote get-url origin)" = \
+          test "$(candidate_git -C "$candidate_repo" remote get-url origin)" = \
             https://github.com/leadpoet/leadpoet.git
           failure_stage=canonical-origin-fetch
-          git -C "$candidate_repo" fetch --no-tags origin \
+          candidate_git -C "$candidate_repo" fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1
-          test "$(git -C "$candidate_repo" rev-parse origin/main)" = \
+          test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \
             {q(required['CANDIDATE_SHA'])}
           cd "$candidate_repo"
           failure_stage=host-python-import

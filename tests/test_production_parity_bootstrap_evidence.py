@@ -47,8 +47,11 @@ def _output(tmp_path: Path) -> Path:
         ("candidate-bundle-metadata", "CommandFailed"),
         ("candidate-bundle-file-integrity", "CommandFailed"),
         ("candidate-bundle-head", "CommandFailed"),
+        ("candidate-git-runtime", "CommandFailed"),
+        ("candidate-repository-directory", "CommandFailed"),
         ("candidate-bundle-verify", "CommandFailed"),
         ("candidate-repository-init", "CommandFailed"),
+        ("candidate-repository-structure", "CommandFailed"),
         ("candidate-bundle-fetch", "CommandFailed"),
         ("candidate-checkout", "CommandFailed"),
         ("candidate-remote-rebind", "CommandFailed"),
@@ -112,6 +115,9 @@ def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
         (52, "host-python-import", "HostImportFailed"),
         (53, "host-entrypoint", "HostEntrypointFailed"),
         (54, "evidence-upload", "EvidenceUploadFailed"),
+        (55, "candidate-git-runtime", "CommandFailed"),
+        (56, "candidate-repository-directory", "CommandFailed"),
+        (57, "candidate-repository-structure", "CommandFailed"),
     )
     codes = [code for code, _stage, _category in values]
     assert len(codes) == len(set(codes))
@@ -341,7 +347,7 @@ def test_terminal_poller_projects_authoritative_bootstrap_response_code(
 
 @pytest.mark.parametrize(
     "response_code",
-    [-1, 0, 1, 39, 55, 255, None, "40", True, 40.0, {}, []],
+    [-1, 0, 1, 39, 58, 255, None, "40", True, 40.0, {}, []],
 )
 def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
     tmp_path: Path,
@@ -629,7 +635,10 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=candidate-bundle-metadata",
         "failure_stage=candidate-bundle-file-integrity",
         "failure_stage=candidate-bundle-head",
+        "failure_stage=candidate-repository-directory",
+        "failure_stage=candidate-git-runtime",
         "failure_stage=candidate-repository-init",
+        "failure_stage=candidate-repository-structure",
         "failure_stage=candidate-bundle-verify",
         "failure_stage=candidate-bundle-fetch",
         "failure_stage=candidate-checkout",
@@ -732,20 +741,41 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert 'LC_ALL=C head -n 3 -- "$candidate_bundle"' in head_stage
     assert "'# v2 git bundle'" in head_stage
     assert "git bundle list-heads" not in head_stage
+    directory_stage = execute.split(
+        "failure_stage=candidate-repository-directory", 1
+    )[1].split("failure_stage=candidate-git-runtime", 1)[0]
+    assert 'mkdir -m 0700 -- "$candidate_repo" "$candidate_git_home"' in (
+        directory_stage
+    )
+    assert 'test -d "$candidate_repo"' in directory_stage
+    assert 'test ! -L "$candidate_repo"' in directory_stage
+    assert 'test -d "$candidate_git_home"' in directory_stage
+    assert 'test ! -L "$candidate_git_home"' in directory_stage
+    git_runtime_stage = execute.split(
+        "failure_stage=candidate-git-runtime", 1
+    )[1].split("failure_stage=candidate-repository-init", 1)[0]
+    assert "test -x /usr/bin/git" in git_runtime_stage
+    assert "candidate_git --version" in git_runtime_stage
     init_stage = execute.split(
         "failure_stage=candidate-repository-init", 1
+    )[1].split("failure_stage=candidate-repository-structure", 1)[0]
+    assert 'candidate_git -C "$candidate_repo" init' in init_stage
+    structure_stage = execute.split(
+        "failure_stage=candidate-repository-structure", 1
     )[1].split("failure_stage=candidate-bundle-verify", 1)[0]
-    assert 'mkdir -m 0700 -- "$candidate_repo"' in init_stage
-    assert 'test -d "$candidate_repo"' in init_stage
-    assert 'test ! -L "$candidate_repo"' in init_stage
-    assert 'git -C "$candidate_repo" init' in init_stage
-    assert 'test -d "$candidate_repo/.git"' in init_stage
-    assert 'test ! -L "$candidate_repo/.git"' in init_stage
+    assert 'test -d "$candidate_repo/.git"' in structure_stage
+    assert 'test ! -L "$candidate_repo/.git"' in structure_stage
     assert 'git init "$candidate_repo"' not in init_stage
+    assert "candidate_git()" in execute
+    assert "-u GIT_DIR" in execute
+    assert 'HOME="$candidate_git_home"' in execute
+    assert "GIT_CONFIG_NOSYSTEM=1" in execute
+    assert "GIT_TERMINAL_PROMPT=0" in execute
+    assert "/usr/bin/git -c init.templateDir=" in execute
     verify_stage = execute.split(
         "failure_stage=candidate-bundle-verify", 1
     )[1].split("failure_stage=candidate-bundle-fetch", 1)[0]
-    assert 'git -C "$candidate_repo" fetch --no-tags' in verify_stage
+    assert 'candidate_git -C "$candidate_repo" fetch --no-tags' in verify_stage
     assert '"$candidate_bundle" HEAD' in verify_stage
     assert "bundle verify" not in verify_stage
     assert "git init --bare" not in execute
@@ -852,7 +882,12 @@ arguments = sys.argv[1:]
 with open(os.environ["GIT_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 
-if arguments[:1] == ["init"]:
+if arguments[:2] == ["-c", "init.templateDir="]:
+    arguments = arguments[2:]
+
+if arguments[:1] == ["--version"]:
+    print("git version test")
+elif arguments[:1] == ["init"]:
     Path(arguments[1]).mkdir(parents=True, exist_ok=False)
 elif arguments[:1] == ["-C"]:
     operation = arguments[2:]
@@ -948,6 +983,7 @@ if "--help" not in sys.argv:
     command = command.replace(
         "/home/ec2-user/venv311/bin/python3", str(host_python)
     )
+    command = command.replace("/usr/bin/git", str(git_stub))
     if stage is not None:
         assert category is not None
         if stage == "bootstrap-environment":
@@ -1002,7 +1038,11 @@ if "--help" not in sys.argv:
 
 @pytest.mark.parametrize(
     ("response_code", "stage", "category"),
-    evidence.BOOTSTRAP_SSM_FAILURE_CODES[:-1],
+    tuple(
+        item
+        for item in evidence.BOOTSTRAP_SSM_FAILURE_CODES
+        if item[1] != "evidence-upload"
+    ),
 )
 def test_rendered_ssm_maps_and_uploads_each_exact_failure_stage(
     tmp_path: Path,
@@ -1095,7 +1135,10 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
             encoding="utf-8"
         ).splitlines()
     ]
-    assert calls == [
+    assert all(call[:2] == ["-c", "init.templateDir="] for call in calls)
+    normalized_calls = [call[2:] for call in calls]
+    assert normalized_calls == [
+        ["--version"],
         ["-C", repo, "init"],
         ["-C", repo, "fetch", "--no-tags", bundle, "HEAD"],
         ["-C", repo, "rev-parse", "FETCH_HEAD"],
@@ -1120,7 +1163,7 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ],
         ["-C", repo, "rev-parse", "origin/main"],
     ]
-    assert all("clone" not in call for call in calls)
+    assert all("clone" not in call for call in normalized_calls)
 
 
 @pytest.mark.parametrize(

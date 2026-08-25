@@ -962,30 +962,30 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     source = (
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
-    initialize = source.index('git init "$candidate_repo"')
+    initialize = source.index('candidate_git -C "$candidate_repo" init')
     bundle_fetch = source.index(
-        'git -C "$candidate_repo" fetch --no-tags'
+        'candidate_git -C "$candidate_repo" fetch --no-tags'
     )
     exact_fetch = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse FETCH_HEAD)" ='
     )
     checkout = source.index(
-        'git -C "$candidate_repo" checkout --detach'
+        'candidate_git -C "$candidate_repo" checkout --detach'
     )
     exact_checkout = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse HEAD)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse HEAD)" ='
     )
     canonical_origin = source.index(
-        'git -C "$candidate_repo" remote add origin'
+        'candidate_git -C "$candidate_repo" remote add origin'
     )
     exact_origin = source.index(
-        'test "$(git -C "$candidate_repo" remote get-url origin)" ='
+        'test "$(candidate_git -C "$candidate_repo" remote get-url origin)" ='
     )
     fetch = source.index(
-        'git -C "$candidate_repo" fetch --no-tags origin'
+        'candidate_git -C "$candidate_repo" fetch --no-tags origin'
     )
     exact_main = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse origin/main)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" ='
     )
     runner = source.index(
         "/home/ec2-user/venv311/bin/python3 "
@@ -1004,6 +1004,8 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         < exact_main
         < runner
     )
+    assert "/usr/bin/git -c init.templateDir=" in source
+    assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 
 

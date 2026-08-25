@@ -242,6 +242,14 @@ _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1 = dict(
 QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1 = str(
     _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1["failure_class"]
 )
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1 = (
+    "required_branch_terminal_control"
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1[
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1
+    ]
+)
 _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_SORTED_UNIQUE_BY_V2 = str(
     _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["sorted_unique_by"]
 )
@@ -347,13 +355,29 @@ if (
     or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1 != {"all", "any"}
     or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 != 4
     or set(_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1)
-    != {QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1}
+    != {
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1,
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1,
+    }
     or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1
     != {
         "phase": "pre_dispatch",
         "failure_class": "branch_deadline_exhausted",
         "retryable": True,
         "required_branch_status": "skipped",
+    }
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1
+    != {
+        "phase": "branch_execution",
+        "allowed_failure_classes": [
+            "budget_blocked",
+            "terminal_auth",
+            "terminal_quota",
+            "tracking_failed",
+            "transport_invariant_failed",
+        ],
+        "retryable": False,
+        "required_branch_status": "failed",
     }
     or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
         "incomplete_retryable"
@@ -362,7 +386,7 @@ if (
     or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
         "incomplete_terminal"
     ].get("terminal_branch_control_alternative")
-    is not False
+    is not True
 ):
     raise RuntimeError("qualification outcome branch control policy is unsupported")
 _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2 = int(
@@ -820,8 +844,16 @@ def validate_qualification_branch_control_failure_v1(
         or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
             str(document.get("branch_id_sha256") or "")
         )
-        or document.get("failure_class")
-        != reason_policy.get("failure_class")
+        or (
+            reason_policy.get("failure_class") is not None
+            and document.get("failure_class")
+            != reason_policy.get("failure_class")
+        )
+        or (
+            reason_policy.get("allowed_failure_classes") is not None
+            and document.get("failure_class")
+            not in reason_policy.get("allowed_failure_classes")
+        )
         or type(document.get("retryable")) is not bool
         or document.get("retryable") is not reason_policy.get("retryable")
         or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(

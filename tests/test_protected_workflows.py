@@ -77,6 +77,8 @@ def test_qualification_branch_control_authority_is_protected():
         "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1",
         "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1",
         "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1",
+        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1",
         "_qualification_outcome_sha256",
         "validate_qualification_branch_control_failure_v1",
         "validate_qualification_route_completion_receipt_v1",

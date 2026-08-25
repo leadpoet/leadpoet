@@ -598,6 +598,40 @@ def _aiohttp_body(aiohttp: Any, session: Any, kwargs: Mapping[str, Any]) -> tupl
     return bytes(value), headers
 
 
+async def _run_blocking_transport(
+    function: Any,
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Keep a started transport owned until its worker reaches a terminal.
+
+    Cancelling ``asyncio.to_thread`` abandons only its asyncio future; the
+    underlying thread keeps running.  A provider thread must not outlive the
+    model-owned route binding that authorizes its physical dispatch.  Shield
+    the worker, drain it after cancellation, and then preserve the caller's
+    cancellation result.
+    """
+
+    worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    cancellation: Optional[asyncio.CancelledError] = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except BaseException:
+            break
+    if cancellation is not None:
+        try:
+            worker.result()
+        except BaseException as worker_exc:
+            raise cancellation from worker_exc
+        raise cancellation
+    return worker.result()
+
+
 def install() -> None:
     global _INSTALLED
     with _INSTALL_LOCK:
@@ -692,7 +726,7 @@ def install() -> None:
                 )
 
             async def async_send(client, request, *args, **kwargs):
-                return await asyncio.to_thread(
+                return await _run_blocking_transport(
                     sync_send, client, request, *args, **kwargs
                 )
 
@@ -753,7 +787,7 @@ def install() -> None:
                         session, method, str_or_url, *args, **kwargs
                     )
                 body, headers = _aiohttp_body(aiohttp, session, kwargs)
-                result = await asyncio.to_thread(
+                result = await _run_blocking_transport(
                     execute,
                     method=str(method),
                     url=str(url),

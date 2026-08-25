@@ -1759,6 +1759,7 @@ PROTECTED_SYMBOLS = {
         "_retain_cleanup_failure",
         "_require_retired_cleanup",
         "_execute_broker_request",
+        "_run_blocking_transport",
         "execute",
     ),
     "gateway/tee/proxy_transport_preflight_v2.py": (

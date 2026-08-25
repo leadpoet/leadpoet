@@ -456,6 +456,7 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "_retain_cleanup_failure",
         "_require_retired_cleanup",
         "_execute_broker_request",
+        "_run_blocking_transport",
         "execute",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_http_shim_v2.py"])
     assert {

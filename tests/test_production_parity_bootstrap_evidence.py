@@ -629,8 +629,8 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=candidate-bundle-metadata",
         "failure_stage=candidate-bundle-file-integrity",
         "failure_stage=candidate-bundle-head",
-        "failure_stage=candidate-bundle-verify",
         "failure_stage=candidate-repository-init",
+        "failure_stage=candidate-bundle-verify",
         "failure_stage=candidate-bundle-fetch",
         "failure_stage=candidate-checkout",
         "failure_stage=candidate-remote-rebind",
@@ -732,6 +732,13 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert 'LC_ALL=C head -n 3 -- "$candidate_bundle"' in head_stage
     assert "'# v2 git bundle'" in head_stage
     assert "git bundle list-heads" not in head_stage
+    verify_stage = execute.split(
+        "failure_stage=candidate-bundle-verify", 1
+    )[1].split("failure_stage=candidate-bundle-fetch", 1)[0]
+    assert 'git -C "$candidate_repo" fetch --no-tags' in verify_stage
+    assert '"$candidate_bundle" HEAD' in verify_stage
+    assert "bundle verify" not in verify_stage
+    assert "git init --bare" not in execute
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -835,20 +842,21 @@ arguments = sys.argv[1:]
 with open(os.environ["GIT_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 
-if arguments[:2] == ["init", "--bare"]:
-    Path(arguments[2]).mkdir(parents=True, exist_ok=False)
-elif arguments[:1] == ["init"]:
+if arguments[:1] == ["init"]:
     Path(arguments[1]).mkdir(parents=True, exist_ok=False)
 elif arguments[:1] == ["-C"]:
     operation = arguments[2:]
-    if operation[:2] == ["bundle", "verify"]:
-        if os.environ.get("FAIL_BUNDLE_VERIFY") == "1":
+    if operation[:1] == ["fetch"]:
+        if (
+            os.environ.get("FAIL_BUNDLE_VERIFY") == "1"
+            and any(value.endswith("/candidate.bundle") for value in operation)
+        ):
             raise SystemExit(74)
     elif operation[:2] == ["remote", "get-url"]:
         print("https://github.com/leadpoet/leadpoet.git")
     elif operation[:1] == ["rev-parse"]:
         print(os.environ["CANDIDATE_SHA"])
-    elif operation[:1] in (["fetch"], ["checkout"], ["remote"]):
+    elif operation[:1] in (["checkout"], ["remote"]):
         pass
     else:
         raise SystemExit(3)
@@ -1068,7 +1076,6 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
     assert result.returncode == 0
     work = tmp_path / "work"
     bundle = str(work / "candidate.bundle")
-    verifier = str(work / "candidate-bundle-verifier.git")
     repo = str(work / "repo")
     calls = [
         json.loads(line)
@@ -1077,8 +1084,6 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ).splitlines()
     ]
     assert calls == [
-        ["init", "--bare", verifier],
-        ["-C", verifier, "bundle", "verify", bundle],
         ["init", repo],
         ["-C", repo, "fetch", "--no-tags", bundle, "HEAD"],
         ["-C", repo, "rev-parse", "FETCH_HEAD"],
@@ -1219,7 +1224,10 @@ def test_rendered_ssm_rejects_each_bundle_integrity_violation(
     assert retained["error_type"] == "CommandFailed"
     assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
     assert not (tmp_path / "work" / "candidate.bundle").exists()
-    assert not (tmp_path / "work" / "repo").exists()
+    if overrides.get("bundle_verify_fails"):
+        assert (tmp_path / "work" / "repo").is_dir()
+    else:
+        assert not (tmp_path / "work" / "repo").exists()
     aws_calls = [
         json.loads(line)
         for line in (tmp_path / "aws-calls.jsonl").read_text(

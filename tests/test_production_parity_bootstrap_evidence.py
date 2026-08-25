@@ -22,6 +22,24 @@ BUCKET = "leadpoet-parity-493765492819-0123456789abcdef"
 CANDIDATE_BUNDLE_BYTES = b"candidate-bundle"
 CANDIDATE_BUNDLE_SHA256 = hashlib.sha256(CANDIDATE_BUNDLE_BYTES).hexdigest()
 CANDIDATE_BUNDLE_SIZE_BYTES = str(len(CANDIDATE_BUNDLE_BYTES))
+CANDIDATE_BUNDLE_BINDING_BYTES = (
+    json.dumps(
+        {
+            "candidate-sha": CANDIDATE_SHA,
+            "bundle-sha256": CANDIDATE_BUNDLE_SHA256,
+            "bundle-size-bytes": CANDIDATE_BUNDLE_SIZE_BYTES,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    + "\n"
+).encode("utf-8")
+CANDIDATE_BUNDLE_BINDING_SHA256 = hashlib.sha256(
+    CANDIDATE_BUNDLE_BINDING_BYTES
+).hexdigest()
+CANDIDATE_BUNDLE_BINDING_SIZE_BYTES = str(
+    len(CANDIDATE_BUNDLE_BINDING_BYTES)
+)
 
 
 def _output(tmp_path: Path) -> Path:
@@ -528,6 +546,12 @@ def _rendered_ssm_command(tmp_path: Path) -> str:
         "${{ steps.candidate_bundle.outputs.size_bytes }}": (
             CANDIDATE_BUNDLE_SIZE_BYTES
         ),
+        "${{ steps.candidate_bundle.outputs.binding_sha256 }}": (
+            CANDIDATE_BUNDLE_BINDING_SHA256
+        ),
+        "${{ steps.candidate_bundle.outputs.binding_size_bytes }}": (
+            CANDIDATE_BUNDLE_BINDING_SIZE_BYTES
+        ),
     }
     for source, replacement in replacements.items():
         controller = controller.replace(source, replacement)
@@ -655,9 +679,11 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert '"bundle-sha256": sys.argv[3]' in script
     assert '"bundle-size-bytes": sys.argv[4]' in script
     assert '"candidate-sha": sys.argv[2]' in script
+    assert "binding_size_bytes=" in script
+    assert "binding_sha256=" in script
     assert "candidate-bundle-binding.json" in script
     assert script.count("aws s3 cp") == 2
-    assert 'printf \'sha256=%s\\nsize_bytes=%s\\n\'' in script
+    assert "binding_sha256=%s\\nbinding_size_bytes=%s\\n" in script
     assert "--all" not in script
 
     execute = next(
@@ -665,8 +691,8 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
         for step in steps
         if step.get("name") == "Start candidate production paths"
     )["run"]
-    assert "MAX_BINDING_BYTES = 4096" in execute
-    assert "object_pairs_hook=exact_object" in execute
+    assert "candidate_bundle_binding_sha256=" in execute
+    assert "candidate_bundle_binding_size_bytes=" in execute
     metadata_stage = execute.split(
         "failure_stage=candidate-bundle-metadata", 1
     )[1].split("failure_stage=candidate-bundle-file-integrity", 1)[0]
@@ -680,9 +706,12 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "head-object" not in execute
     assert "aws s3api get-object" in metadata_stage
     assert "candidate-bundle-binding.json" in metadata_stage
-    assert "/dev/fd/3 3>&1 >/dev/null" in metadata_stage
-    assert "sys.stdin.buffer.read(MAX_BINDING_BYTES + 1)" in execute
-    assert "candidate_bundle_binding=" not in execute
+    assert '"$candidate_bundle_binding" >/dev/null 2>&1' in metadata_stage
+    assert "sha256sum" in metadata_stage
+    assert "stat -c '%s'" in metadata_stage
+    assert "/dev/fd/3" not in metadata_stage
+    assert "/usr/bin/python3.11 -c" not in metadata_stage
+    assert "candidate_bundle_binding=" in execute
     assert "--output text" not in metadata_stage
     assert "aws s3 cp" not in metadata_stage
 
@@ -884,13 +913,17 @@ if "--help" not in sys.argv:
     else:
         early_root.symlink_to(early_parent_target, target_is_directory=True)
     if metadata_raw_json is None:
-        metadata_raw_json = json.dumps(
-            {
-                "candidate-sha": metadata_candidate_sha,
-                "bundle-sha256": metadata_bundle_sha256,
-                "bundle-size-bytes": metadata_bundle_size_bytes,
-            },
-            separators=(",", ":"),
+        metadata_raw_json = (
+            json.dumps(
+                {
+                    "candidate-sha": metadata_candidate_sha,
+                    "bundle-sha256": metadata_bundle_sha256,
+                    "bundle-size-bytes": metadata_bundle_size_bytes,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
         )
     environment = {
         **os.environ,
@@ -968,7 +1001,7 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
     assert result.stderr == ""
 
 
-def test_rendered_ssm_downloads_bundle_and_streams_exact_binding(
+def test_rendered_ssm_downloads_bundle_and_checks_exact_binding_bytes(
     tmp_path: Path,
 ) -> None:
     result, _capture = _run_rendered_ssm(tmp_path)
@@ -989,7 +1022,9 @@ def test_rendered_ssm_downloads_bundle_and_streams_exact_binding(
     assert reads[1][reads[1].index("--key") + 1].endswith(
         "/candidate-bundle-binding.json"
     )
-    assert reads[1][-1] == "/dev/fd/3"
+    assert reads[1][-1] == str(
+        tmp_path / "work" / "candidate-bundle-binding.json"
+    )
     assert "--region" in reads[1]
     assert all("--query" not in call for call in reads)
     assert not any(call[:2] == ["s3api", "head-object"] for call in calls)

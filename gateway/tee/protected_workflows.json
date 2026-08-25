@@ -5422,6 +5422,11 @@
       "symbol": "_retain_cleanup_failure"
     },
     {
+      "ast_sha256": "sha256:82e86ad2efdf5bb1f6442e88e503b803a7932cb130c588c42ce1d125606dc7a4",
+      "path": "gateway/tee/sandbox_http_shim_v2.py",
+      "symbol": "_run_blocking_transport"
+    },
+    {
       "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
       "path": "gateway/tee/sandbox_http_shim_v2.py",
       "symbol": "_shutdown_and_close_socket"
@@ -8102,7 +8107,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:e90130286c3279b8dff6657a16d43f3337835e37f342532140527a78cd4b1b25",
-  "protected_source_commit": "487ff7c6a4656dc93c2ef2d3129892d4c52b0dfd",
+  "manifest_hash": "sha256:1d3a1a92cfd923ef7d294deaf1622dfc5beefd2f29986148e9da0489008d1329",
+  "protected_source_commit": "786797d85bd71b0ab8d96d1544a53b7d9e71af84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

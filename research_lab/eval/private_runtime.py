@@ -139,6 +139,18 @@ QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = (
 QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
     QUALIFICATION_PROTOCOL_POLICY_SHA256_V2.removeprefix("sha256:")
 )
+# The currently selected signed model predates the additive terminal branch-
+# control extension. Keep that exact contract readable until a 2.2 model is
+# selected; no other historical or unknown contract is admitted.
+QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1 = (
+    "188d825489ed2308519c282bf5273de4a3d8caf5c069212bc76cfafe304a8a07"
+)
+QUALIFICATION_OUTCOME_SUPPORTED_CONTRACT_SHA256S_V2 = frozenset(
+    {
+        QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
+    }
+)
 _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
     QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
 )
@@ -807,6 +819,8 @@ def _qualification_outcome_sha256(value: Any) -> str:
 
 def validate_qualification_branch_control_failure_v1(
     value: Mapping[str, Any],
+    *,
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
 ) -> dict[str, Any]:
     """Validate one model-owned, non-provider branch-control authority."""
 
@@ -818,7 +832,18 @@ def validate_qualification_branch_control_failure_v1(
     reason = document.get("reason")
     reason_policy = (
         _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1.get(reason)
-        if isinstance(reason, str)
+        if (
+            isinstance(reason, str)
+            and _qualification_outcome_contract_sha256_supported_v2(
+                contract_sha256
+            )
+            and (
+                contract_sha256
+                != QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+                or reason
+                == QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1
+            )
+        )
         else None
     )
     body = {
@@ -901,6 +926,16 @@ def qualification_outcome_contract_v2() -> dict[str, Any]:
 def qualification_outcome_contract_sha256_v2() -> str:
     qualification_outcome_contract_v2()
     return QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+
+
+def _qualification_outcome_contract_sha256_supported_v2(value: Any) -> bool:
+    """Validate current policy identity before admitting one exact V2 hash."""
+
+    qualification_outcome_contract_v2()
+    return (
+        isinstance(value, str)
+        and value in QUALIFICATION_OUTCOME_SUPPORTED_CONTRACT_SHA256S_V2
+    )
 
 
 def _qualification_outcome_extension_limits_v2() -> tuple[int, int]:
@@ -1080,8 +1115,9 @@ def validate_qualification_outcome_protocol_metadata_v2(
         != QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2
         or document.get("route_completion_receipt_schema_version")
         != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            document.get("contract_sha256")
+        )
     ):
         raise PrivateModelRuntimeError(
             "private model qualification outcome protocol is unsupported"
@@ -1146,8 +1182,9 @@ def validate_qualification_route_completion_receipt_v1(
         or document.get("schema_version")
         != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
         or document.get("outcome_authority") != "sourcing_model"
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            document.get("contract_sha256")
+        )
         or document.get("completion_state") not in {"complete", "incomplete"}
         or document.get("disposition")
         not in {
@@ -1202,7 +1239,8 @@ def validate_qualification_route_completion_receipt_v1(
         branch_control = validate_qualification_branch_control_failure_v1(
             extensions[
                 QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
-            ]
+            ],
+            contract_sha256=document["contract_sha256"],
         )
     if probe is not None and (
         not isinstance(probe, Mapping)
@@ -1255,6 +1293,7 @@ def validate_qualification_outcome_envelope_v2(
             "private model qualification outcome envelope is invalid"
         )
     document = dict(value)
+    contract_sha256 = document.get("contract_sha256")
     fields = set(
         qualification_outcome_contract_v2()["envelope_core_fields"]
     )
@@ -1302,8 +1341,10 @@ def validate_qualification_outcome_envelope_v2(
         or type(document.get("protocol_minor")) is not int
         or document["protocol_minor"] < 0
         or document.get("completion_state") not in {"complete", "incomplete"}
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            contract_sha256
+        )
+        or receipt.get("contract_sha256") != contract_sha256
         or document.get("completion_state") != receipt["completion_state"]
         or receipt.get("returned_count") != len(normalized_companies)
         or not _qualification_outcome_extensions_valid_v2(extensions)
@@ -1378,7 +1419,9 @@ def validate_qualification_outcome_envelope_v2(
                     disposition == "incomplete_terminal"
                     and summary["terminal_failed"] <= 0
                     and not (
-                        isinstance(branch_control, Mapping)
+                        contract_sha256
+                        == QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+                        and isinstance(branch_control, Mapping)
                         and branch_control.get("retryable") is False
                     )
                 )
@@ -1399,6 +1442,7 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
     value: Mapping[str, Any],
     *,
     expected_nonce_sha256s: Mapping[str, str] | None = None,
+    expected_contract_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Exercise both sides of the empty/incomplete boundary before activation."""
 
@@ -1407,6 +1451,16 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
             "private model qualification outcome protocol probe is invalid"
         )
     document = {str(key): item for key, item in value.items()}
+    selected_contract_sha256 = expected_contract_sha256
+    if (
+        selected_contract_sha256 is not None
+        and not _qualification_outcome_contract_sha256_supported_v2(
+            selected_contract_sha256
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol probe contract differs"
+        )
     if (
         set(document) != set(QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1)
     ):
@@ -1415,6 +1469,12 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
         )
     for case_id, expected in _QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASE_POLICY_V1.items():
         envelope = validate_qualification_outcome_envelope_v2(document[case_id])
+        if selected_contract_sha256 is None:
+            selected_contract_sha256 = envelope["contract_sha256"]
+        if envelope["contract_sha256"] != selected_contract_sha256:
+            raise PrivateModelRuntimeError(
+                "private model qualification outcome protocol probe contract differs"
+            )
         receipt = envelope["route_completion_receipt"]
         expected_document = dict(expected)
         if (

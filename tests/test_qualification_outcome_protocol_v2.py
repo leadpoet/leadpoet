@@ -70,6 +70,7 @@ from research_lab.eval.private_runtime import (
     QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1,
     QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1,
     QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+    QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
     QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
     QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
     PrivateModelRuntimeError,
@@ -111,7 +112,13 @@ def _plain_hash(value) -> str:
     return sha256_json(value).removeprefix("sha256:")
 
 
-def _metadata(*, major: int = 2, capabilities=None, extra_cases=()):
+def _metadata(
+    *,
+    major: int = 2,
+    capabilities=None,
+    extra_cases=(),
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+):
     return {
         "protocol_id": "sourcing-model.qualification-outcome",
         "major": major,
@@ -121,7 +128,7 @@ def _metadata(*, major: int = 2, capabilities=None, extra_cases=()):
         "route_completion_receipt_schema_version": (
             "sourcing-model.route-completion-receipt.v1"
         ),
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "capabilities": sorted(
             capabilities
             or {
@@ -238,7 +245,12 @@ def _required_route_outcomes(commitments, state: str) -> list[dict[str, str]]:
     ]
 
 
-def _envelope(case_id: str, nonce: str) -> dict:
+def _envelope(
+    case_id: str,
+    nonce: str,
+    *,
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+) -> dict:
     complete = case_id == "complete_confirmed_empty"
     summary = {
         "attempted": 1,
@@ -251,7 +263,7 @@ def _envelope(case_id: str, nonce: str) -> dict:
     }
     receipt_body = {
         "schema_version": "sourcing-model.route-completion-receipt.v1",
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "outcome_authority": "sourcing_model",
         "completion_state": "complete" if complete else "incomplete",
         "disposition": case_id,
@@ -276,7 +288,7 @@ def _envelope(case_id: str, nonce: str) -> dict:
         "schema_version": "sourcing-model.qualification-outcome.v2",
         "protocol_major": 2,
         "protocol_minor": 4,
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "completion_state": receipt["completion_state"],
         "companies": [],
         "route_completion_receipt": receipt,
@@ -480,6 +492,33 @@ def test_terminal_branch_control_preserves_provider_route_counters() -> None:
         match="branch control failure differs from protocol",
     ):
         validate_qualification_outcome_envelope_v2(invalid)
+
+
+def test_legacy_contract_rejects_terminal_branch_control_extension() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    receipt.update({
+        "contract_sha256": QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
+        "disposition": "incomplete_terminal",
+        "retryable": False,
+        "failure_classes": ["transport_invariant_failed"],
+    })
+    envelope["contract_sha256"] = (
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ] = _branch_control_failure_proof(
+        reason="required_branch_terminal_control",
+        failure_class="transport_invariant_failed",
+    )
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="branch control failure differs from protocol",
+    ):
+        validate_qualification_outcome_envelope_v2(_rehash_receipt(envelope))
+
 
 def test_branch_control_incomplete_can_retain_partial_companies() -> None:
     envelope = _branch_control_incomplete_envelope(
@@ -1112,6 +1151,82 @@ def test_same_major_metadata_allows_harmless_additive_capability() -> None:
     }
 
     assert validate_qualification_outcome_protocol_metadata_v2(document) == document
+
+
+def test_selected_signed_v21_contract_remains_strictly_compatible() -> None:
+    metadata = _metadata(
+        contract_sha256=QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+    metadata["minor"] = 1
+    assert (
+        validate_qualification_outcome_protocol_metadata_v2(metadata)
+        == metadata
+    )
+
+    complete_nonce = "legacy-complete-probe-01"
+    incomplete_nonce = "legacy-incomplete-probe-01"
+    cases = {
+        "complete_confirmed_empty": _envelope(
+            "complete_confirmed_empty",
+            complete_nonce,
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+        "incomplete_retryable": _envelope(
+            "incomplete_retryable",
+            incomplete_nonce,
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+    }
+    expected_hashes = {
+        "complete_confirmed_empty": hashlib.sha256(
+            complete_nonce.encode("ascii")
+        ).hexdigest(),
+        "incomplete_retryable": hashlib.sha256(
+            incomplete_nonce.encode("ascii")
+        ).hexdigest(),
+    }
+    assert validate_qualification_outcome_protocol_probe_cases_v1(
+        cases,
+        expected_nonce_sha256s=expected_hashes,
+        expected_contract_sha256=(
+            QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+        ),
+    ) == cases
+
+
+def test_qualification_contract_versions_cannot_mix_within_one_probe() -> None:
+    cases = {
+        "complete_confirmed_empty": _envelope(
+            "complete_confirmed_empty",
+            "mixed-complete-probe-01",
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+        "incomplete_retryable": _envelope(
+            "incomplete_retryable",
+            "mixed-incomplete-probe-01",
+        ),
+    }
+    with pytest.raises(PrivateModelRuntimeError, match="probe contract differs"):
+        validate_qualification_outcome_protocol_probe_cases_v1(cases)
+
+
+def test_qualification_envelope_and_receipt_contracts_must_match() -> None:
+    envelope = _envelope(
+        "complete_confirmed_empty",
+        "mismatched-contract-probe-01",
+    )
+    envelope["contract_sha256"] = (
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+
+    with pytest.raises(PrivateModelRuntimeError, match="differs from protocol"):
+        validate_qualification_outcome_envelope_v2(envelope)
 
 
 def test_measured_metadata_requires_exact_v2_proof_identity() -> None:

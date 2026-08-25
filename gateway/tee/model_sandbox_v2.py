@@ -1297,6 +1297,7 @@ def validate_consumer_runtime_probe_v1(
             validate_qualification_outcome_protocol_probe_cases_v1(
                 observed_qualification["cases"],
                 expected_nonce_sha256s=observed_qualification["nonce_sha256s"],
+                expected_contract_sha256=metadata_protocol["contract_sha256"],
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(
@@ -1377,6 +1378,9 @@ def _build_consumer_runtime_probe_from_observation_v1(
                 validate_qualification_outcome_protocol_probe_cases_v1(
                     cases,
                     expected_nonce_sha256s=nonce_hashes,
+                    expected_contract_sha256=metadata_document[
+                        "qualification_outcome_protocol"
+                    ]["contract_sha256"],
                 )
             )
         except PrivateModelRuntimeError as exc:

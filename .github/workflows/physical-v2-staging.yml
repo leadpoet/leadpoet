@@ -461,7 +461,12 @@ jobs:
               {q(required['CANDIDATE_SHA'])}
           )"
           failure_stage=candidate-repository-init
-          git init "$candidate_repo" >/dev/null 2>&1
+          mkdir -m 0700 -- "$candidate_repo"
+          test -d "$candidate_repo"
+          test ! -L "$candidate_repo"
+          git -C "$candidate_repo" init >/dev/null 2>&1
+          test -d "$candidate_repo/.git"
+          test ! -L "$candidate_repo/.git"
           # Fetching into a newly initialized empty repository verifies the
           # complete bundle and its object closure without depending on a
           # second, host-configured bare verification repository.

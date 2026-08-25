@@ -732,6 +732,16 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert 'LC_ALL=C head -n 3 -- "$candidate_bundle"' in head_stage
     assert "'# v2 git bundle'" in head_stage
     assert "git bundle list-heads" not in head_stage
+    init_stage = execute.split(
+        "failure_stage=candidate-repository-init", 1
+    )[1].split("failure_stage=candidate-bundle-verify", 1)[0]
+    assert 'mkdir -m 0700 -- "$candidate_repo"' in init_stage
+    assert 'test -d "$candidate_repo"' in init_stage
+    assert 'test ! -L "$candidate_repo"' in init_stage
+    assert 'git -C "$candidate_repo" init' in init_stage
+    assert 'test -d "$candidate_repo/.git"' in init_stage
+    assert 'test ! -L "$candidate_repo/.git"' in init_stage
+    assert 'git init "$candidate_repo"' not in init_stage
     verify_stage = execute.split(
         "failure_stage=candidate-bundle-verify", 1
     )[1].split("failure_stage=candidate-bundle-fetch", 1)[0]
@@ -846,7 +856,9 @@ if arguments[:1] == ["init"]:
     Path(arguments[1]).mkdir(parents=True, exist_ok=False)
 elif arguments[:1] == ["-C"]:
     operation = arguments[2:]
-    if operation[:1] == ["fetch"]:
+    if operation[:1] == ["init"]:
+        Path(arguments[1], ".git").mkdir(parents=False, exist_ok=False)
+    elif operation[:1] == ["fetch"]:
         if (
             os.environ.get("FAIL_BUNDLE_VERIFY") == "1"
             and any(value.endswith("/candidate.bundle") for value in operation)
@@ -1084,7 +1096,7 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ).splitlines()
     ]
     assert calls == [
-        ["init", repo],
+        ["-C", repo, "init"],
         ["-C", repo, "fetch", "--no-tags", bundle, "HEAD"],
         ["-C", repo, "rev-parse", "FETCH_HEAD"],
         ["-C", repo, "checkout", "--detach", CANDIDATE_SHA],

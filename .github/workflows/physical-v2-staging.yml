@@ -319,8 +319,6 @@ jobs:
               "exec",
           )
           candidate_bundle_binding_validator = r'''import json
-          import os
-          import stat
           import sys
 
           MAX_BINDING_BYTES = 4096
@@ -334,25 +332,9 @@ jobs:
               return value
 
           try:
-              if len(sys.argv) != 5:
+              if len(sys.argv) != 4:
                   raise ValueError("binding arguments are invalid")
-              descriptor = os.open(
-                  sys.argv[1],
-                  os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-              )
-              try:
-                  metadata = os.fstat(descriptor)
-                  if (
-                      not stat.S_ISREG(metadata.st_mode)
-                      or metadata.st_size <= 0
-                      or metadata.st_size > MAX_BINDING_BYTES
-                  ):
-                      raise ValueError("binding file is outside its bound")
-                  raw = os.read(descriptor, MAX_BINDING_BYTES + 1)
-                  if len(raw) != metadata.st_size:
-                      raise ValueError("binding file changed during read")
-              finally:
-                  os.close(descriptor)
+              raw = sys.stdin.buffer.read(MAX_BINDING_BYTES + 1)
               if not raw or len(raw) > MAX_BINDING_BYTES:
                   raise ValueError("binding input is outside its bound")
               actual = json.loads(
@@ -362,9 +344,9 @@ jobs:
           except (OSError, UnicodeDecodeError, ValueError):
               raise SystemExit(1) from None
           expected = {
-              "candidate-sha": sys.argv[2],
-              "bundle-sha256": sys.argv[3],
-              "bundle-size-bytes": sys.argv[4],
+              "candidate-sha": sys.argv[1],
+              "bundle-sha256": sys.argv[2],
+              "bundle-size-bytes": sys.argv[3],
           }
           if (
               type(actual) is not dict
@@ -391,7 +373,6 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
-          candidate_bundle_binding=""
           candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
           candidate_repo={q(root + "/repo")}
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
@@ -454,8 +435,7 @@ jobs:
             elif [ "$final_status" -ne 0 ]; then
               final_status="$(failure_response_code)" || final_status=1
             fi
-            rm -f "$candidate_bundle" "$candidate_bundle_binding" \
-              >/dev/null 2>&1 || true
+            rm -f "$candidate_bundle" >/dev/null 2>&1 || true
             exit "$final_status"
           }}
           trap finalize_bootstrap EXIT
@@ -469,30 +449,22 @@ jobs:
           failure_stage=bootstrap-workspace
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
-          candidate_bundle_binding="$(
-            mktemp {q(root + "/candidate-bundle-binding.XXXXXX")}
-          )"
-          test -f "$candidate_bundle_binding"
-          test ! -L "$candidate_bundle_binding"
           failure_stage=candidate-bundle-download
           aws s3api get-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate.bundle")} \
             --region {q(required['AWS_REGION'])} \
             "$candidate_bundle" >/dev/null 2>&1
-          aws s3api get-object \
-            --bucket {q(artifact_bucket)} \
-            --key {q(prefix + "/candidate-bundle-binding.json")} \
-            --region {q(required['AWS_REGION'])} \
-            "$candidate_bundle_binding" >/dev/null 2>&1
           failure_stage=candidate-bundle-metadata
+          aws s3 cp \
+            {q("s3://" + artifact_bucket + "/" + prefix + "/candidate-bundle-binding.json")} \
+            - \
+            --only-show-errors \
+            --region {q(required['AWS_REGION'])} | \
           /usr/bin/python3.11 -c {q(candidate_bundle_binding_validator)} \
-            "$candidate_bundle_binding" \
             {q(required['CANDIDATE_SHA'])} \
             "$candidate_bundle_sha256" \
             "$candidate_bundle_size_bytes"
-          rm -f "$candidate_bundle_binding"
-          candidate_bundle_binding=""
           failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"

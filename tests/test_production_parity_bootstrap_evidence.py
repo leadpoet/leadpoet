@@ -678,12 +678,13 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert '"$candidate_bundle"' in download_stage
     assert "--query Metadata" not in download_stage
     assert "head-object" not in execute
-    assert "aws s3 cp" in metadata_stage
+    assert "aws s3api get-object" in metadata_stage
     assert "candidate-bundle-binding.json" in metadata_stage
+    assert "/dev/fd/3 3>&1 >/dev/null" in metadata_stage
     assert "sys.stdin.buffer.read(MAX_BINDING_BYTES + 1)" in execute
     assert "candidate_bundle_binding=" not in execute
     assert "--output text" not in metadata_stage
-    assert "--only-show-errors" in metadata_stage
+    assert "aws s3 cp" not in metadata_stage
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -737,9 +738,9 @@ with open(os.environ["AWS_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 if arguments[:2] == ["s3api", "get-object"]:
     destination = Path(arguments[-1])
-    destination.parent.mkdir(parents=True, exist_ok=True)
     key = arguments[arguments.index("--key") + 1]
     if key.endswith("/candidate.bundle"):
+        destination.parent.mkdir(parents=True, exist_ok=True)
         payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
         if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
             symlink_target = destination.with_name(destination.name + ".payload")
@@ -747,16 +748,10 @@ if arguments[:2] == ["s3api", "get-object"]:
             destination.symlink_to(symlink_target)
         else:
             destination.write_bytes(payload)
+    elif key.endswith("/candidate-bundle-binding.json"):
+        destination.write_text(os.environ["METADATA_RAW_JSON"], encoding="utf-8")
     else:
         raise SystemExit(2)
-elif arguments[:2] == ["s3", "cp"]:
-    if (
-        len(arguments) < 4
-        or not arguments[2].endswith("/candidate-bundle-binding.json")
-        or arguments[3] != "-"
-    ):
-        raise SystemExit(2)
-    sys.stdout.buffer.write(os.environ["METADATA_RAW_JSON"].encode("utf-8"))
 elif arguments[:2] == ["s3api", "put-object"]:
     if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
         raise SystemExit(73)
@@ -986,21 +981,19 @@ def test_rendered_ssm_downloads_bundle_and_streams_exact_binding(
         ).splitlines()
     ]
     reads = [call for call in calls if call[:2] == ["s3api", "get-object"]]
-    assert len(reads) == 1
+    assert len(reads) == 2
     assert reads[0][reads[0].index("--key") + 1].endswith(
         "/candidate.bundle"
     )
     assert reads[0][-1] == str(tmp_path / "work" / "candidate.bundle")
-    binding_streams = [call for call in calls if call[:2] == ["s3", "cp"]]
-    assert len(binding_streams) == 1
-    assert binding_streams[0][2].endswith(
+    assert reads[1][reads[1].index("--key") + 1].endswith(
         "/candidate-bundle-binding.json"
     )
-    assert binding_streams[0][3] == "-"
-    assert "--only-show-errors" in binding_streams[0]
-    assert "--region" in binding_streams[0]
+    assert reads[1][-1] == "/dev/fd/3"
+    assert "--region" in reads[1]
     assert all("--query" not in call for call in reads)
     assert not any(call[:2] == ["s3api", "head-object"] for call in calls)
+    assert not any(call[:2] == ["s3", "cp"] for call in calls)
 
 
 def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(

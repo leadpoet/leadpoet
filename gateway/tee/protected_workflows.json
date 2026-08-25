@@ -402,7 +402,7 @@
       "symbol": "build_gateway_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:4e260b7831ec597bd952e5a13aff72a791e51ca85f13fea68d0f5167e8865b41",
+      "ast_sha256": "sha256:741b65f7cf14b9328552fd63d25979884295e12ed101663bcf8779f962542189",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -2852,7 +2852,7 @@
       "symbol": "process_source_add_work_item"
     },
     {
-      "ast_sha256": "sha256:ad8eaa4971c6a18443a98d76fe45be3e000ba7cc419c3b3a32133608620d8343",
+      "ast_sha256": "sha256:4ffa42ef6296c9eb969f58f1d535ab4cd2b0fa23fe86136d5100e9a902c5328e",
       "path": "gateway/research_lab/store.py",
       "symbol": "_TRANSIENT_ERROR_SIGNATURES"
     },
@@ -8077,7 +8077,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:2fbc77fdebcd73de5f08f30f7506abcae4e11a0d908b6b853851246b14efd05d",
-  "protected_source_commit": "350f6f220aeb1d10fd61ca198ff7009cd8a47fbd",
+  "manifest_hash": "sha256:ca6444a6976d8b04369d01aa6a2fe304a6d4ed89ae4afff62523366c3cc7eb00",
+  "protected_source_commit": "fc7ac38b67c8d75ab544d7c8674a73074875e342",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

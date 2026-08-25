@@ -1102,7 +1102,7 @@ async def run_authoritative_autoresearch_v2(
     component_registry_authority: Mapping[str, Any],
     active_model_authority: Mapping[str, Any],
     expected_event_state_hash: str,
-    record_loop_event: Callable[[AutoResearchLoopEvent], Any],
+    record_loop_event: Callable[..., Any],
     code_builder: Any,
     should_pause: Callable[[], Any],
     record_privacy_proof: Callable[..., Any],
@@ -1526,7 +1526,20 @@ async def run_authoritative_autoresearch_v2(
             cost_ledger=dict(event_doc.get("cost_ledger") or {}),
             event_doc=dict(event_doc.get("event_doc") or {}),
         )
-        row = await _maybe_await(record_loop_event(event))
+        event_operation_id = sha256_json(
+            {
+                "schema_version": "research_lab.autoresearch_event_operation.v1",
+                "job_id": job_id,
+                "event_hash": event_hash,
+                "event_sequence": sequence,
+            }
+        )
+        row = await _maybe_await(
+            record_loop_event(
+                event,
+                event_operation_id=event_operation_id,
+            )
+        )
         row = dict(row or {})
         next_hash = sha256_json(
             {

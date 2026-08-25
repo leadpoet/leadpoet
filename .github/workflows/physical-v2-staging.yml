@@ -263,6 +263,14 @@ jobs:
           PY
           test -f "$bundle_binding"
           test ! -L "$bundle_binding"
+          binding_size_bytes="$(stat -c '%s' -- "$bundle_binding")"
+          binding_sha256="$(sha256sum -- "$bundle_binding" | awk '{print $1}')"
+          test "$binding_size_bytes" -gt 0
+          test "$binding_size_bytes" -le 4096
+          case "$binding_sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#binding_sha256}" -eq 64
           aws s3 cp "$PARITY_TEMP/candidate.bundle" \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate.bundle" \
             --only-show-errors
@@ -270,8 +278,9 @@ jobs:
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate-bundle-binding.json" \
             --only-show-errors
           rm -f "$bundle_binding"
-          printf 'sha256=%s\nsize_bytes=%s\n' \
-            "$bundle_sha256" "$bundle_size_bytes" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\nsize_bytes=%s\nbinding_sha256=%s\nbinding_size_bytes=%s\n' \
+            "$bundle_sha256" "$bundle_size_bytes" \
+            "$binding_sha256" "$binding_size_bytes" >> "$GITHUB_OUTPUT"
 
       - name: Start candidate production paths
         id: execute
@@ -302,11 +311,20 @@ jobs:
           artifact_bucket = "${{ steps.stack.outputs.artifact_bucket }}"
           candidate_bundle_sha256 = "${{ steps.candidate_bundle.outputs.sha256 }}"
           candidate_bundle_size_bytes = "${{ steps.candidate_bundle.outputs.size_bytes }}"
+          candidate_bundle_binding_sha256 = "${{ steps.candidate_bundle.outputs.binding_sha256 }}"
+          candidate_bundle_binding_size_bytes = "${{ steps.candidate_bundle.outputs.binding_size_bytes }}"
           if (
               len(candidate_bundle_sha256) != 64
               or any(character not in "0123456789abcdef" for character in candidate_bundle_sha256)
               or not candidate_bundle_size_bytes.isdigit()
               or int(candidate_bundle_size_bytes) <= 0
+              or len(candidate_bundle_binding_sha256) != 64
+              or any(
+                  character not in "0123456789abcdef"
+                  for character in candidate_bundle_binding_sha256
+              )
+              or not candidate_bundle_binding_size_bytes.isdigit()
+              or not 0 < int(candidate_bundle_binding_size_bytes) <= 4096
           ):
               raise SystemExit("candidate bundle transfer metadata is invalid")
           root = f"/opt/leadpoet-production-parity/{run_id}"
@@ -316,48 +334,6 @@ jobs:
           compile(
               bootstrap_writer,
               "production_parity_bootstrap_evidence.py",
-              "exec",
-          )
-          candidate_bundle_binding_validator = r'''import json
-          import sys
-
-          MAX_BINDING_BYTES = 4096
-
-          def exact_object(pairs):
-              value = {}
-              for key, item in pairs:
-                  if type(key) is not str or key in value:
-                      raise ValueError("binding object keys are not unique strings")
-                  value[key] = item
-              return value
-
-          try:
-              if len(sys.argv) != 4:
-                  raise ValueError("binding arguments are invalid")
-              raw = sys.stdin.buffer.read(MAX_BINDING_BYTES + 1)
-              if not raw or len(raw) > MAX_BINDING_BYTES:
-                  raise ValueError("binding input is outside its bound")
-              actual = json.loads(
-                  raw.decode("utf-8"),
-                  object_pairs_hook=exact_object,
-              )
-          except (OSError, UnicodeDecodeError, ValueError):
-              raise SystemExit(1) from None
-          expected = {
-              "candidate-sha": sys.argv[1],
-              "bundle-sha256": sys.argv[2],
-              "bundle-size-bytes": sys.argv[3],
-          }
-          if (
-              type(actual) is not dict
-              or actual != expected
-              or any(type(value) is not str for value in actual.values())
-          ):
-              raise SystemExit(1)
-          '''
-          compile(
-              candidate_bundle_binding_validator,
-              "candidate_bundle_binding_validator.py",
               "exec",
           )
           q = shlex.quote
@@ -373,10 +349,13 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
+          candidate_bundle_binding={q(root + "/candidate-bundle-binding.json")}
           candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
           candidate_repo={q(root + "/repo")}
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
+          candidate_bundle_binding_sha256={q(candidate_bundle_binding_sha256)}
+          candidate_bundle_binding_size_bytes={q(candidate_bundle_binding_size_bytes)}
           failure_response_code() {{
             case "$failure_stage" in
           {failure_response_cases}
@@ -435,7 +414,8 @@ jobs:
             elif [ "$final_status" -ne 0 ]; then
               final_status="$(failure_response_code)" || final_status=1
             fi
-            rm -f "$candidate_bundle" >/dev/null 2>&1 || true
+            rm -f "$candidate_bundle" "$candidate_bundle_binding" \
+              >/dev/null 2>&1 || true
             exit "$final_status"
           }}
           trap finalize_bootstrap EXIT
@@ -456,15 +436,19 @@ jobs:
             --region {q(required['AWS_REGION'])} \
             "$candidate_bundle" >/dev/null 2>&1
           failure_stage=candidate-bundle-metadata
+          test ! -e "$candidate_bundle_binding"
           aws s3api get-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate-bundle-binding.json")} \
             --region {q(required['AWS_REGION'])} \
-            /dev/fd/3 3>&1 >/dev/null | \
-          /usr/bin/python3.11 -c {q(candidate_bundle_binding_validator)} \
-            {q(required['CANDIDATE_SHA'])} \
-            "$candidate_bundle_sha256" \
-            "$candidate_bundle_size_bytes"
+            "$candidate_bundle_binding" >/dev/null 2>&1
+          test -f "$candidate_bundle_binding"
+          test ! -L "$candidate_bundle_binding"
+          test "$(stat -c '%s' -- "$candidate_bundle_binding")" = \
+            "$candidate_bundle_binding_size_bytes"
+          test "$(sha256sum -- "$candidate_bundle_binding" | awk '{{print $1}}')" = \
+            "$candidate_bundle_binding_sha256"
+          rm -f "$candidate_bundle_binding"
           failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"

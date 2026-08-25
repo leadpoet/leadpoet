@@ -352,6 +352,7 @@ jobs:
           candidate_bundle_binding={q(root + "/candidate-bundle-binding.json")}
           candidate_repo={q(root + "/repo")}
           candidate_git_home={q(root + "/git-home")}
+          candidate_git_bin=
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
           candidate_bundle_binding_sha256={q(candidate_bundle_binding_sha256)}
@@ -363,27 +364,14 @@ jobs:
             esac
           }}
           candidate_git() {{
-            /usr/bin/env \
-              -u GIT_DIR \
-              -u GIT_WORK_TREE \
-              -u GIT_INDEX_FILE \
-              -u GIT_OBJECT_DIRECTORY \
-              -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
-              -u GIT_COMMON_DIR \
-              -u GIT_CEILING_DIRECTORIES \
-              -u GIT_DISCOVERY_ACROSS_FILESYSTEM \
-              -u GIT_CONFIG_COUNT \
-              -u GIT_CONFIG_SYSTEM \
-              -u GIT_CONFIG_GLOBAL \
-              -u GIT_SSH \
-              -u GIT_SSH_COMMAND \
-              -u GIT_ASKPASS \
-              -u SSH_ASKPASS \
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              LC_ALL=C \
               HOME="$candidate_git_home" \
               XDG_CONFIG_HOME="$candidate_git_home/.config" \
               GIT_CONFIG_NOSYSTEM=1 \
               GIT_TERMINAL_PROMPT=0 \
-              /usr/bin/git -c init.templateDir= "$@"
+              "$candidate_git_bin" -c init.templateDir= "$@"
           }}
           retain_failure() {{
             evidence_parent="$(dirname -- "$evidence")" || return 1
@@ -491,8 +479,20 @@ jobs:
           test -d "$candidate_git_home"
           test ! -L "$candidate_git_home"
           failure_stage=candidate-git-runtime
-          test -x /usr/bin/git
-          candidate_git --version >/dev/null 2>&1
+          if [ -x /usr/bin/git ]; then
+            candidate_git_bin=/usr/bin/git
+          elif [ -x /usr/local/bin/git ]; then
+            candidate_git_bin=/usr/local/bin/git
+          else
+            test -x /usr/bin/dnf
+            sudo -n /usr/bin/dnf -q -y install git-core >/dev/null 2>&1
+            candidate_git_bin=/usr/bin/git
+          fi
+          case "$candidate_git_bin" in
+            /*) ;;
+            *) false ;;
+          esac
+          test -x "$candidate_git_bin"
           failure_stage=candidate-repository-init
           candidate_git -C "$candidate_repo" init >/dev/null 2>&1
           failure_stage=candidate-repository-structure

@@ -1004,7 +1004,9 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         < exact_main
         < runner
     )
-    assert "/usr/bin/git -c init.templateDir=" in source
+    assert '"$candidate_git_bin" -c init.templateDir=' in source
+    assert "/usr/bin/env -i" in source
+    assert "sudo -n /usr/bin/dnf -q -y install git-core" in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 

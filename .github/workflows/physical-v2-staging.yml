@@ -523,15 +523,55 @@ jobs:
           test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \
             {q(required['CANDIDATE_SHA'])}
           cd "$candidate_repo"
+          host_python=/home/ec2-user/venv311/bin/python3
+          failure_stage=host-python-bootstrap
+          failure_category=CommandFailed
+          if [ ! -x "$host_python" ] || ! "$host_python" \
+              scripts/run_production_parity_full_host.py --help >/dev/null 2>&1; then
+            host_venv="$(dirname -- "$(dirname -- "$host_python")")"
+            if [ -e "$host_venv" ]; then
+              test -d "$host_venv"
+              test ! -L "$host_venv"
+            fi
+            if [ ! -x "$host_python" ]; then
+              /usr/bin/python3.11 -m venv "$host_venv"
+            fi
+            test -x "$host_python"
+            test "$(readlink -f -- "$host_python")" = /usr/bin/python3.11
+            test "$("$host_python" -I -c \
+              'import sys; print(f"{{sys.version_info.major}}.{{sys.version_info.minor}}")')" = \
+              3.11
+            host_requirements={q(root + "/host-controller-requirements.txt")}
+            test ! -e "$host_requirements"
+            /usr/bin/python3.11 \
+              scripts/resolve_production_parity_controller_requirements.py \
+              --requirements requirements.txt \
+              --output "$host_requirements" >/dev/null 2>&1
+            test -f "$host_requirements"
+            test ! -L "$host_requirements"
+            if ! PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+                "$host_python" -m pip --version >/dev/null 2>&1; then
+              PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+                "$host_python" -m ensurepip --upgrade >/dev/null 2>&1
+            fi
+            PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+              "$host_python" -m pip install \
+              --disable-pip-version-check \
+              --no-input \
+              --no-cache-dir \
+              --requirement "$host_requirements" >/dev/null 2>&1
+            PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+              "$host_python" -m pip check >/dev/null 2>&1
+          fi
           failure_stage=host-python-import
           failure_category=HostImportFailed
-          /home/ec2-user/venv311/bin/python3 \
+          "$host_python" \
             scripts/run_production_parity_full_host.py --help >/dev/null 2>&1
           evidence="$authoritative_evidence"
           failure_stage=host-entrypoint
           failure_category=HostEntrypointFailed
           status=0
-          /home/ec2-user/venv311/bin/python3 scripts/run_production_parity_full_host.py \
+          "$host_python" scripts/run_production_parity_full_host.py \
             --region {q(required['AWS_REGION'])} \
             --run-id {q(run_id)} \
             --base-sha {q(base)} \

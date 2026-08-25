@@ -56,6 +56,7 @@ def _output(tmp_path: Path) -> Path:
         ("candidate-checkout", "CommandFailed"),
         ("candidate-remote-rebind", "CommandFailed"),
         ("canonical-origin-fetch", "CommandFailed"),
+        ("host-python-bootstrap", "CommandFailed"),
         ("host-python-import", "HostImportFailed"),
         ("host-entrypoint", "HostEntrypointFailed"),
         ("evidence-upload", "EvidenceUploadFailed"),
@@ -118,6 +119,7 @@ def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
         (55, "candidate-git-runtime", "CommandFailed"),
         (56, "candidate-repository-directory", "CommandFailed"),
         (57, "candidate-repository-structure", "CommandFailed"),
+        (58, "host-python-bootstrap", "CommandFailed"),
     )
     codes = [code for code, _stage, _category in values]
     assert len(codes) == len(set(codes))
@@ -347,7 +349,7 @@ def test_terminal_poller_projects_authoritative_bootstrap_response_code(
 
 @pytest.mark.parametrize(
     "response_code",
-    [-1, 0, 1, 39, 58, 255, None, "40", True, 40.0, {}, []],
+    [-1, 0, 1, 39, 59, 255, None, "40", True, 40.0, {}, []],
 )
 def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
     tmp_path: Path,
@@ -644,6 +646,7 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=candidate-checkout",
         "failure_stage=candidate-remote-rebind",
         "failure_stage=canonical-origin-fetch",
+        "failure_stage=host-python-bootstrap",
         "failure_stage=host-python-import",
         "failure_stage=host-entrypoint",
     ]
@@ -651,13 +654,27 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert offsets == sorted(offsets)
     assert "evidence=/run/leadpoet-production-parity/full-evidence.json" in execute
     assert "scripts/run_production_parity_full_host.py --help" in execute
+    assert "scripts/resolve_production_parity_controller_requirements.py" in execute
+    assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in execute
+    assert '"$host_python" -m ensurepip --upgrade' in execute
+    assert '"$host_python" -m pip check' in execute
     provisioner = (
         Path(__file__).parents[1] / "scripts/provision_production_parity_staging.py"
     ).read_text(encoding="utf-8")
     assert "install -d -m 0700 /run/leadpoet-production-parity" in provisioner
+    bootstrap = execute.index("failure_stage=host-python-bootstrap")
+    first_import = execute.index(
+        "scripts/run_production_parity_full_host.py --help", bootstrap
+    )
+    import_stage = execute.index("failure_stage=host-python-import", first_import)
+    verified_import = execute.index(
+        "scripts/run_production_parity_full_host.py --help", import_stage
+    )
     assert (
-        execute.index("failure_stage=host-python-import")
-        < execute.index("scripts/run_production_parity_full_host.py --help")
+        bootstrap
+        < first_import
+        < import_stage
+        < verified_import
         < execute.index('evidence="$authoritative_evidence"')
     )
     for number in range(1, 6):
@@ -814,6 +831,7 @@ def _run_rendered_ssm(
     metadata_bundle_sha256: str | None = None,
     metadata_bundle_size_bytes: str | None = None,
     metadata_raw_json: str | None = None,
+    host_import_fails_once: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     controller_bundle_bytes = (
         CANDIDATE_BUNDLE_BYTES
@@ -835,6 +853,8 @@ def _run_rendered_ssm(
     capture = tmp_path / "uploaded-evidence.json"
     aws_calls = tmp_path / "aws-calls.jsonl"
     git_calls = tmp_path / "git-calls.jsonl"
+    host_python_calls = tmp_path / "host-python-calls.jsonl"
+    host_import_marker = tmp_path / "host-import-marker"
     aws_stub = fake_bin / "aws"
     aws_stub.write_text(
         """#!/usr/bin/env python3
@@ -906,7 +926,23 @@ elif arguments[:1] == ["-C"]:
         print("https://github.com/leadpoet/leadpoet.git")
     elif operation[:1] == ["rev-parse"]:
         print(os.environ["CANDIDATE_SHA"])
-    elif operation[:1] in (["checkout"], ["remote"]):
+    elif operation[:1] == ["checkout"]:
+        repo = Path(arguments[1])
+        scripts = repo / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (repo / "requirements.txt").write_text(
+            "bittensor==10.5.0\\nboto3>=1.40.0\\n"
+            "cryptography>=41.0.7\\nhttpx>=0.27.0\\nsupabase>=2.0.0\\n",
+            encoding="utf-8",
+        )
+        (scripts / "resolve_production_parity_controller_requirements.py").write_text(
+            "from pathlib import Path\\n"
+            "import sys\\n"
+            "output = Path(sys.argv[sys.argv.index('--output') + 1])\\n"
+            "output.write_text('boto3>=1.40.0\\\\n', encoding='utf-8')\\n",
+            encoding="utf-8",
+        )
+    elif operation[:1] == ["remote"]:
         pass
     else:
         raise SystemExit(3)
@@ -954,10 +990,23 @@ print(hashlib.sha256(value).hexdigest(), sys.argv[-1])
     host_python = fake_bin / "host-python"
     host_python.write_text(
         """#!/usr/bin/env python3
+import json
+import os
 from pathlib import Path
 import sys
 
-if "--help" not in sys.argv:
+with open(os.environ["HOST_PYTHON_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\\n")
+if sys.argv[1:2] == ["-I"]:
+    print("3.11")
+elif sys.argv[1:3] == ["-m", "pip"] or sys.argv[1:3] == ["-m", "ensurepip"]:
+    pass
+elif "--help" in sys.argv:
+    marker = Path(os.environ["HOST_IMPORT_MARKER"])
+    if os.environ.get("FAIL_HOST_IMPORT_ONCE") == "1" and not marker.exists():
+        marker.write_text("failed-once\\n", encoding="utf-8")
+        raise SystemExit(70)
+else:
     output = Path(sys.argv[sys.argv.index("--output") + 1])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('{"status":"passed","authority":"host"}\\n')
@@ -985,6 +1034,10 @@ if "--help" not in sys.argv:
     )
     command = command.replace(
         "/home/ec2-user/venv311/bin/python3", str(host_python)
+    )
+    command = command.replace(
+        f'test "$(readlink -f -- "$host_python")" = {sys.executable}',
+        f'test "$(readlink -f -- "$host_python")" = {host_python.resolve()}',
     )
     command = command.replace("/usr/bin/git", str(git_stub))
     command = command.replace("/usr/bin/env -i", "/usr/bin/env")
@@ -1026,6 +1079,9 @@ if "--help" not in sys.argv:
         "FAIL_BUNDLE_VERIFY": "1" if bundle_verify_fails else "0",
         "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "GIT_CALLS": str(git_calls),
+        "HOST_PYTHON_CALLS": str(host_python_calls),
+        "HOST_IMPORT_MARKER": str(host_import_marker),
+        "FAIL_HOST_IMPORT_ONCE": "1" if host_import_fails_once else "0",
         "METADATA_RAW_JSON": metadata_raw_json,
         "PROVIDER_SECRET": "must-never-enter-evidence",
     }
@@ -1090,6 +1146,30 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
     }
     assert not (tmp_path / "work" / "candidate.bundle").exists()
     assert not list((tmp_path / "work").glob("candidate-bundle-binding.*"))
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_repairs_stale_host_dependencies_before_entrypoint(
+    tmp_path: Path,
+) -> None:
+    result, capture = _run_rendered_ssm(tmp_path, host_import_fails_once=True)
+
+    assert result.returncode == 0
+    assert json.loads(capture.read_text(encoding="utf-8")) == {
+        "status": "passed",
+        "authority": "host",
+    }
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "host-python-calls.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert sum("--help" in call for call in calls) == 2
+    assert any(call[:3] == ["-m", "pip", "install"] for call in calls)
+    assert any(call[:3] == ["-m", "pip", "check"] for call in calls)
+    assert (tmp_path / "host-import-marker").is_file()
     assert result.stdout == ""
     assert result.stderr == ""
 

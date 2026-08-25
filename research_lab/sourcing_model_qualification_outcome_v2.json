@@ -1,7 +1,7 @@
 {
   "protocol_id": "sourcing-model.qualification-outcome",
   "protocol_major": 2,
-  "protocol_minor": 1,
+  "protocol_minor": 2,
   "entrypoint": "run_icp_outcome",
   "result_schema_version": "sourcing-model.qualification-outcome.v2",
   "route_completion_receipt_schema_version": "sourcing-model.route-completion-receipt.v1",
@@ -106,7 +106,7 @@
       "completion_state": "incomplete",
       "retryable": false,
       "minimum_terminal_failed_without_branch_control": 1,
-      "terminal_branch_control_alternative": false,
+      "terminal_branch_control_alternative": true,
       "minimum_failure_classes_count": 1
     },
     "unreceipted_empty_allowed": false,
@@ -218,6 +218,18 @@
         "failure_class": "branch_deadline_exhausted",
         "retryable": true,
         "required_branch_status": "skipped"
+      },
+      "required_branch_terminal_control": {
+        "phase": "branch_execution",
+        "allowed_failure_classes": [
+          "budget_blocked",
+          "terminal_auth",
+          "terminal_quota",
+          "tracking_failed",
+          "transport_invariant_failed"
+        ],
+        "retryable": false,
+        "required_branch_status": "failed"
       }
     }
   },

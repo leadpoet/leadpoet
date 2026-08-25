@@ -346,10 +346,14 @@ def _branch_control_failure_proof(
     match_mode: str = "any",
     branch_number: int = 2,
     branch_id: str = "intent:FUNDING:2",
+    reason: str = "required_branch_deadline_exhausted",
+    failure_class: str = "",
 ) -> dict:
     policy = qualification_outcome_contract_v2()["branch_control_failure"]
-    reason = "required_branch_deadline_exhausted"
     reason_policy = policy["reason_policy"][reason]
+    normalized_failure_class = str(
+        failure_class or reason_policy.get("failure_class") or ""
+    )
     body = {
         "schema_version": policy["schema_version"],
         "authority": policy["authority"],
@@ -358,7 +362,7 @@ def _branch_control_failure_proof(
         "match_mode": match_mode,
         "branch_number": branch_number,
         "branch_id_sha256": _plain_hash(branch_id),
-        "failure_class": reason_policy["failure_class"],
+        "failure_class": normalized_failure_class,
         "retryable": reason_policy["retryable"],
     }
     return {**body, "proof_sha256": _plain_hash(body)}
@@ -436,6 +440,46 @@ def test_branch_control_incomplete_preserves_provider_route_counters() -> None:
         QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1
     )
 
+
+def test_terminal_branch_control_preserves_provider_route_counters() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    receipt.update({
+        "disposition": "incomplete_terminal",
+        "retryable": False,
+        "failure_classes": ["transport_invariant_failed"],
+    })
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ] = _branch_control_failure_proof(
+        reason="required_branch_terminal_control",
+        failure_class="transport_invariant_failed",
+    )
+    envelope = _rehash_receipt(envelope)
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+
+    validated_receipt = validated["route_completion_receipt"]
+    assert validated_receipt["disposition"] == "incomplete_terminal"
+    assert validated_receipt["retryable"] is False
+    assert validated_receipt["route_summary"]["terminal_failed"] == 0
+    proof = validated_receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    assert proof["reason"] == "required_branch_terminal_control"
+    assert proof["failure_class"] == "transport_invariant_failed"
+
+    invalid = deepcopy(envelope)
+    invalid_proof = invalid["route_completion_receipt"]["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    invalid_proof["failure_class"] = "retryable_provider"
+    _rehash_branch_control_proof(invalid)
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="branch control failure differs from protocol",
+    ):
+        validate_qualification_outcome_envelope_v2(invalid)
 
 def test_branch_control_incomplete_can_retain_partial_companies() -> None:
     envelope = _branch_control_incomplete_envelope(
@@ -997,7 +1041,7 @@ def test_cross_repository_semantic_contract_fixture_is_exact() -> None:
 
     assert _plain_hash(document) == QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
     assert document["entrypoint"] == "run_icp_outcome"
-    assert document["protocol_minor"] == 1
+    assert document["protocol_minor"] == 2
     assert document["branch_control_failure"] == {
         "extension_key": "com.leadpoet.branch-control-failure",
         "schema_version": "sourcing-model.branch-control-failure.v1",
@@ -1025,7 +1069,19 @@ def test_cross_repository_semantic_contract_fixture_is_exact() -> None:
                 "failure_class": "branch_deadline_exhausted",
                 "retryable": True,
                 "required_branch_status": "skipped",
-            }
+            },
+            "required_branch_terminal_control": {
+                "phase": "branch_execution",
+                "allowed_failure_classes": [
+                    "budget_blocked",
+                    "terminal_auth",
+                    "terminal_quota",
+                    "tracking_failed",
+                    "transport_invariant_failed",
+                ],
+                "retryable": False,
+                "required_branch_status": "failed",
+            },
         },
     }
     assert document["completion_rules"]["unreceipted_empty_allowed"] is False

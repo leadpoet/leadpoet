@@ -45,6 +45,161 @@ async def test_append_event_with_seq_preserves_supplied_event_id(
     assert rows[0]["event_id"] == event_id
 
 
+@pytest.mark.parametrize("detail", ("unexpected_eof", "unexpected eof"))
+def test_loop_event_transport_eof_is_retryable(detail: str) -> None:
+    assert store_mod._is_transient_store_error(RuntimeError(detail))
+
+
+@pytest.mark.asyncio
+async def test_loop_event_recovers_committed_insert_after_response_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id = "44444444-4444-4444-8444-444444444444"
+    inserted: dict[str, Any] | None = None
+    insert_calls = 0
+
+    async def fake_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
+        assert table == "research_lab_auto_research_loop_events"
+        assert kwargs["filters"] == (("event_id", event_id),)
+        return dict(inserted) if inserted is not None else None
+
+    async def fake_create_loop_event(**kwargs: Any) -> dict[str, Any]:
+        nonlocal insert_calls, inserted
+        insert_calls += 1
+        inserted = {
+            **kwargs,
+            "schema_version": "1.0",
+            "seq": 8,
+        }
+        payload = {
+            key: value
+            for key, value in inserted.items()
+            if key not in {"event_id", "schema_version"}
+        }
+        inserted["anchored_hash"] = store_mod.canonical_hash(payload)
+        raise RuntimeError("unexpected_eof")
+
+    monkeypatch.setattr(store_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(
+        store_mod, "create_auto_research_loop_event", fake_create_loop_event
+    )
+
+    result = await store_mod.ensure_auto_research_loop_event(
+        event_id=event_id,
+        run_id=RUN_ID,
+        ticket_id=TICKET_ID,
+        receipt_id=None,
+        event_type="loop_failed",
+        loop_status="failed",
+        worker_ref="worker-a",
+        elapsed_seconds=12.5,
+        provider_usage=[],
+        cost_ledger={"actual_openrouter_cost_microusd": 100},
+        event_doc={"stop_reason": "no_valid_image_build_finalists"},
+    )
+
+    assert insert_calls == 1
+    assert result == inserted
+
+
+@pytest.mark.asyncio
+async def test_loop_event_retries_transport_failure_before_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id = "55555555-5555-4555-8555-555555555555"
+    insert_calls = 0
+
+    async def fake_select_one(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_create_loop_event(**kwargs: Any) -> dict[str, Any]:
+        nonlocal insert_calls
+        insert_calls += 1
+        if insert_calls == 1:
+            raise RuntimeError("unexpected eof")
+        payload = {
+            "run_id": kwargs["run_id"],
+            "ticket_id": kwargs["ticket_id"],
+            "receipt_id": kwargs["receipt_id"],
+            "seq": 2,
+            "event_type": kwargs["event_type"],
+            "loop_status": kwargs["loop_status"],
+            "node_id": kwargs["node_id"],
+            "worker_ref": kwargs["worker_ref"],
+            "elapsed_seconds": kwargs["elapsed_seconds"],
+            "candidate_artifact_hash": kwargs["candidate_artifact_hash"],
+            "candidate_patch_hash": kwargs["candidate_patch_hash"],
+            "provider_usage": kwargs["provider_usage"] or [],
+            "cost_ledger": kwargs["cost_ledger"] or {},
+            "event_doc": kwargs["event_doc"] or {},
+        }
+        return {
+            "event_id": event_id,
+            "schema_version": "1.0",
+            **payload,
+            "anchored_hash": store_mod.canonical_hash(payload),
+        }
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(store_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(
+        store_mod, "create_auto_research_loop_event", fake_create_loop_event
+    )
+    monkeypatch.setattr(store_mod.asyncio, "sleep", no_sleep)
+
+    result = await store_mod.ensure_auto_research_loop_event(
+        event_id=event_id,
+        run_id=RUN_ID,
+        ticket_id=TICKET_ID,
+        receipt_id=None,
+        event_type="checkpoint_saved",
+        loop_status="running",
+        worker_ref="worker-a",
+        event_doc={"checkpoint_hash": "sha256:" + "f" * 64},
+    )
+
+    assert insert_calls == 2
+    assert result["event_id"] == event_id
+
+
+@pytest.mark.asyncio
+async def test_loop_event_does_not_retry_permanent_store_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PermanentStoreError(RuntimeError):
+        code = "23514"
+
+    insert_calls = 0
+
+    async def fake_select_one(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_create_loop_event(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal insert_calls
+        insert_calls += 1
+        raise PermanentStoreError("event_doc violates check constraint")
+
+    monkeypatch.setattr(store_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(
+        store_mod, "create_auto_research_loop_event", fake_create_loop_event
+    )
+
+    with pytest.raises(PermanentStoreError, match="violates check constraint"):
+        await store_mod.ensure_auto_research_loop_event(
+            event_id="66666666-6666-4666-8666-666666666666",
+            run_id=RUN_ID,
+            ticket_id=TICKET_ID,
+            receipt_id=None,
+            event_type="loop_failed",
+            loop_status="failed",
+            worker_ref="worker-a",
+        )
+
+    assert insert_calls == 1
+
+
 def _queue_row(status: str, event_hash: str = QUEUE_HASH) -> dict[str, Any]:
     return {
         "run_id": RUN_ID,
@@ -422,6 +577,7 @@ async def test_resumed_loop_event_binds_to_heartbeat_after_claim(
         event=event,
         event_doc={"checkpoint_hash": "sha256:" + "f" * 64},
         event_provider_usage=[],
+        event_operation_id="sha256:" + "a" * 64,
     )
 
     assert result["event_type"] == "loop_resumed"

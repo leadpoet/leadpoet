@@ -134,6 +134,8 @@ from gateway.research_lab.store import (
     create_reimbursement_schedule,
     create_ticket_event,
     create_openrouter_privacy_proof_event_sync,
+    deterministic_uuid,
+    ensure_auto_research_loop_event,
     ensure_auto_research_loop_transition_event,
     find_queued_receipt_for_run,
     latest_auto_research_checkpoint,
@@ -3350,7 +3352,11 @@ class ResearchLabHostedWorker:
             last_queue_heartbeat_at = 0.0
             recorded_loop_events: list[dict[str, Any]] = []
 
-            async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
+            async def _record_loop_event(
+                event: AutoResearchLoopEvent,
+                *,
+                event_operation_id: str,
+            ) -> None:
                 nonlocal latest_checkpoint, last_queue_heartbeat_at
                 if event.event_type == "checkpoint_saved":
                     checkpoint_doc = event.event_doc.get("checkpoint") if isinstance(event.event_doc, Mapping) else None
@@ -3388,6 +3394,7 @@ class ResearchLabHostedWorker:
                     event=event,
                     event_doc=event_doc,
                     event_provider_usage=event_provider_usage,
+                    event_operation_id=event_operation_id,
                 )
                 recorded_loop_events.append(
                     {
@@ -5729,9 +5736,18 @@ class ResearchLabHostedWorker:
         event: AutoResearchLoopEvent,
         event_doc: dict[str, Any],
         event_provider_usage: list[dict[str, Any]],
+        event_operation_id: str,
     ) -> dict[str, Any]:
         if event.event_type != "loop_resumed":
-            return await create_auto_research_loop_event(
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", event_operation_id):
+                raise HostedResearchLabWorkerError(
+                    "measured loop event operation identity is invalid"
+                )
+            return await ensure_auto_research_loop_event(
+                event_id=deterministic_uuid(
+                    "research_lab_auto_research_loop_event_v2",
+                    event_operation_id,
+                ),
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
                 receipt_id=context.receipt_id,

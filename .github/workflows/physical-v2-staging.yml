@@ -457,8 +457,10 @@ jobs:
           test "$(sha256sum -- "$candidate_bundle" | awk '{{print $1}}')" = \
             "$candidate_bundle_sha256"
           failure_stage=candidate-bundle-head
-          test "$(git bundle list-heads "$candidate_bundle" 2>/dev/null)" = \
-            {q(required['CANDIDATE_SHA'] + " HEAD")}
+          test "$(LC_ALL=C head -n 3 -- "$candidate_bundle")" = "$(
+            printf '%s\n%s HEAD' '# v2 git bundle' \
+              {q(required['CANDIDATE_SHA'])}
+          )"
           failure_stage=candidate-bundle-verify
           git init --bare "$candidate_bundle_verifier" >/dev/null 2>&1
           git -C "$candidate_bundle_verifier" bundle verify \

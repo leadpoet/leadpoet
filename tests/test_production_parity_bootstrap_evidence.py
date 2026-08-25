@@ -19,27 +19,19 @@ RUN_ID = "pp-32241272808-1"
 BASE_SHA = "a" * 40
 CANDIDATE_SHA = "b" * 40
 BUCKET = "leadpoet-parity-493765492819-0123456789abcdef"
-CANDIDATE_BUNDLE_BYTES = b"candidate-bundle"
+CANDIDATE_BUNDLE_HEADER = (
+    b"# v2 git bundle\n" + CANDIDATE_SHA.encode("ascii") + b" HEAD\n\n"
+)
+CANDIDATE_BUNDLE_BYTES = CANDIDATE_BUNDLE_HEADER + b"PACKfixture"
+EXTRA_HEAD_BUNDLE_BYTES = (
+    b"# v2 git bundle\n"
+    + CANDIDATE_SHA.encode("ascii")
+    + b" HEAD\n"
+    + BASE_SHA.encode("ascii")
+    + b" refs/heads/main\n\nPACKfixture"
+)
 CANDIDATE_BUNDLE_SHA256 = hashlib.sha256(CANDIDATE_BUNDLE_BYTES).hexdigest()
 CANDIDATE_BUNDLE_SIZE_BYTES = str(len(CANDIDATE_BUNDLE_BYTES))
-CANDIDATE_BUNDLE_BINDING_BYTES = (
-    json.dumps(
-        {
-            "candidate-sha": CANDIDATE_SHA,
-            "bundle-sha256": CANDIDATE_BUNDLE_SHA256,
-            "bundle-size-bytes": CANDIDATE_BUNDLE_SIZE_BYTES,
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    + "\n"
-).encode("utf-8")
-CANDIDATE_BUNDLE_BINDING_SHA256 = hashlib.sha256(
-    CANDIDATE_BUNDLE_BINDING_BYTES
-).hexdigest()
-CANDIDATE_BUNDLE_BINDING_SIZE_BYTES = str(
-    len(CANDIDATE_BUNDLE_BINDING_BYTES)
-)
 
 
 def _output(tmp_path: Path) -> Path:
@@ -523,7 +515,11 @@ def test_terminal_upload_never_replaces_existing_s3_evidence(
     )
 
 
-def _rendered_ssm_command(tmp_path: Path) -> str:
+def _rendered_ssm_command(
+    tmp_path: Path,
+    *,
+    candidate_bundle_bytes: bytes = CANDIDATE_BUNDLE_BYTES,
+) -> str:
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = Path(__file__).parents[1] / ".github/workflows/physical-v2-staging.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -532,6 +528,22 @@ def _rendered_ssm_command(tmp_path: Path) -> str:
         step for step in steps if step.get("name") == "Start candidate production paths"
     )["run"]
     controller = execute.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    candidate_bundle_sha256 = hashlib.sha256(
+        candidate_bundle_bytes
+    ).hexdigest()
+    candidate_bundle_size_bytes = str(len(candidate_bundle_bytes))
+    candidate_bundle_binding_bytes = (
+        json.dumps(
+            {
+                "candidate-sha": CANDIDATE_SHA,
+                "bundle-sha256": candidate_bundle_sha256,
+                "bundle-size-bytes": candidate_bundle_size_bytes,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
     replacements = {
         "${{ steps.inputs.outputs.run_id }}": RUN_ID,
         "${{ steps.inputs.outputs.base }}": BASE_SHA,
@@ -541,16 +553,16 @@ def _rendered_ssm_command(tmp_path: Path) -> str:
         ),
         "${{ steps.stack.outputs.artifact_bucket }}": BUCKET,
         "${{ steps.candidate_bundle.outputs.sha256 }}": (
-            CANDIDATE_BUNDLE_SHA256
+            candidate_bundle_sha256
         ),
         "${{ steps.candidate_bundle.outputs.size_bytes }}": (
-            CANDIDATE_BUNDLE_SIZE_BYTES
+            candidate_bundle_size_bytes
         ),
         "${{ steps.candidate_bundle.outputs.binding_sha256 }}": (
-            CANDIDATE_BUNDLE_BINDING_SHA256
+            hashlib.sha256(candidate_bundle_binding_bytes).hexdigest()
         ),
         "${{ steps.candidate_bundle.outputs.binding_size_bytes }}": (
-            CANDIDATE_BUNDLE_BINDING_SIZE_BYTES
+            str(len(candidate_bundle_binding_bytes))
         ),
     }
     for source, replacement in replacements.items():
@@ -714,6 +726,12 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "candidate_bundle_binding=" in execute
     assert "--output text" not in metadata_stage
     assert "aws s3 cp" not in metadata_stage
+    head_stage = execute.split(
+        "failure_stage=candidate-bundle-head", 1
+    )[1].split("failure_stage=candidate-bundle-verify", 1)[0]
+    assert 'LC_ALL=C head -n 3 -- "$candidate_bundle"' in head_stage
+    assert "'# v2 git bundle'" in head_stage
+    assert "git bundle list-heads" not in head_stage
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -739,15 +757,29 @@ def _run_rendered_ssm(
     upload_fails: bool = False,
     early_parent_target: Path | None = None,
     bundle_bytes: bytes = CANDIDATE_BUNDLE_BYTES,
-    bundle_heads: str | None = None,
+    bound_bundle_bytes: bytes | None = None,
     bundle_verify_fails: bool = False,
     bundle_as_symlink: bool = False,
     metadata_candidate_sha: str = CANDIDATE_SHA,
-    metadata_bundle_sha256: str = CANDIDATE_BUNDLE_SHA256,
-    metadata_bundle_size_bytes: str = CANDIDATE_BUNDLE_SIZE_BYTES,
+    metadata_bundle_sha256: str | None = None,
+    metadata_bundle_size_bytes: str | None = None,
     metadata_raw_json: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    command = _rendered_ssm_command(tmp_path / "render")
+    controller_bundle_bytes = (
+        CANDIDATE_BUNDLE_BYTES
+        if bound_bundle_bytes is None
+        else bound_bundle_bytes
+    )
+    command = _rendered_ssm_command(
+        tmp_path / "render",
+        candidate_bundle_bytes=controller_bundle_bytes,
+    )
+    if metadata_bundle_sha256 is None:
+        metadata_bundle_sha256 = hashlib.sha256(
+            controller_bundle_bytes
+        ).hexdigest()
+    if metadata_bundle_size_bytes is None:
+        metadata_bundle_size_bytes = str(len(controller_bundle_bytes))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     capture = tmp_path / "uploaded-evidence.json"
@@ -803,9 +835,7 @@ arguments = sys.argv[1:]
 with open(os.environ["GIT_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 
-if arguments[:2] == ["bundle", "list-heads"]:
-    print(os.environ["BUNDLE_HEADS"])
-elif arguments[:2] == ["init", "--bare"]:
+if arguments[:2] == ["init", "--bare"]:
     Path(arguments[2]).mkdir(parents=True, exist_ok=False)
 elif arguments[:1] == ["init"]:
     Path(arguments[1]).mkdir(parents=True, exist_ok=False)
@@ -933,7 +963,6 @@ if "--help" not in sys.argv:
         "CANDIDATE_SHA": CANDIDATE_SHA,
         "BUNDLE_HEX": bundle_bytes.hex(),
         "BUNDLE_AS_SYMLINK": "1" if bundle_as_symlink else "0",
-        "BUNDLE_HEADS": bundle_heads or f"{CANDIDATE_SHA} HEAD",
         "FAIL_BUNDLE_VERIFY": "1" if bundle_verify_fails else "0",
         "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "GIT_CALLS": str(git_calls),
@@ -1048,7 +1077,6 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ).splitlines()
     ]
     assert calls == [
-        ["bundle", "list-heads", bundle],
         ["init", "--bare", verifier],
         ["-C", verifier, "bundle", "verify", bundle],
         ["init", repo],
@@ -1132,7 +1160,12 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ),
         ({"metadata_raw_json": "[]"}, 43, "candidate-bundle-metadata"),
         (
-            {"bundle_bytes": b"candidate-bundlf"},
+            {
+                "bundle_bytes": (
+                    CANDIDATE_BUNDLE_BYTES[:-1]
+                    + bytes([CANDIDATE_BUNDLE_BYTES[-1] ^ 1])
+                )
+            },
             44,
             "candidate-bundle-file-integrity",
         ),
@@ -1147,7 +1180,10 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
             "candidate-bundle-file-integrity",
         ),
         (
-            {"bundle_heads": f"{CANDIDATE_SHA} HEAD\n{BASE_SHA} refs/heads/main"},
+            {
+                "bundle_bytes": EXTRA_HEAD_BUNDLE_BYTES,
+                "bound_bundle_bytes": EXTRA_HEAD_BUNDLE_BYTES,
+            },
             45,
             "candidate-bundle-head",
         ),

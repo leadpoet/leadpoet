@@ -34,6 +34,7 @@ BOOTSTRAP_STAGES = frozenset(
         "candidate-checkout",
         "candidate-remote-rebind",
         "canonical-origin-fetch",
+        "host-python-bootstrap",
         "host-python-import",
         "host-entrypoint",
         "evidence-upload",
@@ -72,6 +73,7 @@ BOOTSTRAP_SSM_FAILURE_CODES = (
     (55, "candidate-git-runtime", "CommandFailed"),
     (56, "candidate-repository-directory", "CommandFailed"),
     (57, "candidate-repository-structure", "CommandFailed"),
+    (58, "host-python-bootstrap", "CommandFailed"),
 )
 MAX_EVIDENCE_BYTES = 1_024
 

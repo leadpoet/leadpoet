@@ -988,8 +988,7 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" ='
     )
     runner = source.index(
-        "/home/ec2-user/venv311/bin/python3 "
-        "scripts/run_production_parity_full_host.py"
+        '"$host_python" scripts/run_production_parity_full_host.py'
     )
 
     assert (
@@ -1007,6 +1006,8 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     assert '"$candidate_git_bin" -c init.templateDir=' in source
     assert "/usr/bin/env -i" in source
     assert "sudo -n /usr/bin/dnf -q -y install git-core" in source
+    assert "scripts/resolve_production_parity_controller_requirements.py" in source
+    assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 

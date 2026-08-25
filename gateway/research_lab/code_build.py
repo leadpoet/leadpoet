@@ -89,8 +89,19 @@ _SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _SOURCE_ADD_ROUTING_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
 _SOURCE_ADD_PARITY_FIXTURE_PATH = "sourcing_model/consumer_parity_fixtures.json"
+_SOURCE_ADD_PARITY_MODULE_PATH = "sourcing_model/consumer_parity.py"
+_SOURCE_ADD_CONSUMER_CONTRACT_PATH = "sourcing_model/consumer_contract.json"
+_SOURCE_ADD_PARITY_HASH_CONSTANT = "CONSUMER_PARITY_FIXTURE_DOCUMENT_SHA256"
+_SOURCE_ADD_DERIVED_ARTIFACT_PATHS = frozenset(
+    {
+        _SOURCE_ADD_PARITY_FIXTURE_PATH,
+        _SOURCE_ADD_PARITY_MODULE_PATH,
+        _SOURCE_ADD_CONSUMER_CONTRACT_PATH,
+    }
+)
 _SOURCE_ADD_PARITY_PROJECTION_EVALUATORS = (
     ("expected_account_evidence_contract_projections", "evaluate_account_evidence_contract_parity_cases"),
+    ("expected_maps_response_projection_parity_projections", "evaluate_maps_response_projection_parity_cases"),
     ("expected_segmented_discovery_plan_projections", "evaluate_segmented_discovery_plan_parity_cases"),
     ("expected_signal_intent_route_projections", "evaluate_signal_intent_route_parity_cases"),
     ("expected_routing_profile_projections", "evaluate_routing_profile_parity_cases"),
@@ -137,9 +148,97 @@ def _source_add_registration_changed(unified_diff: str) -> bool:
     )
 
 
+def _source_add_custody_refresh_script() -> str:
+    return f"""\
+import hashlib
+import json
+from pathlib import Path
+
+from sourcing_model import consumer_parity as parity
+
+fixture_path = Path({json.dumps(_SOURCE_ADD_PARITY_FIXTURE_PATH)})
+fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+# A SOURCE_ADD route changes the runtime identity carried by the model-runner
+# custody dispatch vectors. Refresh only those derived envelope bytes and
+# hashes; custody metadata, inventory, and fixture identities remain frozen.
+custody_section = fixtures.get("model_runner_custody_v3")
+if not isinstance(custody_section, dict):
+    raise RuntimeError("model runner custody fixture is unavailable")
+custody_metadata = parity.model_runner_custody_metadata()
+for key, expected in custody_metadata.items():
+    if custody_section.get(key) != expected:
+        raise RuntimeError("model runner custody metadata differs: " + str(key))
+dispatch_vectors = custody_section.get("dispatch_vectors")
+required_kinds = list(custody_metadata["required_dispatch_vector_kinds"])
+if (
+    not isinstance(dispatch_vectors, list)
+    or len(dispatch_vectors) != len(required_kinds)
+    or [str(item.get("kind") or "") for item in dispatch_vectors]
+       != required_kinds
+):
+    raise RuntimeError("model runner custody dispatch inventory differs")
+generated_vectors = parity.model_runner_custody_parity_vectors()
+generated_by_kind = {{
+    str(item.get("kind") or ""): item
+    for item in generated_vectors
+    if isinstance(item, dict)
+}}
+if sorted(generated_by_kind) != sorted(required_kinds):
+    raise RuntimeError("generated model runner custody inventory differs")
+
+refreshed_dispatch_vectors = []
+for stored in dispatch_vectors:
+    if not isinstance(stored, dict):
+        raise RuntimeError("model runner custody dispatch vector is invalid")
+    kind = str(stored.get("kind") or "")
+    generated = generated_by_kind[kind]
+    envelope = generated.get("envelope")
+    if not isinstance(envelope, dict):
+        raise RuntimeError("generated model runner custody envelope is invalid")
+    static_expected = {{
+        "kind": kind,
+        "kind_id": custody_metadata["kind_ids"][kind],
+        "domain": custody_metadata["domain"],
+        "domain_terminator_hex": "00",
+        "self_hash_field": custody_metadata["self_hash_fields"][kind],
+        "builder_id": custody_metadata["dispatch_vector_builder_id"],
+    }}
+    if any(stored.get(key) != value for key, value in static_expected.items()):
+        raise RuntimeError("model runner custody static vector fields differ")
+    fixture_id = str(stored.get("fixture_id") or "")
+    if not fixture_id:
+        raise RuntimeError("model runner custody fixture identity is missing")
+    persisted_bytes = parity.custody_json_bytes(envelope)
+    payload = {{
+        key: value
+        for key, value in envelope.items()
+        if key not in custody_metadata["custody_fields"]
+    }}
+    custody_sha256 = parity.custody_envelope_sha256(kind, payload)
+    refreshed_dispatch_vectors.append({{
+        "fixture_id": fixture_id,
+        **static_expected,
+        "custody_sha256": custody_sha256,
+        "persisted_json_hex": persisted_bytes.hex(),
+        "persisted_bytes_sha256": hashlib.sha256(persisted_bytes).hexdigest(),
+        "persisted_bytes_length": len(persisted_bytes),
+    }})
+custody_section["dispatch_vectors"] = refreshed_dispatch_vectors
+custody_section["dispatch_vector_count"] = len(refreshed_dispatch_vectors)
+fixture_path.write_text(
+    json.dumps(fixtures, indent=2, ensure_ascii=True) + "\\n",
+    encoding="utf-8",
+)
+print(json.dumps({{"status": "refreshed", "dispatch_count": len(refreshed_dispatch_vectors)}}))
+"""
+
+
 def _source_add_parity_refresh_script() -> str:
     evaluators = json.dumps(_SOURCE_ADD_PARITY_PROJECTION_EVALUATORS)
     return f"""\
+import ast
+import hashlib
 import json
 from pathlib import Path
 
@@ -147,8 +246,15 @@ from sourcing_model import consumer_parity as parity
 import sourcing_model.intent_source_evaluation as intent_source
 
 fixture_path = Path({json.dumps(_SOURCE_ADD_PARITY_FIXTURE_PATH)})
+parity_path = Path({json.dumps(_SOURCE_ADD_PARITY_MODULE_PATH)})
+contract_path = Path({json.dumps(_SOURCE_ADD_CONSUMER_CONTRACT_PATH)})
+hash_constant = {json.dumps(_SOURCE_ADD_PARITY_HASH_CONSTANT)}
 fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
-updates = {{}}
+updates = {{
+    "expected_model_runner_custody_v3_projection": (
+        parity.evaluate_model_runner_custody_v3_parity(fixtures)
+    ),
+}}
 for expected_key, evaluator_name in {evaluators}:
     evaluator = getattr(parity, evaluator_name)
     updates[expected_key] = evaluator(fixtures)
@@ -162,7 +268,75 @@ fixture_path.write_text(
     json.dumps(fixtures, indent=2, ensure_ascii=True) + "\\n",
     encoding="utf-8",
 )
-parity.verify_expected_projections(fixtures)
+fixture_digest = hashlib.sha256(
+    json.dumps(
+        fixtures,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
+
+parity_source = parity_path.read_text(encoding="utf-8")
+parity_tree = ast.parse(parity_source)
+matches = []
+for node in parity_tree.body:
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        continue
+    target = (
+        node.targets[0]
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+        else getattr(node, "target", None)
+    )
+    value = getattr(node, "value", None)
+    if (
+        isinstance(target, ast.Name)
+        and target.id == hash_constant
+        and isinstance(value, ast.Constant)
+        and isinstance(value.value, str)
+    ):
+        matches.append(value)
+if len(matches) != 1:
+    raise RuntimeError("consumer parity fixture hash constant is not unique")
+constant_node = matches[0]
+previous_digest = constant_node.value
+if len(previous_digest) != 64 or any(
+    character not in "0123456789abcdef" for character in previous_digest
+):
+    raise RuntimeError("consumer parity fixture hash constant is invalid")
+
+contract = json.loads(contract_path.read_text(encoding="utf-8"))
+exact_constants = contract.get("exact_constants")
+parity_constants = (
+    exact_constants.get({json.dumps(_SOURCE_ADD_PARITY_MODULE_PATH)})
+    if isinstance(exact_constants, dict)
+    else None
+)
+if (
+    not isinstance(parity_constants, dict)
+    or parity_constants.get(hash_constant) != previous_digest
+):
+    raise RuntimeError("consumer contract parity fixture hash differs")
+
+source_lines = parity_source.splitlines(keepends=True)
+start = (
+    sum(len(line) for line in source_lines[: constant_node.lineno - 1])
+    + constant_node.col_offset
+)
+end = (
+    sum(len(line) for line in source_lines[: constant_node.end_lineno - 1])
+    + constant_node.end_col_offset
+)
+parity_path.write_text(
+    parity_source[:start] + json.dumps(fixture_digest) + parity_source[end:],
+    encoding="utf-8",
+)
+parity_constants[hash_constant] = fixture_digest
+contract_path.write_text(
+    json.dumps(contract, indent=2, ensure_ascii=True) + "\\n",
+    encoding="utf-8",
+)
 print(json.dumps({{"status": "verified", "projection_count": len(updates)}}))
 """
 
@@ -998,9 +1172,14 @@ class CodeEditCandidateBuilder:
 
         if not _source_add_registration_changed(draft.unified_diff):
             return draft
-        if _SOURCE_ADD_PARITY_FIXTURE_PATH not in set(source_context.editable_files):
+        missing_derived_paths = sorted(
+            _SOURCE_ADD_DERIVED_ARTIFACT_PATHS
+            - set(source_context.editable_files)
+        )
+        if missing_derived_paths:
             raise CodeEditPrivateTestError(
-                "SOURCE_ADD parity fixture is unavailable in the measured source tree",
+                "SOURCE_ADD parity artifacts are unavailable in the measured source tree: "
+                + ", ".join(missing_derived_paths),
                 failure_stage="candidate_derived_artifact_failed",
             )
         try:
@@ -1035,13 +1214,48 @@ class CodeEditCandidateBuilder:
                     timeout_seconds=120,
                     check=False,
                 )
+                custody_path = tmp_dir / "refresh_source_add_custody.py"
+                custody_path.write_text(
+                    _source_add_custody_refresh_script(),
+                    encoding="utf-8",
+                )
+                _run_candidate_derived_artifact_tool(
+                    [sys.executable, str(custody_path)],
+                    cwd=repo_dir,
+                    timeout_seconds=240,
+                )
                 refresh_path = tmp_dir / "refresh_source_add_parity.py"
                 refresh_path.write_text(
                     _source_add_parity_refresh_script(),
                     encoding="utf-8",
                 )
+                previous_projection_state: tuple[bytes, ...] | None = None
+                for _ in range(3):
+                    _run_candidate_derived_artifact_tool(
+                        [sys.executable, str(refresh_path)],
+                        cwd=repo_dir,
+                        timeout_seconds=240,
+                    )
+                    projection_state = tuple(
+                        (repo_dir / path).read_bytes()
+                        for path in sorted(_SOURCE_ADD_DERIVED_ARTIFACT_PATHS)
+                    )
+                    if projection_state == previous_projection_state:
+                        break
+                    previous_projection_state = projection_state
+                else:
+                    raise CodeEditBuildError(
+                        "SOURCE_ADD parity projection did not converge"
+                    )
+                verify_path = tmp_dir / "verify_source_add_parity.py"
+                verify_path.write_text(
+                    "from sourcing_model.consumer_parity import "
+                    "verify_expected_projections\n"
+                    "verify_expected_projections()\n",
+                    encoding="utf-8",
+                )
                 _run_candidate_derived_artifact_tool(
-                    [sys.executable, str(refresh_path)],
+                    [sys.executable, str(verify_path)],
                     cwd=repo_dir,
                     timeout_seconds=240,
                 )
@@ -1056,7 +1270,7 @@ class CodeEditCandidateBuilder:
 
             changed_files = _changed_files(repo_dir)
             allowed_changed = set(extract_unified_diff_paths(draft.unified_diff))
-            allowed_changed.add(_SOURCE_ADD_PARITY_FIXTURE_PATH)
+            allowed_changed.update(_SOURCE_ADD_DERIVED_ARTIFACT_PATHS)
             unexpected = sorted(set(changed_files) - allowed_changed)
             if unexpected:
                 raise CodeEditPrivateTestError(
@@ -1064,9 +1278,13 @@ class CodeEditCandidateBuilder:
                     + ", ".join(unexpected),
                     failure_stage="candidate_derived_artifact_failed",
                 )
-            if _SOURCE_ADD_PARITY_FIXTURE_PATH not in changed_files:
+            missing_materialized_paths = sorted(
+                _SOURCE_ADD_DERIVED_ARTIFACT_PATHS - set(changed_files)
+            )
+            if missing_materialized_paths:
                 raise CodeEditPrivateTestError(
-                    "SOURCE_ADD routing edit did not produce a parity fixture update",
+                    "SOURCE_ADD routing edit did not produce all parity artifacts: "
+                    + ", ".join(missing_materialized_paths),
                     failure_stage="candidate_derived_artifact_failed",
                 )
             materialized_diff = _run(

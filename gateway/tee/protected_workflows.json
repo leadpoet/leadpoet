@@ -6927,6 +6927,11 @@
       "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1"
     },
     {
+      "ast_sha256": "sha256:242da1311043cb2620d6c8b18fbb7ed375c5f55ee035510a605b5379b710e578",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1"
+    },
+    {
       "ast_sha256": "sha256:8ff11687f4141764c8471de8dba2df6622726c768d48984ab0d5aea63c92785c",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2"
@@ -7020,6 +7025,11 @@
       "ast_sha256": "sha256:c03d961a01cefb584063f83f7252ecc2b48f87bf1a5861518da2dba73116dea9",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1"
+    },
+    {
+      "ast_sha256": "sha256:1994c9b657b4e6566cf62959ceb3bccec8c0256e648827cff20d8fd384c6ff5e",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1"
     },
     {
       "ast_sha256": "sha256:903d923eabc74dbeb91151349348a2948fb9bf63a58914b9f134c555d94b50f4",
@@ -7142,7 +7152,7 @@
       "symbol": "qualification_outcome_required_route_terminal_satisfies_v2"
     },
     {
-      "ast_sha256": "sha256:c794299fa5f6d9507a77fa77e09b6a9fe056c11b5b2b04ab1e162a29fb9f0477",
+      "ast_sha256": "sha256:0434fd06cee943a6f456c9ef2eadc5998a448597e13094eca7697775700826a5",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "validate_qualification_branch_control_failure_v1"
     },
@@ -7487,7 +7497,7 @@
       "symbol": "_QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2"
     },
     {
-      "ast_sha256": "sha256:170305aaec86685db4987aa07d7b0546bfa8743f6da943b90e7a5082707b4011",
+      "ast_sha256": "sha256:89d96e83b5aa30f53f3f70ec4f91d4b7227bedcfa797b69724cd92bf8e6dcbba",
       "path": "research_lab/sourcing_model_contract_check.py",
       "symbol": "_QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2"
     },
@@ -8077,7 +8087,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:70d3962e96bcc203c4800da3f5517ae67c803ce1b01446f4a2b7675c12b80dad",
-  "protected_source_commit": "46b37d5ff242baff926886c8b176c45c4879aaa6",
+  "manifest_hash": "sha256:c67cdb6950d307b210b6b39511adbbaeae046ba2c36ea6597eec07e6860cd94c",
+  "protected_source_commit": "cb8169ba519094905c09abdcdae55fef08ddb1cc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

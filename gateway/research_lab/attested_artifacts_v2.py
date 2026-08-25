@@ -92,6 +92,56 @@ def _select_committed_encrypted_artifacts(
     return selected
 
 
+async def _list_committed_transport_artifacts(
+    *,
+    client: Any,
+    root_job_id: str,
+    root_purpose: str,
+    transport_attempts: Sequence[Mapping[str, Any]],
+    committed_hashes: Sequence[str],
+) -> list[dict[str, Any]]:
+    scopes = [(str(root_job_id), str(root_purpose))]
+    seen_scopes = set(scopes)
+    for attempt in transport_attempts:
+        if attempt.get("provider_id") == "aws_s3_object_lock":
+            continue
+        scope = (
+            str(attempt.get("job_id") or ""),
+            str(attempt.get("purpose") or ""),
+        )
+        if not all(scope):
+            raise AttestedArtifactPersistenceV2Error(
+                "transport artifact scope is invalid"
+            )
+        if scope not in seen_scopes:
+            scopes.append(scope)
+            seen_scopes.add(scope)
+
+    by_artifact_id: dict[str, dict[str, Any]] = {}
+    for scoped_job_id, scoped_purpose in scopes:
+        listed = await client.v2_list_encrypted_artifacts(
+            job_id=scoped_job_id,
+            purpose=scoped_purpose,
+        )
+        selected = _select_committed_encrypted_artifacts(
+            listed.get("artifacts"),
+            committed_hashes=committed_hashes,
+        )
+        for artifact in selected:
+            artifact_id = str(artifact.get("artifact_id") or "")
+            if not _HASH_RE.fullmatch(artifact_id):
+                raise AttestedArtifactPersistenceV2Error(
+                    "coordinator encrypted artifact ID is invalid"
+                )
+            previous = by_artifact_id.get(artifact_id)
+            if previous is not None and previous != artifact:
+                raise AttestedArtifactPersistenceV2Error(
+                    "coordinator encrypted artifact descriptor differs"
+                )
+            by_artifact_id[artifact_id] = artifact
+    return [by_artifact_id[item] for item in sorted(by_artifact_id)]
+
+
 async def persist_execution_transport_artifacts_v2(
     *,
     job_id: str,
@@ -149,12 +199,11 @@ async def persist_execution_transport_artifacts_v2(
             and item.get("provider_id") != "aws_s3_object_lock"
         ]
     )
-    listed = await client.v2_list_encrypted_artifacts(
-        job_id=str(job_id),
-        purpose=str(purpose),
-    )
-    artifacts = _select_committed_encrypted_artifacts(
-        listed.get("artifacts"),
+    artifacts = await _list_committed_transport_artifacts(
+        client=client,
+        root_job_id=str(job_id),
+        root_purpose=str(purpose),
+        transport_attempts=transport_attempts,
         committed_hashes=committed_hashes,
     )
     observed_hashes = sorted(

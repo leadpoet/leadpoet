@@ -456,11 +456,11 @@ jobs:
             --region {q(required['AWS_REGION'])} \
             "$candidate_bundle" >/dev/null 2>&1
           failure_stage=candidate-bundle-metadata
-          aws s3 cp \
-            {q("s3://" + artifact_bucket + "/" + prefix + "/candidate-bundle-binding.json")} \
-            - \
-            --only-show-errors \
-            --region {q(required['AWS_REGION'])} | \
+          aws s3api get-object \
+            --bucket {q(artifact_bucket)} \
+            --key {q(prefix + "/candidate-bundle-binding.json")} \
+            --region {q(required['AWS_REGION'])} \
+            /dev/fd/3 3>&1 >/dev/null | \
           /usr/bin/python3.11 -c {q(candidate_bundle_binding_validator)} \
             {q(required['CANDIDATE_SHA'])} \
             "$candidate_bundle_sha256" \

@@ -743,7 +743,7 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "git bundle list-heads" not in head_stage
     directory_stage = execute.split(
         "failure_stage=candidate-repository-directory", 1
-    )[1].split("failure_stage=candidate-git-runtime", 1)[0]
+    )[1].split("if [ -x /usr/bin/git ]", 1)[0]
     assert 'mkdir -m 0700 -- "$candidate_repo" "$candidate_git_home"' in (
         directory_stage
     )
@@ -754,8 +754,9 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     git_runtime_stage = execute.split(
         "failure_stage=candidate-git-runtime", 1
     )[1].split("failure_stage=candidate-repository-init", 1)[0]
-    assert "test -x /usr/bin/git" in git_runtime_stage
-    assert "candidate_git --version" in git_runtime_stage
+    assert 'test -x "$candidate_git_bin"' in git_runtime_stage
+    assert "candidate_git --version" not in git_runtime_stage
+    assert "sudo -n /usr/bin/dnf -q -y install git-core" in execute
     init_stage = execute.split(
         "failure_stage=candidate-repository-init", 1
     )[1].split("failure_stage=candidate-repository-structure", 1)[0]
@@ -767,11 +768,13 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert 'test ! -L "$candidate_repo/.git"' in structure_stage
     assert 'git init "$candidate_repo"' not in init_stage
     assert "candidate_git()" in execute
-    assert "-u GIT_DIR" in execute
+    assert "/usr/bin/env -i" in execute
+    assert "PATH=/usr/bin:/bin" in execute
+    assert "LC_ALL=C" in execute
     assert 'HOME="$candidate_git_home"' in execute
     assert "GIT_CONFIG_NOSYSTEM=1" in execute
     assert "GIT_TERMINAL_PROMPT=0" in execute
-    assert "/usr/bin/git -c init.templateDir=" in execute
+    assert '"$candidate_git_bin" -c init.templateDir=' in execute
     verify_stage = execute.split(
         "failure_stage=candidate-bundle-verify", 1
     )[1].split("failure_stage=candidate-bundle-fetch", 1)[0]
@@ -984,6 +987,7 @@ if "--help" not in sys.argv:
         "/home/ec2-user/venv311/bin/python3", str(host_python)
     )
     command = command.replace("/usr/bin/git", str(git_stub))
+    command = command.replace("/usr/bin/env -i", "/usr/bin/env")
     if stage is not None:
         assert category is not None
         if stage == "bootstrap-environment":
@@ -1138,7 +1142,6 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
     assert all(call[:2] == ["-c", "init.templateDir="] for call in calls)
     normalized_calls = [call[2:] for call in calls]
     assert normalized_calls == [
-        ["--version"],
         ["-C", repo, "init"],
         ["-C", repo, "fetch", "--no-tags", bundle, "HEAD"],
         ["-C", repo, "rev-parse", "FETCH_HEAD"],

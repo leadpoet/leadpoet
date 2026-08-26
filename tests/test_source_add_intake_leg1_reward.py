@@ -394,6 +394,65 @@ async def test_manual_provenance_never_queues_probe_or_reward(monkeypatch):
     assert "reward_intent" not in finished
 
 
+@pytest.mark.parametrize(
+    ("http_status", "expected_disposition"),
+    (
+        (400, "retry"),
+        (408, "retry"),
+        (429, "retry"),
+        (503, "retry"),
+        (404, "complete"),
+        (410, "complete"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_documentation_fetch_retries_only_transient_statuses(
+    monkeypatch, http_status, expected_disposition
+):
+    finished = {}
+
+    async def fake_provenance(**_kwargs):
+        return (
+            SourceAddProvenanceResult(
+                PRECHECK_MANUAL,
+                ("documentation_fetch_failed",),
+                {"docs_fetch": {"provider_status": "ok", "status": http_status}},
+            ),
+            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        )
+
+    async def fake_finish(_work, **kwargs):
+        finished.update(kwargs)
+        return {
+            "status": (
+                "retry_wait"
+                if kwargs["disposition"] == "retry"
+                else "completed"
+            )
+        }
+
+    monkeypatch.setattr(
+        workflow, "_load_submission", lambda _sid: _async_value(_submission_row())
+    )
+    monkeypatch.setattr(
+        workflow, "evaluate_source_add_provenance_v2", fake_provenance
+    )
+    monkeypatch.setattr(workflow, "_finish_work", fake_finish)
+
+    await workflow._process_provenance(
+        _leased_work("provenance"), config=_config()
+    )
+
+    assert finished["disposition"] == expected_disposition
+    assert finished["stage"] == PRECHECK_MANUAL
+    if expected_disposition == "retry":
+        assert "next_work" not in finished
+        assert "reward_intent" not in finished
+    else:
+        assert finished["next_work"] == {}
+        assert "reward_intent" not in finished
+
+
 @pytest.mark.asyncio
 async def test_exact_functional_pass_queues_one_leg1_intent(monkeypatch):
     config_ref = "source_add_probe_config:0123456789abcdef"

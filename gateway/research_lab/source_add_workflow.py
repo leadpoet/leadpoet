@@ -293,10 +293,29 @@ async def _process_provenance(
     )
     precheck_doc = precheck.to_record_doc()
     reasons = {str(item) for item in precheck.reasons}
-    if precheck.precheck_status == "needs_manual_review" and any(
+    docs_fetch = precheck_doc.get("docs_fetch")
+    docs_http_status = docs_fetch.get("status", 0) if isinstance(
+        docs_fetch, Mapping
+    ) else 0
+    if not isinstance(docs_http_status, int):
+        docs_http_status = 0
+    retryable_provider_failure = any(
         item.endswith("provider_error") or item == "scrapingdog_key_missing"
         for item in reasons
-    ) and _retry_allowed(work, attempt_count, config.source_add_probe_max_attempts):
+    ) or (
+        "documentation_fetch_failed" in reasons
+        and (
+            docs_http_status in {400, 408, 425, 429}
+            or 500 <= docs_http_status < 600
+        )
+    )
+    if (
+        precheck.precheck_status == "needs_manual_review"
+        and retryable_provider_failure
+        and _retry_allowed(
+            work, attempt_count, config.source_add_probe_max_attempts
+        )
+    ):
         return await _finish_work(
             work,
             disposition="retry",

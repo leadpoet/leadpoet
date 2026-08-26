@@ -21,9 +21,14 @@ completions.
 request path. Every other health, liveness or readiness route is traced
 normally — `/health/v2-authority`, `/attest/health`, `/attestation/health` and
 the `/attestation/deploy-readiness` readiness probe all export spans.
-`/attestation/deploy-readiness` is probe traffic and is one of the highest-volume
-routes on the gateway, so it dominates any unfiltered aggregate; exclude it
-before reading request counts as user traffic. `/health/v2-authority` is
+`/attestation/deploy-readiness` is probe traffic and, whenever its caller is
+running, one of the highest-volume routes on the gateway, so it dominates any
+unfiltered aggregate; exclude it before reading request counts as user traffic.
+Exclude it from latency aggregates too, and in both directions: it answers in
+about three milliseconds, so its arrival or departure moves an all-route p95 by
+more than a real slowdown does. It stopped dead at 21:24 UTC on 2026-08-24 and
+has emitted nothing since; the 149% jump in the gateway's aggregate p95 that
+followed was that absence, not a regression. `/health/v2-authority` is
 low-volume by comparison but a recurring source of 5xx, so it is worth keeping
 in error queries.
 

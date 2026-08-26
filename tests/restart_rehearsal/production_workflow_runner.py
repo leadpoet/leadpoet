@@ -31,7 +31,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -11221,6 +11221,29 @@ def _exercise_full_rebenchmark_publication_path(
             self.tables[table].append(inserted)
             return copy.deepcopy(inserted)
 
+        async def insert_rows(
+            self,
+            table: str,
+            rows: Iterable[Mapping[str, Any]],
+        ) -> list[dict[str, Any]]:
+            payload = [copy.deepcopy(dict(row)) for row in rows]
+            if not payload:
+                raise ValueError(f"{table}: batch insert requires at least one row")
+
+            # A PostgreSQL multi-row INSERT is atomic. Preserve that external
+            # boundary contract if a later row hits one of the strict unique
+            # checks exercised by ``insert_row``.
+            prior_rows = copy.deepcopy(self.tables[table])
+            prior_ordinal = self._ordinal
+            prior_log_length = len(self.insert_log)
+            try:
+                return [await self.insert_row(table, row) for row in payload]
+            except Exception:
+                self.tables[table] = prior_rows
+                self._ordinal = prior_ordinal
+                del self.insert_log[prior_log_length:]
+                raise
+
         async def next_event_seq(
             self,
             table: str,
@@ -12675,6 +12698,7 @@ def _exercise_full_rebenchmark_publication_path(
     patchers = (
         patch.dict(os.environ, launch_environment),
         patch.object(research_lab_store, "insert_row", boundary.insert_row),
+        patch.object(research_lab_store, "insert_rows", boundary.insert_rows),
         patch.object(research_lab_store, "select_one", boundary.select_one),
         patch.object(research_lab_store, "select_many", boundary.select_many),
         patch.object(research_lab_store, "select_all", boundary.select_all),
@@ -12698,6 +12722,7 @@ def _exercise_full_rebenchmark_publication_path(
         ),
         patch.object(active_model_authority_v2, "select_many", boundary.select_many),
         patch.object(attested_v2_store, "insert_row", boundary.insert_row),
+        patch.object(attested_v2_store, "insert_rows", boundary.insert_rows),
         patch.object(attested_v2_store, "select_one", boundary.select_one),
         patch.object(attested_v2_store, "select_many", boundary.select_many),
         patch.object(attested_v2_store, "select_all", boundary.select_all),
@@ -13006,6 +13031,13 @@ def _exercise_full_rebenchmark_publication_path(
                         research_lab_store,
                         "next_event_seq",
                         recovery_boundary.next_event_seq,
+                    )
+                )
+                recovery_stack.enter_context(
+                    patch.object(
+                        research_lab_store,
+                        "insert_rows",
+                        recovery_boundary.insert_rows,
                     )
                 )
                 recovery_stack.enter_context(

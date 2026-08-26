@@ -5362,6 +5362,11 @@
       "symbol": "SandboxHTTPShimTransportCleanupError"
     },
     {
+      "ast_sha256": "sha256:87267507be4f1a5a586d9f18364f7c16a206498964b89a14ffdef834426942c0",
+      "path": "gateway/tee/sandbox_http_shim_v2.py",
+      "symbol": "SandboxQualificationRouteTrackingError"
+    },
+    {
       "ast_sha256": "sha256:6aad52af7c70d3c4cf734553283e18f799ab3302ee821dda629d27042ebef71d",
       "path": "gateway/tee/sandbox_http_shim_v2.py",
       "symbol": "_EVIDENCE_MISS_WRITE"
@@ -5407,7 +5412,7 @@
       "symbol": "_headers"
     },
     {
-      "ast_sha256": "sha256:ff24eaeb1270e848883a8003ff1b081ba967bfb70fed9bbc94bc50cdc9b2b877",
+      "ast_sha256": "sha256:043de36a8949192af5b400ba7a023037936f795454e1a32dcca40e2d5c1960c7",
       "path": "gateway/tee/sandbox_http_shim_v2.py",
       "symbol": "_qualification_route_transport_headers"
     },
@@ -8107,7 +8112,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1d3a1a92cfd923ef7d294deaf1622dfc5beefd2f29986148e9da0489008d1329",
-  "protected_source_commit": "786797d85bd71b0ab8d96d1544a53b7d9e71af84",
+  "manifest_hash": "sha256:8d74f2f37df5dbd970e8f4253282a3ed5f02a4cbb862004abe98d68b66fd4613",
+  "protected_source_commit": "761f7f8923a5f6852c2aad99163e4d56c4e64aab",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -2857,7 +2857,7 @@
       "symbol": "_process_leg1_reward"
     },
     {
-      "ast_sha256": "sha256:f987cdaef7d1355274ea7321d2c64a4dc87e85f33b61ae66f6c20a1e7d3da7bd",
+      "ast_sha256": "sha256:1ae4e78ba874afb13539235ff6cd4a75267e0fd98ea6b5f2b892f738f093a883",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provenance"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:478b26283e3b972460d9d7e0d3a3eb01ae96aa1f49a4c214cfcb94c82640be38",
-  "protected_source_commit": "1923433057acfd8b8f26c14fbf3c2bb7c114f242",
+  "manifest_hash": "sha256:fdab9f529923508756a0cb32fa20bdddacab1c5cf19fac2452ca943ba2760465",
+  "protected_source_commit": "36232929adb328385beefb2665c21261c67dcb57",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

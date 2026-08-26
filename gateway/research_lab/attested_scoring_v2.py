@@ -181,6 +181,18 @@ def _local_failed_receipt_hashes(
     )
 
 
+def _encrypted_transport_attempts_v2(
+    transport_attempts: Iterable[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    """Select attempts whose payloads entered the coordinator artifact vault."""
+
+    return tuple(
+        attempt
+        for attempt in transport_attempts
+        if attempt.get("terminal_status") != "attested_local_response"
+    )
+
+
 def _compact_proof_root(proof: Mapping[str, Any]) -> str:
     certificate = proof.get("certificate")
     claim = certificate.get("claim") if isinstance(certificate, Mapping) else None
@@ -1816,16 +1828,18 @@ async def execute_scoring_v2(
     if receipt.get("artifact_root") != expected_artifact_root:
         raise AttestedScoringV2Error("V2 scoring artifact root differs")
     transitions = await rpc_method("get_transitions")(job_id) if succeeded else []
+    encrypted_transport_attempts = _encrypted_transport_attempts_v2(
+        transport_attempts
+    )
     request_artifact_hashes = sorted(
         str(attempt.get("request_artifact_hash") or "")
-        for attempt in transport_attempts
+        for attempt in encrypted_transport_attempts
         if attempt.get("provider_id") != "aws_s3_object_lock"
     )
     response_artifact_hashes = sorted(
         str(attempt.get("response_artifact_hash") or "")
-        for attempt in transport_attempts
-        if attempt.get("terminal_status")
-        in {"authenticated_response", "attested_local_response"}
+        for attempt in encrypted_transport_attempts
+        if attempt.get("terminal_status") == "authenticated_response"
         and attempt.get("provider_id") != "aws_s3_object_lock"
     )
     transport_artifact_hashes = sorted(
@@ -1884,7 +1898,7 @@ async def execute_scoring_v2(
                 sequence=sequence,
                 source_receipt=receipt,
                 source_graph=graph,
-                transport_attempts=transport_attempts,
+                transport_attempts=encrypted_transport_attempts,
                 execution_artifact_hashes=job_artifact_hashes,
                 release_manifest=release,
                 client=artifact_coordinator_client,
@@ -2086,7 +2100,12 @@ async def execute_scoring_v2(
         return compatibility_outcome
     artifact_persistence = []
     reuse_persisted_artifacts = False
-    if expected_artifact_hashes:
+    # Snapshot/cache replay bytes are already bound to an immutable input
+    # authority and do not create duplicate coordinator envelopes. Inspect the
+    # vault anyway so any envelopes that do exist remain durably persisted.
+    if expected_artifact_hashes or len(encrypted_transport_attempts) != len(
+        transport_attempts
+    ):
         from gateway.research_lab.attested_artifacts_v2 import (
             _select_committed_encrypted_artifacts,
         )
@@ -2172,7 +2191,7 @@ async def execute_scoring_v2(
             release_hash=release["release_hash"],
             physical_role="gateway_coordinator",
         )
-        if not reuse_persisted_artifacts:
+        if artifacts and not reuse_persisted_artifacts:
             if persist_artifact is None:
                 from gateway.utils.tee_artifact_store_v2 import (
                     persist_enclave_artifact_v2,

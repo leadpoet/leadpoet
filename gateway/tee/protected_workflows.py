@@ -750,6 +750,7 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/research_lab/attested_scoring_v2.py": (
         "_local_failed_receipt_hashes",
+        "_encrypted_transport_attempts_v2",
         "_is_checkpoint_bootstrap_scope",
         "_resolve_parent_ancestry_transport_v2",
         "_validate_output_ancestry_checkpoint_v2",

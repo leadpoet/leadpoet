@@ -1660,13 +1660,13 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     diagnostics = _runtime_error_diagnostics(error_text)
     status = int(diagnostics.get("status") or 0)
     provider = str(diagnostics.get("provider") or "unknown")
+    if _provider_cost_cap_error_text(error_text):
+        return False
     if any(
         marker in lowered
         for marker in _MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS
     ):
         return True
-    if _provider_cost_cap_error_text(error_text):
-        return False
     if status in (408, 429) or status >= 500:
         return True
     # Scrapingdog's 400 "Something went wrong or profile not found" is

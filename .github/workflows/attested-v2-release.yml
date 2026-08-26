@@ -35,11 +35,23 @@ jobs:
         continue-on-error: true
         run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
 
-      - name: Remove stale root-owned V2 builder temp directories
+      - name: Reset stale V2 runner workspace before checkout
         id: stale_cleanup
         run: |
-          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
-            -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
+          set -Eeuo pipefail
+          test -n "${GITHUB_WORKSPACE:-}"
+          test -n "${GITHUB_REPOSITORY:-}"
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$GITHUB_WORKSPACE"
+          test ! -L "$GITHUB_WORKSPACE"
+          workspace="$(realpath -- "$GITHUB_WORKSPACE")"
+          runner_work_root="$(realpath -- "$(dirname -- "$RUNNER_TEMP")")"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          test -n "$repository_name"
+          test "$(dirname -- "$(dirname -- "$workspace")")" = "$runner_work_root"
+          test "$(basename -- "$workspace")" = "$repository_name"
+          test "$(basename -- "$(dirname -- "$workspace")")" = "$repository_name"
+          sudo find -P "$workspace" -xdev -depth -mindepth 1 -delete
 
       - name: Check out exact release source
         id: source_checkout
@@ -205,11 +217,23 @@ jobs:
         continue-on-error: true
         run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
 
-      - name: Remove stale root-owned V2 builder temp directories
+      - name: Reset stale V2 runner workspace before checkout
         id: stale_cleanup
         run: |
-          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
-            -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
+          set -Eeuo pipefail
+          test -n "${GITHUB_WORKSPACE:-}"
+          test -n "${GITHUB_REPOSITORY:-}"
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$GITHUB_WORKSPACE"
+          test ! -L "$GITHUB_WORKSPACE"
+          workspace="$(realpath -- "$GITHUB_WORKSPACE")"
+          runner_work_root="$(realpath -- "$(dirname -- "$RUNNER_TEMP")")"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          test -n "$repository_name"
+          test "$(dirname -- "$(dirname -- "$workspace")")" = "$runner_work_root"
+          test "$(basename -- "$workspace")" = "$repository_name"
+          test "$(basename -- "$(dirname -- "$workspace")")" = "$repository_name"
+          sudo find -P "$workspace" -xdev -depth -mindepth 1 -delete
 
       - name: Check out exact release source
         id: source_checkout
@@ -360,6 +384,24 @@ jobs:
         id: telemetry_start
         continue-on-error: true
         run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
+
+      - name: Reset stale V2 runner workspace before checkout
+        id: stale_cleanup
+        run: |
+          set -Eeuo pipefail
+          test -n "${GITHUB_WORKSPACE:-}"
+          test -n "${GITHUB_REPOSITORY:-}"
+          test -n "${RUNNER_TEMP:-}"
+          test -d "$GITHUB_WORKSPACE"
+          test ! -L "$GITHUB_WORKSPACE"
+          workspace="$(realpath -- "$GITHUB_WORKSPACE")"
+          runner_work_root="$(realpath -- "$(dirname -- "$RUNNER_TEMP")")"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          test -n "$repository_name"
+          test "$(dirname -- "$(dirname -- "$workspace")")" = "$runner_work_root"
+          test "$(basename -- "$workspace")" = "$repository_name"
+          test "$(basename -- "$(dirname -- "$workspace")")" = "$repository_name"
+          sudo find -P "$workspace" -xdev -depth -mindepth 1 -delete
 
       - name: Check out exact release source
         id: source_checkout

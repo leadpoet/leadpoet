@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "0b1bc9f5045922114e814c4795422699b3eeabff",
+  "baseline_commit": "064c538d79a4a8e78f85e7fac035dc673d26db9d",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -182,6 +182,11 @@
       "symbol": "_compact_parent_graphs_for_transport"
     },
     {
+      "ast_sha256": "sha256:b4a05bbb07a2e45baaf4a5bf4085198ba3de04fcaf41c0bc684c02d8cefe1b7f",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_encrypted_transport_attempts_v2"
+    },
+    {
       "ast_sha256": "sha256:56bbc4afdc22f24cbc590f10a3f793f99a1c54957cca2ebbd0704342594e2e28",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_is_checkpoint_bootstrap_scope"
@@ -222,7 +227,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:469756697a5b74f4afe5d8b648dd53e373b41ab160a3f0aee2d52e29fc2ce24f",
+      "ast_sha256": "sha256:63b0281b1c1697308bb51c3cf9001eb5cacf054a3abe8ee7f32f2bee28c1582d",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -8112,7 +8117,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:16d7b8c3dbaf86eb9964cf148b7d6a91a3a2b8679ca4f2b99611b6b962a39257",
-  "protected_source_commit": "8c21d833f2abfbbb58a340e55399f160368d831d",
+  "manifest_hash": "sha256:bd4ab2ffe3dd22c126f3980270406ba937d2134dac4c9bbd7fef06ff9425e387",
+  "protected_source_commit": "064c538d79a4a8e78f85e7fac035dc673d26db9d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

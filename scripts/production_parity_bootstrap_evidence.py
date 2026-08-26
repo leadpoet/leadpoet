@@ -35,6 +35,10 @@ BOOTSTRAP_STAGES = frozenset(
         "candidate-remote-rebind",
         "canonical-origin-fetch",
         "host-python-bootstrap",
+        "host-python-requirements",
+        "host-python-pip-bootstrap",
+        "host-python-dependency-install",
+        "host-python-dependency-check",
         "host-python-import",
         "host-entrypoint",
         "evidence-upload",
@@ -74,6 +78,10 @@ BOOTSTRAP_SSM_FAILURE_CODES = (
     (56, "candidate-repository-directory", "CommandFailed"),
     (57, "candidate-repository-structure", "CommandFailed"),
     (58, "host-python-bootstrap", "CommandFailed"),
+    (59, "host-python-requirements", "CommandFailed"),
+    (60, "host-python-pip-bootstrap", "CommandFailed"),
+    (61, "host-python-dependency-install", "CommandFailed"),
+    (62, "host-python-dependency-check", "CommandFailed"),
 )
 MAX_EVIDENCE_BYTES = 1_024
 

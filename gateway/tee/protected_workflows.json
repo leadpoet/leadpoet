@@ -3287,7 +3287,7 @@
       "symbol": "CoordinatorSourceAddFunctionalProbeV2"
     },
     {
-      "ast_sha256": "sha256:b2b2ade4d9b8e25f37f14d38ac44d186de577dfdbde719b503b0f1b0c02c8b36",
+      "ast_sha256": "sha256:ae68af84f573e86b7bca70c90a4e9286f8e7dbca5e57ab3f190d3475806c7787",
       "path": "gateway/tee/coordinator_source_add_v2.py",
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
@@ -8112,7 +8112,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8d74f2f37df5dbd970e8f4253282a3ed5f02a4cbb862004abe98d68b66fd4613",
-  "protected_source_commit": "761f7f8923a5f6852c2aad99163e4d56c4e64aab",
+  "manifest_hash": "sha256:16d7b8c3dbaf86eb9964cf148b7d6a91a3a2b8679ca4f2b99611b6b962a39257",
+  "protected_source_commit": "8c21d833f2abfbbb58a340e55399f160368d831d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

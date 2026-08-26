@@ -180,6 +180,22 @@ async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     return dict(data[0])
 
 
+async def insert_rows(
+    table: str, rows: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Insert one nonempty PostgREST batch and return its row representations."""
+
+    payload = [dict(row) for row in rows]
+    if not payload:
+        raise ValueError(f"{table}: batch insert requires at least one row")
+
+    def _call() -> Any:
+        return get_write_client().table(table).insert(payload).execute()
+
+    response = await asyncio.to_thread(_call)
+    return [dict(row) for row in (getattr(response, "data", None) or [])]
+
+
 async def call_rpc(function_name: str, params: Mapping[str, Any]) -> Any:
     """Call one service-role PostgREST function without blocking the event loop."""
     def _call() -> Any:

@@ -124,6 +124,146 @@ async def test_exact_duplicate_readback_retry_is_bounded(monkeypatch):
 
     assert inserts == 1
     assert reads == attested_v2_store._DUPLICATE_READBACK_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_exact_rows_use_bounded_postgrest_batches(monkeypatch):
+    rows = [
+        {"row_id": "row-%03d" % index, "value": index}
+        for index in range(250)
+    ]
+    batches = []
+
+    async def insert_batch(table, values):
+        assert table == "example"
+        batch = [dict(row) for row in values]
+        batches.append(batch)
+        return list(reversed(batch))
+
+    async def unexpected_read(*_args, **_kwargs):
+        pytest.fail("successful exact batches must not require reconciliation")
+
+    async def unexpected_single_insert(*_args, **_kwargs):
+        pytest.fail("multi-row chunks must not fall back to row-at-a-time inserts")
+
+    monkeypatch.setattr(attested_v2_store, "insert_rows", insert_batch)
+    monkeypatch.setattr(attested_v2_store, "select_one", unexpected_read)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_insert_exact",
+        unexpected_single_insert,
+    )
+
+    await attested_v2_store._insert_exact_rows(
+        "example",
+        rows,
+        key_fields=("row_id",),
+    )
+
+    assert [len(batch) for batch in batches] == [100, 100, 50]
+    assert [row for batch in batches for row in batch] == rows
+
+
+@pytest.mark.asyncio
+async def test_exact_batch_recovers_unknown_committed_response(monkeypatch):
+    rows = [
+        {"row_id": "row-a", "value": 1},
+        {"row_id": "row-b", "value": 2},
+    ]
+    durable = {}
+    insert_calls = 0
+
+    async def lost_response(_table, values):
+        nonlocal insert_calls
+        insert_calls += 1
+        for row in values:
+            durable[row["row_id"]] = dict(row)
+        raise ConnectionError("connection reset after batch commit")
+
+    async def select(_table, *, filters):
+        return durable.get(dict(filters)["row_id"])
+
+    monkeypatch.setattr(attested_v2_store, "insert_rows", lost_response)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+
+    await attested_v2_store._insert_exact_batch(
+        "example",
+        rows,
+        key_fields=("row_id",),
+    )
+
+    assert insert_calls == 1
+    assert durable == {row["row_id"]: row for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_exact_batch_retries_only_missing_concurrent_rows(monkeypatch):
+    rows = [
+        {"row_id": "row-a", "value": 1},
+        {"row_id": "row-b", "value": 2},
+        {"row_id": "row-c", "value": 3},
+    ]
+    durable = {}
+    insert_calls = []
+    sleeps = []
+
+    async def insert_batch(_table, values):
+        batch = [dict(row) for row in values]
+        insert_calls.append([row["row_id"] for row in batch])
+        if len(insert_calls) == 1:
+            durable[batch[0]["row_id"]] = batch[0]
+            raise RuntimeError("duplicate key value violates unique constraint 23505")
+        for row in batch:
+            durable[row["row_id"]] = row
+        return list(reversed(batch))
+
+    async def select(_table, *, filters):
+        return durable.get(dict(filters)["row_id"])
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(attested_v2_store, "insert_rows", insert_batch)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", sleep)
+
+    await attested_v2_store._insert_exact_batch(
+        "example",
+        rows,
+        key_fields=("row_id",),
+    )
+
+    assert insert_calls == [["row-a", "row-b", "row-c"], ["row-b", "row-c"]]
+    assert sleeps == [0.1]
+    assert durable == {row["row_id"]: row for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_exact_batch_conflicting_readback_fails_closed(monkeypatch):
+    rows = [
+        {"row_id": "row-a", "value": 1},
+        {"row_id": "row-b", "value": 2},
+    ]
+
+    async def lost_response(_table, _values):
+        raise ConnectionError("connection reset after batch commit")
+
+    async def conflicting(_table, *, filters):
+        row_id = dict(filters)["row_id"]
+        return {"row_id": row_id, "value": 99}
+
+    monkeypatch.setattr(attested_v2_store, "insert_rows", lost_response)
+    monkeypatch.setattr(attested_v2_store, "select_one", conflicting)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="stored row conflicts at value",
+    ):
+        await attested_v2_store._insert_exact_batch(
+            "example",
+            rows,
+            key_fields=("row_id",),
+        )
 HASH_C = "sha256:" + "c" * 64
 NOW = "2026-07-10T20:00:00Z"
 LATER = "2026-07-10T20:01:00Z"

@@ -269,3 +269,43 @@ def test_json_null_filter_uses_postgrest_is_operator():
             "null",
         )
     ]
+
+
+def test_insert_rows_sends_one_nonempty_payload(monkeypatch):
+    payloads = []
+
+    class _Response:
+        data = [{"id": 2}, {"id": 1}]
+
+    class _Query:
+        def insert(self, payload):
+            payloads.append(payload)
+            return self
+
+        def execute(self):
+            return _Response()
+
+    class _Client:
+        def table(self, table):
+            assert table == "events"
+            return _Query()
+
+    monkeypatch.setattr(store, "get_write_client", lambda: _Client())
+
+    result = asyncio.run(
+        store.insert_rows("events", ({"id": value} for value in (1, 2)))
+    )
+
+    assert payloads == [[{"id": 1}, {"id": 2}]]
+    assert result == [{"id": 2}, {"id": 1}]
+
+
+def test_insert_rows_rejects_empty_payload_before_client_access(monkeypatch):
+    monkeypatch.setattr(
+        store,
+        "get_write_client",
+        lambda: pytest.fail("empty batches must not open a database client"),
+    )
+
+    with pytest.raises(ValueError, match="requires at least one row"):
+        asyncio.run(store.insert_rows("events", ()))

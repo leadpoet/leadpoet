@@ -16,6 +16,7 @@ from gateway.research_lab.store import (
     _is_transient_store_error,
     call_rpc,
     insert_row,
+    insert_rows,
     select_all,
     select_many,
     select_one,
@@ -120,6 +121,7 @@ _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
 _EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
+_EXACT_INSERT_BATCH_ROWS = 100
 _DUPLICATE_READBACK_ATTEMPTS = 4
 _DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
 _ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0)
@@ -309,6 +311,177 @@ async def _insert_exact(
         return dict(stored)
 
     raise AssertionError("exact insert retry loop exhausted unexpectedly")
+
+
+def _exact_batch_row_key(
+    table: str,
+    row: Mapping[str, Any],
+    *,
+    key_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    key = tuple(str(row.get(field) or "") for field in key_fields)
+    if not key_fields or len(set(key_fields)) != len(key_fields) or not all(key):
+        raise AttestedV2StoreError(
+            "%s exact batch row key is invalid" % table
+        )
+    return key
+
+
+async def _read_exact_batch_rows(
+    table: str,
+    *,
+    expected_by_key: Mapping[tuple[str, ...], Mapping[str, Any]],
+    key_fields: tuple[str, ...],
+) -> set[tuple[str, ...]]:
+    """Reconcile one ambiguous batch through exact per-key durable reads."""
+
+    existing: set[tuple[str, ...]] = set()
+    for key, expected in expected_by_key.items():
+        stored = await select_one(
+            table,
+            filters=tuple(zip(key_fields, key)),
+        )
+        if stored is None:
+            continue
+        _assert_stored_row(table, stored, expected)
+        existing.add(key)
+    return existing
+
+
+async def _insert_exact_batch(
+    table: str,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+) -> None:
+    """Insert one independent row batch with exact ambiguous-outcome recovery."""
+
+    expected_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for value in rows:
+        row = dict(value)
+        key = _exact_batch_row_key(table, row, key_fields=key_fields)
+        if key in expected_by_key:
+            raise AttestedV2StoreError(
+                "%s exact batch row key is duplicated" % table
+            )
+        expected_by_key[key] = row
+    if not expected_by_key:
+        return
+
+    pending = dict(expected_by_key)
+    last_error: BaseException | None = None
+    last_error_kind = ""
+    for attempt in range(_EXACT_INSERT_ATTEMPTS):
+        try:
+            stored_rows = await insert_rows(table, pending.values())
+        except Exception as exc:
+            duplicate = _is_duplicate_error(exc)
+            transient = _is_transient_store_error(exc)
+            if not duplicate and not transient:
+                raise
+            last_error = exc
+            last_error_kind = "duplicate" if duplicate else "transient"
+        else:
+            observed: set[tuple[str, ...]] = set()
+            for stored in stored_rows:
+                if not isinstance(stored, Mapping):
+                    raise AttestedV2StoreError(
+                        "%s exact batch insert returned an invalid row" % table
+                    )
+                key = _exact_batch_row_key(
+                    table,
+                    stored,
+                    key_fields=key_fields,
+                )
+                expected = pending.get(key)
+                if expected is None or key in observed:
+                    raise AttestedV2StoreError(
+                        "%s exact batch insert returned an unexpected row" % table
+                    )
+                _assert_stored_row(table, stored, expected)
+                observed.add(key)
+            if observed == set(pending):
+                return
+            last_error = AttestedV2StoreError(
+                "%s exact batch insert response is incomplete" % table
+            )
+            last_error_kind = "ambiguous_response"
+
+        existing = await _read_exact_batch_rows(
+            table,
+            expected_by_key=pending,
+            key_fields=key_fields,
+        )
+        pending = {
+            key: row for key, row in pending.items() if key not in existing
+        }
+        if not pending:
+            return
+        if attempt == _EXACT_INSERT_ATTEMPTS - 1:
+            if last_error_kind == "duplicate":
+                raise AttestedV2StoreError(
+                    "%s batch duplicate could not be reloaded after bounded retry"
+                    % table
+                ) from last_error
+            assert last_error is not None
+            raise last_error
+
+        if last_error_kind == "duplicate":
+            backoff = _DUPLICATE_READBACK_BACKOFF_SECONDS[
+                min(attempt, len(_DUPLICATE_READBACK_BACKOFF_SECONDS) - 1)
+            ]
+        else:
+            backoff = _EXACT_INSERT_BACKOFF_SECONDS[
+                min(attempt, len(_EXACT_INSERT_BACKOFF_SECONDS) - 1)
+            ]
+        logger.warning(
+            "exact_batch_insert_retry table=%s attempt=%s/%s kind=%s "
+            "remaining_rows=%s",
+            table,
+            attempt + 1,
+            _EXACT_INSERT_ATTEMPTS,
+            last_error_kind,
+            len(pending),
+        )
+        await asyncio.sleep(backoff)
+
+    raise AssertionError("exact batch insert retry loop exhausted unexpectedly")
+
+
+async def _insert_exact_rows(
+    table: str,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+) -> None:
+    """Persist independent rows in bounded batches without weakening readback."""
+
+    normalized = [dict(row) for row in rows]
+    seen: set[tuple[str, ...]] = set()
+    for row in normalized:
+        key = _exact_batch_row_key(table, row, key_fields=key_fields)
+        if key in seen:
+            raise AttestedV2StoreError(
+                "%s exact row key is duplicated" % table
+            )
+        seen.add(key)
+    for offset in range(0, len(normalized), _EXACT_INSERT_BATCH_ROWS):
+        batch = normalized[offset : offset + _EXACT_INSERT_BATCH_ROWS]
+        if len(batch) == 1:
+            row = batch[0]
+            await _insert_exact(
+                table,
+                row,
+                key_filters=tuple(
+                    (field, row[field]) for field in key_fields
+                ),
+            )
+            continue
+        await _insert_exact_batch(
+            table,
+            batch,
+            key_fields=key_fields,
+        )
 
 
 def _attestation_document(identity: Mapping[str, Any]) -> tuple[str, str]:
@@ -863,14 +1036,15 @@ async def persist_receipt_graph_v2(
             row,
             key_filters=(("boot_identity_hash", row["boot_identity_hash"]),),
         )
-    for row in transport_rows:
-        if row["attempt_hash"] in existing_attempts:
-            continue
-        await _insert_exact(
-            TRANSPORT_TABLE,
-            row,
-            key_filters=(("attempt_hash", row["attempt_hash"]),),
-        )
+    await _insert_exact_rows(
+        TRANSPORT_TABLE,
+        (
+            row
+            for row in transport_rows
+            if row["attempt_hash"] not in existing_attempts
+        ),
+        key_fields=("attempt_hash",),
+    )
     for row in receipt_rows:
         if row["receipt_hash"] in existing_receipts:
             continue
@@ -891,18 +1065,16 @@ async def persist_receipt_graph_v2(
                 ("parent_receipt_hash", row["parent_receipt_hash"]),
             ),
         )
-    for row in receipt_transport_rows:
-        key = (row["receipt_hash"], row["attempt_hash"])
-        if key in existing_receipt_transports:
-            continue
-        await _insert_exact(
-            RECEIPT_TRANSPORT_TABLE,
-            row,
-            key_filters=(
-                ("receipt_hash", row["receipt_hash"]),
-                ("attempt_hash", row["attempt_hash"]),
-            ),
-        )
+    await _insert_exact_rows(
+        RECEIPT_TRANSPORT_TABLE,
+        (
+            row
+            for row in receipt_transport_rows
+            if (row["receipt_hash"], row["attempt_hash"])
+            not in existing_receipt_transports
+        ),
+        key_fields=("receipt_hash", "attempt_hash"),
+    )
     for row in host_operation_rows:
         key = (row["request_hash"],)
         if key in existing_host_operations:

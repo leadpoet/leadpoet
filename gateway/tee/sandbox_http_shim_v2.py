@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from email.message import Message
+import hashlib
 import importlib
 import io
 import json
@@ -65,6 +66,19 @@ _INSTALLED = False
 
 class SandboxHTTPShimV2Error(RuntimeError):
     """The sandbox could not obtain an authenticated provider terminal."""
+
+
+class SandboxQualificationRouteTrackingError(SandboxHTTPShimV2Error):
+    """The model's required-route ledger rejected this dispatch."""
+
+    qualification_failure_class = "tracking_failed"
+
+    def __init__(self, reason_sha256: str) -> None:
+        self.qualification_tracking_reason_sha256 = reason_sha256
+        super().__init__(
+            "qualification route transport hook failed "
+            f"reason_sha256={reason_sha256}"
+        )
 
 
 class SandboxHTTPShimTransportCleanupError(SandboxHTTPShimV2Error):
@@ -299,6 +313,23 @@ def _qualification_route_transport_headers() -> Dict[str, str]:
     try:
         value = hook()
     except Exception as exc:
+        try:
+            failure_class = getattr(exc, "qualification_failure_class", "")
+        except BaseException:
+            failure_class = ""
+        if type(failure_class) is str and failure_class == "tracking_failed":
+            try:
+                reason = str(exc)
+            except BaseException:
+                reason = ""
+            reason_material = (
+                reason.encode("utf-8", "replace")
+                if len(reason) <= 4096
+                else b"oversized qualification tracking reason"
+            )
+            raise SandboxQualificationRouteTrackingError(
+                "sha256:" + hashlib.sha256(reason_material).hexdigest()
+            ) from exc
         raise SandboxHTTPShimV2Error(
             "qualification route transport hook failed"
         ) from exc

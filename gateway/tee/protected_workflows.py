@@ -1751,6 +1751,7 @@ PROTECTED_SYMBOLS = {
         "_headers",
         "_qualification_route_transport_headers",
         "_cached_terminal",
+        "SandboxQualificationRouteTrackingError",
         "SandboxHTTPShimTransportCleanupError",
         "_RETIRED_CLEANUP_LOCK",
         "_RETIRED_CLEANUP_RECOVERY_LOCK",

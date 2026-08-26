@@ -140,6 +140,62 @@ def test_absent_hook_is_legacy_safe_but_v2_fails_closed(monkeypatch) -> None:
         shim._qualification_route_transport_headers()
 
 
+def test_route_tracking_failure_remains_terminal_and_reason_is_hash_only(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    class TrackingFailure(RuntimeError):
+        qualification_failure_class = "tracking_failed"
+
+    failure = TrackingFailure(
+        "confirmed-empty qualification route binding is stale"
+    )
+
+    def transport_headers():
+        raise failure
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+
+    with pytest.raises(
+        shim.SandboxQualificationRouteTrackingError
+    ) as raised:
+        shim._qualification_route_transport_headers()
+
+    expected_hash = (
+        "sha256:"
+        "e52443596eeefaa49367f3ac9b6132c9a259dcbd85217c2cb7a137796c165a07"
+    )
+    assert raised.value.qualification_failure_class == "tracking_failed"
+    assert raised.value.qualification_tracking_reason_sha256 == expected_hash
+    assert str(raised.value) == (
+        "qualification route transport hook failed "
+        f"reason_sha256={expected_hash}"
+    )
+    assert raised.value.__cause__ is failure
+    assert str(failure) not in str(raised.value)
+
+
+def test_nontracking_route_hook_failure_remains_generic(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    failure = RuntimeError("private provider detail")
+
+    def transport_headers():
+        raise failure
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+
+    with pytest.raises(shim.SandboxHTTPShimV2Error) as raised:
+        shim._qualification_route_transport_headers()
+
+    assert type(raised.value) is shim.SandboxHTTPShimV2Error
+    assert str(raised.value) == "qualification route transport hook failed"
+    assert not hasattr(raised.value, "qualification_failure_class")
+    assert raised.value.__cause__ is failure
+    assert str(failure) not in str(raised.value)
+
+
 def test_live_socket_waits_for_measured_operation_completion(monkeypatch) -> None:
     import gateway.tee.sandbox_http_shim_v2 as shim
 

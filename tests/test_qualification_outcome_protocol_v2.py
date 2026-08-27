@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -2376,6 +2377,147 @@ def test_local_replay_hint_cannot_override_host_authority(tmp_path) -> None:
     )
     with pytest.raises(ModelSandboxV2Error, match="cache body is invalid"):
         tampered_resolver(request_doc, "provider_evidence_cache")
+
+
+@pytest.mark.parametrize(
+    ("recorded_error", "expected_failure_code"),
+    [
+        (http.client.IncompleteRead(b"partial", 12), "unexpected_eof"),
+        (TimeoutError("provider timed out"), "timeout"),
+    ],
+)
+def test_frozen_transport_failure_is_one_measured_terminal(
+    monkeypatch,
+    request,
+    recorded_error,
+    expected_failure_code,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    short_root = Path(tempfile.mkdtemp(prefix="lp-replay-failure-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(short_root, ignore_errors=True))
+    socket_path = short_root / "provider.sock"
+    snapshot_root = short_root / "snapshot"
+    url = "https://api.exa.ai/search"
+    body = b"{}"
+    record_store = ProviderSnapshotStore(
+        str(snapshot_root),
+        mode=MODE_RECORD,
+    )
+    record_store.record_urllib_transport_error(
+        build_snapshot_request("POST", url, body=body),
+        error=recorded_error,
+    )
+    record_store.write_dev_icp_items(
+        [{"icp_ref": "qualification-transport-failure-test"}]
+    )
+    manifest = record_store.build_manifest(
+        recorded_at="2026-08-27T00:00:00Z"
+    )
+    record_store.write_manifest(manifest)
+    retained_attempts = []
+    retained_artifacts = []
+    transport = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail(
+            "frozen transport failure reached the live coordinator"
+        )
+    )
+    scope = transport.create_scope(
+        job_id="qualification-replay-failure",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="qualification-replay-failure",
+        retry_policy_hashes={"exa": "sha256:" + "b" * 64},
+        terminal_sink=lambda attempt: retained_attempts.append(
+            deepcopy(dict(attempt))
+        ),
+        artifact_sink=retained_artifacts.append,
+        allow_transport_failures=True,
+    )
+    resolver = _local_provider_replay_resolver_v2(
+        evidence_mode="frozen",
+        evidence_cache={},
+        evidence_cache_hash=sha256_json({}),
+        snapshot_root=snapshot_root,
+        snapshot_manifest_hash=str(manifest["manifest_hash"]),
+    )
+    server = SandboxProviderSocketServerV2(
+        socket_path=socket_path,
+        transport=transport,
+        execution_scope=scope,
+        local_replay_resolver=resolver,
+    )
+    package = ModuleType("sourcing_model")
+    package.__path__ = []
+    route_module = ModuleType("sourcing_model.qualification_route")
+    route_module.transport_headers = lambda: {}
+    package.qualification_route = route_module
+    monkeypatch.setitem(sys.modules, "sourcing_model", package)
+    monkeypatch.setitem(
+        sys.modules,
+        "sourcing_model.qualification_route",
+        route_module,
+    )
+    monkeypatch.setenv(shim.QUALIFICATION_PROTOCOL_V2_ENV, "1")
+    monkeypatch.setenv(shim.EVIDENCE_MODE_ENV, "frozen")
+    monkeypatch.setenv(shim.SNAPSHOT_DIR_ENV, str(snapshot_root))
+    monkeypatch.setenv(shim.SOCKET_ENV, str(socket_path))
+    server.start()
+    try:
+        terminal = shim.execute(
+            method="POST",
+            url=url,
+            headers={"accept": "application/json"},
+            body=body,
+            timeout_ms=1000,
+        )
+    finally:
+        server.close()
+
+    scope.assert_accepted_result_is_complete()
+    assert terminal["terminal_status"] == "transport_failure"
+    assert terminal["failure_code"] == expected_failure_code
+    assert terminal["http_status"] is None
+    assert terminal["body_b64"] == ""
+    assert len(retained_attempts) == 1
+    assert retained_attempts[0]["terminal_status"] == "transport_failure"
+    assert retained_attempts[0]["failure_code"] == expected_failure_code
+    assert retained_attempts[0]["response_artifact_hash"] is None
+    assert len(set(retained_artifacts)) == 2
+
+
+def test_attested_local_transport_failure_rejects_response_payload() -> None:
+    transport = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("local replay reached the live coordinator")
+    )
+    scope = transport.create_scope(
+        job_id="qualification-replay-invalid-failure",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="qualification-replay-invalid-failure",
+        retry_policy_hashes={"exa": "sha256:" + "b" * 64},
+        allow_transport_failures=True,
+    )
+
+    with transport.activate_scope(scope):
+        with pytest.raises(
+            ProviderClientV2Error,
+            match="attested local response authority is invalid",
+        ):
+            transport.execute_attested_local_http(
+                method="POST",
+                url="https://api.exa.ai/search",
+                headers={},
+                body=b"{}",
+                timeout_ms=1000,
+                replay_kind="snapshot",
+                resolver=lambda _request, _kind: {
+                    "terminal_status": "transport_failure",
+                    "http_status": None,
+                    "headers": {},
+                    "body_b64": base64.b64encode(b"forbidden").decode("ascii"),
+                    "failure_code": "unexpected_eof",
+                    "local_authority_sha256": "sha256:" + "a" * 64,
+                },
+            )
 
 
 @pytest.mark.asyncio

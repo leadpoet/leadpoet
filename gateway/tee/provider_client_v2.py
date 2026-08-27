@@ -30,6 +30,7 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ENDPOINT_HOST,
 )
 from leadpoet_canonical.attested_v2 import (
+    TRANSPORT_FAILURE_CODES,
     build_transport_attempt,
     canonical_json,
     sha256_bytes,
@@ -821,33 +822,57 @@ class BrokeredProviderTransportV2:
             raise ProviderClientV2Error(
                 "attested local response authority fields are invalid"
             )
-        if (
-            resolved.get("terminal_status") != "attested_local_response"
-            or resolved.get("failure_code") not in {None, ""}
-            or isinstance(resolved.get("http_status"), bool)
-            or not isinstance(resolved.get("http_status"), int)
-            or not 100 <= int(resolved["http_status"]) <= 599
-            or not isinstance(resolved.get("headers"), Mapping)
-            or not _HASH_RE.fullmatch(
-                str(resolved.get("local_authority_sha256") or "")
-            )
-        ):
+        terminal_status = str(resolved.get("terminal_status") or "")
+        failure_code = str(resolved.get("failure_code") or "")
+        authority_hash = str(resolved.get("local_authority_sha256") or "")
+        if not _HASH_RE.fullmatch(authority_hash):
             raise ProviderClientV2Error(
                 "attested local response authority is invalid"
             )
-        try:
-            response_body = base64.b64decode(
-                str(resolved.get("body_b64") or ""),
-                validate=True,
+        if terminal_status == "attested_local_response":
+            if (
+                failure_code
+                or isinstance(resolved.get("http_status"), bool)
+                or not isinstance(resolved.get("http_status"), int)
+                or not 100 <= int(resolved["http_status"]) <= 599
+                or not isinstance(resolved.get("headers"), Mapping)
+            ):
+                raise ProviderClientV2Error(
+                    "attested local response authority is invalid"
+                )
+            try:
+                response_body = base64.b64decode(
+                    str(resolved.get("body_b64") or ""),
+                    validate=True,
+                )
+            except Exception as exc:
+                raise ProviderClientV2Error(
+                    "attested local response body is invalid"
+                ) from exc
+            response_headers = _headers_without_credentials(
+                dict(resolved["headers"])
             )
-        except Exception as exc:
+            http_status: int | None = int(resolved["http_status"])
+            response_artifact_hash: str | None = sha256_bytes(response_body)
+        elif terminal_status == "transport_failure":
+            if (
+                failure_code not in TRANSPORT_FAILURE_CODES
+                or resolved.get("http_status") is not None
+                or resolved.get("body_b64") != ""
+                or not isinstance(resolved.get("headers"), Mapping)
+                or dict(resolved["headers"])
+            ):
+                raise ProviderClientV2Error(
+                    "attested local response authority is invalid"
+                )
+            response_body = b""
+            response_headers = {}
+            http_status = None
+            response_artifact_hash = None
+        else:
             raise ProviderClientV2Error(
-                "attested local response body is invalid"
-            ) from exc
-        response_headers = _headers_without_credentials(
-            dict(resolved["headers"])
-        )
-        authority_hash = str(resolved["local_authority_sha256"])
+                "attested local response authority is invalid"
+            )
         request_artifact = {
             "schema_version": "leadpoet.attested-local-request.v1",
             "authority_sha256": authority_hash,
@@ -857,7 +882,6 @@ class BrokeredProviderTransportV2:
         request_artifact_hash = sha256_bytes(
             canonical_json(request_artifact).encode("utf-8")
         )
-        response_artifact_hash = sha256_bytes(response_body)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         attempt = build_transport_attempt(
             request_id=secrets.token_hex(16),
@@ -885,47 +909,47 @@ class BrokeredProviderTransportV2:
             retry_policy_hash=retry_policy_hash,
             timeout_ms=int(timeout_ms or scope.default_timeout_ms),
             started_at=now,
-            terminal_status="attested_local_response",
-            http_status=int(resolved["http_status"]),
+            terminal_status=terminal_status,
+            http_status=http_status,
             response_hash=response_artifact_hash,
             request_artifact_hash=request_artifact_hash,
             response_artifact_hash=response_artifact_hash,
             tls_peer_chain_hash=None,
             tls_protocol=None,
-            failure_code=None,
+            failure_code=failure_code or None,
             completed_at=now,
         )
         validate_transport_attempt(attempt)
         if scope.terminal_sink is not None:
             scope.terminal_sink(dict(attempt))
+        evidence_artifact_hashes = {
+            authority_hash,
+            request_artifact_hash,
+        }
+        if response_artifact_hash is not None:
+            evidence_artifact_hashes.add(response_artifact_hash)
         if scope.artifact_sink is not None:
-            for artifact_hash in (
-                authority_hash,
-                request_artifact_hash,
-                response_artifact_hash,
-            ):
+            for artifact_hash in sorted(evidence_artifact_hashes):
                 scope.artifact_sink(artifact_hash)
         scope.record_terminal(
             logical_operation_id,
             attempt_number,
-            "attested_local_response",
-            int(resolved["http_status"]),
+            terminal_status,
+            http_status,
             str(attempt["attempt_hash"]),
         )
         return {
-            "terminal_status": "attested_local_response",
-            "http_status": int(resolved["http_status"]),
+            "terminal_status": terminal_status,
+            "http_status": http_status,
             "headers": response_headers,
-            "body_b64": base64.b64encode(response_body).decode("ascii"),
-            "failure_code": None,
-            "transport_attempt": attempt,
-            "evidence_artifact_hashes": sorted(
-                {
-                    authority_hash,
-                    request_artifact_hash,
-                    response_artifact_hash,
-                }
+            "body_b64": (
+                base64.b64encode(response_body).decode("ascii")
+                if terminal_status == "attested_local_response"
+                else ""
             ),
+            "failure_code": failure_code or None,
+            "transport_attempt": attempt,
+            "evidence_artifact_hashes": sorted(evidence_artifact_hashes),
         }
 
     def install(self) -> None:

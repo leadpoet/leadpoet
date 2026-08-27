@@ -1317,7 +1317,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:3a52ce9c5e2ea612a27f8e967aad456465355b2ecfe87e1c05b3246a8ddf001a",
+      "ast_sha256": "sha256:cde12fa586f98ca305fe592ec2b0612ca6324dd8600ed9e4c3dc64f136f90d9b",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:fdab9f529923508756a0cb32fa20bdddacab1c5cf19fac2452ca943ba2760465",
-  "protected_source_commit": "36232929adb328385beefb2665c21261c67dcb57",
+  "manifest_hash": "sha256:28036e22c88ab4b90f818300627211a147771ccb863ec6f45e8e6b80aaf68e89",
+  "protected_source_commit": "ba67e44980a19656877bbb831234b314da416fca",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -1011,10 +1011,18 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     assert 'host_python="$host_venv/bin/python3"' in source
     assert 'test ! -e "$host_venv"' in source
     assert (
-        '/usr/bin/python3.11 -I -m venv --without-pip "$host_venv"'
+        'sudo -n /usr/bin/dnf -q -y install \\\n'
+        '            python3.11-pip >/dev/null 2>&1'
         in source
     )
-    assert "python3.11-pip-wheel" in source
+    assert (
+        '/usr/bin/python3.11 -I -m venv "$host_venv"'
+        in source
+    )
+    runtime_package = source.index("host_bootstrap_step=runtime-package")
+    venv_create = source.index("host_bootstrap_step=venv-create")
+    assert runtime_package < venv_create
+    assert "python3.11-pip-wheel" not in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 
@@ -1078,6 +1086,7 @@ def test_full_bootstrap_diagnostic_exposes_only_a_bounded_substage():
     ).read_text(encoding="utf-8")
     allowed = {
         "venv-absence",
+        "runtime-package",
         "venv-create",
         "venv-identity",
         "python-version",

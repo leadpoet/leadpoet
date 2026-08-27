@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "064c538d79a4a8e78f85e7fac035dc673d26db9d",
+  "baseline_commit": "9c6a4fea465d9b13b8780ced936c8f18f8ca6210",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1747,7 +1747,7 @@
       "symbol": "reregister_active_manifest"
     },
     {
-      "ast_sha256": "sha256:faa0e34674910f100a7728ac49041d6f151f775c976204ec59aedcf49e3febb6",
+      "ast_sha256": "sha256:1260e26cad9984f3bd8781010efc16daff8f60cdb1321070c900e2468eda0d50",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "sync_active_model_to_repo_head"
     },
@@ -8152,7 +8152,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6f609efc974ce329d62e18f73437539e5020e855db52f711207ff4ec7c0d9b5b",
-  "protected_source_commit": "9c3d4e8ec292b40ee9bbeed21c1e6148780a5d5e",
+  "manifest_hash": "sha256:948cb7ceea10b6722b110bbfb6016168edde89fd0151b58b875c45050e9420c4",
+  "protected_source_commit": "9c6a4fea465d9b13b8780ced936c8f18f8ca6210",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

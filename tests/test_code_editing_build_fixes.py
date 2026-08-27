@@ -74,7 +74,11 @@ def _source_add_materialization_fixture(
     (source_root / "sourcing_model" / "__init__.py").write_text("", encoding="utf-8")
     (routing_dir / "__init__.py").write_text("", encoding="utf-8")
     runtime_path = routing_dir / "runtime.py"
-    runtime_source = "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+    runtime_source = (
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "    SourceAddRoutingRegistration(provider_id='existing'),\n"
+        ")\n"
+    )
     runtime_path.write_text(runtime_source, encoding="utf-8")
     semantic_registry_path = (
         source_root / code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH
@@ -351,15 +355,16 @@ def verify_expected_projections(fixtures=None):
         ),
         file_previews=(),
     )
+    # Real model diffs may omit the enclosing tuple name from the hunk label
+    # and context while inserting a registration inside the tuple.
     unified_diff = (
         "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
         "--- a/sourcing_model/routing/runtime.py\n"
         "+++ b/sourcing_model/routing/runtime.py\n"
-        "@@ -1 +1,4 @@\n"
-        "-SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
-        "+SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "@@ -2,2 +2,3 @@\n"
+        "     SourceAddRoutingRegistration(provider_id='existing'),\n"
         "+    SourceAddRoutingRegistration(provider_id='builtwith_trends'),\n"
-        "+)\n"
+        " )\n"
     )
     draft = _draft(
         target_files=(code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,),

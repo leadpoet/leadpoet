@@ -148,17 +148,29 @@ _SOURCE_ADD_PARITY_PROJECTION_EVALUATORS = (
 
 
 def _source_add_registration_changed(unified_diff: str) -> bool:
-    if _SOURCE_ADD_ROUTING_RUNTIME_PATH not in extract_unified_diff_paths(unified_diff):
-        return False
-    added_lines = "\n".join(
-        line[1:]
-        for line in str(unified_diff or "").splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    )
-    return (
-        "SourceAddRoutingRegistration(" in added_lines
-        and "SOURCE_ADD_ROUTING_REGISTRATIONS" in str(unified_diff or "")
-    )
+    sections: list[str] = []
+    current: list[str] = []
+    for line in str(unified_diff or "").splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            sections.append("".join(current))
+            current = []
+        current.append(line)
+    if current:
+        sections.append("".join(current))
+
+    for section in sections:
+        if extract_unified_diff_paths(section) != {
+            _SOURCE_ADD_ROUTING_RUNTIME_PATH
+        }:
+            continue
+        added_lines = "\n".join(
+            line[1:]
+            for line in section.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        if "SourceAddRoutingRegistration(" in added_lines:
+            return True
+    return False
 
 
 def _source_add_candidate_authored_draft(

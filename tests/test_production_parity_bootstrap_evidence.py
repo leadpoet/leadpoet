@@ -657,6 +657,7 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert "scripts/run_production_parity_full_host.py --help" in execute
     assert "scripts/resolve_production_parity_controller_requirements.py" in execute
     assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in execute
+    assert "python3.11-pip-wheel" in execute
     assert '"$host_python" -m ensurepip --upgrade' in execute
     assert '"$host_python" -m pip check' in execute
     provisioner = (
@@ -664,7 +665,11 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     ).read_text(encoding="utf-8")
     assert "install -d -m 0700 /run/leadpoet-production-parity" in provisioner
     bootstrap = execute.index("failure_stage=host-python-bootstrap")
-    venv = execute.index('/usr/bin/python3.11 -m venv "$host_venv"', bootstrap)
+    venv = execute.index(
+        '/usr/bin/python3.11 -I -m venv --without-pip "$host_venv"',
+        bootstrap,
+    )
+    bootstrap_pip = execute.index("python3.11-pip-wheel", venv)
     install = execute.index('"$host_python" -m pip install', venv)
     import_stage = execute.index("failure_stage=host-python-import", install)
     verified_import = execute.index(
@@ -673,6 +678,7 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert (
         bootstrap
         < venv
+        < bootstrap_pip
         < install
         < import_stage
         < verified_import
@@ -1033,7 +1039,9 @@ else:
         'host_python="$host_venv/bin/python3"',
         f"host_python={shlex.quote(str(host_python))}",
     )
-    venv_command = f'{sys.executable} -m venv "$host_venv"'
+    venv_command = (
+        f'{sys.executable} -I -m venv --without-pip "$host_venv"'
+    )
     assert command.count(venv_command) == 1
     command = command.replace(
         venv_command, 'mkdir -m 0700 -- "$host_venv"', 1

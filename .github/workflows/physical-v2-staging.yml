@@ -567,7 +567,10 @@ jobs:
           host_bootstrap_step=venv-absence
           test ! -e "$host_venv"
           host_bootstrap_step=venv-create
-          /usr/bin/python3.11 -m venv "$host_venv"
+          # The production AMI may omit the distro pip bootstrap wheel. Build
+          # the isolated interpreter first so that omission cannot make venv
+          # creation fail before the candidate dependency lock is installed.
+          /usr/bin/python3.11 -I -m venv --without-pip "$host_venv"
           host_bootstrap_step=venv-identity
           test -d "$host_venv"
           test ! -L "$host_venv"
@@ -589,6 +592,9 @@ jobs:
           host_bootstrap_step=pip-bootstrap
           if ! PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m pip --version >/dev/null 2>&1; then
+            test -x /usr/bin/dnf
+            sudo -n /usr/bin/dnf -q -y install \
+              python3.11-pip-wheel >/dev/null 2>&1
             PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m ensurepip --upgrade >/dev/null 2>&1
           fi

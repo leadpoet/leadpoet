@@ -1132,7 +1132,7 @@
       "symbol": "S3OfficialBaselineDocumentCustody.transition_repository"
     },
     {
-      "ast_sha256": "sha256:cdbc093cd9b1768d5bbfa5cec1c0a4181e7f69ca68b2b9f6a1b9cb02aef3de2a",
+      "ast_sha256": "sha256:cd3cf13e9da76ae813c31fb6173e6bfe23c2f3e59c90f95664344fc225a33ec9",
       "path": "gateway/research_lab/official_baseline_custody.py",
       "symbol": "S3OfficialBaselineTransitionRepository.append_model_transition"
     },
@@ -1142,7 +1142,7 @@
       "symbol": "S3OfficialBaselineTransitionRepository.expected_frontier_sha256"
     },
     {
-      "ast_sha256": "sha256:36657598ff82bb3957c4c889f7f3933582a86bf3cbed8de3e409fac60b4054ee",
+      "ast_sha256": "sha256:1c6f7b2a0426898a450441c40f0e070f463d8bb38f0789588ddc81dbb29900f8",
       "path": "gateway/research_lab/official_baseline_custody.py",
       "symbol": "S3OfficialBaselineTransitionRepository.load_model_transition"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:28036e22c88ab4b90f818300627211a147771ccb863ec6f45e8e6b80aaf68e89",
-  "protected_source_commit": "ba67e44980a19656877bbb831234b314da416fca",
+  "manifest_hash": "sha256:60da3138e2c0a628228e373cfa38bb40a678d3c0306888e7864eb00915523d7d",
+  "protected_source_commit": "015a816137abf610ae82d302ddc514974e09bdb7",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

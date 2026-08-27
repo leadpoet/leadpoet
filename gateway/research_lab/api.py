@@ -196,6 +196,35 @@ ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started", "paused"}
 AUTORESEARCH_PROXY_PREFIXES = HOSTED_PROXY_PREFIXES
 
 
+def _openrouter_registration_failure_is_retryable(
+    authority_doc: Mapping[str, Any],
+) -> bool:
+    attempts = authority_doc.get("transport_attempts")
+    if not isinstance(attempts, list):
+        return False
+    for item in attempts:
+        if not isinstance(item, Mapping):
+            continue
+        terminal_status = str(item.get("terminal_status") or "")
+        if terminal_status == "transport_failure":
+            return True
+        if terminal_status not in {
+            "authenticated_response",
+            "attested_local_response",
+        }:
+            continue
+        http_status = item.get("http_status")
+        if isinstance(http_status, bool):
+            continue
+        try:
+            status = int(http_status)
+        except (TypeError, ValueError):
+            continue
+        if status in {408, 429} or 500 <= status <= 599:
+            return True
+    return False
+
+
 def _source_add_provision_credential_ref(miner_hotkey: str, adapter_id: str) -> str:
     return (
         "encrypted_ref:source_add:"
@@ -2012,12 +2041,7 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
 
         if isinstance(exc, AttestedScoringV2Error):
             authority_doc = exc.authority or {}
-            attempts = authority_doc.get("transport_attempts") or []
-            if any(
-                isinstance(item, Mapping)
-                and item.get("terminal_status") == "transport_failure"
-                for item in attempts
-            ):
+            if _openrouter_registration_failure_is_retryable(authority_doc):
                 raise HTTPException(
                     status_code=503,
                     detail="OpenRouter credential verification transport is unavailable",

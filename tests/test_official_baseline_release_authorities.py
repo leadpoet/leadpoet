@@ -244,7 +244,7 @@ def _provider_fixture():
         },
         "body": {"name": "fixture", "input": {"schema_version": 3}},
         "reconciliation": {
-            "run_id_json_pointer": "/id",
+            "run_id_json_pointer": "/run/id",
             "primary_poll": {
                 "method": "GET",
                 "url_template": "https://code.deepline.com/api/v2/runs/{run_id}?full=true",
@@ -309,7 +309,11 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     custody = _custody()
     interrupted = _Proxy(
         [
-            (200, {"id": "run-fixture", "status": "running"}, {}),
+            (
+                200,
+                {"run": {"id": "run-fixture", "status": "running"}},
+                {},
+            ),
             OfficialBaselineProtectedAuthorityError("poll interrupted"),
         ]
     )
@@ -398,6 +402,39 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
         .model_provider_response_ingestion
         is None
     )
+
+
+def test_deepline_missing_model_owned_run_id_path_fails_closed_before_poll():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [(200, {"id": "legacy-top-level", "status": "running"}, {})]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "missing-nested-id"},
+        unit_ref="baseline_icp:" + "9" * 64,
+        action=action,
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="run id is unavailable",
+    ):
+        executor.execute_prepared(preparation=preparation, action=action)
+
+    assert [call["method"] for call in proxy.calls] == ["POST"]
+    assert custody.load_protected_action_progress(
+        preparation_sha256=preparation.preparation_sha256
+    ) is None
 
 
 def test_deepline_tampered_progress_fails_closed_without_network():

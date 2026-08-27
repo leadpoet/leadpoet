@@ -101,6 +101,25 @@ jobs:
             --wait \
             --timeout-seconds 1800 \
             --interval-seconds 3
+          release_image_inventory="$RUNNER_TEMP/gateway-parent-preexisting-images.txt"
+          bash validator_tee/scripts/reclaim_release_build_images_v2.sh \
+            snapshot "$release_image_inventory"
+          cleanup_release_build_images() {
+            bash validator_tee/scripts/reclaim_release_build_images_v2.sh \
+              cleanup "$release_image_inventory"
+            docker builder prune --all --force
+          }
+          cleanup_release_build_images_on_exit() {
+            local build_status="$?"
+            local cleanup_status=0
+            trap - EXIT
+            cleanup_release_build_images || cleanup_status="$?"
+            if [ "$build_status" -ne 0 ]; then
+              exit "$build_status"
+            fi
+            exit "$cleanup_status"
+          }
+          trap cleanup_release_build_images_on_exit EXIT
           python3 gateway/tee/host_memory_guard_v2.py \
             --cleanup-disposable-tests \
             --minimum-available-mib 4096
@@ -115,8 +134,7 @@ jobs:
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
 
           rm -rf "$RUNNER_TEMP/gateway-build-work"
-          docker image prune --all --force
-          docker builder prune --all --force
+          cleanup_release_build_images
           df -h /
 
           export VALIDATOR_V2_BUILDER_DOMAIN=gateway
@@ -274,6 +292,25 @@ jobs:
             --wait \
             --timeout-seconds 1800 \
             --interval-seconds 3
+          release_image_inventory="$RUNNER_TEMP/validator-parent-preexisting-images.txt"
+          bash validator_tee/scripts/reclaim_release_build_images_v2.sh \
+            snapshot "$release_image_inventory"
+          cleanup_release_build_images() {
+            bash validator_tee/scripts/reclaim_release_build_images_v2.sh \
+              cleanup "$release_image_inventory"
+            docker builder prune --all --force
+          }
+          cleanup_release_build_images_on_exit() {
+            local build_status="$?"
+            local cleanup_status=0
+            trap - EXIT
+            cleanup_release_build_images || cleanup_status="$?"
+            if [ "$build_status" -ne 0 ]; then
+              exit "$build_status"
+            fi
+            exit "$cleanup_status"
+          }
+          trap cleanup_release_build_images_on_exit EXIT
 
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           export GATEWAY_V2_BUILDER_DOMAIN=validator
@@ -285,8 +322,7 @@ jobs:
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
 
           rm -rf "$RUNNER_TEMP/gateway-build-work"
-          docker image prune --all --force
-          docker builder prune --all --force
+          cleanup_release_build_images
           df -h /
 
           export VALIDATOR_V2_BUILDER_DOMAIN=validator

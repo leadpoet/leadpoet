@@ -1422,6 +1422,7 @@ build_gateway_restart_command() {
   local bootstrap_command=""
   local bootstrap_command_b64=""
   local bootstrap_prefix="gateway-restart-controller-bootstrap"
+  local gateway_restart_entrypoint_root="\$authority_root"
   local gateway_counterpart_path=""
   local gateway_secret_id="${GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
   local miner_bootstrap_arguments=""
@@ -1435,6 +1436,7 @@ build_gateway_restart_command() {
   fi
   if [ "$disable_miner_submissions_before_restart" = "1" ]; then
     bootstrap_prefix="gateway-miner-maintenance-bootstrap"
+    gateway_restart_entrypoint_root="\$candidate_root"
     miner_bootstrap_arguments=" \\
           --miner-maintenance-bootstrap-plan \"\$bootstrap_root/plan.json\" \\
           --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
@@ -1541,7 +1543,7 @@ $miner_candidate_prepare
         GATEWAY_V2_RELEASE_REQUIREMENTS='$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH' \\
         GATEWAY_V2_RELEASE_LINEAGE='$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH' \\
         AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \\
-        bash \"\$authority_root/gw_restart.sh\" \\
+        bash \"$gateway_restart_entrypoint_root/gw_restart.sh\" \\
           --commit '$commit'$miner_bootstrap_arguments"
   bootstrap_command_b64="$(
     printf '%s' "$bootstrap_command" | base64 | tr -d '\n'

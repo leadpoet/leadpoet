@@ -170,7 +170,9 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     )
     assert "GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit'" in source
     assert "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit'" in source
-    assert r'bash \"\$authority_root/gw_restart.sh\"' in source
+    assert 'local gateway_restart_entrypoint_root="\\$authority_root"' in source
+    assert 'gateway_restart_entrypoint_root="\\$candidate_root"' in source
+    assert r'bash \"$gateway_restart_entrypoint_root/gw_restart.sh\"' in source
     assert r'bash \"\$authority_root/validator_restart.sh\"' in source
     assert r"""bash \"\$authority_root/validator_restart.sh\" --commit '$commit'""" in source
     assert "git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit'" in source
@@ -273,13 +275,13 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
     controller_activation = bootstrap_command.index(
         'mv -Tf -- "$controller_link" "$controller_root/current"'
     )
-    authority_exec = bootstrap_command.index('bash "$authority_root/gw_restart.sh"')
-    assert controller_install < controller_activation < authority_exec
+    candidate_exec = bootstrap_command.index('bash "$candidate_root/gw_restart.sh"')
+    assert controller_install < controller_activation < candidate_exec
     assert "chmod 700 \"$(dirname \"$controller_root\")\"" in bootstrap_command
     assert "stat -c '%u:%g:%a' \"$controller_release/gw_restart.sh\"" in bootstrap_command
     assert "stat -c '%u:%g:%a' '/home/ec2-user/gw_restart.sh'" in bootstrap_command
     assert "cmp -s '/home/ec2-user/gw_restart.sh' \"$controller_release/gw_restart.sh\"" in bootstrap_command
-    assert 'bash "$authority_root/gw_restart.sh"' in bootstrap_command
+    assert 'bash "$candidate_root/gw_restart.sh"' in bootstrap_command
     assert "--commit '" + commit + "'" in bootstrap_command
     assert (
         "--commit '"
@@ -296,6 +298,44 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
         timeout=5,
     )
     assert syntax.returncode == 0, syntax.stderr
+
+    exec_start = bootstrap_command.index("      exec env \\\n")
+    argument_probe = bootstrap_command[exec_start:].replace(
+        "      exec env \\\n",
+        "      printf '%s\\0' \\\n",
+        1,
+    )
+    parsed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            "bootstrap_root=/tmp/gateway-miner-maintenance-bootstrap.fixture\n"
+            'authority_root="$bootstrap_root/authority"\n'
+            'candidate_root="$bootstrap_root/candidate"\n'
+            + argument_probe,
+        ],
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+    assert parsed.returncode == 0, parsed.stderr.decode("utf-8", "replace")
+    arguments = parsed.stdout.rstrip(b"\0").split(b"\0")
+    entrypoint = arguments.index(b"bash")
+    assert arguments[entrypoint:] == [
+        b"bash",
+        b"/tmp/gateway-miner-maintenance-bootstrap.fixture/candidate/gw_restart.sh",
+        b"--commit",
+        commit.encode("ascii"),
+        b"--miner-maintenance-bootstrap-plan",
+        b"/tmp/gateway-miner-maintenance-bootstrap.fixture/plan.json",
+        b"--miner-maintenance-bootstrap-root",
+        b"/tmp/gateway-miner-maintenance-bootstrap.fixture",
+        b"--miner-maintenance-handoff-file",
+        b"/tmp/handoff",
+        b"--miner-maintenance-handoff-nonce",
+        ("2" * 64).encode("ascii"),
+    ]
 
 
 def test_general_rollback_bootstraps_current_authority_before_target_runtime() -> None:

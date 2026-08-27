@@ -1159,6 +1159,14 @@ def test_restart_reconstructs_and_does_not_duplicate_provider_call():
         expected_checkpoint=first.checkpoint,
     )
 
+    expected_round_zero_ref = "baseline_icp:" + sha256_json(
+        {
+            "run_sha256": runner.run_sha256,
+            "icp_ref": "icp-restart",
+            "raw_icp_sha256": sha256_json(raw),
+        }
+    ).removeprefix("sha256:")
+    assert first.checkpoint["unit_ref"] == expected_round_zero_ref
     assert second.checkpoint == first.checkpoint
     assert second.replayed_transition_count == 1
     assert authority.dispatcher.provider_calls == 1

@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from typing import Any, Iterator, Mapping, Sequence
@@ -108,6 +109,15 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
 )
 PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
+_PRIVATE_ECR_REGISTRY_RE = re.compile(
+    r"^(?P<registry>[0-9]+\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?)/"
+)
+_PRIVATE_ECR_AUTH_FAILURE_MARKERS = (
+    "authorization token has expired",
+    "no basic auth credentials",
+    "pull access denied",
+    "requested access to the resource is denied",
+)
 SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 # Match the adapter's result/receipt finalization window before sandbox kill.
@@ -1673,6 +1683,101 @@ def _docker_lifecycle_remaining_seconds(deadline_monotonic: float) -> float:
     return max(0.1, remaining)
 
 
+def _private_ecr_registry(image_digest: str) -> tuple[str, str] | None:
+    match = _PRIVATE_ECR_REGISTRY_RE.match(str(image_digest or "").strip())
+    if match is None:
+        return None
+    return match.group("registry"), match.group("region")
+
+
+def _private_ecr_auth_failure(
+    completed: subprocess.CompletedProcess[str],
+) -> bool:
+    text = " ".join(
+        (
+            str(completed.stderr or ""),
+            str(completed.stdout or ""),
+        )
+    ).lower()
+    return any(marker in text for marker in _PRIVATE_ECR_AUTH_FAILURE_MARKERS)
+
+
+def _pull_private_ecr_image_with_refreshed_auth(
+    spec: DockerPrivateModelSpec,
+    *,
+    registry: str,
+    region: str,
+    deadline_monotonic: float,
+    environment: Mapping[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Refresh private-ECR auth in memory and one ephemeral Docker config."""
+
+    try:
+        password_result = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", region],
+            text=True,
+            capture_output=True,
+            timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+            env=dict(environment),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PrivateModelRuntimeError(
+            "private ECR authentication refresh failed"
+        ) from exc
+    password = str(password_result.stdout or "").strip()
+    if password_result.returncode != 0 or not password:
+        raise PrivateModelRuntimeError(
+            "private ECR authentication refresh failed"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="research-lab-private-model-docker-auth-"
+    ) as config_dir:
+        try:
+            login_result = subprocess.run(
+                [
+                    spec.docker_executable,
+                    "--config",
+                    config_dir,
+                    "login",
+                    "--username",
+                    "AWS",
+                    "--password-stdin",
+                    registry,
+                ],
+                input=password + "\n",
+                text=True,
+                capture_output=True,
+                timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+                env=dict(environment),
+                check=False,
+            )
+            if login_result.returncode != 0:
+                raise PrivateModelRuntimeError(
+                    "private ECR Docker login failed"
+                )
+            return subprocess.run(
+                [
+                    spec.docker_executable,
+                    "--config",
+                    config_dir,
+                    "pull",
+                    *_docker_platform_args(spec),
+                    spec.image_digest,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+                env=dict(environment),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PrivateModelRuntimeError(
+                "private ECR authenticated pull failed"
+            ) from exc
+
+
 def _remove_private_model_container(
     spec: DockerPrivateModelSpec,
     *,
@@ -1771,15 +1876,29 @@ class DockerPrivateModelRunner:
         return validate_sourcing_adapter_metadata(decoded)
 
     def _pull_image(self) -> None:
+        environment = _build_docker_process_env(self.spec)
         with _docker_private_model_lifecycle(self.spec) as deadline:
             completed = subprocess.run(
                 [self.spec.docker_executable, "pull", *_docker_platform_args(self.spec), self.spec.image_digest],
                 text=True,
                 capture_output=True,
                 timeout=_docker_lifecycle_remaining_seconds(deadline),
-                env=_build_docker_process_env(self.spec),
+                env=environment,
                 check=False,
             )
+            registry = _private_ecr_registry(self.spec.image_digest)
+            if (
+                completed.returncode != 0
+                and registry is not None
+                and _private_ecr_auth_failure(completed)
+            ):
+                completed = _pull_private_ecr_image_with_refreshed_auth(
+                    self.spec,
+                    registry=registry[0],
+                    region=registry[1],
+                    deadline_monotonic=deadline,
+                    environment=environment,
+                )
         if completed.returncode != 0:
             stderr = _sanitize_text(completed.stderr)[-1200:]
             raise PrivateModelRuntimeError(f"docker pull failed with code {completed.returncode}: {stderr}")

@@ -3967,7 +3967,7 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:f65e4b7dc265631fd28ce36e0713aaa83380a350e155560b622cb090fe78864e",
+      "ast_sha256": "sha256:1519c871c5aef9b7e40e8243bea3c08b2f875691ea2af9c2dd34eb0cbe2b7943",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
     },
@@ -3987,7 +3987,7 @@
       "symbol": "_canonical_remote"
     },
     {
-      "ast_sha256": "sha256:d196f3c7a42bdd0d76fccb707a570bb6b16462a94bfa1b57a87acb591ed6b847",
+      "ast_sha256": "sha256:14bf939988d77db65e5cfb498821831f7dea5746d2ddd5eb014882b300152a70",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_close_bootstrap_tree"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a016fb57c4d9e9f38e69d4fbff848ab6e01210f71687b903f221393588051d5d",
-  "protected_source_commit": "b01255e0693b3cc0644c51d38af95fa05f0eb8c0",
+  "manifest_hash": "sha256:462e257e094b862ffb68d44721e89e80f53d8fa6cef87654bf5be5c894843f04",
+  "protected_source_commit": "b6a2eea8acf2edef0b7c67e44dc632f03b8ada90",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

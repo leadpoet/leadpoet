@@ -1010,7 +1010,11 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in source
     assert 'host_python="$host_venv/bin/python3"' in source
     assert 'test ! -e "$host_venv"' in source
-    assert '/usr/bin/python3.11 -m venv "$host_venv"' in source
+    assert (
+        '/usr/bin/python3.11 -I -m venv --without-pip "$host_venv"'
+        in source
+    )
+    assert "python3.11-pip-wheel" in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 

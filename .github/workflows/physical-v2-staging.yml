@@ -106,24 +106,51 @@ jobs:
             test "${{ github.event.workflow_run.conclusion }}" = "success"
             test "${{ github.event.workflow_run.head_sha }}" = "$CANDIDATE_SHA"
           else
-            GH_TOKEN="${{ github.token }}" gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow attested-v2-release.yml \
-              --commit "$CANDIDATE_SHA" --limit 20 \
-              --json conclusion,headSha > "$PARITY_TEMP/attested-runs.json"
-            python3 - "$PARITY_TEMP/attested-runs.json" "$CANDIDATE_SHA" <<'PY'
+            GH_TOKEN="${{ github.token }}" python3 - \
+              "$GITHUB_REPOSITORY" "$CANDIDATE_SHA" <<'PY'
           import json
-          from pathlib import Path
+          import os
+          import re
           import sys
-          runs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          from urllib import parse, request
+
+          repository, candidate_sha = sys.argv[1:]
+          if (
+              re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+              is None
+              or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None
+          ):
+              raise SystemExit("attested release lookup identity is invalid")
+          token = os.environ.get("GH_TOKEN", "")
+          if not token:
+              raise SystemExit("attested release lookup token is unavailable")
+          query = parse.urlencode({"branch": "main", "per_page": 100})
+          api_request = request.Request(
+              "https://api.github.com/repos/"
+              f"{repository}/actions/workflows/attested-v2-release.yml/runs?{query}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with request.urlopen(api_request, timeout=30) as response:
+              payload = response.read(2_000_001)
+          if len(payload) > 2_000_000:
+              raise SystemExit("attested release lookup response is oversized")
+          value = json.loads(payload.decode("utf-8"))
+          runs = value.get("workflow_runs")
+          if not isinstance(runs, list):
+              raise SystemExit("attested release lookup response is invalid")
           if not any(
-              run.get("headSha") == sys.argv[2]
+              isinstance(run, dict)
+              and run.get("head_sha") == candidate_sha
+              and run.get("head_branch") == "main"
               and run.get("conclusion") == "success"
               for run in runs
           ):
               raise SystemExit("exact candidate has no successful attested release")
           PY
-            rm -f "$PARITY_TEMP/attested-runs.json"
           fi
           echo 'verified=true' >> "$GITHUB_OUTPUT"
 

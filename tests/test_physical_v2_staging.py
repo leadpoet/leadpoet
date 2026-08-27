@@ -1046,6 +1046,28 @@ def test_parity_workflows_reject_non_main_code_before_aws_credentials():
         assert main_gate < local_action < aws_credentials
 
 
+def test_full_manual_attestation_lookup_has_no_runner_cli_dependency():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/physical-v2-staging.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = next(
+        step
+        for step in workflow["jobs"]["validate"]["steps"]
+        if step.get("name")
+        == "Require exact current main candidate before credentials"
+    )["run"]
+
+    assert "gh run list" not in gate
+    assert "https://api.github.com/repos/" in gate
+    assert 'os.environ.get("GH_TOKEN", "")' in gate
+    assert "request.urlopen(api_request, timeout=30)" in gate
+    assert 'run.get("head_sha") == candidate_sha' in gate
+    assert 'run.get("head_branch") == "main"' in gate
+    assert 'run.get("conclusion") == "success"' in gate
+
+
 def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
     required = (

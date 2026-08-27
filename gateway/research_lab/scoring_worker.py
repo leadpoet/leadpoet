@@ -14156,6 +14156,11 @@ class ResearchLabGatewayScoringWorker:
                 latest_result = (
                     attempts[-1].get("result_row") if attempts else None
                 )
+                latest_retry_round = (
+                    int(attempts[-1].get("retry_round") or 0)
+                    if attempts
+                    else 0
+                )
                 checkpoint = (
                     latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
                     if isinstance(latest_result, Mapping)
@@ -14170,6 +14175,7 @@ class ResearchLabGatewayScoringWorker:
                     raw_icp=item["icp"],
                     icp_ref=resumed_ref,
                     target_count=_icp_company_goal(item["icp"]) or 1,
+                    attempt_ordinal=latest_retry_round,
                     expected_checkpoint=checkpoint,
                 )
 
@@ -16084,6 +16090,7 @@ class ResearchLabGatewayScoringWorker:
                     raw_icp=item["icp"],
                     icp_ref=label,
                     target_count=_icp_company_goal(item["icp"]) or 1,
+                    attempt_ordinal=retry_round,
                 )
                 exact_call = functools.partial(
                     contextvars.copy_context().run,

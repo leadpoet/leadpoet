@@ -747,10 +747,12 @@ class _Transitions:
         return self.generation
 
     def load_model_transition(self, **identity):
-        return self.values.get(identity["idempotency_key"])
+        return self.values.get(
+            (identity["unit_ref"], identity["idempotency_key"])
+        )
 
     def append_model_transition(self, **value):
-        self.values[value["action"]["idempotency_key"]] = {
+        self.values[(value["unit_ref"], value["action"]["idempotency_key"])] = {
             "action": deepcopy(value["action"]),
             "continuation": deepcopy(value["continuation"]),
             "completion": deepcopy(value["completion"]),
@@ -878,7 +880,9 @@ class _ProtectedAuthority:
     def close_unit(self, *, completion):
         ordered_keys = []
         ordered_hashes = []
-        for stored in self.transitions.values.values():
+        for (unit_ref, _idempotency_key), stored in self.transitions.values.items():
+            if unit_ref != completion["unit_ref"]:
+                continue
             action = stored["action"]
             attempt_key = sha256_json(
                 {
@@ -1103,7 +1107,10 @@ async def test_scoring_worker_retries_exact_model_incomplete_outcome(
     async def no_traces(**_values):
         return None
 
-    def incomplete_outcome(*_args, **_kwargs):
+    attempt_ordinals = []
+
+    def incomplete_outcome(*_args, **kwargs):
+        attempt_ordinals.append(kwargs.get("attempt_ordinal"))
         raise PrivateModelRuntimeError(incomplete_marker)
 
     worker._ensure_private_baseline_repo_head_unchanged = unchanged
@@ -1131,9 +1138,10 @@ async def test_scoring_worker_retries_exact_model_incomplete_outcome(
             run_start=0.0,
             executor=executor,
             benchmark_date="2026-08-23",
-            retry_round=0,
+            retry_round=1,
         )
 
+    assert attempt_ordinals == [1]
     assert row["_retryable"] is True
     assert row["_nonempty"] is False
     assert row["diagnostics"]["sourcing_failed"] is True
@@ -1151,10 +1159,54 @@ def test_restart_reconstructs_and_does_not_duplicate_provider_call():
         expected_checkpoint=first.checkpoint,
     )
 
+    expected_round_zero_ref = "baseline_icp:" + sha256_json(
+        {
+            "run_sha256": runner.run_sha256,
+            "icp_ref": "icp-restart",
+            "raw_icp_sha256": sha256_json(raw),
+        }
+    ).removeprefix("sha256:")
+    assert first.checkpoint["unit_ref"] == expected_round_zero_ref
     assert second.checkpoint == first.checkpoint
     assert second.replayed_transition_count == 1
     assert authority.dispatcher.provider_calls == 1
     assert len(terminal.records) == 1
+
+    retry = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-restart",
+        target_count=1,
+        attempt_ordinal=1,
+    )
+    retry_after_restart = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-restart",
+        target_count=1,
+        attempt_ordinal=1,
+        expected_checkpoint=retry.checkpoint,
+    )
+
+    assert retry.checkpoint != first.checkpoint
+    assert retry_after_restart.checkpoint == retry.checkpoint
+    assert retry_after_restart.replayed_transition_count == 1
+    assert authority.dispatcher.provider_calls == 2
+    assert len(terminal.records) == 2
+
+
+@pytest.mark.parametrize("attempt_ordinal", (-1, True, 1.0, "1"))
+def test_exact_official_baseline_rejects_invalid_attempt_ordinal(attempt_ordinal):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+
+    with pytest.raises(
+        OfficialBaselineModelError,
+        match="attempt ordinal is invalid",
+    ):
+        runner.run_icp(
+            raw_icp={"outputs": []},
+            icp_ref="icp-invalid-attempt",
+            target_count=1,
+            attempt_ordinal=attempt_ordinal,
+        )
 
 
 def test_current_official_baseline_uses_compiled_dispatch_and_v4_custody():

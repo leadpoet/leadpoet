@@ -7,6 +7,7 @@ import pytest
 
 from gateway.research_lab.official_baseline_authority import (
     PROTECTED_ACTION_AUTHORITY_SHA256,
+    GatewayLocalProtectedActionBridge,
     OfficialBaselineProtectedAuthorityError,
 )
 from gateway.research_lab.official_baseline_custody import (
@@ -302,6 +303,263 @@ def _provider_fixture():
         }
     )
     return action, dispatch, catalog, inventory
+
+
+def _openrouter_provider_fixture():
+    binding = "d" * 64
+    tool_id = "candidate.company_evidence_search"
+    action = {
+        "sequence": 2,
+        "action_type": "execute_candidate_tool",
+        "tool_id": tool_id,
+        "binding_contract_sha256": binding,
+        "response_schema_version": "model-provider-response:v2",
+        "max_response_bytes": 200_000,
+        "idempotency_key": "7" * 64,
+        "action_sha256": "8" * 64,
+        "request_fingerprint_sha256": "9" * 64,
+    }
+    request = {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "static_headers": {"Content-Type": "application/json"},
+        "credential_binding": {
+            "location": "header",
+            "name": "Authorization",
+            "scheme": "Bearer",
+            "source": "OPENROUTER_API_KEY",
+            "persist": False,
+        },
+        "body": {
+            "model": "perplexity/sonar-pro",
+            "messages": [{"role": "user", "content": "fixture"}],
+        },
+    }
+    dispatch_body = {
+        "schema_version": "model-runner-provider-dispatch:v1",
+        "action_sha256": action["action_sha256"],
+        "action_type": action["action_type"],
+        "tool_id": action["tool_id"],
+        "compiler_id": "openrouter.company_evidence:v1",
+        "compiler_contract_sha256": binding,
+        "provider": "openrouter",
+        "request": request,
+        "request_sha256": _hash(request),
+        "response_contract": {
+            "schema_version": "provider-response-contract:v1"
+        },
+        "budgets": {
+            "call_cap": 1,
+            "credit_cap": 0.02,
+            "timeout_seconds": 120.0,
+            "max_results": 100,
+            "max_response_bytes": 200_000,
+        },
+        "idempotency_key": "model-action:" + action["action_sha256"],
+    }
+    dispatch = {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)}
+    catalog = _catalog(
+        _catalog_row(
+            action_type=action["action_type"],
+            tool_id=tool_id,
+            binding=binding,
+            response_schema=action["response_schema_version"],
+        )
+    )
+    inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": tool_id,
+            "status": "supported",
+            "execution_mode": "invoke",
+            "compiler_id": dispatch["compiler_id"],
+            "provider": dispatch["provider"],
+            "compiler_contract_sha256": binding,
+            "timeout_seconds": 120.0,
+        }
+    )
+    return action, dispatch, catalog, inventory
+
+
+def _batched_openrouter_provider_fixture():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    members = [
+        {
+            "method": "GET",
+            "url": "https://openrouter.ai/api/v1/models",
+            "query": {"page": page},
+            "segment_id": f"segment-{page}",
+            "request_sha256": str(page) * 64,
+        }
+        for page in (1, 2)
+    ]
+    request = {
+        "method": "BATCH_GET",
+        "url": "https://openrouter.ai/api/v1/models",
+        "static_headers": {"Accept": "application/json"},
+        "credential_binding": dispatch["request"]["credential_binding"],
+        "requests": members,
+    }
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["request"] = request
+    dispatch_body["request_sha256"] = _hash(request)
+    dispatch_body["budgets"] = {**dispatch_body["budgets"], "call_cap": 2}
+    return (
+        action,
+        {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)},
+        catalog,
+        inventory,
+    )
+
+
+def test_non_deepline_lost_response_recovers_only_from_exact_proxy_replay():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (
+                200,
+                {"choices": [{"message": {"content": "[]"}}]},
+                {"X-Research-Lab-Evidence": "hit"},
+            ),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-recovery"},
+        unit_ref="baseline_icp:" + "a" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["replay_only"] for call in proxy.calls] == [False, True]
+    assert terminal.protected_action_result.provider_receipt.call_count == 1
+
+
+def test_non_deepline_replay_miss_remains_uncertain_without_redispatch():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (409, {"error": "replay_miss"}, {}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-replay-miss"},
+        unit_ref="baseline_icp:" + "b" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "uncertain"
+    assert [call["replay_only"] for call in proxy.calls] == [False, True]
+
+
+def test_non_deepline_cached_provider_409_is_known_not_replay_miss():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    proxy = _Proxy(
+        [
+            (
+                409,
+                {"error": "replay_miss"},
+                {"X-Research-Lab-Evidence": "hit"},
+            )
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "openrouter-cached-conflict"},
+        unit_ref="baseline_icp:" + "c" * 64,
+        action=action,
+    )
+
+    terminal = executor.reconcile(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "failed"
+    assert proxy.calls[0]["replay_only"] is True
+
+
+def test_batched_lost_response_reconciles_all_members_without_live_calls():
+    action, dispatch, catalog, inventory = _batched_openrouter_provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            (200, {"data": ["first"]}, {}),
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (200, {"data": ["first"]}, {"X-Research-Lab-Evidence": "hit"}),
+            (200, {"data": ["second"]}, {"X-Research-Lab-Evidence": "hit"}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-batch-recovery"},
+        unit_ref="baseline_icp:" + "d" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["replay_only"] for call in proxy.calls] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert terminal.protected_action_result.provider_receipt.call_count == 2
 
 
 def test_deepline_progress_survives_interruption_and_restart_never_reposts():
@@ -817,3 +1075,48 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
             max_response_bytes=10_000,
             cost_scope="official-baseline-fixture",
         )
+
+
+def test_official_proxy_replay_only_header_is_host_owned():
+    captured_headers = []
+
+    class _Response:
+        status = 200
+        headers = {"X-Research-Lab-Evidence": "hit"}
+
+        def read(self, _limit):
+            return b'{"results":[]}'
+
+        def close(self):
+            pass
+
+    def opener(request, *, timeout):
+        del timeout
+        captured_headers.append(
+            {key.casefold(): value for key, value in request.header_items()}
+        )
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=opener
+    )
+    common = {
+        "provider": "exa",
+        "method": "POST",
+        "upstream_url": "https://api.exa.ai/search",
+        "static_headers": {
+            "Content-Type": "application/json",
+            "X-Research-Lab-Replay-Only": "1",
+        },
+        "body": {"query": "redacted fixture"},
+        "query": None,
+        "timeout_seconds": 10,
+        "max_response_bytes": 10_000,
+        "cost_scope": "official-baseline-fixture",
+    }
+
+    client.request(**common, replay_only=False)
+    client.request(**common, replay_only=True)
+
+    assert "x-research-lab-replay-only" not in captured_headers[0]
+    assert captured_headers[1]["x-research-lab-replay-only"] == "1"

@@ -737,6 +737,7 @@ class _GatewayEvidenceProxyClient:
         timeout_seconds: float,
         max_response_bytes: int,
         cost_scope: str,
+        replay_only: bool = False,
     ) -> tuple[int, Mapping[str, Any], Mapping[str, str]]:
         normalized_method = str(method or "").upper()
         if normalized_method not in _HTTP_METHODS:
@@ -779,7 +780,11 @@ class _GatewayEvidenceProxyClient:
                 split._replace(query=urllib.parse.urlencode(existing + supplied))
             )
         encoded = None if body is None else _canonical_bytes(body)
-        headers = {str(key): str(value) for key, value in static_headers.items()}
+        headers = {
+            str(key): str(value)
+            for key, value in static_headers.items()
+            if str(key).casefold() != "x-research-lab-replay-only"
+        }
         headers.update(
             {
                 "Accept": headers.get("Accept", "application/json"),
@@ -787,6 +792,8 @@ class _GatewayEvidenceProxyClient:
                 "X-Research-Lab-Budget-Soft-Stop": "1",
             }
         )
+        if replay_only:
+            headers["X-Research-Lab-Replay-Only"] = "1"
         request = urllib.request.Request(
             target,
             data=encoded,
@@ -1266,20 +1273,21 @@ class ArtifactPreparedActionExecutor:
             )
         return expected
 
-    def _one_request(
+    def _proxy_request(
         self,
         *,
         preparation: OfficialBaselineProtectedPreparation,
         provider: str,
         request: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> tuple[int, Mapping[str, Any]]:
+        replay_only: bool,
+    ) -> tuple[int, Mapping[str, Any], Mapping[str, str]]:
         method = str(request.get("method") or "")
         if method == "BATCH_GET":
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline nested batch request is invalid"
             )
-        status, body, _headers = self._proxy.request(
+        return self._proxy.request(
             provider=provider,
             method=method,
             upstream_url=str(request.get("url") or ""),
@@ -1307,8 +1315,60 @@ class ArtifactPreparedActionExecutor:
             cost_scope="official-baseline-" + preparation.unit_ref.split(":", 1)[-1][
                 :32
             ],
+            replay_only=replay_only,
+        )
+
+    def _one_request(
+        self,
+        *,
+        preparation: OfficialBaselineProtectedPreparation,
+        provider: str,
+        request: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> tuple[int, Mapping[str, Any]]:
+        status, body, _headers = self._proxy_request(
+            preparation=preparation,
+            provider=provider,
+            request=request,
+            timeout_seconds=timeout_seconds,
+            replay_only=False,
         )
         return status, body
+
+    def _replay_one_request(
+        self,
+        *,
+        preparation: OfficialBaselineProtectedPreparation,
+        provider: str,
+        request: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> tuple[int, Mapping[str, Any]] | None:
+        status, body, headers = self._proxy_request(
+            preparation=preparation,
+            provider=provider,
+            request=request,
+            timeout_seconds=timeout_seconds,
+            replay_only=True,
+        )
+        evidence = next(
+            (
+                str(value).strip().casefold()
+                for key, value in headers.items()
+                if str(key).casefold() == "x-research-lab-evidence"
+            ),
+            "",
+        )
+        if evidence == "hit":
+            return status, body
+        if (
+            status == 409
+            and evidence in {"", "replay_miss"}
+            and dict(body) == {"error": "replay_miss"}
+        ):
+            return None
+        raise OfficialBaselineProtectedAuthorityError(
+            "official baseline evidence proxy replay response is invalid"
+        )
 
     def _batch_request(
         self,
@@ -1317,7 +1377,8 @@ class ArtifactPreparedActionExecutor:
         provider: str,
         request: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> tuple[int, Mapping[str, Any], int]:
+        replay_only: bool = False,
+    ) -> tuple[int, Mapping[str, Any], int] | None:
         rows = request.get("requests")
         if (
             request.get("method") != "BATCH_GET"
@@ -1340,17 +1401,30 @@ class ArtifactPreparedActionExecutor:
                 raise OfficialBaselineProtectedAuthorityError(
                     "official baseline artifact batch member is invalid"
                 )
-            status, body = self._one_request(
-                preparation=preparation,
-                provider=provider,
-                request={
-                    "method": row["method"],
-                    "url": row["url"],
-                    "query": row["query"],
-                    "static_headers": request.get("static_headers") or {},
-                },
-                timeout_seconds=timeout_seconds,
+            member_request = {
+                "method": row["method"],
+                "url": row["url"],
+                "query": row["query"],
+                "static_headers": request.get("static_headers") or {},
+            }
+            terminal = (
+                self._replay_one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=member_request,
+                    timeout_seconds=timeout_seconds,
+                )
+                if replay_only
+                else self._one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=member_request,
+                    timeout_seconds=timeout_seconds,
+                )
             )
+            if terminal is None:
+                return None
+            status, body = terminal
             responses.append(
                 {
                     "request_sha256": row["request_sha256"],
@@ -1504,22 +1578,36 @@ class ArtifactPreparedActionExecutor:
             if terminal is None:
                 return self._uncertain(request_ref)
             status, body = terminal
-        elif reconcile_only:
-            return self._uncertain(request_ref)
         elif request.get("method") == "BATCH_GET":
-            status, body, calls = self._batch_request(
+            terminal = self._batch_request(
                 preparation=preparation,
                 provider=provider,
                 request=request,
                 timeout_seconds=preparation.timeout_ms / 1000,
+                replay_only=reconcile_only,
             )
+            if terminal is None:
+                return self._uncertain(request_ref)
+            status, body, calls = terminal
         else:
-            status, body = self._one_request(
-                preparation=preparation,
-                provider=provider,
-                request=request,
-                timeout_seconds=preparation.timeout_ms / 1000,
+            terminal = (
+                self._replay_one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=request,
+                    timeout_seconds=preparation.timeout_ms / 1000,
+                )
+                if reconcile_only
+                else self._one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=request,
+                    timeout_seconds=preparation.timeout_ms / 1000,
+                )
             )
+            if terminal is None:
+                return self._uncertain(request_ref)
+            status, body = terminal
         return self._known_provider_terminal(
             preparation=preparation,
             dispatch=dispatch,

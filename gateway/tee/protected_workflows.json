@@ -1317,7 +1317,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:3bd0aa4a42c4c9775941efa440df881fca708d01b2cb06d91934235bf6396823",
+      "ast_sha256": "sha256:4e1005c5480eb3799804be1f03d392f4572f3aa69e7c7eca39203ac6080e311f",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1372,7 +1372,7 @@
       "symbol": "SITE_PROTECTED_ACTION_AUTHORITY_SOURCE_COMMIT"
     },
     {
-      "ast_sha256": "sha256:b42587d249053ed28e7bc44f20b93853384d73a3801043605280fb52cf3bcc01",
+      "ast_sha256": "sha256:3b93e54e1b23f9bc4df52445ffa3839ca58d2f6108c15a28e686345b4a5113ed",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient"
     },
@@ -1382,7 +1382,7 @@
       "symbol": "_GatewayEvidenceProxyClient._proxied_url"
     },
     {
-      "ast_sha256": "sha256:a7056bc3726a2fb01a59f9ee7a4143f923944f3ba5dd0b2e93d115c3c03a5cd1",
+      "ast_sha256": "sha256:4a2446149b9fd091f924cd35aced4861f10f239c6e7dfe17c9c01ef90caab0a8",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient.request"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1971a457a1374227b196b90c12579db64ac6a6a8c869929f35120f92e96b54bd",
-  "protected_source_commit": "5760d2a7f99e38a3c3d8865ef707d02e45ef255d",
+  "manifest_hash": "sha256:664c285561315fa32b9651938d3adb8019a3a9f3b9058b9f28bbda9d81b223fe",
+  "protected_source_commit": "bfd7d755f1a1072a6063cc7d2da3d534eb67de54",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -1632,6 +1632,7 @@ _PROVIDER_COST_CAP_ERROR_MARKERS = (
 )
 _MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS = (
     "model_runner_incomplete:run_budget_exhausted",
+    "model_runner_incomplete:required_provider_failure",
 )
 
 

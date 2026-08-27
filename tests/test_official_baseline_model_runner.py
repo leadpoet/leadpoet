@@ -1079,8 +1079,18 @@ async def test_scoring_worker_accepts_exact_empty_on_retry_zero(monkeypatch):
     assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD in row
 
 
+@pytest.mark.parametrize(
+    "incomplete_marker",
+    (
+        "model_runner_incomplete:run_budget_exhausted",
+        "model_runner_incomplete:required_provider_failure",
+    ),
+)
 @pytest.mark.asyncio
-async def test_scoring_worker_retries_exact_model_incomplete_budget(monkeypatch):
+async def test_scoring_worker_retries_exact_model_incomplete_outcome(
+    monkeypatch,
+    incomplete_marker: str,
+):
     runner, _projector, _authority, _terminal = _exact_fixture()
     worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
     worker.worker_ref = "test-worker"
@@ -1093,17 +1103,15 @@ async def test_scoring_worker_retries_exact_model_incomplete_budget(monkeypatch)
     async def no_traces(**_values):
         return None
 
-    def incomplete_budget(*_args, **_kwargs):
-        raise PrivateModelRuntimeError(
-            "model_runner_incomplete:run_budget_exhausted"
-        )
+    def incomplete_outcome(*_args, **_kwargs):
+        raise PrivateModelRuntimeError(incomplete_marker)
 
     worker._ensure_private_baseline_repo_head_unchanged = unchanged
     worker._record_baseline_icp_traces = no_traces
     monkeypatch.setattr(
         ExactOfficialBaselineRunner,
         "run_icp",
-        incomplete_budget,
+        incomplete_outcome,
     )
     item = {
         "icp_ref": "icp-incomplete-budget",

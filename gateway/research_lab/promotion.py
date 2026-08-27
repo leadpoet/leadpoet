@@ -23,6 +23,7 @@ from gateway.research_lab.attested_scoring import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
+    CodeEditInfraFailureError,
     validate_private_code_edit_diff_artifact,
 )
 from gateway.research_lab.config import (
@@ -1898,6 +1899,22 @@ async def sync_active_model_to_repo_head(
         )
         current_artifact = admitted.artifact
         compatibility_receipt = admitted.compatibility_receipt
+    except CodeEditInfraFailureError as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "model_compatibility_infrastructure_unavailable",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "current_json_git_sha": current_artifact.git_commit_sha,
+            "active_is_repo_head": False,
+            "benchmark_blocked_reason": (
+                "model_compatibility_infrastructure_unavailable"
+            ),
+            "retryable": True,
+            "error": _safe_text(str(exc))[:200],
+        }
     except Exception as exc:
         return {
             "ok": False,

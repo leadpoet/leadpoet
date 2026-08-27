@@ -1435,7 +1435,7 @@ build_gateway_restart_command() {
   fi
   if [ "$disable_miner_submissions_before_restart" = "1" ]; then
     bootstrap_prefix="gateway-miner-maintenance-bootstrap"
-    miner_bootstrap_arguments="
+    miner_bootstrap_arguments=" \\
           --miner-maintenance-bootstrap-plan \"\$bootstrap_root/plan.json\" \\
           --miner-maintenance-bootstrap-root \"\$bootstrap_root\" \\
           --miner-maintenance-handoff-file '$gateway_handoff_file' \\

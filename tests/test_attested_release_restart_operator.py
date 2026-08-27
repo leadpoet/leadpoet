@@ -281,6 +281,13 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
     assert "cmp -s '/home/ec2-user/gw_restart.sh' \"$controller_release/gw_restart.sh\"" in bootstrap_command
     assert 'bash "$authority_root/gw_restart.sh"' in bootstrap_command
     assert "--commit '" + commit + "'" in bootstrap_command
+    assert (
+        "--commit '"
+        + commit
+        + "' \\\n"
+        + '          --miner-maintenance-bootstrap-plan "$bootstrap_root/plan.json" \\'
+        in bootstrap_command
+    )
     syntax = subprocess.run(
         ["bash", "-n", "-c", bootstrap_command],
         check=False,

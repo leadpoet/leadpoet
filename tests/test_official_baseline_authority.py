@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
+from inspect import signature
 
 import pytest
 
@@ -15,6 +16,7 @@ from gateway.research_lab import (
 from gateway.research_lab.common_model_experiment import (
     CommonModelExperimentError,
     CommonModelExperimentRecoveryError,
+    ModelTransitionRepository,
     ProtectedModelActionResult,
 )
 from gateway.research_lab.official_baseline_authority import (
@@ -30,6 +32,7 @@ from gateway.research_lab.official_baseline_authority import (
 from gateway.research_lab.official_baseline_custody import (
     OfficialBaselineCustodyError,
     S3OfficialBaselineDocumentCustody,
+    S3OfficialBaselineTransitionRepository,
 )
 from gateway.research_lab.official_baseline_model_runner import (
     OFFICIAL_BASELINE_PROVIDER_FRONTIER_SCHEMA_VERSION,
@@ -909,6 +912,7 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
         experiment_hash=sha256_json(run_identity),
         variant_id="official_baseline",
         unit_ref=unit_ref,
+        artifact_key=authority._registration.key,
         action=action,
         continuation=continuation,
         completion=completion,
@@ -925,9 +929,34 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
         variant_id="official_baseline",
         unit_ref=unit_ref,
         idempotency_key=action["idempotency_key"],
+        artifact_key=authority._registration.key,
     )
     assert loaded["completion"] == completion
     assert repository.expected_frontier_sha256(1)
+
+    with pytest.raises(OfficialBaselineCustodyError, match="identity differs"):
+        repository.load_model_transition(
+            experiment_hash=sha256_json(run_identity),
+            variant_id="official_baseline",
+            unit_ref=unit_ref,
+            idempotency_key=action["idempotency_key"],
+            artifact_key="sha256:" + "0" * 64,
+        )
+    with pytest.raises(OfficialBaselineCustodyError, match="identity differs"):
+        repository.append_model_transition(
+            experiment_hash=sha256_json(run_identity),
+            variant_id="official_baseline",
+            unit_ref=unit_ref,
+            artifact_key="sha256:" + "0" * 64,
+            action=action,
+            continuation=continuation,
+            completion=completion,
+            provider_receipt=result.provider_receipt.to_dict(),
+            protocol_generation_sha256=(
+                authority._registration.protocol_generation.protocol_generation_sha256
+            ),
+            replay_ref=result.replay_ref,
+        )
 
     record_identity = "sha256:" + "2" * 64
     record = {"company_outputs": []}
@@ -945,6 +974,27 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
             record_identity_sha256=record_identity,
             record={"company_outputs": [{"tampered": True}]},
         )
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "resolve_run_protocol_generation",
+        "load_model_transition",
+        "append_model_transition",
+    ),
+)
+def test_s3_transition_repository_accepts_shared_contract(method_name):
+    contract_parameters = set(
+        signature(getattr(ModelTransitionRepository, method_name)).parameters
+    )
+    implementation_parameters = set(
+        signature(
+            getattr(S3OfficialBaselineTransitionRepository, method_name)
+        ).parameters
+    )
+
+    assert contract_parameters <= implementation_parameters
 
 
 def test_production_factory_is_fail_closed_without_signed_component_handoff(

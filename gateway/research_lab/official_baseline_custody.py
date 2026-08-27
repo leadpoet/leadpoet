@@ -569,11 +569,13 @@ class S3OfficialBaselineTransitionRepository:
         variant_id: str,
         unit_ref: str,
         idempotency_key: str,
+        artifact_key: str,
     ) -> Mapping[str, Any] | None:
         if (
             experiment_hash != self._run_sha256
             or variant_id != "official_baseline"
             or unit_ref != self._unit_ref
+            or artifact_key != self._registration.key
         ):
             raise OfficialBaselineCustodyError(
                 "official baseline transition lookup identity differs"
@@ -602,6 +604,7 @@ class S3OfficialBaselineTransitionRepository:
         experiment_hash: str,
         variant_id: str,
         unit_ref: str,
+        artifact_key: str,
         action: Mapping[str, Any],
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
@@ -612,7 +615,7 @@ class S3OfficialBaselineTransitionRepository:
         generation = self.resolve_run_protocol_generation(
             experiment_hash=experiment_hash,
             variant_id=variant_id,
-            artifact_key=self._registration.key,
+            artifact_key=artifact_key,
         )
         if (
             unit_ref != self._unit_ref

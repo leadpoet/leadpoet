@@ -78,6 +78,10 @@ class OfficialBaselineProtectedAuthorityError(OfficialBaselineModelError):
     """The protected action state machine cannot prove one exact outcome."""
 
 
+class OfficialBaselineTerminalUncertainError(CommonModelExperimentRecoveryError):
+    """A bounded fresh attempt is required after an unresolved paid call."""
+
+
 def _prefixed_hash(value: Any, label: str) -> str:
     text = str(value or "").lower()
     normalized = text if text.startswith("sha256:") else "sha256:" + text
@@ -1000,7 +1004,7 @@ class _ReservedOfficialBaselineDispatcher:
             )
         replay = self._authority.store.load_replay(identity=identity)
         if replay.get("state") == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         if replay.get("state") != "reserved":
@@ -1021,7 +1025,7 @@ class _ReservedOfficialBaselineDispatcher:
                 "uncertainty_sha256": validated.uncertainty_sha256,
             }
         )
-        raise CommonModelExperimentRecoveryError(
+        raise OfficialBaselineTerminalUncertainError(
             "official baseline protected call is terminal uncertain"
         )
 
@@ -1128,7 +1132,7 @@ class _ReservedOfficialBaselineDispatcher:
         replay = self._authority.store.load_replay(identity=identity)
         state = replay.get("state")
         if state == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         if state == "terminal_known":
@@ -1188,7 +1192,7 @@ class _ReservedOfficialBaselineDispatcher:
                 allow_execute_after_absence=False,
             )
         if state == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         raise OfficialBaselineProtectedAuthorityError(

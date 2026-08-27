@@ -26,6 +26,7 @@ from gateway.research_lab.official_baseline_authority import (
     OfficialBaselineProtectedAuthorityError,
     OfficialBaselineProtectedTerminal,
     OfficialBaselineReleaseComponents,
+    OfficialBaselineTerminalUncertainError,
     _protected_result_document,
     build_production_official_baseline_exact_dependencies,
 )
@@ -624,11 +625,11 @@ def test_unknown_call_is_terminal_uncertain_and_never_redispatched():
         run_identity=run_identity, unit_ref=unit_ref
     )
 
-    with pytest.raises(CommonModelExperimentRecoveryError, match="terminal uncertain"):
+    with pytest.raises(OfficialBaselineTerminalUncertainError, match="terminal uncertain"):
         dispatcher.dispatch_provider_action(
             action=action, variant_id="official_baseline", unit_ref=unit_ref
         )
-    with pytest.raises(CommonModelExperimentRecoveryError, match="terminal uncertain"):
+    with pytest.raises(OfficialBaselineTerminalUncertainError, match="terminal uncertain"):
         dispatcher.dispatch_provider_action(
             action=action, variant_id="official_baseline", unit_ref=unit_ref
         )

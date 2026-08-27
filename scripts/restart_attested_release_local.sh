@@ -1449,8 +1449,10 @@ build_gateway_restart_command() {
       test \"\$prepared_candidate_sha\" = '$commit'
       GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive \"\$prepared_candidate_sha\" | tar -xf - -C \"\$candidate_root\"
       run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/plan.json\" --materialized-root \"\$candidate_root\" --phase prepared_archive --strict-extras >/dev/null
-      find \"\$candidate_root\" -type f -exec chmod 400 {} +
+      find \"\$candidate_root\" -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 500 {} +
+      find \"\$candidate_root\" -type f ! \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 400 {} +
       find \"\$candidate_root\" -type d -exec chmod 500 {} +
+      run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/plan.json\" --materialized-root \"\$candidate_root\" --phase prepared_archive --strict-extras >/dev/null
       controller_root='$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT'
       controller_release=\"\$controller_root/releases/$branch_commit\"
       controller_stage=\"\$bootstrap_root/controller-stage\"
@@ -1518,8 +1520,10 @@ build_gateway_restart_command() {
       test \"\$prepared_authority_sha\" = '$branch_commit'
       GIT_NO_REPLACE_OBJECTS=1 git -C '$GATEWAY_REPO_ROOT' archive \"\$prepared_authority_sha\" | tar -xf - -C \"\$authority_root\"
       run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/authority-plan.json\" --materialized-root \"\$authority_root\" --phase prepared_archive --strict-extras >/dev/null
-      find \"\$authority_root\" -type f -exec chmod 400 {} +
+      find \"\$authority_root\" -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 500 {} +
+      find \"\$authority_root\" -type f ! \( -perm -100 -o -perm -010 -o -perm -001 \) -exec chmod 400 {} +
       find \"\$authority_root\" -type d -exec chmod 500 {} +
+      run_verified_gateway_git_helper verify-tree --plan-file \"\$bootstrap_root/authority-plan.json\" --materialized-root \"\$authority_root\" --phase prepared_archive --strict-extras >/dev/null
 $miner_candidate_prepare
       exec env \\
         LEADPOET_REPO_ROOT='$GATEWAY_REPO_ROOT' \\

@@ -199,7 +199,9 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert '[ "$SECONDS" -ge "$paired_restart_deadline" ]' in paired
 
 
-def test_miner_maintenance_bootstrap_command_is_shell_parseable() -> None:
+def test_miner_maintenance_bootstrap_command_is_shell_parseable(
+    tmp_path: Path,
+) -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     function_start = source.index("build_gateway_restart_command() {")
     function_end = source.index(
@@ -256,6 +258,82 @@ printf '%s\\0' "${{gateway_restart_command[@]}}"
     bootstrap_command = base64.b64decode(
         encoded_match.group(1), validate=True
     ).decode("utf-8")
+    candidate_mode_lines = [
+        line.strip()
+        for line in bootstrap_command.splitlines()
+        if 'find "$candidate_root" -type ' in line
+    ]
+    assert candidate_mode_lines == [
+        'find "$candidate_root" -type f \\( -perm -100 -o -perm -010 -o -perm -001 \\) -exec chmod 500 {} +',
+        'find "$candidate_root" -type f ! \\( -perm -100 -o -perm -010 -o -perm -001 \\) -exec chmod 400 {} +',
+        'find "$candidate_root" -type d -exec chmod 500 {} +',
+    ]
+    authority_mode_lines = [
+        line.strip()
+        for line in bootstrap_command.splitlines()
+        if 'find "$authority_root" -type ' in line
+    ]
+    assert authority_mode_lines == [
+        'find "$authority_root" -type f \\( -perm -100 -o -perm -010 -o -perm -001 \\) -exec chmod 500 {} +',
+        'find "$authority_root" -type f ! \\( -perm -100 -o -perm -010 -o -perm -001 \\) -exec chmod 400 {} +',
+        'find "$authority_root" -type d -exec chmod 500 {} +',
+    ]
+    candidate_verify = (
+        'run_verified_gateway_git_helper verify-tree --plan-file '
+        '"$bootstrap_root/plan.json" --materialized-root "$candidate_root" '
+        '--phase prepared_archive --strict-extras >/dev/null'
+    )
+    authority_verify = (
+        'run_verified_gateway_git_helper verify-tree --plan-file '
+        '"$bootstrap_root/authority-plan.json" '
+        '--materialized-root "$authority_root" --phase prepared_archive '
+        '--strict-extras >/dev/null'
+    )
+    assert bootstrap_command.count(candidate_verify) == 2
+    assert bootstrap_command.count(authority_verify) == 2
+    candidate_first_verify = bootstrap_command.index(candidate_verify)
+    candidate_modes = bootstrap_command.index(candidate_mode_lines[0])
+    candidate_second_verify = bootstrap_command.index(
+        candidate_verify, candidate_first_verify + 1
+    )
+    assert candidate_first_verify < candidate_modes < candidate_second_verify
+    authority_first_verify = bootstrap_command.index(authority_verify)
+    authority_modes = bootstrap_command.index(authority_mode_lines[0])
+    authority_second_verify = bootstrap_command.index(
+        authority_verify, authority_first_verify + 1
+    )
+    assert authority_first_verify < authority_modes < authority_second_verify
+    mode_root = tmp_path / "candidate"
+    nested = mode_root / "nested"
+    nested.mkdir(parents=True)
+    executable = nested / "entrypoint.sh"
+    regular = nested / "contract.json"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    regular.write_text("{}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    regular.chmod(0o644)
+    mode_probe = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -Eeuo pipefail\n"
+            'candidate_root="$1"\n'
+            + "\n".join(candidate_mode_lines),
+            "mode-probe",
+            str(mode_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert mode_probe.returncode == 0, mode_probe.stderr
+    try:
+        assert (executable.stat().st_mode & 0o777) == 0o500
+        assert (regular.stat().st_mode & 0o777) == 0o400
+        assert (nested.stat().st_mode & 0o777) == 0o500
+    finally:
+        nested.chmod(0o700)
     assert (
         'exec(compile(source, "<exact-installed-controller-verifier>", "exec"))'
         in bootstrap_command

@@ -1745,10 +1745,17 @@ def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
         f"/tmp/gateway-miner-maintenance-bootstrap.{os.getpid()}cwd"
     )
     candidate_root = bootstrap_root / "candidate"
+    nested_root = candidate_root / "nested"
     original_cwd = os.open(".", os.O_RDONLY)
     try:
         bootstrap_root.mkdir(mode=0o700)
         candidate_root.mkdir()
+        nested_root.mkdir()
+        payload = nested_root / "payload"
+        payload.write_bytes(b"verified archive payload")
+        payload.chmod(0o400)
+        nested_root.chmod(0o500)
+        candidate_root.chmod(0o500)
         os.chdir(candidate_root)
 
         maintenance._leave_and_close_bootstrap_tree(bootstrap_root)
@@ -1759,6 +1766,12 @@ def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
         os.fchdir(original_cwd)
         os.close(original_cwd)
         if bootstrap_root.exists():
+            for directory, _names, _files in os.walk(
+                bootstrap_root,
+                topdown=False,
+                followlinks=False,
+            ):
+                Path(directory).chmod(0o700)
             maintenance.shutil.rmtree(bootstrap_root)
 
 

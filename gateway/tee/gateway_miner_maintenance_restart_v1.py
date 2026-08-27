@@ -2567,11 +2567,65 @@ def _close_bootstrap_tree(path: Path) -> None:
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance bootstrap tree identity is unsafe"
         )
-    shutil.rmtree(root)
-    if root.exists():
+    try:
+        root_device = metadata.st_dev
+        for directory, _names, _files, descriptor in os.fwalk(
+            root,
+            topdown=False,
+            follow_symlinks=False,
+        ):
+            opened = os.fstat(descriptor)
+            current = Path(directory).lstat()
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or opened.st_dev != root_device
+                or opened.st_dev != current.st_dev
+                or opened.st_ino != current.st_ino
+                or stat.S_IMODE(opened.st_mode) & 0o022
+            ):
+                raise GatewayMinerMaintenanceRestartError(
+                    "miner-maintenance bootstrap tree member is unsafe"
+                )
+            os.fchmod(descriptor, 0o700)
+            hardened = os.fstat(descriptor)
+            final_path = Path(directory).lstat()
+            if (
+                hardened.st_dev != opened.st_dev
+                or hardened.st_ino != opened.st_ino
+                or stat.S_IMODE(hardened.st_mode) != 0o700
+                or final_path.st_dev != opened.st_dev
+                or final_path.st_ino != opened.st_ino
+            ):
+                raise GatewayMinerMaintenanceRestartError(
+                    "miner-maintenance bootstrap tree changed while closing"
+                )
+        final_root = root.lstat()
+        if (
+            final_root.st_dev != metadata.st_dev
+            or final_root.st_ino != metadata.st_ino
+        ):
+            raise GatewayMinerMaintenanceRestartError(
+                "miner-maintenance bootstrap tree changed while closing"
+            )
+        shutil.rmtree(root)
+    except GatewayMinerMaintenanceRestartError:
+        raise
+    except OSError as exc:
         raise GatewayMinerMaintenanceRestartError(
-            "miner-maintenance bootstrap tree was not removed"
-        )
+            "miner-maintenance bootstrap tree could not be removed"
+        ) from exc
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "miner-maintenance bootstrap tree removal is unverified"
+        ) from exc
+    raise GatewayMinerMaintenanceRestartError(
+        "miner-maintenance bootstrap tree was not removed"
+    )
 
 
 def _leave_and_close_bootstrap_tree(path: Path) -> None:

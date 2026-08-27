@@ -19,8 +19,9 @@ completions.
 **Suppression is three exact paths, not a family.** `_SUPPRESSED_ROUTES` is
 `{"/health", "/health/live", "/health/ready"}`, matched against the concrete
 request path. Every other health, liveness or readiness route is traced
-normally — `/health/v2-authority`, `/attest/health`, `/attestation/health` and
-the `/attestation/deploy-readiness` readiness probe all export spans.
+normally — `/health/v2-authority`, `/health/routing-experiments`,
+`/attest/health`, `/attestation/health` and the
+`/attestation/deploy-readiness` readiness probe all export spans.
 `/attestation/deploy-readiness` is probe traffic and, whenever its caller is
 running, one of the highest-volume routes on the gateway, so it dominates any
 unfiltered aggregate; exclude it before reading request counts as user traffic.
@@ -43,6 +44,14 @@ nothing.
 `service.name`, so no `deployment.environment` attribute is ever set and the
 store's `env` column is `''` on every gateway span. Filtering by environment
 silently matches nothing — filter on `service_name` instead.
+
+**Span status marks 5xx only.** `_emit` sets `Status(StatusCode.ERROR)` only
+when the response code is `>= 500`, so a 4xx response leaves the status
+`Unset` and counting errors from the span status drops every rejection — the
+only 4xx signal is the `http.response.status_code` attribute.
+`StatusCode.OK` is never set, so a `status != Ok` test matches every span:
+over the trailing 7 days the gateway's spans are 439,148 `Unset` (11,692 of
+them 4xx), 2,003 `Error`, and 0 `Ok`.
 
 ## Enabling (gateway host only)
 

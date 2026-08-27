@@ -1679,6 +1679,31 @@ class ArtifactPreparedActionExecutor:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider response exceeds artifact bound"
             )
+        ingestion: Mapping[str, Any] | None = None
+        response_rejected = False
+        if response is not None:
+            try:
+                ingestion = self._protocol.ingest_provider_response(
+                    action,
+                    response,
+                )
+            except Exception:
+                # The provider has returned a known terminal response. A
+                # model-contract rejection is therefore a known adapter
+                # failure, not an unknown paid-call outcome. Retain only the
+                # response hash in the receipt and let the model-owned
+                # waterfall handle the failed completion.
+                response = None
+                succeeded = False
+                response_rejected = True
+            else:
+                if not isinstance(ingestion, Mapping):
+                    response = None
+                    succeeded = False
+                    response_rejected = True
+                    ingestion = None
+                else:
+                    ingestion = dict(ingestion)
         outcome = (
             ProviderOutcome.VERIFIED.value
             if succeeded
@@ -1733,7 +1758,11 @@ class ArtifactPreparedActionExecutor:
             reason_code=(
                 "protected_provider_verified"
                 if succeeded
-                else "protected_provider_adapter_failure"
+                else (
+                    "protected_provider_response_rejected"
+                    if response_rejected
+                    else "protected_provider_adapter_failure"
+                )
             ),
             provider_response=response,
             calls=calls,
@@ -1743,22 +1772,6 @@ class ArtifactPreparedActionExecutor:
             provider_receipt_ref=receipt.receipt_ref,
             provider_identity_sha256=provider_identity,
         )
-        ingestion: Mapping[str, Any] | None = None
-        if response is not None:
-            try:
-                ingestion = self._protocol.ingest_provider_response(
-                    action,
-                    response,
-                )
-            except Exception as exc:
-                raise OfficialBaselineProtectedAuthorityError(
-                    "official baseline artifact provider response ingestion failed"
-                ) from exc
-            if not isinstance(ingestion, Mapping):
-                raise OfficialBaselineProtectedAuthorityError(
-                    "official baseline artifact provider response ingestion is invalid"
-                )
-            ingestion = dict(ingestion)
         binding_host = (
             replace(
                 host,

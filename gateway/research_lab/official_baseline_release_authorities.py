@@ -1181,6 +1181,27 @@ class ArtifactPreparedActionExecutor:
         return run_id
 
     @staticmethod
+    def _deepline_poll_path_component(
+        progress: Mapping[str, Any],
+    ) -> str:
+        """Encode the run ID exactly as declared by the model artifact."""
+
+        reconciliation = progress.get("reconciliation")
+        if not isinstance(reconciliation, Mapping):
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline poll contract is invalid"
+            )
+        layers = reconciliation.get("run_id_path_encoding_layers", 1)
+        if type(layers) is not int or not 1 <= layers <= 4:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id path encoding is invalid"
+            )
+        encoded = str(progress.get("run_id") or "")
+        for _ in range(layers):
+            encoded = urllib.parse.quote(encoded, safe="")
+        return encoded
+
+    @staticmethod
     def _progress_document(
         *,
         preparation: OfficialBaselineProtectedPreparation,
@@ -1351,7 +1372,7 @@ class ArtifactPreparedActionExecutor:
         started: float,
     ) -> tuple[int, Mapping[str, Any]] | None:
         reconciliation = progress["reconciliation"]
-        run_id = urllib.parse.quote(str(progress["run_id"]), safe="")
+        run_id = self._deepline_poll_path_component(progress)
         deadline = started + preparation.timeout_ms / 1000
         first = True
         while first or self._clock() < deadline:

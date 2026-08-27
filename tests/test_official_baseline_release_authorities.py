@@ -245,6 +245,7 @@ def _provider_fixture():
         "body": {"name": "fixture", "input": {"schema_version": 3}},
         "reconciliation": {
             "run_id_json_pointer": "/run/id",
+            "run_id_path_encoding_layers": 2,
             "primary_poll": {
                 "method": "GET",
                 "url_template": "https://code.deepline.com/api/v2/runs/{run_id}?full=true",
@@ -402,6 +403,81 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
         .model_provider_response_ingestion
         is None
     )
+
+
+def test_deepline_model_owned_run_id_path_encoding_is_applied_exactly():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    run_id = "play/leadpoet-firmographic-company-discovery/run-fixture"
+    proxy = _Proxy(
+        [
+            (200, {"run": {"id": run_id, "status": "running"}}, {}),
+            (
+                200,
+                {
+                    "run": {"id": run_id, "status": "completed"},
+                    "output": {
+                        "schema_version": 3,
+                        "segment_id": "aggregate-fixture",
+                        "rows": [],
+                    },
+                },
+                {},
+            ),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+        sleep=lambda _seconds: None,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "double-encoded"},
+        unit_ref="baseline_icp:" + "6" * 64,
+        action=action,
+    )
+
+    terminal = executor.execute_prepared(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert terminal.state == "known"
+    assert proxy.calls[1]["upstream_url"] == (
+        "https://code.deepline.com/api/v2/runs/"
+        "play%252Fleadpoet-firmographic-company-discovery%252Frun-fixture"
+        "?full=true"
+    )
+
+
+def test_deepline_legacy_artifact_defaults_to_single_path_encoding_layer():
+    assert ArtifactPreparedActionExecutor._deepline_poll_path_component(
+        {
+            "run_id": "play/fixture",
+            "reconciliation": {},
+        }
+    ) == "play%2Ffixture"
+
+
+@pytest.mark.parametrize("layers", [True, 0, 5, "2"])
+def test_deepline_run_id_path_encoding_layers_fail_closed(layers):
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="run id path encoding is invalid",
+    ):
+        ArtifactPreparedActionExecutor._deepline_poll_path_component(
+            {
+                "run_id": "play/fixture",
+                "reconciliation": {
+                    "run_id_path_encoding_layers": layers,
+                },
+            }
+        )
 
 
 def test_deepline_missing_model_owned_run_id_path_fails_closed_before_poll():

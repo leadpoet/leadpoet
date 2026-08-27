@@ -58,6 +58,10 @@ def _output(tmp_path: Path) -> Path:
         ("candidate-remote-rebind", "CommandFailed"),
         ("canonical-origin-fetch", "CommandFailed"),
         ("host-python-bootstrap", "CommandFailed"),
+        ("host-python-requirements", "CommandFailed"),
+        ("host-python-pip-bootstrap", "CommandFailed"),
+        ("host-python-dependency-install", "CommandFailed"),
+        ("host-python-dependency-check", "CommandFailed"),
         ("host-python-import", "HostImportFailed"),
         ("host-entrypoint", "HostEntrypointFailed"),
         ("evidence-upload", "EvidenceUploadFailed"),
@@ -121,6 +125,10 @@ def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
         (56, "candidate-repository-directory", "CommandFailed"),
         (57, "candidate-repository-structure", "CommandFailed"),
         (58, "host-python-bootstrap", "CommandFailed"),
+        (59, "host-python-requirements", "CommandFailed"),
+        (60, "host-python-pip-bootstrap", "CommandFailed"),
+        (61, "host-python-dependency-install", "CommandFailed"),
+        (62, "host-python-dependency-check", "CommandFailed"),
     )
     codes = [code for code, _stage, _category in values]
     assert len(codes) == len(set(codes))
@@ -350,7 +358,7 @@ def test_terminal_poller_projects_authoritative_bootstrap_response_code(
 
 @pytest.mark.parametrize(
     "response_code",
-    [-1, 0, 1, 39, 59, 255, None, "40", True, 40.0, {}, []],
+    [-1, 0, 1, 39, 63, 255, None, "40", True, 40.0, {}, []],
 )
 def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
     tmp_path: Path,
@@ -648,6 +656,10 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=candidate-remote-rebind",
         "failure_stage=canonical-origin-fetch",
         "failure_stage=host-python-bootstrap",
+        "failure_stage=host-python-requirements",
+        "failure_stage=host-python-pip-bootstrap",
+        "failure_stage=host-python-dependency-install",
+        "failure_stage=host-python-dependency-check",
         "failure_stage=host-python-import",
         "failure_stage=host-entrypoint",
     ]
@@ -665,7 +677,15 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert "install -d -m 0700 /run/leadpoet-production-parity" in provisioner
     bootstrap = execute.index("failure_stage=host-python-bootstrap")
     venv = execute.index('/usr/bin/python3.11 -m venv "$host_venv"', bootstrap)
+    requirements = execute.index("failure_stage=host-python-requirements", venv)
+    pip_bootstrap = execute.index("failure_stage=host-python-pip-bootstrap", requirements)
+    dependency_install = execute.index(
+        "failure_stage=host-python-dependency-install", pip_bootstrap
+    )
     install = execute.index('"$host_python" -m pip install', venv)
+    dependency_check = execute.index(
+        "failure_stage=host-python-dependency-check", install
+    )
     import_stage = execute.index("failure_stage=host-python-import", install)
     verified_import = execute.index(
         "scripts/run_production_parity_full_host.py --help", import_stage
@@ -673,7 +693,11 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert (
         bootstrap
         < venv
+        < requirements
+        < pip_bootstrap
+        < dependency_install
         < install
+        < dependency_check
         < import_stage
         < verified_import
         < execute.index('evidence="$authoritative_evidence"')

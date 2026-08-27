@@ -536,6 +536,7 @@ jobs:
           test "$("$host_python" -I -c \
             'import sys; print(f"{{sys.version_info.major}}.{{sys.version_info.minor}}")')" = \
             3.11
+          failure_stage=host-python-requirements
           host_requirements={q(root + "/host-controller-requirements.txt")}
           test ! -e "$host_requirements"
           /usr/bin/python3.11 \
@@ -544,17 +545,20 @@ jobs:
             --output "$host_requirements" >/dev/null 2>&1
           test -f "$host_requirements"
           test ! -L "$host_requirements"
+          failure_stage=host-python-pip-bootstrap
           if ! PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m pip --version >/dev/null 2>&1; then
             PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m ensurepip --upgrade >/dev/null 2>&1
           fi
+          failure_stage=host-python-dependency-install
           PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
             "$host_python" -m pip install \
             --disable-pip-version-check \
             --no-input \
             --no-cache-dir \
             --requirement "$host_requirements" >/dev/null 2>&1
+          failure_stage=host-python-dependency-check
           PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
             "$host_python" -m pip check >/dev/null 2>&1
           failure_stage=host-python-import

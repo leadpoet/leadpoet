@@ -4547,7 +4547,7 @@
       "symbol": "_force_delete_runsc_sandbox"
     },
     {
-      "ast_sha256": "sha256:cd7ab07e9c9e29328f5f730e1c31cb6cbba343960cb87636c698de7c704388f0",
+      "ast_sha256": "sha256:c58a64683cb48f8b4a343238918f821facdcc78ee3d23b861ae523f510e16dc8",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_local_provider_replay_resolver_v2"
     },
@@ -4977,7 +4977,7 @@
       "symbol": "BrokeredProviderTransportV2._execute_request"
     },
     {
-      "ast_sha256": "sha256:ae61d954b49475d7e0c2705e93b88cdbde76034799bf2d97b37def25be3bbd31",
+      "ast_sha256": "sha256:6128aa09264b77a2aa1d733a5a7f8ac87c79a2ed1f5b2a09976c63f974adc76a",
       "path": "gateway/tee/provider_client_v2.py",
       "symbol": "BrokeredProviderTransportV2.execute_attested_local_http"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:60da3138e2c0a628228e373cfa38bb40a678d3c0306888e7864eb00915523d7d",
-  "protected_source_commit": "015a816137abf610ae82d302ddc514974e09bdb7",
+  "manifest_hash": "sha256:a016fb57c4d9e9f38e69d4fbff848ab6e01210f71687b903f221393588051d5d",
+  "protected_source_commit": "b01255e0693b3cc0644c51d38af95fa05f0eb8c0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

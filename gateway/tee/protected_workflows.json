@@ -6887,7 +6887,7 @@
       "symbol": "score_private_model_pair_items"
     },
     {
-      "ast_sha256": "sha256:0895f96accd1152bee5c36bd94a086f3d8619d3ac1a603f919b9d7740afecb35",
+      "ast_sha256": "sha256:b7f97b1edbd874ac6074011c996a5d6572da4070dc5e7806c7a798bc6e332803",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "DockerPrivateModelRunner._pull_image"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:5a69611a31c8224994b296cc30b52f4698e73c410125e4dd0d42456171e4c8d5",
-  "protected_source_commit": "6d2e3f950c9b0b2fcf48e4dd3e1a5f9216d462dd",
+  "manifest_hash": "sha256:1971a457a1374227b196b90c12579db64ac6a6a8c869929f35120f92e96b54bd",
+  "protected_source_commit": "5760d2a7f99e38a3c3d8865ef707d02e45ef255d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

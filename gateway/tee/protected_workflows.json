@@ -602,12 +602,12 @@
       "symbol": "validate_private_code_edit_diff_artifact"
     },
     {
-      "ast_sha256": "sha256:e4e978fccf42d3f0289fda79ff0106fb0e5f11dc8f26b0c97a72c0a5b1978ad0",
+      "ast_sha256": "sha256:e5c49b73de96862b57c153296c7e80b2d49d4dfb4ecf3732aec2f62984372ac0",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
     {
-      "ast_sha256": "sha256:e1f7ee5df68cf43be4d8caad3bf4fddc8561b90e5fbdc4b45401b1e178c4797b",
+      "ast_sha256": "sha256:0c0a09df794eaa48719d05dfcb774cabf5499247d85fdfaf0a6376012a811fca",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "_bind_loop_direction_plan"
     },
@@ -6587,7 +6587,7 @@
       "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
     },
     {
-      "ast_sha256": "sha256:cf2e6bbaccaa4afd7aa5cd9ced231844f7672165a56a56e7e59010f22a80723f",
+      "ast_sha256": "sha256:0adbb3ff6869989fc19c2606b93749f600a7f4d7ff0cb42417c747323ac4be72",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -6602,12 +6602,12 @@
       "symbol": "build_code_edit_repair_messages"
     },
     {
-      "ast_sha256": "sha256:35a588194d0453d72425c30062331ae90e51063d4c0955218ecb3c3f60bde589",
+      "ast_sha256": "sha256:b8d6fd878b57fd6eaa8909ac4911450cf9fdfb9206e10d954087f59b0743ccca",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:5b8703fa52bf5d26c8774706d89f2bd1d870799526747b0dcee2698d1cf0e9d7",
+      "ast_sha256": "sha256:88b4af3be74abe796de4b65b6767b4cae857d0ceb518fa2d905dc56c13868a29",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:462e257e094b862ffb68d44721e89e80f53d8fa6cef87654bf5be5c894843f04",
-  "protected_source_commit": "b6a2eea8acf2edef0b7c67e44dc632f03b8ada90",
+  "manifest_hash": "sha256:79d5e8f35cf866c79dd82ef8bb796da7199d54328837cb9e973b1258112f1cc7",
+  "protected_source_commit": "d5cc04e8decc7457d055a1c073d3f946b4d73024",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

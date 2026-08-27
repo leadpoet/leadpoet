@@ -1799,6 +1799,61 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         assert cleanup["database"] == {"status": "removed"}
 
 
+def test_full_runner_retains_exact_bounded_initialization_stage(
+    monkeypatch,
+    tmp_path: Path,
+):
+    marker = tmp_path / "early-boot-isolated"
+    marker.write_text("isolated\n", encoding="utf-8")
+    work_root = tmp_path / "encrypted-root-volume"
+    output = tmp_path / "evidence" / "full.json"
+    secret = "must-not-escape-initialization-failure"
+
+    monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+    monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
+    monkeypatch.setattr(
+        full_host,
+        "_validated_baked_gateway_private_key_path",
+        lambda: "/home/ec2-user/gateway/secrets/gateway_private_key.pem",
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_validated_baked_arweave_keyfile_path",
+        lambda: "/home/ec2-user/gateway/secrets/arweave_keyfile.json",
+    )
+    monkeypatch.setattr(
+        full_host,
+        "_validated_baked_private_model_ssh_command",
+        lambda: (_ for _ in ()).throw(FullParityError(secret)),
+    )
+
+    with pytest.raises(FullParityError, match=secret):
+        full_host.run_full(
+            region="us-east-1",
+            run_id="pp-test-1",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            production_gateway_secret_id="gateway-secret",
+            readonly_dsn_secret_id="readonly-secret",
+            miner_intake_secret_id="miner-secret",
+            supabase_origin=ORIGIN,
+            artifact_bucket="parity-artifacts",
+            postgres_image="postgres@sha256:" + "c" * 64,
+            postgrest_image="postgrest@sha256:" + "d" * 64,
+            output=output,
+            timeout_seconds=1_000,
+        )
+
+    encoded = output.read_text(encoding="utf-8")
+    evidence = json.loads(encoded)
+    assert evidence["status"] == "failed"
+    assert evidence["failure_stage"] == "private-model-ssh-identity"
+    assert evidence["error_type"] == "FullParityError"
+    assert evidence["cleanup"] == {"work": "already_absent"}
+    assert secret not in encoded
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

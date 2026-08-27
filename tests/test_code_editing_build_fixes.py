@@ -1377,7 +1377,9 @@ def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
     )
     content = messages[-1]["content"]
 
-    assert "add the exact SourceAddRoutingRegistration" in content
+    assert "ensure the exact SourceAddRoutingRegistration" in content
+    assert "preserve it and do not emit a redundant runtime hunk" in content
+    assert "sourcing_model/model_runner.py::_COMMON_SOURCE_ADD_BY_INTENT" in content
     assert "best_for_description" in content
     assert "avoid_when_description" in content
     assert "intent_categories" in content

@@ -1226,6 +1226,11 @@ def test_stale_claim_recovery_preserves_operator_shards_but_lease_owner_gets_all
             True,
         ),
         (
+            "PrivateModelRuntimeError: "
+            "model_runner_incomplete:required_provider_failure",
+            True,
+        ),
+        (
             "model_runner_incomplete:run_budget_exhausted; "
             "research_lab_provider_cost_cap_exceeded",
             False,

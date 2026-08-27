@@ -496,28 +496,55 @@ def intent_category_for_signal(signal: Any) -> str:
     if text in INTENT_SIGNAL_CATEGORY_MAP:
         return INTENT_SIGNAL_CATEGORY_MAP[text]
     lowered = text.lower()
+    # Explicit event semantics must win over broad channel and technology
+    # nouns.  For example, "launched a platform capability" is a product
+    # launch, not a TECHSTACK signal merely because it contains "platform".
     if any(word in lowered for word in ("hiring", "job", "role", "career", "recruit")):
         return "HIRING"
-    if any(word in lowered for word in ("tech stack", "installed", "uses ", "using ", "software", "tool", "vendor", "platform")):
-        return "TECHSTACK"
-    if any(word in lowered for word in ("linkedin", "posted", "social", "tweet", "x.com")):
-        return "SOCIAL_POSTING"
     if any(word in lowered for word in ("funding", "raised", "round", "financing")):
         return "FUNDING"
     if any(word in lowered for word in ("acquired", "acquisition", "merger", "bought")):
         return "ACQUISITION"
     if any(word in lowered for word in ("partner", "partnership", "integration")):
         return "PARTNERSHIP"
-    if any(word in lowered for word in ("launch", "launched", "announced", "released", "new product")):
-        return "PRODUCT_LAUNCH"
     if any(word in lowered for word in ("executive", "ceo", "cfo", "cto", "appointed", "joined", "leadership")):
         return "LEADERSHIP_CHANGE"
-    if any(word in lowered for word in ("expanded", "expansion", "new market")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "expanded into",
+            "expanded to",
+            "expanding into",
+            "expanding to",
+            "market expansion",
+            "new market",
+            "new geography",
+            "new region",
+            "new country",
+        )
+    ):
         return "MARKET_EXPANSION"
     if any(word in lowered for word in ("regulatory", "clearance", "certification", "approved", "compliance")):
         return "REGULATORY_CLEARANCE"
     if any(word in lowered for word in ("factory", "facility", "store", "warehouse", "office opening")):
         return "FACILITY_OPENING"
+    if any(
+        word in lowered
+        for word in (
+            "launch",
+            "launched",
+            "released",
+            "new product",
+            "new feature",
+            "platform capability",
+            "platform module",
+        )
+    ):
+        return "PRODUCT_LAUNCH"
+    if any(word in lowered for word in ("linkedin", "posted", "social", "tweet", "x.com")):
+        return "SOCIAL_POSTING"
+    if any(word in lowered for word in ("tech stack", "installed", "uses ", "using ", "software", "tool", "vendor", "platform")):
+        return "TECHSTACK"
     return "SALES_GROWTH"
 
 

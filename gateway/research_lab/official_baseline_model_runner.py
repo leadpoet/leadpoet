@@ -947,16 +947,31 @@ class ExactOfficialBaselineRunner:
         raw_icp: Mapping[str, Any],
         icp_ref: str,
         target_count: int,
+        attempt_ordinal: int = 0,
         expected_checkpoint: Mapping[str, Any] | None = None,
     ) -> OfficialBaselineModelOutput:
         registration = self.dependencies.registration
         generation_sha256 = registration.protocol_generation.protocol_generation_sha256
+        if (
+            not isinstance(attempt_ordinal, int)
+            or isinstance(attempt_ordinal, bool)
+            or attempt_ordinal < 0
+        ):
+            raise OfficialBaselineModelError(
+                "official baseline attempt ordinal is invalid"
+            )
+        unit_identity: dict[str, Any] = {
+            "run_sha256": self.run_sha256,
+            "icp_ref": str(icp_ref),
+            "raw_icp_sha256": sha256_json(dict(raw_icp)),
+        }
+        # Preserve every existing first-attempt unit identity. A later scoring
+        # round is a new paid provider attempt, while replaying the same round
+        # must remain exactly idempotent across gateway restarts.
+        if attempt_ordinal:
+            unit_identity["attempt_ordinal"] = attempt_ordinal
         unit_ref = "baseline_icp:" + sha256_json(
-            {
-                "run_sha256": self.run_sha256,
-                "icp_ref": str(icp_ref),
-                "raw_icp_sha256": sha256_json(dict(raw_icp)),
-            }
+            unit_identity
         ).removeprefix("sha256:")
         model_input = registration.protocol.build_raw_input(
             raw_icp,

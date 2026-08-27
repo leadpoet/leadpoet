@@ -106,24 +106,51 @@ jobs:
             test "${{ github.event.workflow_run.conclusion }}" = "success"
             test "${{ github.event.workflow_run.head_sha }}" = "$CANDIDATE_SHA"
           else
-            GH_TOKEN="${{ github.token }}" gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow attested-v2-release.yml \
-              --commit "$CANDIDATE_SHA" --limit 20 \
-              --json conclusion,headSha > "$PARITY_TEMP/attested-runs.json"
-            python3 - "$PARITY_TEMP/attested-runs.json" "$CANDIDATE_SHA" <<'PY'
+            GH_TOKEN="${{ github.token }}" python3 - \
+              "$GITHUB_REPOSITORY" "$CANDIDATE_SHA" <<'PY'
           import json
-          from pathlib import Path
+          import os
+          import re
           import sys
-          runs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          from urllib import parse, request
+
+          repository, candidate_sha = sys.argv[1:]
+          if (
+              re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+              is None
+              or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None
+          ):
+              raise SystemExit("attested release lookup identity is invalid")
+          token = os.environ.get("GH_TOKEN", "")
+          if not token:
+              raise SystemExit("attested release lookup token is unavailable")
+          query = parse.urlencode({"branch": "main", "per_page": 100})
+          api_request = request.Request(
+              "https://api.github.com/repos/"
+              f"{repository}/actions/workflows/attested-v2-release.yml/runs?{query}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with request.urlopen(api_request, timeout=30) as response:
+              payload = response.read(2_000_001)
+          if len(payload) > 2_000_000:
+              raise SystemExit("attested release lookup response is oversized")
+          value = json.loads(payload.decode("utf-8"))
+          runs = value.get("workflow_runs")
+          if not isinstance(runs, list):
+              raise SystemExit("attested release lookup response is invalid")
           if not any(
-              run.get("headSha") == sys.argv[2]
+              isinstance(run, dict)
+              and run.get("head_sha") == candidate_sha
+              and run.get("head_branch") == "main"
               and run.get("conclusion") == "success"
               for run in runs
           ):
               raise SystemExit("exact candidate has no successful attested release")
           PY
-            rm -f "$PARITY_TEMP/attested-runs.json"
           fi
           echo 'verified=true' >> "$GITHUB_OUTPUT"
 
@@ -353,6 +380,7 @@ jobs:
           candidate_repo={q(root + "/repo")}
           candidate_git_home={q(root + "/git-home")}
           candidate_git_bin=
+          host_bootstrap_step=
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
           candidate_bundle_binding_sha256={q(candidate_bundle_binding_sha256)}
@@ -396,6 +424,15 @@ jobs:
             final_status=$?
             trap - EXIT HUP INT TERM
             set +e
+            if [ "$final_status" -ne 0 ] && \
+               [ "$failure_stage" = host-python-bootstrap ]; then
+              case "$host_bootstrap_step" in
+                venv-absence|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
+                  printf 'LEADPOET_BOOTSTRAP_STEP=%s\n' \
+                    "$host_bootstrap_step" >&2
+                  ;;
+              esac
+            fi
             if [ "$final_status" -ne 0 ]; then
               retain_failure || true
             fi
@@ -527,16 +564,21 @@ jobs:
           host_python="$host_venv/bin/python3"
           failure_stage=host-python-bootstrap
           failure_category=CommandFailed
+          host_bootstrap_step=venv-absence
           test ! -e "$host_venv"
+          host_bootstrap_step=venv-create
           /usr/bin/python3.11 -m venv "$host_venv"
+          host_bootstrap_step=venv-identity
           test -d "$host_venv"
           test ! -L "$host_venv"
           test -x "$host_python"
           test "$(readlink -f -- "$host_python")" = /usr/bin/python3.11
+          host_bootstrap_step=python-version
           test "$("$host_python" -I -c \
             'import sys; print(f"{{sys.version_info.major}}.{{sys.version_info.minor}}")')" = \
             3.11
           host_requirements={q(root + "/host-controller-requirements.txt")}
+          host_bootstrap_step=requirements-resolve
           test ! -e "$host_requirements"
           /usr/bin/python3.11 \
             scripts/resolve_production_parity_controller_requirements.py \
@@ -544,17 +586,20 @@ jobs:
             --output "$host_requirements" >/dev/null 2>&1
           test -f "$host_requirements"
           test ! -L "$host_requirements"
+          host_bootstrap_step=pip-bootstrap
           if ! PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m pip --version >/dev/null 2>&1; then
             PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
               "$host_python" -m ensurepip --upgrade >/dev/null 2>&1
           fi
+          host_bootstrap_step=pip-install
           PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
             "$host_python" -m pip install \
             --disable-pip-version-check \
             --no-input \
             --no-cache-dir \
             --requirement "$host_requirements" >/dev/null 2>&1
+          host_bootstrap_step=pip-check
           PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
             "$host_python" -m pip check >/dev/null 2>&1
           failure_stage=host-python-import
@@ -627,6 +672,51 @@ jobs:
             --base-sha "${{ steps.inputs.outputs.base }}" \
             --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Report bounded bootstrap substage
+        if: always() && steps.poll1.outcome == 'failure'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          diagnostic="$PARITY_TEMP/ssm-bootstrap-diagnostic.json"
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --query '{stdout:StandardOutputContent,stderr:StandardErrorContent}' \
+            --output json > "$diagnostic"
+          python3 - "$diagnostic" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          allowed = {
+              "venv-absence",
+              "venv-create",
+              "venv-identity",
+              "python-version",
+              "requirements-resolve",
+              "pip-bootstrap",
+              "pip-install",
+              "pip-check",
+          }
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          combined = "\n".join(
+              str(value.get(key) or "") for key in ("stdout", "stderr")
+          )
+          observed = re.findall(
+              r"^LEADPOET_BOOTSTRAP_STEP=([a-z0-9-]+)$",
+              combined,
+              flags=re.MULTILINE,
+          )
+          exact = sorted(set(observed).intersection(allowed))
+          print(json.dumps({
+              "bootstrap_step": exact[0] if len(exact) == 1 else "unavailable",
+              "schema_version": "leadpoet.production_parity_bootstrap_diagnostic.v1",
+          }, sort_keys=True))
+          PY
+          rm -f -- "$diagnostic"
 
       - name: Refresh parity AWS role for poll window 2
         if: steps.poll1.outputs.status == 'pending'

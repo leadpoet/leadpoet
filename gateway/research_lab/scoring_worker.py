@@ -1630,6 +1630,9 @@ _PROVIDER_COST_CAP_ERROR_MARKERS = (
     "provider cost cap",
     "budget_soft_stop",
 )
+_MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS = (
+    "model_runner_incomplete:run_budget_exhausted",
+)
 
 
 def _provider_cost_cap_error_text(error_text: str) -> bool:
@@ -1659,6 +1662,11 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     provider = str(diagnostics.get("provider") or "unknown")
     if _provider_cost_cap_error_text(error_text):
         return False
+    if any(
+        marker in lowered
+        for marker in _MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS
+    ):
+        return True
     if status in (408, 429) or status >= 500:
         return True
     # Scrapingdog's 400 "Something went wrong or profile not found" is

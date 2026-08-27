@@ -34,7 +34,11 @@ from gateway.research_lab.official_baseline_model_runner import (
 )
 from research_lab.canonical import sha256_json
 from research_lab.common_model_runner_host import HostActionResult
-from research_lab.eval import DockerPrivateModelSpec, PrivateModelArtifactManifest
+from research_lab.eval import (
+    DockerPrivateModelSpec,
+    PrivateModelArtifactManifest,
+    PrivateModelRuntimeError,
+)
 from research_lab.model_runner_protocol import (
     ArtifactRunnerProtocolGeneration,
     ExactModelRunnerRegistration,
@@ -1073,6 +1077,59 @@ async def test_scoring_worker_accepts_exact_empty_on_retry_zero(monkeypatch):
     assert row["diagnostics"]["sourcing_failed"] is False
     assert row["diagnostics"]["empty_result_provider_evidence_validated"] is True
     assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD in row
+
+
+@pytest.mark.asyncio
+async def test_scoring_worker_retries_exact_model_incomplete_budget(monkeypatch):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(private_baseline_provider_retry_rounds=2)
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    async def no_traces(**_values):
+        return None
+
+    def incomplete_budget(*_args, **_kwargs):
+        raise PrivateModelRuntimeError(
+            "model_runner_incomplete:run_budget_exhausted"
+        )
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    worker._record_baseline_icp_traces = no_traces
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        incomplete_budget,
+    )
+    item = {
+        "icp_ref": "icp-incomplete-budget",
+        "icp_hash": "sha256:" + "1" * 64,
+        "set_id": "set-1",
+        "day_index": 0,
+        "day_rank": 1,
+        "icp": {"outputs": [], "max_companies": 1},
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        row = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=object(),
+            item=item,
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            benchmark_date="2026-08-23",
+            retry_round=0,
+        )
+
+    assert row["_retryable"] is True
+    assert row["_nonempty"] is False
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD not in row
 
 
 def test_restart_reconstructs_and_does_not_duplicate_provider_call():

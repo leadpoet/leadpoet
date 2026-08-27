@@ -657,19 +657,25 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert "scripts/run_production_parity_full_host.py --help" in execute
     assert "scripts/resolve_production_parity_controller_requirements.py" in execute
     assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in execute
-    assert "python3.11-pip-wheel" in execute
-    assert '"$host_python" -m ensurepip --upgrade' in execute
+    assert "python3.11-pip" in execute
+    assert "python3.11-pip-wheel" not in execute
+    assert '"$host_python" -m ensurepip --upgrade' not in execute
     assert '"$host_python" -m pip check' in execute
     provisioner = (
         Path(__file__).parents[1] / "scripts/provision_production_parity_staging.py"
     ).read_text(encoding="utf-8")
     assert "install -d -m 0700 /run/leadpoet-production-parity" in provisioner
     bootstrap = execute.index("failure_stage=host-python-bootstrap")
-    venv = execute.index(
-        '/usr/bin/python3.11 -I -m venv --without-pip "$host_venv"',
+    runtime_package = execute.index(
+        "host_bootstrap_step=runtime-package",
         bootstrap,
     )
-    bootstrap_pip = execute.index("python3.11-pip-wheel", venv)
+    package_install = execute.index("python3.11-pip", runtime_package)
+    venv = execute.index(
+        '/usr/bin/python3.11 -I -m venv "$host_venv"',
+        package_install,
+    )
+    bootstrap_pip = execute.index('"$host_python" -m pip --version', venv)
     install = execute.index('"$host_python" -m pip install', venv)
     import_stage = execute.index("failure_stage=host-python-import", install)
     verified_import = execute.index(
@@ -677,6 +683,8 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     )
     assert (
         bootstrap
+        < runtime_package
+        < package_install
         < venv
         < bootstrap_pip
         < install
@@ -961,16 +969,22 @@ else:
     sudo_stub.write_text(
         """#!/bin/sh
 set -eu
+if [ "${1:-}" = "-n" ]; then
+  shift
+fi
 operation="$1"
 shift
 case "$operation" in
   mkdir) exec mkdir "$@" ;;
   chown) exit 0 ;;
+  */dnf) exec "$operation" "$@" ;;
   *) exit 2 ;;
 esac
 """,
         encoding="utf-8",
     )
+    dnf_stub = fake_bin / "dnf"
+    dnf_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     stat_stub = fake_bin / "stat"
     stat_stub.write_text(
         """#!/usr/bin/env python3
@@ -1020,6 +1034,7 @@ else:
         aws_stub,
         git_stub,
         sudo_stub,
+        dnf_stub,
         stat_stub,
         sha256sum_stub,
         host_python,
@@ -1040,7 +1055,7 @@ else:
         f"host_python={shlex.quote(str(host_python))}",
     )
     venv_command = (
-        f'{sys.executable} -I -m venv --without-pip "$host_venv"'
+        f'{sys.executable} -I -m venv "$host_venv"'
     )
     assert command.count(venv_command) == 1
     command = command.replace(
@@ -1051,6 +1066,7 @@ else:
         f'test "$(readlink -f -- "$host_python")" = {host_python.resolve()}',
     )
     command = command.replace("/usr/bin/git", str(git_stub))
+    command = command.replace("/usr/bin/dnf", str(dnf_stub))
     command = command.replace("/usr/bin/env -i", "/usr/bin/env")
     if stage is not None:
         assert category is not None

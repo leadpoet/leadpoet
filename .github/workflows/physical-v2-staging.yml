@@ -427,7 +427,7 @@ jobs:
             if [ "$final_status" -ne 0 ] && \
                [ "$failure_stage" = host-python-bootstrap ]; then
               case "$host_bootstrap_step" in
-                venv-absence|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
+                venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
                   printf 'LEADPOET_BOOTSTRAP_STEP=%s\n' \
                     "$host_bootstrap_step" >&2
                   ;;
@@ -566,11 +566,15 @@ jobs:
           failure_category=CommandFailed
           host_bootstrap_step=venv-absence
           test ! -e "$host_venv"
+          host_bootstrap_step=runtime-package
+          test -x /usr/bin/dnf
+          # Amazon Linux publishes the complete Python 3.11 venv bootstrap as
+          # the namespaced pip package. Install it before creating the venv so
+          # the base AMI's optional package set cannot make venv fail first.
+          sudo -n /usr/bin/dnf -q -y install \
+            python3.11-pip >/dev/null 2>&1
           host_bootstrap_step=venv-create
-          # The production AMI may omit the distro pip bootstrap wheel. Build
-          # the isolated interpreter first so that omission cannot make venv
-          # creation fail before the candidate dependency lock is installed.
-          /usr/bin/python3.11 -I -m venv --without-pip "$host_venv"
+          /usr/bin/python3.11 -I -m venv "$host_venv"
           host_bootstrap_step=venv-identity
           test -d "$host_venv"
           test ! -L "$host_venv"
@@ -590,14 +594,8 @@ jobs:
           test -f "$host_requirements"
           test ! -L "$host_requirements"
           host_bootstrap_step=pip-bootstrap
-          if ! PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
-              "$host_python" -m pip --version >/dev/null 2>&1; then
-            test -x /usr/bin/dnf
-            sudo -n /usr/bin/dnf -q -y install \
-              python3.11-pip-wheel >/dev/null 2>&1
-            PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
-              "$host_python" -m ensurepip --upgrade >/dev/null 2>&1
-          fi
+          PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+            "$host_python" -m pip --version >/dev/null 2>&1
           host_bootstrap_step=pip-install
           PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
             "$host_python" -m pip install \
@@ -699,6 +697,7 @@ jobs:
 
           allowed = {
               "venv-absence",
+              "runtime-package",
               "venv-create",
               "venv-identity",
               "python-version",

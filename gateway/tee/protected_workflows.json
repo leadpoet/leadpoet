@@ -182,7 +182,7 @@
       "symbol": "_compact_parent_graphs_for_transport"
     },
     {
-      "ast_sha256": "sha256:b4a05bbb07a2e45baaf4a5bf4085198ba3de04fcaf41c0bc684c02d8cefe1b7f",
+      "ast_sha256": "sha256:28087c9e25b3b7fc10fad856c82e33be2583bf70321f3c3f270054fe57dbd279",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_encrypted_transport_attempts_v2"
     },
@@ -227,7 +227,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:63b0281b1c1697308bb51c3cf9001eb5cacf054a3abe8ee7f32f2bee28c1582d",
+      "ast_sha256": "sha256:41d0e731f5d14ddd1ca14208f2f5503e47c4572190be9279536128d9df6468b6",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -8147,7 +8147,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:79d5e8f35cf866c79dd82ef8bb796da7199d54328837cb9e973b1258112f1cc7",
-  "protected_source_commit": "d5cc04e8decc7457d055a1c073d3f946b4d73024",
+  "manifest_hash": "sha256:b8ba798f232fdd352c20c7476e0e77b9ebdd828fa2d1c652c9ba0c2bb4327635",
+  "protected_source_commit": "2e0dac10487ab81b143966c3c2d075f571482cd7",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

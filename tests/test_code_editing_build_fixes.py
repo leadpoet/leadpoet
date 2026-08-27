@@ -65,6 +65,8 @@ def _source_add_materialization_fixture(
     *,
     omit_evaluator: str = "",
     contract_digest: str | None = None,
+    bind_contract_hash: bool = True,
+    generator_adds_secret: bool = False,
 ):
     source_root = tmp_path / "source"
     routing_dir = source_root / "sourcing_model" / "routing"
@@ -74,6 +76,46 @@ def _source_add_materialization_fixture(
     runtime_path = routing_dir / "runtime.py"
     runtime_source = "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
     runtime_path.write_text(runtime_source, encoding="utf-8")
+    semantic_registry_path = (
+        source_root / code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH
+    )
+    semantic_registry_path.write_text(
+        '{"has_builtwith":false}\n',
+        encoding="utf-8",
+    )
+    scripts_dir = source_root / "scripts"
+    scripts_dir.mkdir()
+    semantic_registry_builder_source = (
+        "import argparse\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--write', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        "if not args.write:\n"
+        "    raise SystemExit(2)\n"
+        "runtime = (ROOT / 'sourcing_model' / 'routing' / 'runtime.py').read_text(encoding='utf-8')\n"
+        "document = {'credential': 'absent', 'has_builtwith': 'builtwith_trends' in runtime}\n"
+    )
+    if generator_adds_secret:
+        semantic_registry_builder_source += (
+            "if document['has_builtwith']:\n"
+            "    document['generated_marker'] = 'sk-' + 'x' * 24\n"
+        )
+    semantic_registry_builder_source += (
+        "(ROOT / 'sourcing_model' / 'production_semantic_registry.json').write_text(\n"
+        "    json.dumps(document, sort_keys=True, separators=(',', ':')) + '\\n',\n"
+        "    encoding='utf-8',\n"
+        ")\n"
+    )
+    (
+        scripts_dir
+        / Path(code_build._SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH).name
+    ).write_text(
+        semantic_registry_builder_source,
+        encoding="utf-8",
+    )
     fixture_path = source_root / code_build._SOURCE_ADD_PARITY_FIXTURE_PATH
     custody_metadata = {
         "required_dispatch_vector_kinds": ["start"],
@@ -119,6 +161,7 @@ def _source_add_materialization_fixture(
     }
     fixture_document = {
         "fixture_id": "source-add",
+        "adversarial_request": {"access_token": "synthetic-secret"},
         "model_runner_custody_v3": {
             **custody_metadata,
             "dispatch_vector_count": 1,
@@ -270,13 +313,17 @@ def verify_expected_projections(fixtures=None):
     contract_path.write_text(
         json.dumps(
             {
-                "exact_constants": {
-                    code_build._SOURCE_ADD_PARITY_MODULE_PATH: {
-                        code_build._SOURCE_ADD_PARITY_HASH_CONSTANT: (
-                            contract_digest or fixture_digest
-                        ),
+                "exact_constants": (
+                    {
+                        code_build._SOURCE_ADD_PARITY_MODULE_PATH: {
+                            code_build._SOURCE_ADD_PARITY_HASH_CONSTANT: (
+                                contract_digest or fixture_digest
+                            ),
+                        }
                     }
-                }
+                    if bind_contract_hash
+                    else {"research_lab_adapter.py": {}}
+                )
             },
             indent=2,
             ensure_ascii=True,
@@ -300,6 +347,7 @@ def verify_expected_projections(fixtures=None):
             code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
             code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
             code_build._SOURCE_ADD_PARITY_MODULE_PATH,
+            code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH,
         ),
         file_previews=(),
     )
@@ -337,6 +385,7 @@ def test_source_add_materialization_binds_verified_parity_fixture(
         code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH,
         code_build._SOURCE_ADD_PARITY_MODULE_PATH,
         code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
+        code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH,
         code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
     )
     for path in code_build._SOURCE_ADD_DERIVED_ARTIFACT_PATHS:
@@ -357,6 +406,73 @@ def test_source_add_materialization_binds_verified_parity_fixture(
         draft=draft,
         source_context=source_context,
     )
+
+
+def test_source_add_materialization_requires_model_semantic_registry_builder(
+    tmp_path,
+):
+    source_context, draft = _source_add_materialization_fixture(tmp_path)
+    (
+        source_context.source_root
+        / code_build._SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH
+    ).unlink()
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="parity projection materialization failed",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
+
+
+def test_source_add_materialization_preserves_unbound_consumer_contract(tmp_path):
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        bind_contract_hash=False,
+    )
+    contract_path = (
+        source_context.source_root
+        / code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH
+    )
+    original_contract = contract_path.read_bytes()
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    materialized = builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    )
+
+    assert code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH not in (
+        materialized.target_files
+    )
+    assert contract_path.read_bytes() == original_contract
+    assert code_build._SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS.issubset(
+        materialized.target_files
+    )
+
+
+def test_source_add_materialization_rejects_new_generated_secret(tmp_path):
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        generator_adds_secret=True,
+    )
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="generated artifacts contain secret-shaped material",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
 
 
 def test_source_add_materialization_fails_closed_when_projection_api_differs(

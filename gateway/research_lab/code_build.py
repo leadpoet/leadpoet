@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import json
@@ -28,6 +29,7 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
+    _SECRET_VALUE_PATTERNS,
     code_edit_candidate_manifest,
     extract_unified_diff_paths,
     git_diff_structural_metadata,
@@ -91,13 +93,24 @@ _SOURCE_ADD_ROUTING_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
 _SOURCE_ADD_PARITY_FIXTURE_PATH = "sourcing_model/consumer_parity_fixtures.json"
 _SOURCE_ADD_PARITY_MODULE_PATH = "sourcing_model/consumer_parity.py"
 _SOURCE_ADD_CONSUMER_CONTRACT_PATH = "sourcing_model/consumer_contract.json"
+_SOURCE_ADD_SEMANTIC_REGISTRY_PATH = (
+    "sourcing_model/production_semantic_registry.json"
+)
+_SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH = (
+    "scripts/build_production_semantic_registry.py"
+)
 _SOURCE_ADD_PARITY_HASH_CONSTANT = "CONSUMER_PARITY_FIXTURE_DOCUMENT_SHA256"
 _SOURCE_ADD_DERIVED_ARTIFACT_PATHS = frozenset(
     {
         _SOURCE_ADD_PARITY_FIXTURE_PATH,
         _SOURCE_ADD_PARITY_MODULE_PATH,
         _SOURCE_ADD_CONSUMER_CONTRACT_PATH,
+        _SOURCE_ADD_SEMANTIC_REGISTRY_PATH,
     }
+)
+_SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS = (
+    _SOURCE_ADD_DERIVED_ARTIFACT_PATHS
+    - {_SOURCE_ADD_CONSUMER_CONTRACT_PATH}
 )
 _SOURCE_ADD_PARITY_PROJECTION_EVALUATORS = (
     ("expected_account_evidence_contract_projections", "evaluate_account_evidence_contract_parity_cases"),
@@ -146,6 +159,103 @@ def _source_add_registration_changed(unified_diff: str) -> bool:
         "SourceAddRoutingRegistration(" in added_lines
         and "SOURCE_ADD_ROUTING_REGISTRATIONS" in str(unified_diff or "")
     )
+
+
+def _source_add_candidate_authored_draft(
+    draft: CodeEditDraft,
+) -> CodeEditDraft | None:
+    """Remove exact generated sections from one materialized SOURCE_ADD diff."""
+
+    diff_paths = extract_unified_diff_paths(draft.unified_diff)
+    generated_paths = diff_paths & _SOURCE_ADD_DERIVED_ARTIFACT_PATHS
+    if (
+        not _SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS.issubset(
+            generated_paths
+        )
+        or not _source_add_registration_changed(draft.unified_diff)
+    ):
+        return None
+    if set(draft.target_files) != diff_paths:
+        raise ValueError("code_edit_target_files_differ_from_unified_diff")
+
+    sections: list[str] = []
+    current: list[str] = []
+    for line in str(draft.unified_diff or "").splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            sections.append("".join(current))
+            current = []
+        current.append(line)
+    if current:
+        sections.append("".join(current))
+
+    candidate_sections: list[str] = []
+    for section in sections:
+        paths = extract_unified_diff_paths(section)
+        if len(paths) != 1:
+            raise ValueError("SOURCE_ADD materialized diff section is invalid")
+        if paths.issubset(generated_paths):
+            continue
+        if paths & generated_paths:
+            raise ValueError("SOURCE_ADD materialized diff paths overlap")
+        candidate_sections.append(section)
+    candidate_diff = "".join(candidate_sections)
+    candidate_paths = diff_paths - generated_paths
+    if not candidate_diff.strip() or not candidate_paths:
+        raise ValueError("SOURCE_ADD candidate-authored diff is unavailable")
+    return replace(
+        draft.with_unified_diff(candidate_diff),
+        target_files=tuple(sorted(candidate_paths)),
+    )
+
+
+def _source_add_generated_artifacts_introduce_secret(
+    unified_diff: str,
+) -> bool:
+    """Reject secret-shaped values newly emitted by model-owned generators.
+
+    Generated minified JSON is often replaced as one line, so its added line
+    can repeat an adversarial synthetic marker already present in the parent
+    fixture. Compare exact match counts with removed generated material while
+    keeping every newly introduced match fail-closed.
+    """
+
+    sections: list[str] = []
+    current: list[str] = []
+    for line in str(unified_diff or "").splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            sections.append("".join(current))
+            current = []
+        current.append(line)
+    if current:
+        sections.append("".join(current))
+
+    for section in sections:
+        paths = extract_unified_diff_paths(section)
+        if not paths or not paths.issubset(_SOURCE_ADD_DERIVED_ARTIFACT_PATHS):
+            continue
+        added = "\n".join(
+            line[1:]
+            for line in section.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        removed = "\n".join(
+            line[1:]
+            for line in section.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        )
+        for pattern in _SECRET_VALUE_PATTERNS:
+            added_matches = Counter(
+                match.group(0) for match in pattern.finditer(added)
+            )
+            removed_matches = Counter(
+                match.group(0) for match in pattern.finditer(removed)
+            )
+            if any(
+                count > removed_matches.get(value, 0)
+                for value, count in added_matches.items()
+            ):
+                return True
+    return False
 
 
 def _source_add_custody_refresh_script() -> str:
@@ -308,12 +418,12 @@ if len(previous_digest) != 64 or any(
 
 contract = json.loads(contract_path.read_text(encoding="utf-8"))
 exact_constants = contract.get("exact_constants")
-parity_constants = (
-    exact_constants.get({json.dumps(_SOURCE_ADD_PARITY_MODULE_PATH)})
-    if isinstance(exact_constants, dict)
-    else None
-)
-if (
+if not isinstance(exact_constants, dict):
+    raise RuntimeError("consumer contract exact constants are unavailable")
+parity_contract_path = {json.dumps(_SOURCE_ADD_PARITY_MODULE_PATH)}
+parity_constants = exact_constants.get(parity_contract_path)
+contract_binds_fixture_hash = parity_contract_path in exact_constants
+if contract_binds_fixture_hash and (
     not isinstance(parity_constants, dict)
     or parity_constants.get(hash_constant) != previous_digest
 ):
@@ -332,12 +442,17 @@ parity_path.write_text(
     parity_source[:start] + json.dumps(fixture_digest) + parity_source[end:],
     encoding="utf-8",
 )
-parity_constants[hash_constant] = fixture_digest
-contract_path.write_text(
-    json.dumps(contract, indent=2, ensure_ascii=True) + "\\n",
-    encoding="utf-8",
-)
-print(json.dumps({{"status": "verified", "projection_count": len(updates)}}))
+if contract_binds_fixture_hash:
+    parity_constants[hash_constant] = fixture_digest
+    contract_path.write_text(
+        json.dumps(contract, indent=2, ensure_ascii=True) + "\\n",
+        encoding="utf-8",
+    )
+print(json.dumps({{
+    "status": "verified",
+    "projection_count": len(updates),
+    "consumer_contract_updated": contract_binds_fixture_hash,
+}}))
 """
 
 
@@ -1157,6 +1272,29 @@ class CodeEditCandidateBuilder:
                 errors.append(f"code_edit_unread_source_file:{path}")
         return errors
 
+    def _validate_builder_draft(self, draft: CodeEditDraft) -> None:
+        candidate_draft = _source_add_candidate_authored_draft(draft)
+        if candidate_draft is None:
+            validate_code_edit_draft(
+                draft,
+                allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+                allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+                allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+            )
+            return
+        if _source_add_generated_artifacts_introduce_secret(
+            draft.unified_diff
+        ):
+            raise ValueError(
+                "SOURCE_ADD generated artifacts contain secret-shaped material"
+            )
+        validate_code_edit_draft(
+            candidate_draft,
+            allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+            allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+            allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+        )
+
     def materialize_source_add_derived_artifacts(
         self,
         *,
@@ -1172,14 +1310,35 @@ class CodeEditCandidateBuilder:
 
         if not _source_add_registration_changed(draft.unified_diff):
             return draft
+        candidate_derived_paths = sorted(
+            extract_unified_diff_paths(draft.unified_diff)
+            & _SOURCE_ADD_DERIVED_ARTIFACT_PATHS
+        )
+        if candidate_derived_paths:
+            raise CodeEditPrivateTestError(
+                "SOURCE_ADD candidate cannot edit generated artifacts: "
+                + ", ".join(candidate_derived_paths),
+                failure_stage="candidate_derived_artifact_failed",
+            )
         missing_derived_paths = sorted(
-            _SOURCE_ADD_DERIVED_ARTIFACT_PATHS
+            _SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS
             - set(source_context.editable_files)
         )
         if missing_derived_paths:
             raise CodeEditPrivateTestError(
                 "SOURCE_ADD parity artifacts are unavailable in the measured source tree: "
                 + ", ".join(missing_derived_paths),
+                failure_stage="candidate_derived_artifact_failed",
+            )
+        consumer_contract_path = (
+            source_context.source_root / _SOURCE_ADD_CONSUMER_CONTRACT_PATH
+        )
+        if (
+            not consumer_contract_path.is_file()
+            or consumer_contract_path.is_symlink()
+        ):
+            raise CodeEditPrivateTestError(
+                "SOURCE_ADD consumer contract is unavailable in the measured source tree",
                 failure_stage="candidate_derived_artifact_failed",
             )
         try:
@@ -1229,8 +1388,27 @@ class CodeEditCandidateBuilder:
                     _source_add_parity_refresh_script(),
                     encoding="utf-8",
                 )
+                semantic_registry_builder = (
+                    repo_dir / _SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH
+                )
+                if (
+                    not semantic_registry_builder.is_file()
+                    or semantic_registry_builder.is_symlink()
+                ):
+                    raise CodeEditBuildError(
+                        "SOURCE_ADD semantic registry builder is unavailable"
+                    )
                 previous_projection_state: tuple[bytes, ...] | None = None
-                for _ in range(3):
+                for _ in range(5):
+                    _run_candidate_derived_artifact_tool(
+                        [
+                            sys.executable,
+                            _SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH,
+                            "--write",
+                        ],
+                        cwd=repo_dir,
+                        timeout_seconds=240,
+                    )
                     _run_candidate_derived_artifact_tool(
                         [sys.executable, str(refresh_path)],
                         cwd=repo_dir,
@@ -1279,7 +1457,8 @@ class CodeEditCandidateBuilder:
                     failure_stage="candidate_derived_artifact_failed",
                 )
             missing_materialized_paths = sorted(
-                _SOURCE_ADD_DERIVED_ARTIFACT_PATHS - set(changed_files)
+                _SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS
+                - set(changed_files)
             )
             if missing_materialized_paths:
                 raise CodeEditPrivateTestError(
@@ -1297,12 +1476,7 @@ class CodeEditCandidateBuilder:
                 target_files=tuple(changed_files),
             )
             try:
-                validate_code_edit_draft(
-                    materialized,
-                    allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
-                    allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
-                    allowed_suffixes=self.config.code_edit_allowed_suffixes(),
-                )
+                self._validate_builder_draft(materialized)
             except ValueError as exc:
                 raise CodeEditPrivateTestError(
                     "SOURCE_ADD materialized candidate is invalid: " + str(exc),
@@ -1320,12 +1494,7 @@ class CodeEditCandidateBuilder:
         """Validate that a draft patch applies before starting the full build."""
 
         try:
-            validate_code_edit_draft(
-                draft,
-                allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
-                allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
-                allowed_suffixes=self.config.code_edit_allowed_suffixes(),
-            )
+            self._validate_builder_draft(draft)
         except ValueError as exc:
             raise CodeEditPatchApplyError(str(exc)) from exc
         with tempfile.TemporaryDirectory(prefix="research-lab-code-edit-check-") as tmp:
@@ -1405,12 +1574,7 @@ class CodeEditCandidateBuilder:
                 if not str(value or "").strip()
             ]
             raise CodeEditBuildError("code-edit image builder is missing config: " + ", ".join(missing))
-        validate_code_edit_draft(
-            draft,
-            allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
-            allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
-            allowed_suffixes=self.config.code_edit_allowed_suffixes(),
-        )
+        self._validate_builder_draft(draft)
         source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
         parent_image_digest_hash = canonical_hash({"image_digest": parent_artifact.image_digest})
         source_mode = (

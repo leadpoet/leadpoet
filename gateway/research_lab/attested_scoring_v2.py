@@ -183,13 +183,51 @@ def _local_failed_receipt_hashes(
 
 def _encrypted_transport_attempts_v2(
     transport_attempts: Iterable[Mapping[str, Any]],
+    *,
+    committed_artifact_hashes: Iterable[str],
 ) -> tuple[Mapping[str, Any], ...]:
     """Select attempts whose payloads entered the coordinator artifact vault."""
+
+    committed_hashes = {
+        str(item).lower()
+        for item in committed_artifact_hashes
+        if _HASH_RE.fullmatch(str(item or "").lower())
+    }
+    local_authority_refs = {
+        sha256_json(
+            {
+                "schema_version": "leadpoet.attested-local-authority.v1",
+                "authority_sha256": artifact_hash,
+            }
+        )
+        for artifact_hash in committed_hashes
+    }
+
+    def is_attested_local(attempt: Mapping[str, Any]) -> bool:
+        terminal_status = str(attempt.get("terminal_status") or "")
+        if terminal_status not in {
+            "attested_local_response",
+            "transport_failure",
+        }:
+            return False
+        if (
+            str(attempt.get("credential_ref_hash") or "")
+            not in local_authority_refs
+            or str(attempt.get("request_artifact_hash") or "")
+            not in committed_hashes
+            or attempt.get("tls_peer_chain_hash") is not None
+            or attempt.get("tls_protocol") is not None
+        ):
+            return False
+        response_hash = str(attempt.get("response_artifact_hash") or "")
+        if terminal_status == "attested_local_response":
+            return response_hash in committed_hashes
+        return not response_hash
 
     return tuple(
         attempt
         for attempt in transport_attempts
-        if attempt.get("terminal_status") != "attested_local_response"
+        if not is_attested_local(attempt)
     )
 
 
@@ -1829,7 +1867,8 @@ async def execute_scoring_v2(
         raise AttestedScoringV2Error("V2 scoring artifact root differs")
     transitions = await rpc_method("get_transitions")(job_id) if succeeded else []
     encrypted_transport_attempts = _encrypted_transport_attempts_v2(
-        transport_attempts
+        transport_attempts,
+        committed_artifact_hashes=job_artifact_hashes,
     )
     request_artifact_hashes = sorted(
         str(attempt.get("request_artifact_hash") or "")

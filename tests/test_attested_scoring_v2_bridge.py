@@ -2805,6 +2805,7 @@ def _authenticated_attempt(context):
 
 
 def _attested_local_attempt(context):
+    authority_hash = _hash("a")
     return build_transport_attempt(
         request_id="b" * 32,
         logical_operation_id="provider-snapshot-replay",
@@ -2818,7 +2819,12 @@ def _attested_local_attempt(context):
         path_hash=_hash("1"),
         nonsecret_headers_hash=_hash("2"),
         body_hash=_hash("3"),
-        credential_ref_hash=_hash("4"),
+        credential_ref_hash=sha256_json(
+            {
+                "schema_version": "leadpoet.attested-local-authority.v1",
+                "authority_sha256": authority_hash,
+            }
+        ),
         retry_policy_hash=_hash("5"),
         timeout_ms=30000,
         started_at="2026-07-10T00:00:00Z",
@@ -2830,6 +2836,45 @@ def _attested_local_attempt(context):
         tls_peer_chain_hash=None,
         tls_protocol=None,
         failure_code=None,
+        completed_at="2026-07-10T00:00:01Z",
+    )
+
+
+def _attested_local_failure_attempt(context, *, credential_ref_hash=None):
+    authority_hash = _hash("a")
+    return build_transport_attempt(
+        request_id="e" * 32,
+        logical_operation_id="provider-snapshot-replay-failure",
+        job_id=context.job_id,
+        purpose=context.purpose,
+        provider_id="snapshot_replay",
+        attempt_number=0,
+        method="POST",
+        destination_host="snapshot.example",
+        destination_port=443,
+        path_hash=_hash("1"),
+        nonsecret_headers_hash=_hash("2"),
+        body_hash=_hash("3"),
+        credential_ref_hash=(
+            credential_ref_hash
+            or sha256_json(
+                {
+                    "schema_version": "leadpoet.attested-local-authority.v1",
+                    "authority_sha256": authority_hash,
+                }
+            )
+        ),
+        retry_policy_hash=_hash("5"),
+        timeout_ms=30000,
+        started_at="2026-07-10T00:00:00Z",
+        terminal_status="transport_failure",
+        http_status=None,
+        response_hash=None,
+        request_artifact_hash=_hash("8"),
+        response_artifact_hash=None,
+        tls_peer_chain_hash=None,
+        tls_protocol=None,
+        failure_code="unexpected_eof",
         completed_at="2026-07-10T00:00:01Z",
     )
 
@@ -2896,6 +2941,80 @@ async def test_v2_bridge_accepts_authority_bound_local_replay_without_envelopes(
         (result["execution_receipt"]["job_id"], "research_lab.benchmark.v2")
     ]
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_accepts_authority_bound_local_failure_without_envelopes():
+    release = _release()
+    listed_scopes = []
+    persisted = []
+
+    def executor(operation, payload, context):
+        context.record_transport(_attested_local_failure_attempt(context))
+        for digest in (_hash("a"), _hash("8")):
+            context.record_artifact(digest)
+        return {"operation": operation, "echo": payload}
+
+    class EmptyArtifactCoordinator:
+        async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
+            listed_scopes.append((job_id, purpose))
+            return {"artifacts": []}
+
+    async def persist(graph, **_kwargs):
+        persisted.append(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def unexpected_artifact_upload(*_args, **_kwargs):
+        pytest.fail("authority-bound replay failure has no encrypted envelope")
+
+    result = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"scores": [1.0]},
+        worker_index=0,
+        provider_profile_loader=lambda *_args, **_kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        release_manifest=release,
+        client=_Client(release, executor=executor),
+        artifact_coordinator_client=EmptyArtifactCoordinator(),
+        persist_artifact=unexpected_artifact_upload,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["transport_attempts"][0]["terminal_status"] == "transport_failure"
+    assert result["transport_attempts"][0]["failure_code"] == "unexpected_eof"
+    assert set(result["artifact_hashes"]) == {_hash("a"), _hash("8")}
+    assert listed_scopes == [
+        (result["execution_receipt"]["job_id"], "research_lab.benchmark.v2")
+    ]
+    assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+def test_v2_bridge_keeps_live_transport_failure_in_encrypted_set():
+    attempt = _attested_local_failure_attempt(
+        type(
+            "Context",
+            (),
+            {
+                "job_id": "job-live-transport-failure",
+                "purpose": "research_lab.benchmark.v2",
+            },
+        )(),
+        credential_ref_hash=_hash("4"),
+    )
+
+    assert attested_scoring_v2._encrypted_transport_attempts_v2(
+        [attempt],
+        committed_artifact_hashes=(_hash("a"), _hash("8")),
+    ) == (attempt,)
 
 
 @pytest.mark.asyncio

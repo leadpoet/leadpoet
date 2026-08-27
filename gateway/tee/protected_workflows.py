@@ -1084,6 +1084,7 @@ PROTECTED_SYMBOLS = {
         "OFFICIAL_BASELINE_PROTECTED_RECONCILIATION_SCHEMA_VERSION",
         "PROTECTED_ACTION_AUTHORITY_SCHEMA_VERSION",
         "PROTECTED_ACTION_AUTHORITY_SHA256",
+        "OfficialBaselineTerminalUncertainError",
         "OfficialBaselineProtectedPreparation",
         "OfficialBaselineProtectedTerminal",
         "OfficialBaselineReleaseComponents",

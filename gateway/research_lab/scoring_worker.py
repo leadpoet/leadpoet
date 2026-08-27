@@ -111,6 +111,7 @@ from gateway.research_lab.official_baseline_store import (
     SupabaseOfficialBaselineAttemptStore,
 )
 from gateway.research_lab.official_baseline_authority import (
+    OfficialBaselineTerminalUncertainError,
     build_production_official_baseline_exact_dependencies,
 )
 from gateway.research_lab.official_baseline_release_authorities import (
@@ -16141,7 +16142,10 @@ class ResearchLabGatewayScoringWorker:
                 and model_qualification_authority is None
             ):
                 retryable = True
-        except PrivateModelRuntimeError as exc:
+        except (
+            PrivateModelRuntimeError,
+            OfficialBaselineTerminalUncertainError,
+        ) as exc:
             outputs = []
             runtime_error = _short_error(exc)
             runtime_error_class = type(exc).__name__
@@ -16155,6 +16159,13 @@ class ResearchLabGatewayScoringWorker:
                 model_qualification_partial_count = len(
                     tuple(exc.partial_companies)
                 )
+            elif isinstance(exc, OfficialBaselineTerminalUncertainError):
+                # The append-only authority correctly forbids reopening the
+                # unresolved paid-call identity.  The existing bounded retry
+                # round supplies a fresh durable unit/attempt identity, while
+                # exact evidence-proxy replay can still recover the response
+                # without redispatching the physical provider request.
+                retryable = True
             else:
                 # Classify from the full exception text: _short_error
                 # truncates to 300 chars and can drop the status marker the

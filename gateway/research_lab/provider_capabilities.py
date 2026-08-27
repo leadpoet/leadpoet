@@ -1610,6 +1610,103 @@ def validate_source_add_registration_diff(
             contract_version=7,
         ), legacy_contract
 
+    opaque_ast_field = "__signed_parent_registration_ast_sha256"
+    forward_parent_fields = {
+        "execution_plan_identity",
+        "requires_full_timeout",
+    }
+
+    def opaque_parent_registration(
+        node: ast.Call,
+        *,
+        contract_version: int,
+    ) -> tuple[tuple[str, str], dict[str, Any]]:
+        """Hash-lock one forward-version registration without executing it.
+
+        A signed model release may add constructor fields before this gateway
+        can normalize their semantics.  Such a parent entry can remain in the
+        registry only while its complete AST is unchanged.  New or modified
+        entries still have to pass the current literal normalizer.
+        """
+
+        if (
+            contract_version != 8
+            or function_name(node) != "SourceAddRoutingRegistration"
+            or node.args
+            or any(keyword.arg is None for keyword in node.keywords)
+        ):
+            raise ValueError("opaque registration shape is invalid")
+        keyword_names = [str(keyword.arg) for keyword in node.keywords]
+        keyword_set = set(keyword_names)
+        if (
+            len(keyword_names) != len(set(keyword_names))
+            or not _SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS
+            <= keyword_set
+            or not keyword_set
+            <= set(_SOURCE_ADD_REGISTRATION_FIELDS) | forward_parent_fields
+            or not keyword_set - set(_SOURCE_ADD_REGISTRATION_FIELDS)
+        ):
+            raise ValueError("opaque registration fields are invalid")
+        keywords = {
+            str(keyword.arg): keyword.value
+            for keyword in node.keywords
+        }
+        try:
+            literal_node = ast.Call(
+                func=node.func,
+                args=[],
+                keywords=[
+                    keyword
+                    for keyword in node.keywords
+                    if keyword.arg not in forward_parent_fields
+                ],
+            )
+            registration, _ = registration_from_call(
+                literal_node,
+                contract_version=contract_version,
+            )
+        except (KeyError, TypeError, ValueError, SyntaxError) as exc:
+            raise ValueError("opaque registration base fields are invalid") from exc
+        provider_id = str(registration.get("provider_id") or "")
+        stage = str(registration.get("stage") or "")
+        key = (provider_id, stage)
+        if "requires_full_timeout" in keywords:
+            try:
+                requires_full_timeout = ast.literal_eval(
+                    keywords["requires_full_timeout"]
+                )
+            except (TypeError, ValueError, SyntaxError) as exc:
+                raise ValueError(
+                    "requires_full_timeout must be static"
+                ) from exc
+            if not isinstance(requires_full_timeout, bool):
+                raise ValueError("requires_full_timeout must be a boolean")
+        if "execution_plan_identity" in keywords:
+            plan_node = keywords["execution_plan_identity"]
+            expected_tool_id = (
+                "candidate" if stage == "candidate_acquisition" else "intent"
+            ) + f".source_add.{provider_id}"
+            if (
+                not isinstance(plan_node, ast.Call)
+                or function_name(plan_node)
+                != "_predictleads_execution_plan_manifest"
+                or len(plan_node.args) != 1
+                or plan_node.keywords
+            ):
+                raise ValueError("execution plan identity helper is invalid")
+            try:
+                plan_tool_id = ast.literal_eval(plan_node.args[0])
+            except (TypeError, ValueError, SyntaxError) as exc:
+                raise ValueError(
+                    "execution plan identity tool is dynamic"
+                ) from exc
+            if plan_tool_id != expected_tool_id:
+                raise ValueError("execution plan identity tool differs")
+        ast_hash = hashlib.sha256(
+            ast.dump(node, include_attributes=False).encode("utf-8")
+        ).hexdigest()
+        return key, {**registration, opaque_ast_field: ast_hash}
+
     def source_contract_version(tree: ast.Module) -> int:
         manifest_assignments: list[ast.AST] = []
         category_contract_classes = 0
@@ -1868,6 +1965,9 @@ def validate_source_add_registration_diff(
 
     def registrations_from_source(
         source: str,
+        *,
+        allow_opaque_parent: bool = False,
+        opaque_parent_hashes: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[
         dict[tuple[str, str], dict[str, Any]],
         set[tuple[str, str]],
@@ -1917,14 +2017,29 @@ def validate_source_add_registration_diff(
         for element in elements:
             if not isinstance(element, ast.Call):
                 raise ValueError("registry contains a dynamic value")
-            registration, legacy_guidance = registration_from_call(
-                element,
-                contract_version=contract_version,
-            )
-            key = (
-                str(registration.get("provider_id") or ""),
-                str(registration.get("stage") or ""),
-            )
+            try:
+                registration, legacy_guidance = registration_from_call(
+                    element,
+                    contract_version=contract_version,
+                )
+                key = (
+                    str(registration.get("provider_id") or ""),
+                    str(registration.get("stage") or ""),
+                )
+            except (SyntaxError, TypeError, ValueError):
+                key, registration = opaque_parent_registration(
+                    element,
+                    contract_version=contract_version,
+                )
+                legacy_guidance = False
+                observed_hash = str(registration[opaque_ast_field])
+                if not allow_opaque_parent and (
+                    opaque_parent_hashes is None
+                    or opaque_parent_hashes.get(key) != observed_hash
+                ):
+                    raise ValueError(
+                        "forward-version registration differs from signed parent"
+                    )
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_-]{1,79}", key[0])
                 or key[1] not in {"candidate_acquisition", "intent_evidence"}
@@ -2068,7 +2183,10 @@ def validate_source_add_registration_diff(
             existing_contract_signature,
             existing_non_registry_signature,
             existing_sensitive_signature,
-        ) = registrations_from_source(existing_runtime_source)
+        ) = registrations_from_source(
+            existing_runtime_source,
+            allow_opaque_parent=True,
+        )
     except (SyntaxError, ValueError):
         errors.append("source_add_registration_existing_source_invalid")
         return sorted(set(errors))
@@ -2086,6 +2204,11 @@ def validate_source_add_registration_diff(
         except (CodeEditBuildError, OSError, ValueError):
             errors.append("source_add_registration_runtime_diff_unapplicable")
             return sorted(set(errors))
+    opaque_parent_hashes = {
+        key: str(registration[opaque_ast_field])
+        for key, registration in existing.items()
+        if opaque_ast_field in registration
+    }
     try:
         (
             observed,
@@ -2094,7 +2217,10 @@ def validate_source_add_registration_diff(
             observed_contract_signature,
             observed_non_registry_signature,
             observed_sensitive_signature,
-        ) = registrations_from_source(patched_source)
+        ) = registrations_from_source(
+            patched_source,
+            opaque_parent_hashes=opaque_parent_hashes,
+        )
     except (SyntaxError, ValueError):
         errors.append("source_add_registration_patched_source_invalid")
         return sorted(set(errors))

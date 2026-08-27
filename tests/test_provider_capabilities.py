@@ -199,6 +199,37 @@ def _v8_router_registration_source(request: dict) -> str:
     ),
 )""",
     )
+
+
+def _forward_v8_router_source() -> str:
+    return _EMPTY_V8_ROUTER_RUNTIME.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        """def _predictleads_execution_plan_manifest(tool_id):
+    return {"tool_id": tool_id}
+
+SOURCE_ADD_ROUTING_REGISTRATIONS = (
+    SourceAddRoutingRegistration(
+        provider_id="signed_plan_source",
+        stage=STAGE_INTENT_EVIDENCE,
+        priority=35,
+        capabilities=("intent.provider_evidence",),
+        requires_full_timeout=True,
+        execution_plan_identity=_predictleads_execution_plan_manifest(
+            "intent.source_add.signed_plan_source"
+        ),
+    ),
+)""",
+    )
+
+
+def _append_v8_registration(source: str, request: dict) -> str:
+    generated = _v8_router_registration_source(request)
+    marker = "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+    registration = generated.split(marker, 1)[1].rsplit("\n)", 1)[0]
+    prefix, suffix = source.rsplit("\n)", 1)
+    return f"{prefix}\n{registration}\n){suffix}"
+
+
 def _provider_doc(
     provider_id: str = "synthetic_feed",
     *,
@@ -1178,6 +1209,75 @@ if False:
         _router_runtime_diff(expected, dead_code_constructor),
         context,
         existing_runtime_source=expected,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+
+def test_source_add_registration_preserves_forward_version_parent_entries():
+    provider = _provider_doc("community_accounts", origin="source_add")
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    existing = _forward_v8_router_source()
+    changed = _append_v8_registration(existing, context["requests"][0])
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        context,
+        existing_runtime_source=existing,
+    ) == []
+
+    changed_parent = existing.replace(
+        "intent.source_add.signed_plan_source",
+        "signed-plan-v2",
+    )
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed_parent),
+        None,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+    changed_helper = existing.replace(
+        'return {"tool_id": tool_id}',
+        'return {"tool_id": tool_id, "unreviewed": True}',
+    )
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed_helper),
+        None,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+    unknown_parent_field = existing.replace(
+        "requires_full_timeout=True,",
+        "unreviewed_behavior=True,",
+    )
+    assert validate_source_add_registration_diff(
+        "",
+        {"requests": [{}]},
+        existing_runtime_source=unknown_parent_field,
+    ) == ["source_add_registration_existing_source_invalid"]
+
+    empty_parent = _EMPTY_V8_ROUTER_RUNTIME.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        """def _predictleads_execution_plan_manifest(tool_id):
+    return {"tool_id": tool_id}
+
+SOURCE_ADD_ROUTING_REGISTRATIONS = ()""",
+    )
+    unreviewed_new = _append_v8_registration(
+        empty_parent,
+        context["requests"][0],
+    ).replace(
+        "        best_for=",
+        "        execution_plan_identity="
+        "_predictleads_execution_plan_manifest("
+        "'candidate.source_add.community_accounts'),\n"
+        "        best_for=",
+    )
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(empty_parent, unreviewed_new),
+        context,
+        existing_runtime_source=empty_parent,
     ) == ["source_add_registration_patched_source_invalid"]
 
 

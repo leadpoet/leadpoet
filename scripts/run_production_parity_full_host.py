@@ -139,6 +139,13 @@ CLONE_PREFIX_ADAPTER_METHODS = frozenset(
 FULL_FAILURE_STAGES = frozenset(
     {
         "initialization",
+        "public-origin",
+        "checkout-identity",
+        "early-boot-isolation",
+        "gateway-key-identity",
+        "arweave-key-identity",
+        "private-model-ssh-identity",
+        "work-root",
         "runtime-config-capture",
         "parity-contract",
         "production-dsn",
@@ -2516,32 +2523,13 @@ def run_full(
         or not ARTIFACT_BUCKET_RE.fullmatch(artifact_bucket)
     ):
         raise FullParityError("full parity inputs are invalid")
-    supabase_origin = _validated_public_origin(supabase_origin)
-    _checkout_identity(candidate_sha)
-    try:
-        boot_state = EARLY_BOOT_MARKER.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise FullParityError(
-            "transient host did not prove early production-service isolation"
-        ) from exc
-    if boot_state != "isolated":
-        raise FullParityError(
-            "transient host early production-service isolation differs"
-        )
-    gateway_private_key_path = _validated_baked_gateway_private_key_path()
-    arweave_keyfile_path = _validated_baked_arweave_keyfile_path()
-    private_model_git_ssh_command = (
-        _validated_baked_private_model_ssh_command()
-    )
     started = time.monotonic()
     deadline = _full_deadline(
         started=started,
         timeout_seconds=timeout_seconds,
     )
     work = FULL_WORK_ROOT / run_id / "runtime"
-    work.mkdir(parents=True, mode=0o700, exist_ok=False)
     scoring_cache = work / "scoring-cache"
-    scoring_cache.mkdir(mode=0o700)
     runtime_config = work / "runtime-config.json"
     contract_path = work / "contract.json"
     archive_path = work / "production.dump"
@@ -2563,6 +2551,34 @@ def run_full(
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
+        failure_stage = "public-origin"
+        supabase_origin = _validated_public_origin(supabase_origin)
+        failure_stage = "checkout-identity"
+        _checkout_identity(candidate_sha)
+        failure_stage = "early-boot-isolation"
+        try:
+            boot_state = EARLY_BOOT_MARKER.read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError as exc:
+            raise FullParityError(
+                "transient host did not prove early production-service isolation"
+            ) from exc
+        if boot_state != "isolated":
+            raise FullParityError(
+                "transient host early production-service isolation differs"
+            )
+        failure_stage = "gateway-key-identity"
+        gateway_private_key_path = _validated_baked_gateway_private_key_path()
+        failure_stage = "arweave-key-identity"
+        arweave_keyfile_path = _validated_baked_arweave_keyfile_path()
+        failure_stage = "private-model-ssh-identity"
+        private_model_git_ssh_command = (
+            _validated_baked_private_model_ssh_command()
+        )
+        failure_stage = "work-root"
+        work.mkdir(parents=True, mode=0o700, exist_ok=False)
+        scoring_cache.mkdir(mode=0o700)
         secrets_client = boto3.client("secretsmanager", region_name=region)
         database = _DockerDatabase(
             candidate_sha=candidate_sha,

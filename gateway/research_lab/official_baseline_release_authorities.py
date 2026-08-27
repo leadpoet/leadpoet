@@ -1150,6 +1150,37 @@ class ArtifactPreparedActionExecutor:
         return ""
 
     @staticmethod
+    def _deepline_run_id(
+        value: Mapping[str, Any],
+        reconciliation: Mapping[str, Any],
+    ) -> str:
+        """Resolve the provider run ID from the exact model-owned pointer."""
+
+        pointer = reconciliation.get("run_id_json_pointer")
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id pointer is invalid"
+            )
+        current: Any = value
+        for raw_segment in pointer[1:].split("/"):
+            if not raw_segment or re.search(r"~(?:[^01]|$)", raw_segment):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline Deepline run id pointer is invalid"
+                )
+            segment = raw_segment.replace("~1", "/").replace("~0", "~")
+            if not isinstance(current, Mapping) or segment not in current:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline Deepline run id is unavailable"
+                )
+            current = current[segment]
+        run_id = current.strip() if isinstance(current, str) else ""
+        if _SAFE_REF_RE.fullmatch(run_id) is None:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id is invalid"
+            )
+        return run_id
+
+    @staticmethod
     def _progress_document(
         *,
         preparation: OfficialBaselineProtectedPreparation,
@@ -1406,11 +1437,12 @@ class ArtifactPreparedActionExecutor:
                         calls=1,
                         started=started,
                     )
-                run_id = str(body.get("id") or "")
-                if _SAFE_REF_RE.fullmatch(run_id) is None:
+                reconciliation = request.get("reconciliation")
+                if not isinstance(reconciliation, Mapping):
                     raise OfficialBaselineProtectedAuthorityError(
-                        "official baseline Deepline run id is invalid"
+                        "official baseline Deepline reconciliation contract is missing"
                     )
+                run_id = self._deepline_run_id(body, reconciliation)
                 progress = self._progress_document(
                     preparation=preparation,
                     dispatch=dispatch,

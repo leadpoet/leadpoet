@@ -44,7 +44,11 @@ from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
 )
 from research_lab.canonical import sha256_json
-from research_lab.common_model_runner_host import HostActionResult
+from research_lab.common_model_runner_host import (
+    HostActionResult,
+    HostCompiledProviderDispatch,
+    ModelRunnerHostError,
+)
 from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
 from research_lab.eval.private_runtime import DockerPrivateModelRunner
 from research_lab.model_runner_protocol import (
@@ -955,11 +959,17 @@ class ArtifactPreparedActionExecutor:
                 "official baseline artifact provider dispatch is not closed"
             )
         value = dict(dispatch)
-        body = dict(value)
-        claimed = _bare_hash(
-            body.pop("dispatch_sha256"),
-            "official baseline provider dispatch hash",
-        )
+        # Reuse the consumer-neutral runner validator here. Its canonical JSON
+        # is the exact ASCII/no-NaN algorithm frozen by the signed runner role
+        # contract. The gateway's general-purpose canonical helper deliberately
+        # uses UTF-8 text instead, so it is not an authority for model-owned
+        # request or dispatch hashes when a prompt contains non-ASCII text.
+        try:
+            HostCompiledProviderDispatch.from_mapping(action, value)
+        except ModelRunnerHostError as exc:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline artifact provider dispatch identity differs"
+            ) from exc
         request = value.get("request")
         if (
             value.get("action_sha256") != action.get("action_sha256")
@@ -974,12 +984,6 @@ class ArtifactPreparedActionExecutor:
                 "official baseline action binding hash",
             )
             or not isinstance(request, Mapping)
-            or _bare_hash(
-                value.get("request_sha256"),
-                "official baseline provider request hash",
-            )
-            != sha256_json(dict(request)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact provider dispatch identity differs"

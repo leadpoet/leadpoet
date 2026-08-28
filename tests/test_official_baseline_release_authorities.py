@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import json
 
@@ -73,6 +74,17 @@ def _custody() -> S3OfficialBaselineDocumentCustody:
 
 def _hash(value) -> str:
     return sha256_json(value).removeprefix("sha256:")
+
+
+def _runner_hash(value) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _catalog_row(
@@ -379,6 +391,76 @@ def _openrouter_provider_fixture():
         }
     )
     return action, dispatch, catalog, inventory
+
+
+def _unicode_openrouter_provider_fixture():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    request = dict(dispatch_body["request"])
+    request["body"] = {
+        **request["body"],
+        "messages": [{"role": "user", "content": "Société — München"}],
+    }
+    dispatch_body["request"] = request
+    dispatch_body["request_sha256"] = _runner_hash(request)
+    return (
+        action,
+        {
+            **dispatch_body,
+            "dispatch_sha256": _runner_hash(dispatch_body),
+        },
+        catalog,
+        inventory,
+    )
+
+
+def test_provider_dispatch_uses_signed_runner_canonical_json_for_unicode():
+    action, dispatch, catalog, inventory = _unicode_openrouter_provider_fixture()
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    preparation = executor.prepare(
+        run_identity={"run": "unicode-provider-dispatch"},
+        unit_ref="baseline_icp:" + "f" * 64,
+        action=action,
+    )
+
+    assert preparation.request_body_sha256 == "sha256:" + dispatch["request_sha256"]
+    assert preparation.action_sha256 == "sha256:" + action["action_sha256"]
+    assert preparation.tool_id == action["tool_id"]
+
+
+def test_provider_dispatch_rejects_utf8_hash_for_signed_ascii_canonical_json():
+    action, dispatch, catalog, inventory = _unicode_openrouter_provider_fixture()
+    body = {key: value for key, value in dispatch.items() if key != "dispatch_sha256"}
+    body["request_sha256"] = _hash(body["request"])
+    invalid = {**body, "dispatch_sha256": _hash(body)}
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=invalid)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="provider dispatch identity differs",
+    ):
+        executor.prepare(
+            run_identity={"run": "unicode-provider-dispatch-invalid"},
+            unit_ref="baseline_icp:" + "e" * 64,
+            action=action,
+        )
 
 
 def _batched_openrouter_provider_fixture():

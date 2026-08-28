@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "8f0dbf0a79106d7c0cda6d43551273c705084d36",
+  "baseline_commit": "a04f70a9396be9d39223343b3b24cda62a095410",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1002,7 +1002,7 @@
       "symbol": "PROTECTED_ACTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:4213cf6d31d8736d84cdbebc6b7f49dd60f49e53eb023e00e31b0b7866e9e83b",
+      "ast_sha256": "sha256:b9922ab60cc51c9804ab14cca8ddf1d8a4c9f4b04ae13436140d870eb8aadaaf",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher"
     },
@@ -1322,7 +1322,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:daced534bd1a91966e62027cd9dffc03fff15104d79e4b0726b3836048f4fa0c",
+      "ast_sha256": "sha256:792f2324ade77c9653ba9cef4c1cb766ab90f572840d26879ab7163394435ea6",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1467,7 +1467,7 @@
       "symbol": "SupabaseOfficialBaselineAttemptStore"
     },
     {
-      "ast_sha256": "sha256:4f6db852cc550c9e62ca31e424b3afaa665381aa7c1fe16259796a39020410d9",
+      "ast_sha256": "sha256:18a670136a27b7660643c1efa348fcf21c528aec3cb4040b879dbebfb3a21f16",
       "path": "gateway/research_lab/official_baseline_store.py",
       "symbol": "_validate_action_authorization"
     },
@@ -8152,7 +8152,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:646f5a1f978614a6af0137acfb656d11e920d60b0242cbbb52c0c012bd58e1d4",
-  "protected_source_commit": "8f0dbf0a79106d7c0cda6d43551273c705084d36",
+  "manifest_hash": "sha256:488ebbf9bcf6fa5df04a2d1f5f025f5e5d48f1cfdc10a3f25d6634cc87d2fd64",
+  "protected_source_commit": "a04f70a9396be9d39223343b3b24cda62a095410",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

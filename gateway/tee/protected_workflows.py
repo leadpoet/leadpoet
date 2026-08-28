@@ -1212,11 +1212,15 @@ PROTECTED_SYMBOLS = {
         "ExactModelRunnerRegistration",
     ),
     "gateway/tee/update_gateway_rebenchmark_retry_secret.py": (
+        "_FIRST_PASS_CONCURRENCY_ENV",
+        "_MAX_FIRST_PASS_CONCURRENCY",
         "_json_object_without_duplicates",
         "_parse_shell_environment",
         "_parse_environment",
         "_render_environment",
+        "_bounded_first_pass_concurrency",
         "update_gateway_rebenchmark_retry_secret",
+        "update_gateway_rebenchmark_concurrency_secret",
     ),
     "gateway/tee/disable_gateway_miner_submissions_secret.py": (
         "__module__",

@@ -5752,24 +5752,44 @@
       "symbol": "vsock_rpc_transport_health_lock"
     },
     {
+      "ast_sha256": "sha256:992453cca7209352c9020a1ff94d1b297d33bb3d14752ca2bd1654f9c77785c0",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_FIRST_PASS_CONCURRENCY_ENV"
+    },
+    {
+      "ast_sha256": "sha256:4c21743ad594f6c0e6103470c89ef6e3a9a1ff79fa8df7d9aa22aece719f6cb2",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_MAX_FIRST_PASS_CONCURRENCY"
+    },
+    {
+      "ast_sha256": "sha256:1e88a8c89d285ff142f07a5ed791d8ae6101127c2152e8204b98de0cfc7d4b04",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_bounded_first_pass_concurrency"
+    },
+    {
       "ast_sha256": "sha256:3fb69b53608890f5ccfe1791a72447118a8193dbf3708701ab0b2840e8d34e22",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_json_object_without_duplicates"
     },
     {
-      "ast_sha256": "sha256:754feaee3d4c470aa8310357ac5e82cab87aa195c96c7da7beecac84e38d8bea",
+      "ast_sha256": "sha256:4fdfb1b70cac96fc96f57e56ad4b886f98068c0423724402d6105e4e68dc05e5",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_parse_environment"
     },
     {
-      "ast_sha256": "sha256:1c4e81131331e539dcce605b3a82a67cadb19cae729652fc593a0f8a203f473e",
+      "ast_sha256": "sha256:070c0b870a678bc574224dac18b5e8aaaf9df24422b55564c47cdaa7b3518012",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_parse_shell_environment"
     },
     {
-      "ast_sha256": "sha256:8352cc3946b967db7551e201bcca127d4c40d89de50afe09d5beefef9a7d8b23",
+      "ast_sha256": "sha256:29bcbc4adcbfaa59c4a0706e6783b2381dd4c0aa02abe17d1029329e2ad990b8",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_render_environment"
+    },
+    {
+      "ast_sha256": "sha256:e0bd2ad6dea348372245a203dc4cc6d4f2122f9f751b47346ca51bf0e208b8b4",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "update_gateway_rebenchmark_concurrency_secret"
     },
     {
       "ast_sha256": "sha256:2b1a8074a1b313094036519d84707890273df78569b69ec805a8e07f7ed17921",
@@ -8197,7 +8217,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:3a62d7fbe21a2489970450dd314cc94e70382d7eb3846d58f42d87b8f59a99e0",
+  "manifest_hash": "sha256:28bcc2d0569f09d771ef63de7e918eec5fb2381f48147e2d4efed868459739c3",
   "protected_source_commit": "0baa2d8dc80287bd42ee3c8ebaa403480ced7532",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

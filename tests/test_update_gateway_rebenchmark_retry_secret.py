@@ -13,11 +13,15 @@ from gateway.tee.scoring_executor import (
 from gateway.tee.update_gateway_rebenchmark_retry_secret import (
     GatewayRebenchmarkRetryUpdateError,
     _parse_shell_environment,
+    update_gateway_rebenchmark_concurrency_secret,
     update_gateway_rebenchmark_retry_secret,
 )
 
 
-def _scoring_hash(*, retry_rounds: str | None) -> str:
+def _scoring_hash(
+    *,
+    retry_rounds: str | None,
+) -> str:
     values = {name: None for name in SCORING_RUNTIME_ENV_NAMES}
     values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = retry_rounds
     return scoring_configuration_hash(values)
@@ -212,7 +216,7 @@ def test_duplicate_target_setting_fails_before_backup_or_write(
 
     with pytest.raises(
         GatewayRebenchmarkRetryUpdateError,
-        match="duplicate retry setting",
+        match="duplicate target setting",
     ):
         update_gateway_rebenchmark_retry_secret(
             secrets_client=client,
@@ -442,3 +446,144 @@ def test_failed_exact_readback_restores_prior_secret(tmp_path):
 
     assert len(client.put_calls) == 2
     assert client.versions[client.current] == original
+
+
+def test_concurrency_update_is_exact_and_preserves_unrelated_values(tmp_path):
+    original = (
+        "UNRELATED='preserve me'\n"
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY=5\n"
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=1\n"
+    )
+    client = FakeSecretsClient(original)
+    prior_hash = _scoring_hash(
+        retry_rounds="1",
+    )
+
+    verified = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=prior_hash,
+        expected_current_concurrency=5,
+        target_concurrency=20,
+        backup_directory=tmp_path,
+    )
+
+    assert verified["status"] == "verified"
+    assert verified["prior_first_pass_concurrency"] == 5
+    assert verified["current_first_pass_concurrency"] == 20
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+    result = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=prior_hash,
+        expected_current_concurrency=5,
+        target_concurrency=20,
+        apply=True,
+        backup_directory=tmp_path,
+        now=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    )
+
+    persisted = client.versions[client.current]
+    assert "UNRELATED='preserve me'" in persisted
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=1" in persisted
+    assert persisted.count("RESEARCH_LAB_BENCHMARK_CONCURRENCY=") == 1
+    assert "RESEARCH_LAB_BENCHMARK_CONCURRENCY=20" in persisted
+    assert result["status"] == "updated"
+    assert Path(result["backup_path"]).read_text(encoding="utf-8") == original
+
+
+def test_concurrency_update_supports_default_one_and_json(tmp_path):
+    original = json.dumps({"UNRELATED": "preserved"})
+    client = FakeSecretsClient(original)
+
+    result = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=_scoring_hash(
+            retry_rounds=None,
+        ),
+        expected_current_concurrency=1,
+        target_concurrency=8,
+        apply=True,
+        backup_directory=tmp_path,
+    )
+
+    assert result["status"] == "updated"
+    assert json.loads(client.versions[client.current]) == {
+        "UNRELATED": "preserved",
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY": "8",
+    }
+
+
+def test_concurrency_update_is_idempotent_against_prior_hash(tmp_path):
+    client = FakeSecretsClient(
+        "UNRELATED=value\n"
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY=20\n"
+    )
+    result = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=_scoring_hash(
+            retry_rounds=None,
+        ),
+        expected_current_concurrency=5,
+        target_concurrency=20,
+        apply=True,
+        backup_directory=tmp_path,
+    )
+
+    assert result["status"] == "already_applied"
+    assert result["current_first_pass_concurrency"] == 20
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("expected_current", "target"),
+    [(0, 20), (5, 0), (5, 65), (True, 20)],
+)
+def test_concurrency_update_rejects_out_of_bounds_before_secret_read(
+    tmp_path,
+    expected_current,
+    target,
+):
+    class NoReadClient(FakeSecretsClient):
+        def get_secret_value(self, **_kwargs):
+            raise AssertionError("secret must not be read")
+
+    with pytest.raises(
+        GatewayRebenchmarkRetryUpdateError,
+        match="invalid|between 1 and 64",
+    ):
+        update_gateway_rebenchmark_concurrency_secret(
+            secrets_client=NoReadClient(""),
+            expected_prior_scoring_configuration_hash=_scoring_hash(
+                retry_rounds=None,
+            ),
+            expected_current_concurrency=expected_current,
+            target_concurrency=target,
+            apply=True,
+            backup_directory=tmp_path,
+        )
+
+
+def test_concurrency_update_rejects_wrong_old_value_without_write(tmp_path):
+    client = FakeSecretsClient(
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY=5\n"
+    )
+
+    with pytest.raises(
+        GatewayRebenchmarkRetryUpdateError,
+        match="does not match the expected old value",
+    ):
+        update_gateway_rebenchmark_concurrency_secret(
+            secrets_client=client,
+            expected_prior_scoring_configuration_hash=_scoring_hash(
+                retry_rounds=None,
+            ),
+            expected_current_concurrency=4,
+            target_concurrency=20,
+            apply=True,
+            backup_directory=tmp_path,
+        )
+
+    assert client.put_calls == []
+    assert list(tmp_path.iterdir()) == []

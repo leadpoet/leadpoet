@@ -1112,7 +1112,10 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
         provider="exa",
         method="POST",
         upstream_url="https://api.exa.ai/search",
-        static_headers={"Content-Type": "application/json"},
+        static_headers={
+            "Content-Type": "application/json",
+            "X-Research-Lab-Request-Timeout-Ms": "999999",
+        },
         body={"query": "redacted fixture"},
         query=None,
         timeout_seconds=10,
@@ -1127,6 +1130,7 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
     lowered_headers = {key.casefold(): value for key, value in captured["headers"].items()}
     assert "authorization" not in lowered_headers
     assert "x-api-key" not in lowered_headers
+    assert lowered_headers["x-research-lab-request-timeout-ms"] == "9500"
     assert captured["closed"] is True
 
     with pytest.raises(
@@ -1189,3 +1193,49 @@ def test_official_proxy_replay_only_header_is_host_owned():
 
     assert "x-research-lab-replay-only" not in captured_headers[0]
     assert captured_headers[1]["x-research-lab-replay-only"] == "1"
+
+
+def test_official_proxy_pending_response_enters_protected_reconciliation():
+    captured = {}
+
+    class _Response:
+        status = 409
+        headers = {"X-Research-Lab-Evidence": "request_pending"}
+
+        def read(self, _limit):
+            return b'{"error":"request_pending"}'
+
+        def close(self):
+            captured["closed"] = True
+
+    def opener(request, *, timeout):
+        captured["headers"] = {
+            key.casefold(): value for key, value in request.header_items()
+        }
+        captured["timeout"] = timeout
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765",
+        opener=opener,
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="remains pending reconciliation",
+    ):
+        client.request(
+            provider="exa",
+            method="POST",
+            upstream_url="https://api.exa.ai/search",
+            static_headers={},
+            body={"query": "redacted fixture"},
+            query=None,
+            timeout_seconds=120,
+            max_response_bytes=10_000,
+            cost_scope="official-baseline-fixture",
+        )
+
+    assert captured["headers"]["x-research-lab-request-timeout-ms"] == "115000"
+    assert captured["timeout"] == 120
+    assert captured["closed"] is True

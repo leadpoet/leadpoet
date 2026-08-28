@@ -118,6 +118,9 @@ _ARTIFACT_CREDENTIAL_BINDING_BY_PROVIDER = {
 }
 _HTTP_METHODS = frozenset({"GET", "POST"})
 _MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+_PROXY_REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
+_PROXY_REQUEST_PENDING_EVIDENCE = "request_pending"
+_PROXY_RESPONSE_RESERVE_SECONDS = 5.0
 _DEEPLINE_TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "cancelled"}
 )
@@ -783,13 +786,26 @@ class _GatewayEvidenceProxyClient:
         headers = {
             str(key): str(value)
             for key, value in static_headers.items()
-            if str(key).casefold() != "x-research-lab-replay-only"
+            if str(key).casefold()
+            not in {
+                "x-research-lab-replay-only",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER.casefold(),
+            }
         }
+        proxy_reserve_seconds = min(
+            _PROXY_RESPONSE_RESERVE_SECONDS,
+            max(0.05, float(timeout_seconds) * 0.05),
+        )
+        proxy_timeout_ms = max(
+            1,
+            int((float(timeout_seconds) - proxy_reserve_seconds) * 1000),
+        )
         headers.update(
             {
                 "Accept": headers.get("Accept", "application/json"),
                 "X-Research-Lab-Cost-Scope": cost_scope,
                 "X-Research-Lab-Budget-Soft-Stop": "1",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER: str(proxy_timeout_ms),
             }
         )
         if replay_only:
@@ -830,7 +846,24 @@ class _GatewayEvidenceProxyClient:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider response exceeds artifact bound"
             )
-        return status, _load_json_object(raw), response_headers
+        parsed_body = _load_json_object(raw)
+        evidence = next(
+            (
+                str(value).strip().casefold()
+                for key, value in response_headers.items()
+                if str(key).casefold() == "x-research-lab-evidence"
+            ),
+            "",
+        )
+        if evidence == _PROXY_REQUEST_PENDING_EVIDENCE:
+            if status != 409 or parsed_body != {"error": "request_pending"}:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline evidence proxy pending response is invalid"
+                )
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline provider request remains pending reconciliation"
+            )
+        return status, parsed_body, response_headers
 
 
 class ArtifactPreparedActionExecutor:

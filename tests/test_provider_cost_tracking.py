@@ -460,6 +460,53 @@ def test_openrouter_missing_cost_for_perplexity_without_usage_is_zero_until_reco
     assert estimate.generation_id == "gen-sonar-no-usage"
 
 
+def test_openrouter_generation_cost_reconciliation_honors_request_deadline(
+    monkeypatch,
+):
+    estimate = ProviderCostEstimate(
+        provider="or",
+        endpoint="/api/v1/chat/completions",
+        model="perplexity/sonar",
+        generation_id="gen-bounded-reconciliation",
+        cost_source="openrouter_missing_cost_zero_cost",
+        tracking_reason="missing_openrouter_cost",
+    )
+    entry = provider_evidence_proxy.ProviderRegistryEntry(
+        id="or",
+        base_url="https://openrouter.ai",
+        auth_kind="bearer",
+    )
+    now = [100.0]
+    observed_timeouts = []
+
+    monkeypatch.setattr(
+        provider_evidence_proxy.time,
+        "monotonic",
+        lambda: now[0],
+    )
+
+    def unavailable(_request, *, timeout):
+        observed_timeouts.append(timeout)
+        now[0] += timeout
+        raise TimeoutError("bounded fixture timeout")
+
+    monkeypatch.setattr(
+        provider_evidence_proxy.urllib.request,
+        "urlopen",
+        unavailable,
+    )
+
+    result = provider_evidence_proxy._reconcile_openrouter_generation_cost(
+        entry=entry,
+        credential="redacted-fixture-key",
+        estimate=estimate,
+        deadline=101.0,
+    )
+
+    assert result == estimate
+    assert observed_timeouts == pytest.approx([0.75])
+
+
 def test_exa_agent_running_poll_is_not_billable_until_completed():
     running = estimate_provider_cost(
         provider="exa",
@@ -1496,6 +1543,55 @@ def test_evidence_store_single_flight_timeout_is_one_absolute_deadline(
 
     assert store.acquire_or_wait(fingerprint, timeout=0.1) == (None, False)
     assert condition.waits == pytest.approx([0.1, 0.06, 0.02])
+
+
+def test_live_single_flight_timeout_returns_pending_without_duplicate_call(
+    monkeypatch,
+):
+    registry = [
+        provider_evidence_proxy.ProviderRegistryEntry(
+            id="exa",
+            base_url="http://127.0.0.1:9",
+            auth_kind="none",
+        )
+    ]
+    proxy = None
+    try:
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        acquire_calls = []
+
+        def acquire_or_wait(*args, **kwargs):
+            acquire_calls.append((args, kwargs))
+            return None, False
+
+        monkeypatch.setattr(store, "acquire_or_wait", acquire_or_wait)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            headers={provider_evidence_proxy.REQUEST_TIMEOUT_MS_HEADER: "2500"},
+            method="GET",
+        )
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+
+        assert raised.value.code == 409
+        assert raised.value.headers.get("X-Research-Lab-Evidence") == (
+            provider_evidence_proxy.REQUEST_PENDING_EVIDENCE
+        )
+        assert json.loads(raised.value.read().decode("utf-8")) == {
+            "error": "request_pending"
+        }
+        assert len(acquire_calls) == 1
+        assert acquire_calls[0][0]
+        assert 0 < acquire_calls[0][1]["timeout"] <= 2.25
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
 
 
 def test_replay_only_miss_does_not_wait_for_live_single_flight(monkeypatch):

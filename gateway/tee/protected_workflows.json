@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "b5ea0b3836603db4a643bb4a89e5f3fd54cd1560",
+  "baseline_commit": "6f35f470d90ee2eec1f731e4f929be11944de952",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -6697,7 +6697,7 @@
       "symbol": "_COMMON_RUNNER_BOOTSTRAP"
     },
     {
-      "ast_sha256": "sha256:d037eff37714b7336f164f9b4dfaf0b0e60db047a94db912056fd40e0327c7c4",
+      "ast_sha256": "sha256:7db7e77d016bea0777ed99dbe89e4f60ae7fae6ff8109c2b932d514c048213fc",
       "path": "research_lab/docker_model_runner_transport.py",
       "symbol": "_COMMON_RUNNER_SESSION_BOOTSTRAP"
     },
@@ -8187,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8b173575e3231f228e12a147f82dd25291c252c0784d56844bf37344c2df0203",
-  "protected_source_commit": "b5ea0b3836603db4a643bb4a89e5f3fd54cd1560",
+  "manifest_hash": "sha256:734810e6e7c94343049a6270184a46a817e6ed6be75314917cc9a0fc45396d81",
+  "protected_source_commit": "6f35f470d90ee2eec1f731e4f929be11944de952",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

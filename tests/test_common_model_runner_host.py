@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
 from io import StringIO
@@ -7,6 +8,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -1527,6 +1529,59 @@ def test_oci_runner_transport_reuses_one_credential_free_session(monkeypatch):
     ]
     transport.close()
     assert sessions[0].closed is True
+
+
+def test_oci_runner_transport_runs_independent_calls_in_parallel(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_common_runner_session_capacity",
+        lambda: 2,
+    )
+    barrier = threading.Barrier(2, timeout=2)
+    sessions = []
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            barrier.wait()
+            return {"operation": operation, "index": payload["index"]}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(
+            lambda index: transport._call(
+                "continue_runner",
+                {"index": index},
+            ),
+            range(2),
+        ))
+
+    assert sorted(result["index"] for result in results) == [0, 1]
+    assert len(sessions) == 2
+    transport.close()
+    assert all(session.closed for session in sessions)
 
 
 def test_oci_runner_transport_replaces_only_broken_session(monkeypatch):

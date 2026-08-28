@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 import queue
 import re
 import subprocess
@@ -362,6 +363,7 @@ sys.stdout.write(encoded)
 _COMMON_RUNNER_SESSION_SCHEMA_VERSION = (
     "leadpoet.research_lab.common_runner_session.v1"
 )
+_COMMON_RUNNER_MAX_PARALLEL_SESSIONS = 4
 _COMMON_RUNNER_SESSION_BOOTSTRAP = r"""
 import json
 import os
@@ -479,6 +481,25 @@ for line in sys.stdin:
 
 class _DockerModelRunnerSessionError(PrivateModelRuntimeError):
     """The reusable credential-free OCI process became unavailable."""
+
+
+def _common_runner_session_capacity() -> int:
+    """Use available CPUs without allowing an unbounded OCI session fanout."""
+
+    affinity = getattr(os, "sched_getaffinity", None)
+    if callable(affinity):
+        try:
+            processor_count = len(affinity(0))
+        except (OSError, TypeError, ValueError):
+            processor_count = 0
+    else:
+        processor_count = 0
+    if processor_count <= 0:
+        processor_count = os.cpu_count() or 1
+    return max(
+        1,
+        min(_COMMON_RUNNER_MAX_PARALLEL_SESSIONS, int(processor_count)),
+    )
 
 
 class _DockerModelRunnerSession:
@@ -789,8 +810,51 @@ class DockerModelRunnerTransport:
             pull_before_run=False,
         )
         self._runner = DockerPrivateModelRunner(isolated_spec)
-        self._session: _DockerModelRunnerSession | None = None
-        self._session_lock = threading.Lock()
+        self._pool_capacity = _common_runner_session_capacity()
+        self._pool_slots = threading.BoundedSemaphore(self._pool_capacity)
+        self._pool_lock = threading.Lock()
+        self._idle_sessions: list[_DockerModelRunnerSession] = []
+        self._sessions: set[_DockerModelRunnerSession] = set()
+        self._closed = False
+
+    def _checkout_session(self) -> _DockerModelRunnerSession:
+        with self._pool_lock:
+            if self._closed:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner transport is closed"
+                )
+            if self._idle_sessions:
+                return self._idle_sessions.pop()
+        session = _DockerModelRunnerSession(self._runner)
+        with self._pool_lock:
+            if self._closed:
+                session.close()
+                raise _DockerModelRunnerSessionError(
+                    "common model runner transport is closed"
+                )
+            self._sessions.add(session)
+        return session
+
+    def _return_session(self, session: _DockerModelRunnerSession) -> None:
+        close_session = False
+        with self._pool_lock:
+            if session not in self._sessions:
+                return
+            if self._closed:
+                self._sessions.remove(session)
+                close_session = True
+            else:
+                self._idle_sessions.append(session)
+        if close_session:
+            session.close()
+
+    def _discard_session(self, session: _DockerModelRunnerSession) -> None:
+        with self._pool_lock:
+            if session in self._sessions:
+                self._sessions.remove(session)
+            if session in self._idle_sessions:
+                self._idle_sessions.remove(session)
+        session.close()
 
     def _call(
         self,
@@ -801,27 +865,51 @@ class DockerModelRunnerTransport:
             raise PrivateModelRuntimeError(
                 "common model runner operation is invalid"
             )
-        with self._session_lock:
+        self._pool_slots.acquire()
+        session: _DockerModelRunnerSession | None = None
+        try:
             for session_attempt in range(2):
-                if self._session is None:
-                    self._session = _DockerModelRunnerSession(self._runner)
+                session = self._checkout_session()
                 try:
-                    return self._session.call(operation, payload)
+                    result = session.call(operation, payload)
                 except _DockerModelRunnerSessionError:
-                    self._session.close()
-                    self._session = None
+                    self._discard_session(session)
+                    session = None
                     if session_attempt:
                         raise
-        raise PrivateModelRuntimeError(
-            "common model runner session did not return"
-        )
+                except BaseException:
+                    self._return_session(session)
+                    session = None
+                    raise
+                else:
+                    self._return_session(session)
+                    session = None
+                    return result
+            raise PrivateModelRuntimeError(
+                "common model runner session did not return"
+            )
+        finally:
+            if session is not None:
+                self._return_session(session)
+            self._pool_slots.release()
 
     def close(self) -> None:
-        with self._session_lock:
-            session = self._session
-            self._session = None
-            if session is not None:
+        with self._pool_lock:
+            if self._closed:
+                return
+            self._closed = True
+        for _ in range(self._pool_capacity):
+            self._pool_slots.acquire()
+        try:
+            with self._pool_lock:
+                sessions = list(self._sessions)
+                self._sessions.clear()
+                self._idle_sessions.clear()
+            for session in sessions:
                 session.close()
+        finally:
+            for _ in range(self._pool_capacity):
+                self._pool_slots.release()
 
     def __del__(self) -> None:
         try:

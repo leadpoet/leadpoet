@@ -6607,7 +6607,7 @@
       "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
     },
     {
-      "ast_sha256": "sha256:0adbb3ff6869989fc19c2606b93749f600a7f4d7ff0cb42417c747323ac4be72",
+      "ast_sha256": "sha256:b61c62257cf88d6d3183919cacd602229ec4d256e6ac29b08c4e217d07abdb7c",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -6627,7 +6627,7 @@
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:88b4af3be74abe796de4b65b6767b4cae857d0ceb518fa2d905dc56c13868a29",
+      "ast_sha256": "sha256:6991692c4b2e71844d7df7e9da2a5db26708d8289385cfaa11ab8abcddb300db",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -6637,7 +6637,7 @@
       "symbol": "build_loop_direction_reference_repair_messages"
     },
     {
-      "ast_sha256": "sha256:563456657ac92d8f1aebcbf569efb8d20700dba0bebbdcb420346d26c454ecdc",
+      "ast_sha256": "sha256:89c775d602a65d1db28566f1bb7f75b975c67630e7a0224ad94ff5954d02794c",
       "path": "research_lab/code_editing.py",
       "symbol": "build_plan_alignment_judge_messages"
     },
@@ -8187,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:d21d3b0b49fe7c7f1f6f0ce5ebd0a022c61aeac32308522cbf267fed00a97392",
-  "protected_source_commit": "d0bc30bdd2f069accd700a7ab20560f398fbbc02",
+  "manifest_hash": "sha256:904a16644eee9f28c19123636b8238c8d9e82196ce04ff0e37d4528f0913d91d",
+  "protected_source_commit": "6e64f371ef813b1e33de82ddf72772725fecc410",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

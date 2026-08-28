@@ -952,7 +952,16 @@ async def test_hybrid_discovery_restores_tree_caps_and_limits_live_icps(
 
         @staticmethod
         def attested_authorities():
-            return [{"receipt_graph": {"root_receipt_hash": "sha256:" + "8" * 64}}]
+            return [
+                {
+                    "execution_receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "7" * 64
+                    },
+                    "receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "8" * 64
+                    },
+                }
+            ]
 
         @staticmethod
         def provider_evidence_summary(cache_ref):
@@ -997,7 +1006,7 @@ async def test_hybrid_discovery_restores_tree_caps_and_limits_live_icps(
             candidate_model_manifest=SimpleNamespace(image_digest=IMAGE_DIGEST)
         ),
     )
-    caches, _graphs, paid_calls, cost = (
+    caches, graphs, paid_calls, cost = (
         await evaluator._discover_provider_overlay_locked(
             candidates=(candidate,),
             cohort_hash="sha256:" + "3" * 64,
@@ -1006,6 +1015,9 @@ async def test_hybrid_discovery_restores_tree_caps_and_limits_live_icps(
     )
 
     assert len(caches) == 3
+    assert {
+        graph["root_receipt_hash"] for graph in graphs
+    } == {"sha256:" + "7" * 64}
     assert len(calls) == 3
     assert paid_calls == 0
     assert cost == 0
@@ -1076,7 +1088,14 @@ async def test_hybrid_discovery_reuses_identical_sibling_request_once(monkeypatc
         @staticmethod
         def attested_authorities():
             return [
-                {"receipt_graph": {"root_receipt_hash": "sha256:" + "8" * 64}}
+                {
+                    "execution_receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "7" * 64
+                    },
+                    "receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "8" * 64
+                    },
+                }
             ]
 
         def provider_evidence_summary(self, cache_ref):
@@ -1118,7 +1137,7 @@ async def test_hybrid_discovery_reuses_identical_sibling_request_once(monkeypatc
             ),
         )
 
-    caches, _graphs, paid_calls, cost = (
+    caches, graphs, paid_calls, cost = (
         await evaluator._discover_provider_overlay_locked(
             candidates=(candidate("1"), candidate("2")),
             cohort_hash="sha256:" + "3" * 64,
@@ -1127,6 +1146,9 @@ async def test_hybrid_discovery_reuses_identical_sibling_request_once(monkeypatc
     )
 
     assert len(caches) == 1
+    assert graphs == (
+        {"root_receipt_hash": "sha256:" + "7" * 64},
+    )
     assert len(invocations) == 2
     assert invocations[0]["incoming_cache"] == {}
     assert invocations[1]["incoming_cache"] == caches[next(iter(caches))]

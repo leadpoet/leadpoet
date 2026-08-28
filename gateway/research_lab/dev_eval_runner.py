@@ -1330,7 +1330,9 @@ class AttestedReplayDevEvaluatorV2:
                 generated_doc = dict(generated)
                 generated_hash = sha256_json(generated_doc)
                 if generated_hash != current_hash:
-                    authority_graph = authorities[-1].get("receipt_graph")
+                    authority_graph = authorities[-1].get(
+                        "execution_receipt_graph"
+                    )
                     if not isinstance(authority_graph, Mapping):
                         raise DevEvalRunnerError(
                             "hybrid discovery tape graph is missing"

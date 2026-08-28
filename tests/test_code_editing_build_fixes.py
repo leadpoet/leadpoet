@@ -1508,6 +1508,111 @@ def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
     assert "consumer separately binds and activates" in content
 
 
+def test_source_add_prompts_bind_v8_constructor_derived_manifest_fields():
+    provider_context = {
+        "routerverse_source_incorporation": {
+            "requests": [
+                {
+                    "schema_version": (
+                        "leadpoet.routerverse_source_incorporation.v3"
+                    ),
+                    "provider_id": "community_signals",
+                    "stage": "intent_evidence",
+                    "binding_manifest": {
+                        "schema_version": (
+                            "leadpoet.intent-source-binding-manifest:v1"
+                        ),
+                        "tool_id": "intent.source_add.community_signals",
+                        "provider_id": "community_signals",
+                        "stage": "intent_evidence",
+                        "execution_mode": "invoke",
+                    },
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                }
+            ],
+            "clarifications": [],
+        }
+    }
+    planner_messages = code_editing.build_loop_direction_planner_messages(
+        ticket={
+            "ticket_id": "ticket-source-add-v8",
+            "brief_public_summary": "Register the approved source.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        provider_capability_summary=provider_context,
+    )
+    planner_content = planner_messages[-1]["content"]
+
+    edit_messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={
+            "ticket_id": "ticket-source-add-v8",
+            "brief_public_summary": "Register the approved source.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        source_inspection_context={
+            "read_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "register-community-signals-v8",
+        },
+        max_candidates=1,
+        provider_capability_summary=provider_context,
+    )
+    edit_content = edit_messages[-1]["content"]
+
+    assert "binding_manifest is the approved attestation" in planner_content
+    assert "revision and manifest_sha256 are constructor-derived" in planner_content
+    assert "binding_manifest" in edit_content
+    assert "not constructor keywords" in edit_content
+    assert "Omit revision and manifest_sha256 in v8" in edit_content
+    assert "execution_plan_identity" in edit_content
+
+
+def test_plan_alignment_judge_does_not_require_v8_manifest_metadata_keywords():
+    messages = code_editing.build_plan_alignment_judge_messages(
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "register-community-signals-v8",
+            "required_mechanism": "approved source registration",
+        },
+        draft=_draft(
+            lane="source_routing",
+            plan_path_id="register-community-signals-v8",
+            target_files=("sourcing_model/routing/runtime.py",),
+            unified_diff=(
+                "diff --git a/sourcing_model/routing/runtime.py "
+                "b/sourcing_model/routing/runtime.py\n"
+                "--- a/sourcing_model/routing/runtime.py\n"
+                "+++ b/sourcing_model/routing/runtime.py\n"
+                "@@ -1 +1,2 @@\n"
+                " SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+                "+    SourceAddRoutingRegistration(provider_id='community_signals'),\n"
+            ),
+        ),
+    )
+    content = messages[-1]["content"]
+
+    assert "binding_manifest is an approved request-side attestation" in content
+    assert "Do not fail a v8 registration merely because" in content
+    assert "omits binding_manifest, revision, or manifest_sha256" in content
+
+
 def test_code_edit_prompt_requires_direct_git_parent_and_safe_branch_feedback():
     feedback = {
         "schema_version": "research_lab.git_tree_parent_feedback.v1",

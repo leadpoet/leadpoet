@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "77d5273628e66f9dd626d125823ca7ca0cbfdc08",
+  "baseline_commit": "322df215a9f9c3d4800ee864718d8bf5914c01ec",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -5852,7 +5852,7 @@
       "symbol": "_docker_operation_admission_lock_file"
     },
     {
-      "ast_sha256": "sha256:e6cc1830904563437f36cccbd826bcac23b47e3e4b87aa8db1468ed6af07146b",
+      "ast_sha256": "sha256:6963029110d19b0eec8f84df6df9e71ae3d1f60074998d6557bb95670db7e742",
       "path": "gateway/utils/pcr0_builder.py",
       "symbol": "_docker_operation_lock_scope"
     },
@@ -8187,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6566147393b860309629a8758b58019c7db40e85f4faafd156cc19750c904111",
-  "protected_source_commit": "77d5273628e66f9dd626d125823ca7ca0cbfdc08",
+  "manifest_hash": "sha256:e5a5a4b4f250e73c9486c5c9e2835af2c727db3e341301a4ea866b6a3ad96a2b",
+  "protected_source_commit": "322df215a9f9c3d4800ee864718d8bf5914c01ec",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

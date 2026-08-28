@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 import concurrent.futures
+from datetime import datetime, timezone
 import hashlib
 import json
 from types import SimpleNamespace
@@ -1217,6 +1218,7 @@ async def test_scoring_worker_retries_terminal_uncertain_with_fresh_attempt(
 async def test_terminal_uncertain_advances_to_fresh_bounded_attempt(
     monkeypatch,
 ):
+    benchmark_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
     runner, _projector, _authority, _terminal = _exact_fixture()
     runner = runner.with_spec(
         replace(
@@ -1276,6 +1278,10 @@ async def test_terminal_uncertain_advances_to_fresh_bounded_attempt(
         "_apply_provider_cost_baseline_outcome",
         lambda _row: None,
     )
+    monkeypatch.setattr(
+        "leadpoet_canonical.production_parity_boundary_v2.configured_rebenchmark_now_v2",
+        lambda *, now=None: benchmark_now,
+    )
     window = SimpleNamespace(
         benchmark_items=[
             {
@@ -1295,7 +1301,7 @@ async def test_terminal_uncertain_advances_to_fresh_bounded_attempt(
         scorer=object(),
         window=window,
         run_start=0.0,
-        benchmark_date="2026-08-27",
+        benchmark_date=benchmark_now.date().isoformat(),
     )
 
     assert attempt_ordinals == [0, 1]

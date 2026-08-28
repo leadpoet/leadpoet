@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "322df215a9f9c3d4800ee864718d8bf5914c01ec",
+  "baseline_commit": "b5ea0b3836603db4a643bb4a89e5f3fd54cd1560",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1082,7 +1082,7 @@
       "symbol": "OFFICIAL_BASELINE_TRANSITION_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:462ede266f669f90094fd988635db081a4883d9bd64665be24dc0b4c3781d04d",
+      "ast_sha256": "sha256:1d4888fe29814e5500e9552b6e92d9c053ed00e9ec2e0cf9f5cd09a1b956c200",
       "path": "gateway/research_lab/official_baseline_custody.py",
       "symbol": "S3OfficialBaselineDocumentCustody"
     },
@@ -8187,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:e5a5a4b4f250e73c9486c5c9e2835af2c727db3e341301a4ea866b6a3ad96a2b",
-  "protected_source_commit": "322df215a9f9c3d4800ee864718d8bf5914c01ec",
+  "manifest_hash": "sha256:8b173575e3231f228e12a147f82dd25291c252c0784d56844bf37344c2df0203",
+  "protected_source_commit": "b5ea0b3836603db4a643bb4a89e5f3fd54cd1560",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

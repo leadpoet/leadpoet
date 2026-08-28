@@ -170,6 +170,18 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     )
     assert "GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit'" in source
     assert "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit'" in source
+    assert (
+        'VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
+        'leadpoet/stateful-epoch-cutover.json"'
+    ) in source
+    assert "test -f '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
+    assert "test ! -L '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
+    assert "test -s '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
+    assert (
+        "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="
+        "'$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' "
+        "PYTHONPATH='$VALIDATOR_REPO_ROOT'"
+    ) in source
     assert 'local gateway_restart_entrypoint_root="\\$authority_root"' in source
     assert 'gateway_restart_entrypoint_root="\\$candidate_root"' in source
     assert r'bash \"$gateway_restart_entrypoint_root/gw_restart.sh\"' in source

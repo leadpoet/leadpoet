@@ -118,7 +118,9 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
     assert source.count("trap cleanup_release_build_images_on_exit EXIT") == 2
     assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 4
     assert source.count("VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1") == 2
-    assert source.count("REQUIRE_ZERO_RUNTIME_RECONCILE=1") == 1
+    assert source.count(
+        'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
+    ) == 1
     assert source.count(
         'sudo rm -rf -- \\\n            "$RUNNER_TEMP/offline-artifacts"'
     ) == 4
@@ -144,7 +146,17 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
         for step in gateway_steps
         if step.get("name") == "Reclaim unreferenced gateway build space"
     )
-    assert "REQUIRE_ZERO_RUNTIME_RECONCILE=1" in gateway_prebuild["run"]
+    gateway_prebuild_command = gateway_prebuild["run"]
+    assert 'container_ids="$(timeout 10 docker ps -aq --no-trunc 2>/dev/null)"' in (
+        gateway_prebuild_command
+    )
+    assert "require_zero_runtime_reconcile=0" in gateway_prebuild_command
+    assert 'if [ -z "$container_ids" ]; then' in gateway_prebuild_command
+    assert "require_zero_runtime_reconcile=1" in gateway_prebuild_command
+    assert (
+        'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
+        in gateway_prebuild_command
+    )
     reclaim_steps = [
         step
         for job in workflow["jobs"].values()
@@ -154,7 +166,10 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
     ]
     assert len(reclaim_steps) == 4
     assert all(
-        ("REQUIRE_ZERO_RUNTIME_RECONCILE=1" in str(step.get("run", "")))
+        (
+            'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
+            in str(step.get("run", ""))
+        )
         == (step is gateway_prebuild)
         for step in reclaim_steps
     )

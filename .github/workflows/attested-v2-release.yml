@@ -80,9 +80,17 @@ jobs:
             "$RUNNER_TEMP/release-evidence" \
             "$RUNNER_TEMP/evidence" \
             "$RUNNER_TEMP/release"
+          if ! container_ids="$(timeout 10 docker ps -aq --no-trunc 2>/dev/null)"; then
+            echo "ERROR: Docker container inventory is unreadable before release storage reconciliation" >&2
+            exit 1
+          fi
+          require_zero_runtime_reconcile=0
+          if [ -z "$container_ids" ]; then
+            require_zero_runtime_reconcile=1
+          fi
           VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
           VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
-          REQUIRE_ZERO_RUNTIME_RECONCILE=1 \
+          REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile" \
             bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 

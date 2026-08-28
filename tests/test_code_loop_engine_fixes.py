@@ -301,6 +301,130 @@ def test_source_add_intent_plan_binding_requires_both_model_symbols(tmp_path):
     assert expected <= set(binding.plan_doc["ranked_paths"][0]["must_inspect"])
 
 
+def test_source_add_plan_binding_repairs_legacy_constructor_alias(tmp_path):
+    source_context = _source_add_context(tmp_path)
+    plan = _loop_direction_plan_v1_1_payload(
+        required_lane="source_routing",
+        required_mechanism="activate the approved source",
+        selected_path_id="activate-approved-source",
+        must_inspect=[
+            "sourcing_model/routing/contracts.py::SourceAddRoutingRegistration"
+        ],
+        allowed_lanes=["source_routing"],
+        ranked_paths=[
+            {
+                "path_id": "activate-approved-source",
+                "lane": "source_routing",
+                "mechanism": "activate the approved source",
+                "target_behavior": ["use the approved source"],
+                "must_inspect": [
+                    "sourcing_model/routing/contracts.py::"
+                    "SourceAddRoutingRegistration"
+                ],
+                "allowed_lanes": ["source_routing"],
+                "disallowed_lanes": ["provider_fallback"],
+                "must_not_try": ["do not add host-owned routing"],
+                "success_criteria": ["the model-owned registration validates"],
+                "novelty_requirements": ["use the approved source"],
+                "anti_overfit_checks": ["preserve existing mappings"],
+                "validation_mode": "runtime_checks",
+                "validation_paths": [],
+            }
+        ],
+        target_behavior=["use the approved source"],
+        disallowed_lanes=["provider_fallback"],
+        must_not_try=["do not add host-owned routing"],
+        success_criteria=["the model-owned registration validates"],
+        novelty_requirements=["use the approved source"],
+        anti_overfit_checks=["preserve existing mappings"],
+    )
+    binding = engine._bind_loop_direction_plan(
+        plan,
+        source_context=source_context,
+        candidate_edit_constraints={},
+        source_incorporation_context={
+            "requests": [
+                {
+                    "provider_id": "builtwith",
+                    "stage": "candidate_discovery",
+                    "tool_id": "candidate.source_add.builtwith",
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                    "registration_type": "SourceAddRoutingRegistration",
+                }
+            ]
+        },
+    )
+
+    assert binding.errors == ()
+    assert binding.plan_doc is not None
+    references = set(binding.plan_doc["must_inspect"])
+    assert (
+        "sourcing_model/routing/contracts.py::SourceAddRoutingRegistration"
+        not in references
+    )
+    assert (
+        "sourcing_model/routing/runtime.py::SourceAddRoutingRegistration"
+        in references
+    )
+    assert (
+        "sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS"
+        in references
+    )
+
+
+def test_source_add_plan_binding_does_not_repair_unapproved_alias(tmp_path):
+    source_context = _source_add_context(tmp_path)
+    plan = _loop_direction_plan_v1_1_payload(
+        required_lane="source_routing",
+        required_mechanism="inspect an unapproved source",
+        selected_path_id="unapproved-source",
+        must_inspect=[
+            "sourcing_model/routing/contracts.py::SourceAddRoutingRegistration"
+        ],
+        allowed_lanes=["source_routing"],
+        ranked_paths=[
+            {
+                "path_id": "unapproved-source",
+                "lane": "source_routing",
+                "mechanism": "inspect an unapproved source",
+                "target_behavior": ["preserve fail-closed binding"],
+                "must_inspect": [
+                    "sourcing_model/routing/contracts.py::"
+                    "SourceAddRoutingRegistration"
+                ],
+                "allowed_lanes": ["source_routing"],
+                "disallowed_lanes": ["provider_fallback"],
+                "must_not_try": ["do not infer approval"],
+                "success_criteria": ["the missing alias is rejected"],
+                "novelty_requirements": ["none"],
+                "anti_overfit_checks": ["preserve exact references"],
+                "validation_mode": "runtime_checks",
+                "validation_paths": [],
+            }
+        ],
+        target_behavior=["preserve fail-closed binding"],
+        disallowed_lanes=["provider_fallback"],
+        must_not_try=["do not infer approval"],
+        success_criteria=["the missing alias is rejected"],
+        novelty_requirements=["none"],
+        anti_overfit_checks=["preserve exact references"],
+    )
+    binding = engine._bind_loop_direction_plan(
+        plan,
+        source_context=source_context,
+        candidate_edit_constraints={},
+        source_incorporation_context=None,
+    )
+
+    assert binding.errors == (
+        "loop_direction_plan_reference_missing:"
+        "sourcing_model/routing/contracts.py::SourceAddRoutingRegistration",
+    )
+
+
 def _source_add_runtime_diff(*, request: dict) -> str:
     contract_prefix = (
         "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (\n"

@@ -363,11 +363,49 @@ def _bind_loop_direction_plan(
     required_references = _required_source_add_inspection_references(
         source_incorporation_context
     )
+    requested_references = tuple(plan.must_inspect)
+    incorporation_requests = (
+        source_incorporation_context.get("requests")
+        if isinstance(source_incorporation_context, Mapping)
+        else None
+    )
+    if isinstance(incorporation_requests, list):
+        for request in incorporation_requests:
+            if not isinstance(request, Mapping):
+                continue
+            registration_symbol = str(request.get("registration_symbol") or "")
+            registration_type = str(request.get("registration_type") or "")
+            if (
+                registration_symbol
+                == (
+                    "sourcing_model/routing/runtime.py::"
+                    "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                )
+                and registration_type == "SourceAddRoutingRegistration"
+            ):
+                constructor_reference = (
+                    registration_symbol.rsplit("::", 1)[0]
+                    + "::"
+                    + registration_type
+                )
+                requested_references = tuple(
+                    constructor_reference
+                    if reference
+                    == (
+                        "sourcing_model/routing/contracts.py::"
+                        "SourceAddRoutingRegistration"
+                    )
+                    else reference
+                    for reference in requested_references
+                )
+                break
     reference_binding = bind_source_references_exact(
         index_doc=getattr(source_context, "planner_source_index", {}),
         source_root=source_context.source_root,
         editable_files=getattr(source_context, "editable_files", ()),
-        references=tuple(dict.fromkeys((*plan.must_inspect, *required_references))),
+        references=tuple(
+            dict.fromkeys((*requested_references, *required_references))
+        ),
     )
     ranked_paths: list[dict[str, Any]] = []
     for raw_path in canonical_doc.get("ranked_paths", []):

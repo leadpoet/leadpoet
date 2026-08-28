@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "6f35f470d90ee2eec1f731e4f929be11944de952",
+  "baseline_commit": "0baa2d8dc80287bd42ee3c8ebaa403480ced7532",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1322,7 +1322,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:792f2324ade77c9653ba9cef4c1cb766ab90f572840d26879ab7163394435ea6",
+      "ast_sha256": "sha256:636d5c24bfa4797e30edfb0ed9d56ff51464c4f62175bfaf4496fe8fbb6d87c9",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1392,7 +1392,17 @@
       "symbol": "_GatewayEvidenceProxyClient.request"
     },
     {
-      "ast_sha256": "sha256:bbfe69d1f0b978a04e8f3444b117cff1058a129dbf512d9235b6f9041e91f267",
+      "ast_sha256": "sha256:94b72df538fd6e8c14084a3e58f0b230089b18b12bb3256ea5ea851c4350e12c",
+      "path": "gateway/research_lab/official_baseline_release_authorities.py",
+      "symbol": "_artifact_wire_sha256"
+    },
+    {
+      "ast_sha256": "sha256:b73d269a0e72cd709b2f8236817ab38bef68b0b0d781b20c8939262f8720bf6e",
+      "path": "gateway/research_lab/official_baseline_release_authorities.py",
+      "symbol": "_canonical_bytes"
+    },
+    {
+      "ast_sha256": "sha256:8add45417a6927f76f3c327852f9091d1231f8cb674cf141a36cd6c7fde383c3",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_catalog_bindings"
     },
@@ -1412,7 +1422,7 @@
       "symbol": "_reviewed_provider_transport_available"
     },
     {
-      "ast_sha256": "sha256:dfa293ee66040f143e10adc9b219be2993ef7f91a14df717e75d4a878381686b",
+      "ast_sha256": "sha256:297c4606ab0607fd9ee574a1752aa555016aba9277df646e50c530bc4003247c",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_validate_inventory_catalog"
     },
@@ -1422,7 +1432,7 @@
       "symbol": "_validated_protected_action_authority_sha256"
     },
     {
-      "ast_sha256": "sha256:da83569d5708f42bfe5622533b2c2a0cd7a308d0b920a71d1ff6310d54ae813a",
+      "ast_sha256": "sha256:1f8d66a478cf4548e1f1ea4af361833b2c0caa89f4f511d70eb421020522c41b",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "load_official_baseline_release_components"
     },
@@ -8187,7 +8197,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:734810e6e7c94343049a6270184a46a817e6ed6be75314917cc9a0fc45396d81",
-  "protected_source_commit": "6f35f470d90ee2eec1f731e4f929be11944de952",
+  "manifest_hash": "sha256:3a62d7fbe21a2489970450dd314cc94e70382d7eb3846d58f42d87b8f59a99e0",
+  "protected_source_commit": "0baa2d8dc80287bd42ee3c8ebaa403480ced7532",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

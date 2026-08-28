@@ -118,6 +118,14 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         f'VALIDATOR_KEY="${{LEADPOET_VALIDATOR_SSH_KEY:-{expected_key}}}"'
         in source
     )
+    assert (
+        'PRODUCTION_VALIDATOR_PYTHON_BIN="/home/ec2-user/venv311/bin/python3"'
+        in source
+    )
+    assert (
+        'VALIDATOR_PYTHON_BIN="${LEADPOET_VALIDATOR_PYTHON_BIN:-'
+        '$PRODUCTION_VALIDATOR_PYTHON_BIN}"'
+    ) in source
     assert 'component="all"' in source
     assert "exact_commit_restart_v2.py" in source
     assert "--compatibility-floor" not in source
@@ -177,11 +185,18 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "test -f '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
     assert "test ! -L '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
     assert "test -s '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'" in source
+    assert "test -x '$VALIDATOR_PYTHON_BIN'" in source
     assert (
         "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="
         "'$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' "
-        "PYTHONPATH='$VALIDATOR_REPO_ROOT'"
+        "PYTHONPATH='$VALIDATOR_REPO_ROOT' '$VALIDATOR_PYTHON_BIN'"
     ) in source
+    assert (
+        "'$VALIDATOR_PYTHON_BIN' -m "
+        "gateway.tee.prepare_active_release_lineage_v2"
+    ) in source
+    assert "python3 -m gateway.tee.prepare_active_release_lineage_v2" not in source
+    assert "VALIDATOR_PYTHON_BIN='$VALIDATOR_PYTHON_BIN'" in source
     assert 'local gateway_restart_entrypoint_root="\\$authority_root"' in source
     assert 'gateway_restart_entrypoint_root="\\$candidate_root"' in source
     assert r'bash \"$gateway_restart_entrypoint_root/gw_restart.sh\"' in source

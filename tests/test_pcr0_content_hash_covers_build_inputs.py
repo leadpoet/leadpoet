@@ -588,6 +588,65 @@ async def test_queued_pcr0_writer_blocks_late_shared_reader(
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_historical_writer_yields_to_shared_reader(
+    tmp_path,
+    monkeypatch,
+):
+    lock_path = tmp_path / "docker-operation.lock"
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_FILE",
+        str(lock_path),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS",
+        3,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_POLL_SECONDS",
+        0.01,
+    )
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_path)
+    )
+    monkeypatch.setenv("LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS", "3")
+
+    first_reader_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(first_reader_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    historical_entered = asyncio.Event()
+    late_reader_entered = threading.Event()
+
+    async def historical_writer() -> None:
+        async with pcr0_builder._docker_operation_lock_scope(
+            opportunistic=True,
+        ):
+            historical_entered.set()
+
+    def late_reader() -> None:
+        with docker_lock.shared_docker_operation_lock(
+            timeout_seconds=3,
+            require_daemon_ready=False,
+        ):
+            late_reader_entered.set()
+
+    historical_task = asyncio.create_task(historical_writer())
+    await asyncio.sleep(0.05)
+    assert historical_entered.is_set() is False
+
+    late_reader_task = asyncio.create_task(asyncio.to_thread(late_reader))
+    await asyncio.wait_for(late_reader_task, timeout=1)
+    assert late_reader_entered.is_set() is True
+    assert historical_entered.is_set() is False
+
+    fcntl.flock(first_reader_fd, fcntl.LOCK_UN)
+    os.close(first_reader_fd)
+    await asyncio.wait_for(historical_task, timeout=1)
+    assert historical_entered.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_pcr0_builder_releases_waiting_lock_on_cancellation(
     tmp_path,
     monkeypatch,

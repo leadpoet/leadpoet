@@ -150,4 +150,10 @@ def test_attestation_builds_share_the_same_host_docker_lock() -> None:
     )
     assert pcr0_builder.count(
         "async with _docker_operation_lock_scope()"
-    ) == 2
+    ) == 1
+    assert (
+        "async with _docker_operation_lock_scope(\n"
+        "                opportunistic=commit_hash not in required_commit_hashes,\n"
+        "            ):"
+        in pcr0_builder
+    )

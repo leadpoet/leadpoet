@@ -4,6 +4,7 @@ import base64
 import json
 import subprocess
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from decimal import Decimal
@@ -1495,3 +1496,55 @@ def test_evidence_store_single_flight_timeout_is_one_absolute_deadline(
 
     assert store.acquire_or_wait(fingerprint, timeout=0.1) == (None, False)
     assert condition.waits == pytest.approx([0.1, 0.06, 0.02])
+
+
+def test_replay_only_miss_does_not_wait_for_live_single_flight(monkeypatch):
+    registry = [
+        provider_evidence_proxy.ProviderRegistryEntry(
+            id="exa",
+            base_url="http://127.0.0.1:9",
+            auth_kind="none",
+        )
+    ]
+    proxy = None
+    try:
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        upstream_url = "http://127.0.0.1:9/search"
+        fingerprint = provider_evidence_proxy.canonical_request_fingerprint(
+            "GET",
+            upstream_url,
+            None,
+        )
+        with store._cond:
+            store._inflight.add(fingerprint)
+
+        acquire_calls = []
+
+        def acquire_or_wait(*args, **kwargs):
+            acquire_calls.append((args, kwargs))
+            return None, False
+
+        monkeypatch.setattr(store, "acquire_or_wait", acquire_or_wait)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            headers={provider_evidence_proxy.REPLAY_ONLY_HEADER: "1"},
+            method="GET",
+        )
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+
+        assert raised.value.code == 409
+        assert json.loads(raised.value.read().decode("utf-8")) == {
+            "error": "replay_miss"
+        }
+        assert acquire_calls == []
+        assert store.lookup(fingerprint) is None
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()

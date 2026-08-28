@@ -1421,7 +1421,21 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # make a request calls the provider live while every concurrent
         # identical request (e.g. another candidate on the same ICP) waits and
         # replays the recorded result, so one live call is shared by all.
-        cached, is_leader = self.store.acquire_or_wait(fingerprint)
+        replay_only = str(self.headers.get(REPLAY_ONLY_HEADER) or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        # Reconciliation is an observation, never another contender for the
+        # live single-flight.  Waiting here can outlive the caller's protected
+        # action timeout and strand its append-only reservation before the
+        # authority can persist terminal uncertainty.
+        cached, is_leader = (
+            (self.store.lookup(fingerprint), False)
+            if replay_only
+            else self.store.acquire_or_wait(fingerprint)
+        )
         if cached is not None:
             try:
                 body = base64.b64decode(cached.get("body_b64") or "")
@@ -1437,9 +1451,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             self._ledger_row(entry, rest, fingerprint, evidence="hit", status=status, live_cost=False)
             self._respond(status, body, evidence="hit", headers=event.to_headers())
             return
-        if str(self.headers.get(REPLAY_ONLY_HEADER) or "").strip().lower() in {"1", "true", "yes", "on"}:
-            if is_leader:
-                self.store.release_lead(fingerprint)
+        if replay_only:
             self._ledger_row(entry, rest, fingerprint, evidence="replay_miss", status=409, live_cost=False)
             self._respond(409, b'{"error":"replay_miss"}')
             return

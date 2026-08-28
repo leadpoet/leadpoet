@@ -1116,7 +1116,7 @@ prepare_running_validator_release_requirements() {
      test -f '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
      test ! -L '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
      test -s '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
-     lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id; print(_lineage_id())')
+     lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover; from leadpoet_canonical.ancestry_checkpoint_v2 import derive_ancestry_lineage_id_v2; cutover = load_subnet_epoch_cutover(); print(derive_ancestry_lineage_id_v2(cutover_mapping_hash=str(cutover.mapping_hash), network_genesis_hash=str(cutover.network_genesis_hash), netuid=int(cutover.netuid)))')
      sudo env PYTHONPATH='$VALIDATOR_REPO_ROOT' \
        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
        python3 -m gateway.tee.prepare_active_release_lineage_v2 \

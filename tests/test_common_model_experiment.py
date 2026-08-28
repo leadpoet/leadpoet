@@ -431,6 +431,7 @@ class _Dispatcher:
 def test_exact_coordinator_replays_persisted_completion_without_paid_call():
     transitions = _Transitions()
     dispatcher = _Dispatcher()
+    progress = []
     coordinator = ExactModelExperimentCoordinator(
         experiment_hash="sha256:" + "d" * 64,
         registration=_registration(),
@@ -445,12 +446,19 @@ def test_exact_coordinator_replays_persisted_completion_without_paid_call():
         target_count=1,
         evaluated_on="2026-08-20",
     )
-    first = coordinator.run_unit(**values)
-    second = coordinator.run_unit(**values)
+    first = coordinator.run_unit(
+        **values,
+        progress_callback=lambda: progress.append(bool(transitions.values)),
+    )
+    second = coordinator.run_unit(
+        **values,
+        progress_callback=lambda: progress.append(bool(transitions.values)),
+    )
 
     assert first.terminal_result == second.terminal_result
     assert dispatcher.calls == 1
     assert second.replayed_transition_count == 1
+    assert progress == [True, True]
 
 
 def test_old_v2_run_drains_under_its_pin_with_new_v3_registry_present():

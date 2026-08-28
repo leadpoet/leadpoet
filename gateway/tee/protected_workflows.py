@@ -1140,6 +1140,8 @@ PROTECTED_SYMBOLS = {
         "load_official_baseline_release_components",
     ),
     "gateway/research_lab/scoring_worker.py": (
+        "_baseline_wave_stall_timeout_seconds",
+        "_baseline_wave_watchdog",
         "_baseline_failure_completed_icp_count",
         "_benchmark_item_ref_for_progress",
         "_baseline_preflight_monotonic",
@@ -1178,11 +1180,18 @@ PROTECTED_SYMBOLS = {
         "_cached_attested_preflight",
         "preflight_gate",
     ),
+    "gateway/research_lab/provider_evidence_proxy.py": (
+        "EvidenceStore.acquire_or_wait",
+    ),
     "research_lab/common_model_runner_host.py": (
         "HostActionResult",
     ),
     "research_lab/docker_model_runner_transport.py": (
         "_COMMON_RUNNER_BOOTSTRAP",
+        "_COMMON_RUNNER_SESSION_SCHEMA_VERSION",
+        "_COMMON_RUNNER_SESSION_BOOTSTRAP",
+        "_DockerModelRunnerSessionError",
+        "_DockerModelRunnerSession",
         "DockerModelRunnerTransport",
     ),
     "research_lab/model_runner_protocol.py": (

@@ -1065,7 +1065,7 @@ class EvidenceStore:
           blocking forever).
         """
         with self._cond:
-            deadline = None
+            deadline = time.monotonic() + max(0.0, float(timeout))
             while True:
                 self._rollover_if_needed_locked()
                 cached = self._cached_locked(fingerprint)
@@ -1075,9 +1075,8 @@ class EvidenceStore:
                     self._inflight.add(fingerprint)
                     return None, True
                 # Another caller is leading this fingerprint; wait for it.
-                if deadline is None:
-                    deadline = timeout
-                if not self._cond.wait(timeout=deadline):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._cond.wait(timeout=remaining):
                     return None, False
 
     def release_lead(self, fingerprint: str) -> None:

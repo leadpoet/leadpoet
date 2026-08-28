@@ -5,6 +5,7 @@ import hashlib
 from io import StringIO
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -29,11 +30,16 @@ from research_lab.model_runner_protocol import (
 )
 from research_lab.docker_model_runner_transport import (
     _COMMON_RUNNER_BOOTSTRAP,
+    _COMMON_RUNNER_SESSION_BOOTSTRAP,
+    _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+    _DockerModelRunnerSessionError,
     DockerModelRunnerTransport,
 )
+import research_lab.docker_model_runner_transport as docker_model_runner_transport
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    PrivateModelRuntimeError,
 )
 from tests.model_runner_protocol_fixtures import (
     runner_declaration,
@@ -1407,6 +1413,203 @@ def test_oci_runner_transport_does_not_forward_provider_credentials(
     assert transport._runner.spec.env_passthrough == ()
     assert transport._runner.spec.extra_env == {}
     assert transport._runner.spec.pull_before_run is False
+
+
+def test_common_runner_session_reuses_container_but_not_python_process():
+    child_bootstrap = """
+import json
+import os
+import sys
+
+payload = json.load(sys.stdin)
+sys.stdout.write(json.dumps({
+    "operation": sys.argv[2],
+    "payload": payload,
+    "pid": os.getpid(),
+}, sort_keys=True, separators=(",", ":")))
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            _COMMON_RUNNER_SESSION_BOOTSTRAP,
+            child_bootstrap,
+            "fixture_adapter",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert json.loads(process.stdout.readline()) == {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "status": "ready",
+    }
+
+    results = []
+    for index in range(2):
+        request = {
+            "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+            "request_id": f"{index + 1:032x}",
+            "operation": "continue_runner",
+            "payload": {"index": index},
+            "timeout_seconds": 5.0,
+            "provider_cost_scope": "sha256:" + f"{index + 1:064x}",
+        }
+        process.stdin.write(
+            json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        process.stdin.flush()
+        response = json.loads(process.stdout.readline())
+        assert response["status"] == "succeeded"
+        results.append(json.loads(response["stdout"]))
+
+    process.stdin.close()
+    assert process.wait(timeout=5) == 0
+    assert [result["payload"] for result in results] == [
+        {"index": 0},
+        {"index": 1},
+    ]
+    assert results[0]["pid"] != results[1]["pid"]
+
+
+def test_oci_runner_transport_reuses_one_credential_free_session(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        env_passthrough=("DEEPLINE_API_KEY",),
+        extra_env={"DEEPLINE_API_KEY": "must-not-cross"},
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, runner):
+            self.runner = runner
+            self.calls = []
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            self.calls.append((operation, dict(payload)))
+            return {"operation": operation}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    assert transport._call("runner_preflight", {"one": 1}) == {
+        "operation": "runner_preflight"
+    }
+    assert transport._call("continue_runner", {"two": 2}) == {
+        "operation": "continue_runner"
+    }
+    assert len(sessions) == 1
+    assert sessions[0].runner.spec.env_passthrough == ()
+    assert sessions[0].runner.spec.extra_env == {}
+    assert sessions[0].calls == [
+        ("runner_preflight", {"one": 1}),
+        ("continue_runner", {"two": 2}),
+    ]
+    transport.close()
+    assert sessions[0].closed is True
+
+
+def test_oci_runner_transport_replaces_only_broken_session(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            if len(sessions) == 1:
+                raise _DockerModelRunnerSessionError("session disconnected")
+            return {"operation": operation}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    assert transport._call("continue_runner", {}) == {
+        "operation": "continue_runner"
+    }
+    assert len(sessions) == 2
+    assert sessions[0].closed is True
+    transport.close()
+
+
+def test_oci_runner_transport_does_not_retry_artifact_failure(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, _operation, _payload):
+            raise PrivateModelRuntimeError("artifact rejected request")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="artifact rejected request",
+    ):
+        transport._call("continue_runner", {})
+    assert len(sessions) == 1
+    assert sessions[0].closed is False
+    transport.close()
+    assert sessions[0].closed is True
 
 
 def test_oci_generation_discovers_signed_role_path_and_extensions(

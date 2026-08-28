@@ -1573,35 +1573,58 @@ def _baseline_wave_watchdog(
     timeout_seconds: float,
     on_timeout: Callable[..., None] | None = None,
 ):
-    """Hard-stop a stalled checkpoint-backed wave without racing disarm."""
+    """Hard-stop a no-progress checkpoint wave without racing disarm."""
 
-    deadline = max(0.001, float(timeout_seconds))
+    stall_timeout = max(0.001, float(timeout_seconds))
     state_lock = threading.Lock()
+    state_changed = threading.Event()
     armed = True
+    last_progress_at = time.monotonic()
 
-    def fire() -> None:
-        nonlocal armed
+    def mark_progress() -> None:
+        nonlocal last_progress_at
         with state_lock:
             if not armed:
                 return
-            armed = False
+            last_progress_at = time.monotonic()
+        state_changed.set()
+
+    def monitor() -> None:
+        nonlocal armed
+        while True:
+            with state_lock:
+                if not armed:
+                    return
+                remaining = stall_timeout - (
+                    time.monotonic() - last_progress_at
+                )
+                if remaining <= 0:
+                    armed = False
+                    break
+            state_changed.wait(timeout=max(0.001, remaining))
+            state_changed.clear()
         callback = on_timeout or _terminate_stalled_baseline_worker
         callback(
             worker_ref=worker_ref,
             phase=phase,
             item_indexes=tuple(int(value) for value in item_indexes),
-            timeout_seconds=deadline,
+            timeout_seconds=stall_timeout,
         )
 
-    timer = threading.Timer(deadline, fire)
-    timer.daemon = True
-    timer.start()
+    monitor_thread = threading.Thread(
+        target=monitor,
+        name="baseline-wave-watchdog",
+        daemon=True,
+    )
+    monitor_thread.start()
     try:
-        yield
+        yield mark_progress
     finally:
         with state_lock:
             armed = False
-        timer.cancel()
+        state_changed.set()
+        if threading.current_thread() is not monitor_thread:
+            monitor_thread.join(timeout=1.0)
 
 
 def _read_own_rss_mb(status_path: str = "/proc/self/status") -> int | None:
@@ -15995,6 +16018,7 @@ class ResearchLabGatewayScoringWorker:
         telemetry_session: ScoringTelemetrySession | None = None,
         telemetry_model_role: str = "reference",
         retry_round: int = 0,
+        progress_callback: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
 
@@ -16092,6 +16116,7 @@ class ResearchLabGatewayScoringWorker:
                     icp_ref=label,
                     target_count=_icp_company_goal(item["icp"]) or 1,
                     attempt_ordinal=retry_round,
+                    progress_callback=progress_callback,
                 )
                 exact_call = functools.partial(
                     contextvars.copy_context().run,
@@ -16833,7 +16858,12 @@ class ResearchLabGatewayScoringWorker:
             semaphore = asyncio.Semaphore(concurrency)
             persisted_attempt_indexes: set[int] = set()
 
-            async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
+            async def run_one(
+                item_index: int,
+                item: Mapping[str, Any],
+                *,
+                progress_callback: Callable[[], None] | None = None,
+            ) -> dict[str, Any]:
                 async with semaphore:
                     attempt_runner = _baseline_runner_for_attempt(
                         runner,
@@ -16864,6 +16894,7 @@ class ResearchLabGatewayScoringWorker:
                         telemetry_session=telemetry_session,
                         telemetry_model_role=telemetry_model_role,
                         retry_round=0,
+                        progress_callback=progress_callback,
                     )
                     if await persist_attempt(entry, retry_round=0):
                         persisted_attempt_indexes.add(item_index)
@@ -16923,9 +16954,16 @@ class ResearchLabGatewayScoringWorker:
                     if checkpoint_recycle_enabled
                     else contextlib.nullcontext()
                 )
-                with watchdog:
+                with watchdog as mark_wave_progress:
                     settled = await asyncio.gather(
-                        *(run_one(item_index, item) for item_index, item in wave),
+                        *(
+                            run_one(
+                                item_index,
+                                item,
+                                progress_callback=mark_wave_progress,
+                            )
+                            for item_index, item in wave
+                        ),
                         return_exceptions=True,
                     )
                 fatal = [entry for entry in settled if isinstance(entry, BaseException)]
@@ -17041,7 +17079,11 @@ class ResearchLabGatewayScoringWorker:
                 )
                 retry_persisted_attempt_indexes: set[int] = set()
 
-                async def retry_one(item_index: int) -> dict[str, Any]:
+                async def retry_one(
+                    item_index: int,
+                    *,
+                    progress_callback: Callable[[], None] | None = None,
+                ) -> dict[str, Any]:
                     async with retry_semaphore:
                         backoff_seconds = float(
                             results.get(item_index, {}).get("_retry_backoff_seconds") or 0.0
@@ -17084,6 +17126,7 @@ class ResearchLabGatewayScoringWorker:
                             telemetry_session=telemetry_session,
                             telemetry_model_role=telemetry_model_role,
                             retry_round=round_no,
+                            progress_callback=progress_callback,
                         )
                         if await persist_attempt(entry, retry_round=round_no):
                             retry_persisted_attempt_indexes.add(item_index)
@@ -17137,9 +17180,15 @@ class ResearchLabGatewayScoringWorker:
                         if checkpoint_recycle_enabled
                         else contextlib.nullcontext()
                     )
-                    with watchdog:
+                    with watchdog as mark_wave_progress:
                         retried = await asyncio.gather(
-                            *(retry_one(item_index) for item_index in wave_indexes),
+                            *(
+                                retry_one(
+                                    item_index,
+                                    progress_callback=mark_wave_progress,
+                                )
+                                for item_index in wave_indexes
+                            ),
                             return_exceptions=True,
                         )
                     fatal = [

@@ -1290,6 +1290,23 @@ def test_baseline_wave_watchdog_fires_and_disarms():
     assert calls == []
 
 
+def test_baseline_wave_watchdog_extends_only_on_explicit_progress():
+    fired = threading.Event()
+
+    with sw._baseline_wave_watchdog(
+        worker_ref="baseline-worker",
+        phase="first_pass",
+        item_indexes=(1, 2),
+        timeout_seconds=0.05,
+        on_timeout=lambda **_kwargs: fired.set(),
+    ) as mark_progress:
+        for _ in range(3):
+            assert not fired.wait(0.03)
+            mark_progress()
+        assert not fired.is_set()
+        assert fired.wait(0.2)
+
+
 @pytest.mark.asyncio
 async def test_checkpointed_baseline_arms_watchdog_for_each_wave(monkeypatch):
     worker = object.__new__(sw.ResearchLabGatewayScoringWorker)

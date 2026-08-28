@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
 from gateway.qualification.models import CompanyOutput
@@ -949,6 +949,7 @@ class ExactOfficialBaselineRunner:
         target_count: int,
         attempt_ordinal: int = 0,
         expected_checkpoint: Mapping[str, Any] | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ) -> OfficialBaselineModelOutput:
         registration = self.dependencies.registration
         generation_sha256 = registration.protocol_generation.protocol_generation_sha256
@@ -997,6 +998,7 @@ class ExactOfficialBaselineRunner:
             execution_mode="full_company",
             target_count=int(target_count),
             evaluated_on=self._benchmark_date,
+            progress_callback=progress_callback,
         )
         return self._finish_unit(
             unit=unit,

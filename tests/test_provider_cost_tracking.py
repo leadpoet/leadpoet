@@ -9,6 +9,8 @@ import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from gateway.research_lab import provider_evidence_proxy
 from research_lab.canonical import sha256_json
 from research_lab.eval.private_runtime import (
@@ -1455,3 +1457,41 @@ def test_evidence_store_ignores_preexisting_nonterminal_exa_agent_cache(tmp_path
     store = provider_evidence_proxy.EvidenceStore(day_cache_path=str(cache_path))
 
     assert store.lookup(fingerprint) is None
+
+
+def test_evidence_store_single_flight_timeout_is_one_absolute_deadline(
+    monkeypatch,
+):
+    fingerprint = "e" * 64
+    store = provider_evidence_proxy.EvidenceStore()
+    store._inflight.add(fingerprint)
+    now = [100.0]
+
+    class SpuriousCondition:
+        def __init__(self):
+            self.waits = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            now[0] += min(0.04, float(timeout))
+            return len(self.waits) < 4
+
+        def notify_all(self):
+            return None
+
+    condition = SpuriousCondition()
+    store._cond = condition
+    monkeypatch.setattr(
+        provider_evidence_proxy.time,
+        "monotonic",
+        lambda: now[0],
+    )
+
+    assert store.acquire_or_wait(fingerprint, timeout=0.1) == (None, False)
+    assert condition.waits == pytest.approx([0.1, 0.06, 0.02])

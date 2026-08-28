@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+import queue
+import re
+import subprocess
+import threading
+import uuid
 from typing import Any, Mapping, Sequence
 
+from research_lab.canonical import sha256_json
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     PrivateModelRuntimeError,
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
+    _build_docker_process_env,
+    _collect_incontainer_trace,
+    _docker_env_args,
+    _docker_lifecycle_remaining_seconds,
+    _docker_platform_args,
+    _docker_private_model_lifecycle,
+    _loads_adapter_stdout,
+    _raise_on_empty_provider_error,
+    _remove_private_model_container,
+    _sanitize_text,
 )
 
 
@@ -341,6 +359,423 @@ sys.stdout.write(encoded)
 """
 
 
+_COMMON_RUNNER_SESSION_SCHEMA_VERSION = (
+    "leadpoet.research_lab.common_runner_session.v1"
+)
+_COMMON_RUNNER_SESSION_BOOTSTRAP = r"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+schema_version = "leadpoet.research_lab.common_runner_session.v1"
+common_bootstrap, module_name = sys.argv[1:3]
+if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,191}", module_name) is None:
+    raise RuntimeError("common runner session module name is invalid")
+
+sys.stdout.write(json.dumps({
+    "schema_version": schema_version,
+    "status": "ready",
+}, sort_keys=True, separators=(",", ":")) + "\n")
+sys.stdout.flush()
+
+for line in sys.stdin:
+    request_id = ""
+    try:
+        request = json.loads(line)
+        if not isinstance(request, dict) or set(request) != {
+            "schema_version",
+            "request_id",
+            "operation",
+            "payload",
+            "timeout_seconds",
+            "provider_cost_scope",
+        }:
+            raise RuntimeError("common runner session request is not closed")
+        request_id = request.get("request_id")
+        operation = request.get("operation")
+        payload = request.get("payload")
+        timeout_seconds = request.get("timeout_seconds")
+        provider_cost_scope = request.get("provider_cost_scope")
+        if (
+            request.get("schema_version") != schema_version
+            or not isinstance(request_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", request_id) is None
+            or not isinstance(operation, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", operation) is None
+            or not isinstance(payload, dict)
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not 0.1 <= float(timeout_seconds) <= 900000.0
+            or not isinstance(provider_cost_scope, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", provider_cost_scope) is None
+        ):
+            raise RuntimeError("common runner session request is invalid")
+        environment = dict(os.environ)
+        environment["RESEARCH_LAB_PROVIDER_COST_SCOPE"] = provider_cost_scope
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    common_bootstrap,
+                    module_name,
+                    operation,
+                ],
+                input=json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                text=True,
+                capture_output=True,
+                timeout=float(timeout_seconds),
+                env=environment,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout
+            stderr = exc.stderr
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", "replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", "replace")
+            response = {
+                "schema_version": schema_version,
+                "request_id": request_id,
+                "status": "timeout",
+                "returncode": None,
+                "stdout": str(stdout or "")[-8000:],
+                "stderr": str(stderr or "")[-8000:],
+            }
+        else:
+            response = {
+                "schema_version": schema_version,
+                "request_id": request_id,
+                "status": (
+                    "succeeded" if completed.returncode == 0 else "failed"
+                ),
+                "returncode": int(completed.returncode),
+                "stdout": str(completed.stdout or ""),
+                "stderr": str(completed.stderr or ""),
+            }
+    except BaseException as exc:
+        response = {
+            "schema_version": schema_version,
+            "request_id": request_id,
+            "status": "server_error",
+            "error_class": type(exc).__name__,
+            "error": str(exc)[:1200],
+        }
+    sys.stdout.write(json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n")
+    sys.stdout.flush()
+"""
+
+
+class _DockerModelRunnerSessionError(PrivateModelRuntimeError):
+    """The reusable credential-free OCI process became unavailable."""
+
+
+class _DockerModelRunnerSession:
+    """Reuse one immutable OCI container while keeping each call process-fresh."""
+
+    def __init__(self, runner: DockerPrivateModelRunner) -> None:
+        if not isinstance(runner, DockerPrivateModelRunner):
+            raise PrivateModelRuntimeError("Docker model runner is required")
+        self._runner = runner
+        self._responses: queue.Queue[str | None] = queue.Queue()
+        self._stderr_lock = threading.Lock()
+        self._stderr_tail = ""
+        self._call_lock = threading.Lock()
+        self._closed = False
+        self._container_name = (
+            "leadpoet-private-model-session-" + uuid.uuid4().hex
+        )
+        self._process: subprocess.Popen[str] | None = None
+        self._start()
+
+    def _start(self) -> None:
+        spec = self._runner.spec
+        session_scope = sha256_json({
+            "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+            "image_digest": spec.image_digest,
+            "module_name": spec.module_name,
+        })
+        command = [
+            spec.docker_executable,
+            "run",
+            "--rm",
+            "--name",
+            self._container_name,
+            "-i",
+            *_docker_platform_args(spec),
+            *(["--network", "none"] if spec.network_disabled else []),
+            *_docker_env_args(spec),
+            "-e",
+            f"{PROVIDER_COST_EVALUATION_SCOPE_ENV}={session_scope}",
+            spec.image_digest,
+            "python",
+            "-u",
+            "-c",
+            _COMMON_RUNNER_SESSION_BOOTSTRAP,
+            _COMMON_RUNNER_BOOTSTRAP,
+            spec.module_name,
+        ]
+        try:
+            with _docker_private_model_lifecycle(spec) as deadline:
+                self._process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    env=_build_docker_process_env(spec),
+                )
+                threading.Thread(
+                    target=self._read_stdout,
+                    name="common-runner-session-stdout",
+                    daemon=True,
+                ).start()
+                threading.Thread(
+                    target=self._read_stderr,
+                    name="common-runner-session-stderr",
+                    daemon=True,
+                ).start()
+                ready_line = self._next_response(
+                    _docker_lifecycle_remaining_seconds(deadline)
+                )
+        except BaseException:
+            self.close()
+            raise
+        try:
+            ready = json.loads(ready_line)
+        except (TypeError, json.JSONDecodeError) as exc:
+            self.close()
+            raise _DockerModelRunnerSessionError(
+                "common model runner session returned invalid readiness"
+            ) from exc
+        if ready != {
+            "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+            "status": "ready",
+        }:
+            self.close()
+            raise _DockerModelRunnerSessionError(
+                "common model runner session readiness differs"
+            )
+
+    def _read_stdout(self) -> None:
+        process = self._process
+        stream = process.stdout if process is not None else None
+        try:
+            if stream is not None:
+                for line in stream:
+                    self._responses.put(line)
+        finally:
+            self._responses.put(None)
+
+    def _read_stderr(self) -> None:
+        process = self._process
+        stream = process.stderr if process is not None else None
+        if stream is None:
+            return
+        for line in stream:
+            with self._stderr_lock:
+                self._stderr_tail = (self._stderr_tail + line)[-8000:]
+
+    def _next_response(self, timeout_seconds: float) -> str:
+        try:
+            value = self._responses.get(timeout=max(0.1, timeout_seconds))
+        except queue.Empty as exc:
+            raise _DockerModelRunnerSessionError(
+                "common model runner session response timed out"
+            ) from exc
+        if value is None:
+            with self._stderr_lock:
+                stderr = _sanitize_text(self._stderr_tail)[-1200:]
+            raise _DockerModelRunnerSessionError(
+                "common model runner session exited before responding: "
+                + stderr
+            )
+        return value
+
+    def call(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        # The idle session may coexist with Docker maintenance, but one child
+        # operation keeps the established shared lifecycle exclusion. If
+        # maintenance removed an idle session, the transport replaces it once.
+        with _docker_private_model_lifecycle(self._runner.spec):
+            return self._call_with_lifecycle(operation, payload)
+
+    def _call_with_lifecycle(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        with self._call_lock:
+            if self._closed:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session is closed"
+                )
+            process = self._process
+            stream = process.stdin if process is not None else None
+            if process is None or process.poll() is not None or stream is None:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session is unavailable"
+                )
+            request_id = uuid.uuid4().hex
+            timeout_seconds = max(
+                0.1,
+                float(self._runner.spec.timeout_seconds),
+            )
+            provider_cost_scope = sha256_json({
+                "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+                "image_digest": self._runner.spec.image_digest,
+                "module_name": self._runner.spec.module_name,
+                "operation": operation,
+                "payload": dict(payload),
+            })
+            request = {
+                "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+                "request_id": request_id,
+                "operation": operation,
+                "payload": dict(payload),
+                "timeout_seconds": timeout_seconds,
+                "provider_cost_scope": provider_cost_scope,
+            }
+            try:
+                stream.write(json.dumps(
+                    request,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ) + "\n")
+                stream.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session request failed"
+                ) from exc
+            response_line = self._next_response(timeout_seconds + 5.0)
+            try:
+                response = json.loads(response_line)
+            except json.JSONDecodeError as exc:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session response is invalid"
+                ) from exc
+            if (
+                not isinstance(response, Mapping)
+                or response.get("schema_version")
+                != _COMMON_RUNNER_SESSION_SCHEMA_VERSION
+                or response.get("request_id") != request_id
+            ):
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session response identity differs"
+                )
+            status = response.get("status")
+            if status == "server_error":
+                if set(response) != {
+                    "schema_version",
+                    "request_id",
+                    "status",
+                    "error_class",
+                    "error",
+                }:
+                    raise _DockerModelRunnerSessionError(
+                        "common model runner session error response is invalid"
+                    )
+                detail = _sanitize_text(str(response.get("error") or ""))[-1200:]
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session failed: " + detail
+                )
+            if set(response) != {
+                "schema_version",
+                "request_id",
+                "status",
+                "returncode",
+                "stdout",
+                "stderr",
+            }:
+                raise _DockerModelRunnerSessionError(
+                    "common model runner session result is not closed"
+                )
+            stderr_text = _collect_incontainer_trace(
+                str(response.get("stderr") or "")
+            )
+            if status == "timeout":
+                raise PrivateModelRuntimeError(
+                    "common model runner operation timed out"
+                )
+            if status != "succeeded" or response.get("returncode") != 0:
+                stderr = _sanitize_text(stderr_text)[-1200:]
+                raise PrivateModelRuntimeError(
+                    "common model runner operation failed with code "
+                    f"{response.get('returncode')}: {stderr}"
+                )
+            stdout = str(response.get("stdout") or "")
+            try:
+                result = _loads_adapter_stdout(stdout)
+            except json.JSONDecodeError as exc:
+                safe_stdout = _sanitize_text(stdout)[-800:]
+                safe_stderr = _sanitize_text(stderr_text)[-800:]
+                raise PrivateModelRuntimeError(
+                    "common model runner returned invalid JSON: "
+                    f"stdout={safe_stdout!r} stderr={safe_stderr!r}"
+                ) from exc
+            _raise_on_empty_provider_error(
+                result,
+                stderr_text,
+                context_label="common model runner",
+            )
+            if not isinstance(result, Mapping):
+                raise PrivateModelRuntimeError(
+                    "common model runner returned a non-object response"
+                )
+            return dict(result)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        process = self._process
+        self._process = None
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            process.wait(timeout=5)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _remove_private_model_container(
+            self._runner.spec,
+            container_name=self._container_name,
+        )
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
 class DockerModelRunnerTransport:
     """Invoke only runner APIs, without forwarding provider credentials."""
 
@@ -354,22 +789,45 @@ class DockerModelRunnerTransport:
             pull_before_run=False,
         )
         self._runner = DockerPrivateModelRunner(isolated_spec)
+        self._session: _DockerModelRunnerSession | None = None
+        self._session_lock = threading.Lock()
 
     def _call(
         self,
         operation: str,
         payload: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        result = self._runner._run_json(
-            bootstrap=_COMMON_RUNNER_BOOTSTRAP,
-            argv=(self._runner.spec.module_name, operation),
-            stdin_payload=payload,
-        )
-        if not isinstance(result, Mapping):
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", operation) is None:
             raise PrivateModelRuntimeError(
-                "common model runner returned a non-object response"
+                "common model runner operation is invalid"
             )
-        return result
+        with self._session_lock:
+            for session_attempt in range(2):
+                if self._session is None:
+                    self._session = _DockerModelRunnerSession(self._runner)
+                try:
+                    return self._session.call(operation, payload)
+                except _DockerModelRunnerSessionError:
+                    self._session.close()
+                    self._session = None
+                    if session_attempt:
+                        raise
+        raise PrivateModelRuntimeError(
+            "common model runner session did not return"
+        )
+
+    def close(self) -> None:
+        with self._session_lock:
+            session = self._session
+            self._session = None
+            if session is not None:
+                session.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
 
     def continue_runner(
         self,

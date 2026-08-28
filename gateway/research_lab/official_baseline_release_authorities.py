@@ -1027,6 +1027,8 @@ class ArtifactPreparedActionExecutor:
                 ),
             }
             request_body_sha256 = sha256_json(request_value)
+        verifier_action = action_type in _VERIFIER_ACTION_TYPES
+        provider_action = action_type in _PROVIDER_ACTION_TYPES
         if (
             type(call_cap) is not int
             or not 0 <= call_cap <= 100_000
@@ -1035,7 +1037,10 @@ class ArtifactPreparedActionExecutor:
             or not 0 <= float(credit_cap) <= 100
             or isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
-            or not 0 < float(timeout_seconds) <= 900
+            or not 0 <= float(timeout_seconds) <= 900
+            or (provider_action and float(timeout_seconds) == 0)
+            or (verifier_action and float(timeout_seconds) != 0)
+            or (not provider_action and not verifier_action)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected action budget is invalid"

@@ -420,7 +420,7 @@ class _Bridge:
             request_body_sha256=sha256_json(action["arguments"]),
             call_cap=0 if verifier else 1,
             credit_cap_microunits=0 if verifier else 100,
-            timeout_ms=5_000,
+            timeout_ms=0 if verifier else 5_000,
             protected_job_ref="protected_job:" + action["idempotency_key"][:16],
             protected_request_sha256=sha256_json(dict(action)),
         )

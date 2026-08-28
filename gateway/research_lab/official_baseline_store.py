@@ -357,9 +357,9 @@ def _validate_action_authorization(value: Any) -> dict[str, Any]:
         maximum=100_000_000,
         label="official baseline credit_cap_microunits",
     )
-    _integer(
+    timeout_ms = _integer(
         document["timeout_ms"],
-        minimum=1,
+        minimum=0,
         maximum=900_000,
         label="official baseline timeout_ms",
     )
@@ -373,7 +373,10 @@ def _validate_action_authorization(value: Any) -> dict[str, Any]:
     }
     if not verifier and not tool:
         raise OfficialBaselineStoreError("official baseline action_type is invalid")
-    if (verifier and (call_cap != 0 or credit_cap != 0)) or (tool and call_cap < 1):
+    if (
+        verifier
+        and (call_cap != 0 or credit_cap != 0 or timeout_ms != 0)
+    ) or (tool and (call_cap < 1 or timeout_ms < 1)):
         raise OfficialBaselineStoreError(
             "official baseline action accounting is invalid"
         )

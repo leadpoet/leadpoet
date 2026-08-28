@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run after migrations 157, 163, and 164 against disposable PostgreSQL only.
+-- Run after migrations 157, 163, 164, and 166 against disposable PostgreSQL only.
 BEGIN;
 
 DO $official_baseline_happy_path$
@@ -72,6 +72,14 @@ BEGIN
         'lease_holder_sha256', h,
         'expected_frontier_sha256', frontier_hash
     );
+    BEGIN
+        PERFORM public.research_lab_official_baseline_reserve_action_v1(
+            action_auth || pg_catalog.jsonb_build_object('timeout_ms', 0)
+        );
+        RAISE EXCEPTION 'zero-timeout provider reservation unexpectedly succeeded';
+    EXCEPTION
+        WHEN SQLSTATE '22023' THEN NULL;
+    END;
     result := public.research_lab_official_baseline_reserve_action_v1(
         action_auth
     );
@@ -166,12 +174,20 @@ BEGIN
         'request_body_sha256', 'sha256:' || repeat('b', 64),
         'call_cap', 0,
         'credit_cap_microunits', 0,
-        'timeout_ms', 5000,
+        'timeout_ms', 0,
         'protected_job_ref', 'protected_job:verifier',
         'protected_request_sha256', 'sha256:' || repeat('c', 64),
         'lease_holder_sha256', h,
         'expected_frontier_sha256', frontier_hash
     );
+    BEGIN
+        PERFORM public.research_lab_official_baseline_reserve_action_v1(
+            action_auth || pg_catalog.jsonb_build_object('timeout_ms', 1)
+        );
+        RAISE EXCEPTION 'positive-timeout verifier reservation unexpectedly succeeded';
+    EXCEPTION
+        WHEN SQLSTATE '22023' THEN NULL;
+    END;
     result := public.research_lab_official_baseline_reserve_action_v1(
         action_auth
     );

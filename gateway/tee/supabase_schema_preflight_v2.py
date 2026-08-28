@@ -1164,7 +1164,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_official_baseline_register_run_v1",
     ),
     (
-        "scripts/164-research-lab-official-baseline-action-authority.sql",
+        "scripts/166-research-lab-zero-call-verifier-timeout.sql",
         "research_lab_official_baseline_reserve_action_v1",
     ),
     (

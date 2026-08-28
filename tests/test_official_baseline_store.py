@@ -92,6 +92,17 @@ def _authorization() -> dict:
     }
 
 
+def _verifier_authorization() -> dict:
+    return {
+        **_authorization(),
+        "action_type": "verify_company",
+        "tool_id": "verifier.company",
+        "call_cap": 0,
+        "credit_cap_microunits": 0,
+        "timeout_ms": 0,
+    }
+
+
 def _terminal_known() -> dict:
     return {
         "schema_version": OFFICIAL_BASELINE_ACTION_TERMINAL_KNOWN_SCHEMA_VERSION,
@@ -337,6 +348,43 @@ def test_supabase_store_uses_all_seven_exact_rpc_shapes():
     ]
 
 
+def test_supabase_store_accepts_exact_zero_call_verifier_authorization():
+    authorization = _verifier_authorization()
+    responses = _responses()
+    reservation = responses[OFFICIAL_BASELINE_RPCS[1]]
+    reservation.update(
+        protected_job_ref=authorization["protected_job_ref"],
+        protected_request_sha256=authorization["protected_request_sha256"],
+        attempt_sha256=sha256_json(authorization),
+    )
+    client = _Client(responses)
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    result = store.reserve_action(authorization=authorization)
+
+    assert result["disposition"] == "reserved_new"
+    assert client.calls == [
+        (OFFICIAL_BASELINE_RPCS[1], {"p_authorization": authorization})
+    ]
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    (
+        {**_authorization(), "timeout_ms": 0},
+        {**_verifier_authorization(), "timeout_ms": 1},
+    ),
+)
+def test_supabase_store_rejects_wrong_timeout_class_before_rpc(authorization):
+    client = _Client(_responses())
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    with pytest.raises(OfficialBaselineStoreError, match="accounting is invalid"):
+        store.reserve_action(authorization=authorization)
+
+    assert client.calls == []
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
@@ -518,12 +566,19 @@ def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
     assert {
         (OFFICIAL_BASELINE_MIGRATION, relation) for relation in expected_relations
     } <= relations
+    reserve_migration = "scripts/166-research-lab-zero-call-verifier-timeout.sql"
     assert {
-        (OFFICIAL_BASELINE_MIGRATION, rpc) for rpc in OFFICIAL_BASELINE_RPCS
+        (OFFICIAL_BASELINE_MIGRATION, rpc)
+        for rpc in OFFICIAL_BASELINE_RPCS
+        if rpc != OFFICIAL_BASELINE_RPCS[1]
     } <= set(REQUIRED_SUPABASE_V2_RPCS)
+    assert (reserve_migration, OFFICIAL_BASELINE_RPCS[1]) in set(
+        REQUIRED_SUPABASE_V2_RPCS
+    )
     assert {
         "gateway/research_lab/official_baseline_model_runner.py",
         "gateway/research_lab/official_baseline_store.py",
         OFFICIAL_BASELINE_MIGRATION,
+        reserve_migration,
     } <= set(EXACT_PRODUCTION_ENTRYPOINTS)
     OFFICIAL_BASELINE_EXECUTION_SCHEMA_VERSION,

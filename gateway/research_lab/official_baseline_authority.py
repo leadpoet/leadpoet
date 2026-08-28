@@ -688,7 +688,7 @@ class _ReservedOfficialBaselineDispatcher:
             or type(value.credit_cap_microunits) is not int
             or not 0 <= value.credit_cap_microunits <= 100_000_000
             or type(value.timeout_ms) is not int
-            or not 1 <= value.timeout_ms <= 900_000
+            or not 0 <= value.timeout_ms <= 900_000
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected preparation identity differs"
@@ -707,9 +707,13 @@ class _ReservedOfficialBaselineDispatcher:
             not verifier
             and not provider
             or verifier
-            and (value.call_cap != 0 or value.credit_cap_microunits != 0)
+            and (
+                value.call_cap != 0
+                or value.credit_cap_microunits != 0
+                or value.timeout_ms != 0
+            )
             or provider
-            and value.call_cap < 1
+            and (value.call_cap < 1 or value.timeout_ms < 1)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected action accounting differs"

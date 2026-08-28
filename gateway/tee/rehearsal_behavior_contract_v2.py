@@ -230,6 +230,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/162-research-lab-candidate-routing-experiments.sql",
     "scripts/163-research-lab-model-transition-artifact-custody.sql",
     "scripts/164-research-lab-official-baseline-action-authority.sql",
+    "scripts/166-research-lab-zero-call-verifier-timeout.sql",
     "gateway/api/weights.py",
     "gateway/tee/coordinator_chain_source_v2.py",
     "gateway/tee/coordinator_executor_v2.py",

@@ -802,21 +802,31 @@ def test_deepline_tampered_progress_fails_closed_without_network():
         executor.reconcile(preparation=preparation, action=action)
 
 
-def test_artifact_verifier_result_is_zero_call_known_terminal():
+@pytest.mark.parametrize(
+    ("action_type", "tool_id", "response_schema"),
+    (
+        ("verify_company", "verifier.company", "company-verifier-result:v2"),
+        ("verify_intent", "verifier.intent", "intent-verifier-response:v1"),
+        ("verify_contact", "verifier.contact", "contact-verifier-response:v1"),
+    ),
+)
+def test_artifact_verifier_result_is_zero_call_known_terminal(
+    action_type, tool_id, response_schema
+):
     binding = "c" * 64
     action = {
         "sequence": 2,
-        "action_type": "verify_company",
-        "tool_id": "verifier.company",
+        "action_type": action_type,
+        "tool_id": tool_id,
         "binding_contract_sha256": binding,
-        "response_schema_version": "company-verifier-result:v2",
+        "response_schema_version": response_schema,
         "max_response_bytes": 200_000,
         "idempotency_key": "6" * 64,
         "action_sha256": "7" * 64,
         "request_fingerprint_sha256": "8" * 64,
     }
     result = {
-        "schema_version": "company-verifier-result:v2",
+        "schema_version": response_schema,
         "accepted": False,
         "reason_code": "company_constraints_not_proven",
     }
@@ -849,7 +859,7 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
             "tool_id": action["tool_id"],
             "status": "virtual",
             "compiler_contract_sha256": "0" * 64,
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 0.0,
         }
     )
     executor = ArtifactPreparedActionExecutor(
@@ -865,6 +875,7 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
         unit_ref="baseline_icp:" + "9" * 64,
         action=action,
     )
+    assert preparation.timeout_ms == 0
 
     terminal = executor.execute_prepared(preparation=preparation, action=action)
 
@@ -877,6 +888,64 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
     assert host.cost_credits == 0.0
     assert terminal.protected_action_result.provider_receipt is None
     assert terminal.provider_request_ref is None
+
+    positive_timeout_inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": action["tool_id"],
+            "status": "virtual",
+            "compiler_contract_sha256": "0" * 64,
+            "timeout_seconds": 1.0,
+        }
+    )
+    invalid_executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=positive_timeout_inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError, match="budget is invalid"
+    ):
+        invalid_executor.prepare(
+            run_identity={"run": "positive-verifier-timeout"},
+            unit_ref="baseline_icp:" + "a" * 64,
+            action=action,
+        )
+
+
+def test_paid_provider_zero_timeout_fails_closed():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["budgets"] = {
+        **dispatch_body["budgets"],
+        "timeout_seconds": 0.0,
+    }
+    zero_timeout_dispatch = {
+        **dispatch_body,
+        "dispatch_sha256": _hash(dispatch_body),
+    }
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=zero_timeout_dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError, match="budget is invalid"
+    ):
+        executor.prepare(
+            run_identity={"run": "zero-provider-timeout"},
+            unit_ref="baseline_icp:" + "b" * 64,
+            action=action,
+        )
 
 
 def test_catalog_hash_and_order_tampering_fail_closed():

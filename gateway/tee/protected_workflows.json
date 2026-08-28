@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "55b0bc2c09dfa6e0ee4f056d89c83533221209e5",
+  "baseline_commit": "77d5273628e66f9dd626d125823ca7ca0cbfdc08",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1377,7 +1377,7 @@
       "symbol": "SITE_PROTECTED_ACTION_AUTHORITY_SOURCE_COMMIT"
     },
     {
-      "ast_sha256": "sha256:3b93e54e1b23f9bc4df52445ffa3839ca58d2f6108c15a28e686345b4a5113ed",
+      "ast_sha256": "sha256:a33eda85fd768291f56c85da33c4b872e0f7b964a4b8386dccb9ce90654ac77e",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient"
     },
@@ -1387,7 +1387,7 @@
       "symbol": "_GatewayEvidenceProxyClient._proxied_url"
     },
     {
-      "ast_sha256": "sha256:4a2446149b9fd091f924cd35aced4861f10f239c6e7dfe17c9c01ef90caab0a8",
+      "ast_sha256": "sha256:7046f2001ccd426266c7bef56268d1530cbcb486b1693859a0c5894d153daff5",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient.request"
     },
@@ -1942,7 +1942,7 @@
       "symbol": "validate_source_add_registration_diff"
     },
     {
-      "ast_sha256": "sha256:d77384bbfad2b7fe682ba8703f242555363899f6a17fcd6bb2bb24fed7ada9a4",
+      "ast_sha256": "sha256:f8eb06ff4d31210b3e57c5c708498b91275a6e27dded868846c576bb6016a7f1",
       "path": "gateway/research_lab/provider_evidence_proxy.py",
       "symbol": "EvidenceStore.acquire_or_wait"
     },
@@ -8187,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:cc647e1d03241422985cac5c91607d92bf0d14b05ac03617607c7cc64705c673",
-  "protected_source_commit": "55b0bc2c09dfa6e0ee4f056d89c83533221209e5",
+  "manifest_hash": "sha256:6566147393b860309629a8758b58019c7db40e85f4faafd156cc19750c904111",
+  "protected_source_commit": "77d5273628e66f9dd626d125823ca7ca0cbfdc08",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

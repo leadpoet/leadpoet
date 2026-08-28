@@ -5,6 +5,7 @@ from copy import deepcopy
 import hashlib
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelRuntimeError,
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
 )
 from tests.model_runner_protocol_fixtures import (
     runner_declaration,
@@ -1417,19 +1419,46 @@ def test_oci_runner_transport_does_not_forward_provider_credentials(
     assert transport._runner.spec.pull_before_run is False
 
 
-def test_common_runner_session_reuses_container_but_not_python_process():
+def test_common_runner_session_reuses_preloaded_model_but_not_python_process(
+    tmp_path,
+):
+    if not hasattr(os, "fork"):
+        pytest.skip("fresh fork runner is unavailable")
+    (tmp_path / "fixture_adapter.py").write_text(
+        "\n".join((
+            "import os",
+            "IMPORT_PID = os.getpid()",
+            "STATE = []",
+            "_research_lab_provider_cost_scope = "
+            "os.environ.get('RESEARCH_LAB_PROVIDER_COST_SCOPE', '')",
+            "",
+        )),
+        encoding="utf-8",
+    )
     child_bootstrap = """
 import json
 import os
 import sys
+import time
+import fixture_adapter
 
 payload = json.load(sys.stdin)
+if payload.get("sleep"):
+    time.sleep(float(payload["sleep"]))
+fixture_adapter.STATE.append(payload)
 sys.stdout.write(json.dumps({
     "operation": sys.argv[2],
     "payload": payload,
     "pid": os.getpid(),
+    "import_pid": fixture_adapter.IMPORT_PID,
+    "state_count": len(fixture_adapter.STATE),
+    "provider_cost_scope": fixture_adapter._research_lab_provider_cost_scope,
 }, sort_keys=True, separators=(",", ":")))
 """
+    session_scope = "sha256:" + "a" * 64
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(tmp_path)
+    environment[PROVIDER_COST_EVALUATION_SCOPE_ENV] = session_scope
     process = subprocess.Popen(
         [
             sys.executable,
@@ -1443,6 +1472,7 @@ sys.stdout.write(json.dumps({
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
     assert process.stdin is not None
     assert process.stdout is not None
@@ -1469,13 +1499,60 @@ sys.stdout.write(json.dumps({
         assert response["status"] == "succeeded"
         results.append(json.loads(response["stdout"]))
 
-    process.stdin.close()
-    assert process.wait(timeout=5) == 0
     assert [result["payload"] for result in results] == [
         {"index": 0},
         {"index": 1},
     ]
     assert results[0]["pid"] != results[1]["pid"]
+    assert results[0]["import_pid"] == results[1]["import_pid"]
+    assert results[0]["import_pid"] not in {
+        results[0]["pid"],
+        results[1]["pid"],
+    }
+    assert [result["state_count"] for result in results] == [1, 1]
+    assert [result["provider_cost_scope"] for result in results] == [
+        "sha256:" + f"{index + 1:064x}"
+        for index in range(2)
+    ]
+
+    timeout_request = {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "request_id": f"{3:032x}",
+        "operation": "continue_runner",
+        "payload": {"sleep": 0.5},
+        "timeout_seconds": 0.1,
+        "provider_cost_scope": "sha256:" + "3" * 64,
+    }
+    process.stdin.write(
+        json.dumps(timeout_request, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    process.stdin.flush()
+    timeout_response = json.loads(process.stdout.readline())
+    assert timeout_response["status"] == "timeout", timeout_response
+    assert timeout_response["returncode"] is None
+
+    recovery_request = {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "request_id": f"{4:032x}",
+        "operation": "continue_runner",
+        "payload": {"index": 2},
+        "timeout_seconds": 5.0,
+        "provider_cost_scope": "sha256:" + "4" * 64,
+    }
+    process.stdin.write(
+        json.dumps(recovery_request, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    process.stdin.flush()
+    recovery_response = json.loads(process.stdout.readline())
+    assert recovery_response["status"] == "succeeded"
+    recovery = json.loads(recovery_response["stdout"])
+    assert recovery["payload"] == {"index": 2}
+    assert recovery["state_count"] == 1
+    assert recovery["provider_cost_scope"] == "sha256:" + "4" * 64
+    process.stdin.close()
+    assert process.wait(timeout=5) == 0
 
 
 def test_oci_runner_transport_reuses_one_credential_free_session(monkeypatch):

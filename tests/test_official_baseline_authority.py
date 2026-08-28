@@ -61,14 +61,17 @@ class _S3:
     def __init__(self):
         self.values = {}
         self.puts = 0
+        self.readers = []
 
     def get_object(self, *, Bucket, Key):
         del Bucket
         if Key not in self.values:
             raise _Missing
         value = self.values[Key]
+        reader = BytesIO(value["Body"])
+        self.readers.append(reader)
         return {
-            "Body": BytesIO(value["Body"]),
+            "Body": reader,
             "Metadata": deepcopy(value["Metadata"]),
             "ServerSideEncryption": value["ServerSideEncryption"],
         }
@@ -83,6 +86,17 @@ class _S3:
             **deepcopy(value),
             "Body": bytes(value["Body"]),
         }
+
+
+class _FailingBody:
+    def __init__(self):
+        self.closed = False
+
+    def read(self):
+        raise RuntimeError("fixture read failure")
+
+    def close(self):
+        self.closed = True
 
 
 def _context(runner) -> OfficialBaselineDependencyContext:
@@ -105,6 +119,65 @@ def _context(runner) -> OfficialBaselineDependencyContext:
         evidence_proxy_capability_sha256="sha256:" + "a" * 64,
         evidence_proxy_ready_provider_ids=("or",),
     )
+
+
+def _custody_for_test(s3) -> S3OfficialBaselineDocumentCustody:
+    return S3OfficialBaselineDocumentCustody(
+        client=s3,
+        bucket="fixture-bucket",
+        prefix="official-baseline",
+        kms_key_id="alias/fixture-encryption",
+    )
+
+
+def test_custody_closes_every_successful_s3_response_body():
+    s3 = _S3()
+    custody = _custody_for_test(s3)
+
+    assert custody._append_document("fixture.json", {"value": "fixture"}) is True
+    assert s3.readers
+    assert all(reader.closed for reader in s3.readers)
+
+
+def test_custody_closes_s3_body_before_rejecting_invalid_encryption():
+    s3 = _S3()
+    body = b'{}'
+    s3.values["fixture.json"] = {
+        "Body": body,
+        "Metadata": {
+            "content-sha256": sha256_bytes(body).removeprefix("sha256:"),
+            "kms-key-id-sha256": sha256_bytes(
+                b"alias/fixture-encryption"
+            ).removeprefix("sha256:"),
+        },
+        "ServerSideEncryption": "AES256",
+    }
+    custody = _custody_for_test(s3)
+
+    with pytest.raises(OfficialBaselineCustodyError, match="SSE-KMS protected"):
+        custody._read_bytes("fixture.json")
+
+    assert s3.readers[-1].closed
+
+
+def test_custody_closes_s3_body_when_stream_read_fails():
+    body = _FailingBody()
+
+    class _ReadFailureS3(_S3):
+        def get_object(self, *, Bucket, Key):
+            del Bucket, Key
+            return {
+                "Body": body,
+                "Metadata": {},
+                "ServerSideEncryption": "aws:kms",
+            }
+
+    custody = _custody_for_test(_ReadFailureS3())
+
+    with pytest.raises(OfficialBaselineCustodyError, match="body read failed"):
+        custody._read_bytes("fixture.json")
+
+    assert body.closed is True
 
 
 def test_fresh_daily_attempt_zero_is_a_valid_frozen_context():

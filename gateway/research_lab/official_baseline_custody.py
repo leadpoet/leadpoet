@@ -177,11 +177,38 @@ class S3OfficialBaselineDocumentCustody:
             response.get("ServerSideEncryption") != "aws:kms"
             or not isinstance(metadata, Mapping)
             or not callable(getattr(body_reader, "read", None))
+            or not callable(getattr(body_reader, "close", None))
         ):
+            close = getattr(body_reader, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 - cleanup is fail-closed
+                    raise OfficialBaselineCustodyError(
+                        "official baseline custody response cleanup failed"
+                    ) from exc
             raise OfficialBaselineCustodyError(
                 "official baseline custody object is not SSE-KMS protected"
             )
-        body = bytes(body_reader.read())
+        read_error: Exception | None = None
+        close_error: Exception | None = None
+        body = b""
+        try:
+            body = bytes(body_reader.read())
+        except Exception as exc:  # noqa: BLE001 - normalize SDK/body failures
+            read_error = exc
+        try:
+            body_reader.close()
+        except Exception as exc:  # noqa: BLE001 - cleanup is fail-closed
+            close_error = exc
+        if read_error is not None:
+            raise OfficialBaselineCustodyError(
+                "official baseline encrypted custody body read failed"
+            ) from read_error
+        if close_error is not None:
+            raise OfficialBaselineCustodyError(
+                "official baseline custody response cleanup failed"
+            ) from close_error
         expected = str(metadata.get("content-sha256") or "")
         expected_kms = str(metadata.get("kms-key-id-sha256") or "")
         if (

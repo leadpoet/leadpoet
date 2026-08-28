@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "a04f70a9396be9d39223343b3b24cda62a095410",
+  "baseline_commit": "b96b318d578fdfe1bd98ed9e92f266b2d4adf2d3",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -612,7 +612,7 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:aca5ee66a3662f2f9b9dde455e3ddf6f371ad1ee16adb6fa41ccd3b3ad7e97e8",
+      "ast_sha256": "sha256:9373fb855ff114c3e167669341e8be757f969ff6bc39c4a7b396fe3d7ae8e3ff",
       "path": "gateway/research_lab/common_model_experiment.py",
       "symbol": "ExactModelExperimentCoordinator"
     },
@@ -1177,7 +1177,7 @@
       "symbol": "EXACT_MODEL_RUNNER_FAMILY"
     },
     {
-      "ast_sha256": "sha256:672c83eff8fd41e8c588c4c6603da2f1804ec40766a1f2498eff0fc1051277a5",
+      "ast_sha256": "sha256:af120f0653ba05745759bad2ef6bd1a15a315616265b6f40c647b33beaff97de",
       "path": "gateway/research_lab/official_baseline_model_runner.py",
       "symbol": "ExactOfficialBaselineRunner"
     },
@@ -1942,6 +1942,11 @@
       "symbol": "validate_source_add_registration_diff"
     },
     {
+      "ast_sha256": "sha256:d77384bbfad2b7fe682ba8703f242555363899f6a17fcd6bb2bb24fed7ada9a4",
+      "path": "gateway/research_lab/provider_evidence_proxy.py",
+      "symbol": "EvidenceStore.acquire_or_wait"
+    },
+    {
       "ast_sha256": "sha256:ba65bbfb019c0b78a756fd28f1d8e89e90556642d6583e3030ae245ab7118869",
       "path": "gateway/research_lab/provider_preflight.py",
       "symbol": "ProviderPreflight.check"
@@ -2557,12 +2562,12 @@
       "symbol": "ResearchLabGatewayScoringWorker._run_baseline_batch"
     },
     {
-      "ast_sha256": "sha256:1a40378357d5f2405dfe824250aeaede08e614ca944bb1a11152ce2e8da5bd81",
+      "ast_sha256": "sha256:6594a75589af2f5cb4f33c5f5453278a9ed2a37424728f544918e6e6bb98d469",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._run_baseline_batch_inner"
     },
     {
-      "ast_sha256": "sha256:24e10af5084842a7c558f107bc65467f8e649a100c144eafcddc23d0b0333282",
+      "ast_sha256": "sha256:a5277d0214af04d3aa9d85791af59d745b745b436537ca540aebf38a077c82ff",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._run_baseline_icp"
     },
@@ -2640,6 +2645,16 @@
       "ast_sha256": "sha256:fe7c6e13787a77fbf9c0ac97cbe060fff8f6c88ef1b4f93229ec138f2decb2ef",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_scoring_contract_hash"
+    },
+    {
+      "ast_sha256": "sha256:422b28e97f03c0bab31e90ad812047df1ab874e247c3ed69a15a2d4ddd7296fb",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_wave_stall_timeout_seconds"
+    },
+    {
+      "ast_sha256": "sha256:5be7b80ec51f5cdc49ad3babf73c494cea6cf8bd44ac4a7a198370c7f223e494",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_wave_watchdog"
     },
     {
       "ast_sha256": "sha256:e37d0b5c790750466ca3b487e220667bfc7d70b1d1db5a2fa175e4a0f11219ca",
@@ -6672,7 +6687,7 @@
       "symbol": "HostActionResult"
     },
     {
-      "ast_sha256": "sha256:e193a9ab3580c16bafe54051f0451b6b47a28e25b6d57eefac12ca37b740c245",
+      "ast_sha256": "sha256:4bee33e407536f527f985b6563f5011b57e9b9b0e6cddd2d558998dd5868c88c",
       "path": "research_lab/docker_model_runner_transport.py",
       "symbol": "DockerModelRunnerTransport"
     },
@@ -6680,6 +6695,26 @@
       "ast_sha256": "sha256:7b0f99e0ac1ce8d1e1913b1d5e3e1451dbf0896b1c8ccaf46892648d7fdccea7",
       "path": "research_lab/docker_model_runner_transport.py",
       "symbol": "_COMMON_RUNNER_BOOTSTRAP"
+    },
+    {
+      "ast_sha256": "sha256:d037eff37714b7336f164f9b4dfaf0b0e60db047a94db912056fd40e0327c7c4",
+      "path": "research_lab/docker_model_runner_transport.py",
+      "symbol": "_COMMON_RUNNER_SESSION_BOOTSTRAP"
+    },
+    {
+      "ast_sha256": "sha256:e6f746b25fbb250079f0bf66bd210fade492a3b00785e191a28548020d123b44",
+      "path": "research_lab/docker_model_runner_transport.py",
+      "symbol": "_COMMON_RUNNER_SESSION_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:b73aa388f094ce5fad1d55109632837a0a5d956efe9330ed4e0979d0a4687d21",
+      "path": "research_lab/docker_model_runner_transport.py",
+      "symbol": "_DockerModelRunnerSession"
+    },
+    {
+      "ast_sha256": "sha256:cb2b81b5dcad054c7b257529ddd40dde56c5f158d95d88ba546b14f65120e612",
+      "path": "research_lab/docker_model_runner_transport.py",
+      "symbol": "_DockerModelRunnerSessionError"
     },
     {
       "ast_sha256": "sha256:e2ab8993885689eba460298cd4c7b5baf9eea6157ad9191c1897dedc01ce8c91",
@@ -8152,7 +8187,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:488ebbf9bcf6fa5df04a2d1f5f025f5e5d48f1cfdc10a3f25d6634cc87d2fd64",
-  "protected_source_commit": "a04f70a9396be9d39223343b3b24cda62a095410",
+  "manifest_hash": "sha256:6b2b4727e21e9df64fdb993743940b13cc862d88cd38d49b748376ade22ac0d2",
+  "protected_source_commit": "b96b318d578fdfe1bd98ed9e92f266b2d4adf2d3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

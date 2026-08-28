@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import json
 
@@ -73,6 +74,17 @@ def _custody() -> S3OfficialBaselineDocumentCustody:
 
 def _hash(value) -> str:
     return sha256_json(value).removeprefix("sha256:")
+
+
+def _model_hash(value) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _catalog_row(
@@ -379,6 +391,37 @@ def _openrouter_provider_fixture():
         }
     )
     return action, dispatch, catalog, inventory
+
+
+def test_unicode_provider_dispatch_uses_model_wire_canonicalization():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    request = json.loads(json.dumps(dispatch["request"]))
+    request["body"]["messages"][0]["content"] = "M\u00fcnchen"
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["request"] = request
+    dispatch_body["request_sha256"] = _model_hash(request)
+    unicode_dispatch = {
+        **dispatch_body,
+        "dispatch_sha256": _model_hash(dispatch_body),
+    }
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=unicode_dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    preparation = executor.prepare(
+        run_identity={"run": "unicode-provider-request"},
+        unit_ref="baseline_icp:" + "f" * 64,
+        action=action,
+    )
+
+    assert preparation.request_body_sha256 == "sha256:" + _model_hash(request)
 
 
 def _batched_openrouter_provider_fixture():
@@ -829,6 +872,7 @@ def test_artifact_verifier_result_is_zero_call_known_terminal(
         "schema_version": response_schema,
         "accepted": False,
         "reason_code": "company_constraints_not_proven",
+        "evidence_summary": "M\u00fcnchen",
     }
     execution_body = {
         "schema_version": "model-runner-verifier-execution:v1",
@@ -838,11 +882,11 @@ def test_artifact_verifier_result_is_zero_call_known_terminal(
         "cost_credits": 0.0,
         "provider_receipt_allowed": False,
         "result": result,
-        "result_sha256": _hash(result),
+        "result_sha256": _model_hash(result),
     }
     execution = {
         **execution_body,
-        "execution_sha256": _hash(execution_body),
+        "execution_sha256": _model_hash(execution_body),
     }
     protocol = _Protocol(verifier=execution)
     catalog = _catalog(

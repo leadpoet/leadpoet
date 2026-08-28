@@ -1124,6 +1124,8 @@ PROTECTED_SYMBOLS = {
         "SITE_PROTECTED_ACTION_AUTHORITY_SOURCE_CALLABLE",
         "protected_action_authority_contract_identity",
         "_validated_protected_action_authority_sha256",
+        "_canonical_bytes",
+        "_artifact_wire_sha256",
         "preflight_official_baseline_artifact_protocol",
         "_catalog_bindings",
         "_validate_inventory_catalog",

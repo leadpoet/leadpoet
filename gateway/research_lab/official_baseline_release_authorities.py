@@ -386,6 +386,12 @@ def _canonical_bytes(value: Any) -> bytes:
         ) from exc
 
 
+def _artifact_wire_sha256(value: Any) -> str:
+    """Hash one model-owned wire document with the signed artifact contract."""
+
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
 def _load_json_object(value: bytes) -> Mapping[str, Any]:
     def _closed_pairs(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
         output: dict[str, Any] = {}
@@ -523,12 +529,12 @@ def _catalog_bindings(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             catalog.get("binding_contracts_sha256"),
             "official baseline binding catalog hash",
         )
-        != sha256_json(normalized).removeprefix("sha256:")
+        != _artifact_wire_sha256(normalized)
         or _bare_hash(
             catalog.get("catalog_sha256"),
             "official baseline catalog identity",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 "schema_version": OFFICIAL_BINDING_CATALOG_SCHEMA_VERSION,
                 "bindings": normalized,
@@ -555,12 +561,12 @@ def _validate_inventory_catalog(
             inventory.get("entries_sha256"),
             "official baseline compiler entries hash",
         )
-        != sha256_json(entries).removeprefix("sha256:")
+        != _artifact_wire_sha256(entries)
         or _bare_hash(
             inventory.get("inventory_sha256"),
             "official baseline compiler inventory hash",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 key: item
                 for key, item in inventory.items()
@@ -978,8 +984,8 @@ class ArtifactPreparedActionExecutor:
                 value.get("request_sha256"),
                 "official baseline provider request hash",
             )
-            != sha256_json(dict(request)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(request))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact provider dispatch identity differs"
@@ -1909,8 +1915,8 @@ class ArtifactPreparedActionExecutor:
                 execution.get("result_sha256"),
                 "official baseline verifier result hash",
             )
-            != sha256_json(dict(result)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(result))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact verifier identity differs"
@@ -2190,7 +2196,7 @@ def load_official_baseline_release_components(
             compiler_preflight.get("preflight_sha256"),
             "official baseline compiler preflight hash",
         )
-        != sha256_json(preflight_payload).removeprefix("sha256:")
+        != _artifact_wire_sha256(preflight_payload)
     ):
         raise OfficialBaselineAuthorityUnavailable(
             "official baseline artifact compiler preflight failed"

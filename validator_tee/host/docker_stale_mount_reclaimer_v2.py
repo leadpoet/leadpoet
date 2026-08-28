@@ -532,6 +532,94 @@ def _inventory(
             "Docker container inspection changed identity"
         )
 
+    if docker_root.is_symlink() or not docker_root.is_dir():
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker data-root is not a canonical directory"
+        )
+    metadata_ancestors = (
+        docker_root / "image",
+        docker_root / "image" / "overlay2",
+        docker_root / "image" / "overlay2" / "layerdb",
+    )
+    for path in metadata_ancestors:
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise DockerStaleMountReclaimerV2Error(
+                f"Docker overlay metadata ancestor is unsafe: {path}"
+            )
+
+    metadata_roots = (layerdb_root, mountdb_root, overlay_root)
+    metadata_root_states: list[bool] = []
+    for path in metadata_roots:
+        if path.is_symlink():
+            raise DockerStaleMountReclaimerV2Error(
+                f"Docker overlay metadata root is a symlink: {path}"
+            )
+        exists = path.exists()
+        if exists and not path.is_dir():
+            raise DockerStaleMountReclaimerV2Error(
+                f"Docker overlay metadata root is not a directory: {path}"
+            )
+        metadata_root_states.append(exists)
+    if any(metadata_root_states) and not all(metadata_root_states):
+        raise DockerStaleMountReclaimerV2Error(
+            "Docker overlay metadata roots are only partially initialized"
+        )
+    if not any(metadata_root_states):
+        if image_ids or container_ids:
+            raise DockerStaleMountReclaimerV2Error(
+                "Docker overlay metadata is absent while active objects remain"
+            )
+        mounted_overlay_targets = _mounted_overlay_dirs(
+            runner,
+            docker_root=docker_root,
+        )
+        if mounted_overlay_targets:
+            raise DockerStaleMountReclaimerV2Error(
+                "Docker overlay metadata is absent while overlay mounts remain"
+            )
+        protected_roots = (
+            str(docker_root / "image" / "overlay2"),
+            str(overlay_root),
+        )
+        conflicting_mounts = sorted(
+            target
+            for target in _all_mount_targets(runner)
+            if any(
+                target == root or target.startswith(root + "/")
+                for root in protected_roots
+            )
+        )
+        if conflicting_mounts:
+            raise DockerStaleMountReclaimerV2Error(
+                "Docker overlay metadata is absent while protected mounts remain: "
+                + ",".join(conflicting_mounts)
+            )
+        active_manifest_hash = _metadata_manifest_hash(
+            image_rows=(),
+            container_rows=(),
+            active_chain_ids=(),
+            active_overlay_ids=(),
+            layerdb_root=layerdb_root,
+            mountdb_root=mountdb_root,
+            overlay_root=overlay_root,
+            active_links={},
+            backing_device_identity=None,
+        )
+        return _DockerStorageInventory(
+            docker_root=docker_root,
+            image_ids=frozenset(),
+            container_ids=frozenset(),
+            active_chain_ids=frozenset(),
+            active_overlay_ids=frozenset(),
+            active_mount_targets=frozenset(),
+            mounted_overlay_targets=frozenset(),
+            stale_layer_records=(),
+            stale_mount_records=(),
+            stale_overlay_dirs=(),
+            stale_overlay_links=(),
+            active_manifest_hash=active_manifest_hash,
+        )
+
     layer_records = _iter_directories(layerdb_root, label="Docker layer database")
     mount_records = _iter_directories(mountdb_root, label="Docker mount database")
     layer_record_ids = {

@@ -472,13 +472,16 @@ case "$command" in
     fi
     case "${2:-}" in
       */image/overlay2/layerdb/sha256)
-        [ "$FAKE_LAYERDB_IMAGE_DIRECTORY_EXISTS" = "1" ]
+        [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+          || [ "$FAKE_LAYERDB_IMAGE_DIRECTORY_EXISTS" = "1" ]
         ;;
       */image/overlay2/layerdb/mounts)
-        [ "$FAKE_LAYERDB_MOUNT_DIRECTORY_EXISTS" = "1" ]
+        [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+          || [ "$FAKE_LAYERDB_MOUNT_DIRECTORY_EXISTS" = "1" ]
         ;;
       */overlay2)
-        [ "$FAKE_OVERLAY_DIRECTORY_EXISTS" = "1" ]
+        [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+          || [ "$FAKE_OVERLAY_DIRECTORY_EXISTS" = "1" ]
         ;;
       *)
         exit 2
@@ -1125,6 +1128,70 @@ def test_required_zero_runtime_reconcile_runs_with_ample_space(
     assert "systemctl" not in sudo_log
     assert "rm " not in sudo_log
     assert "pkill" not in sudo_log
+
+
+def test_required_live_reconcile_initializes_a_fully_empty_metadata_root(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        layerdb_image_directory_exists=False,
+        layerdb_mount_directory_exists=False,
+        overlay_directory_exists=False,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+        change_audit_manifest_after_reconcile=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "phase=pre-stale-reclaim containers=0" in result.stdout
+    assert "phase=post-daemon-reconcile containers=0" in result.stdout
+    assert "Docker storage ready after bounded online reclaim" in result.stdout
+    assert "docker_stale_mount_reclaimer_v2.py" in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert (tmp_path / "daemon-reconciled").is_file()
+    assert (tmp_path / "builder-prune-count").read_text().strip() == "2"
+
+
+def test_required_live_reconcile_rejects_partial_metadata_before_audit(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        layerdb_image_directory_exists=False,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+    )
+
+    assert result.returncode == 1
+    assert "metadata layout is partial or inconsistent" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
+
+
+def test_required_live_reconcile_rejects_absent_metadata_with_images(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        images=1,
+        layerdb_image_directory_exists=False,
+        layerdb_mount_directory_exists=False,
+        overlay_directory_exists=False,
+        host_gateway_live=True,
+        allow_live_host_gateway_prune=True,
+        require_zero_runtime_reconcile="1",
+    )
+
+    assert result.returncode == 1
+    assert "metadata layout is partial or inconsistent" in result.stderr
+    assert "docker_stale_mount_reclaimer_v2.py" not in sudo_log
+    assert "docker_zero_runtime_reconciler_v2.py" not in sudo_log
 
 
 @pytest.mark.parametrize(

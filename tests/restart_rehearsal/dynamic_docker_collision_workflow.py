@@ -1028,6 +1028,11 @@ if [ "${REHEARSAL_ONLINE_RECLAIM:-0}" = "1" ]; then
     "ctr -n moby containers list -q"|"ctr -n moby tasks list -q")
       exit 0
       ;;
+    "test -d /var/lib/docker/image/overlay2/layerdb/sha256"|\
+    "test -d /var/lib/docker/image/overlay2/layerdb/mounts"|\
+    "test -d /var/lib/docker/overlay2")
+      exit 0
+      ;;
     "env PYTHONSAFEPATH=1 python3 $REHEARSAL_ONLINE_STALE_RECLAIMER --audit-only")
       mounted="$REHEARSAL_ONLINE_STALE_MOUNT_COUNT"
       layer_records="$REHEARSAL_ONLINE_STALE_LAYER_RECORD_COUNT"
@@ -1324,6 +1329,11 @@ exit 96
         zero_runtime_prefix = (
             "sudo env PYTHONSAFEPATH=1 python3 " + str(zero_runtime_reconciler)
         )
+        metadata_layout_commands = {
+            "sudo test -d /var/lib/docker/image/overlay2/layerdb/sha256",
+            "sudo test -d /var/lib/docker/image/overlay2/layerdb/mounts",
+            "sudo test -d /var/lib/docker/overlay2",
+        }
         allowed_commands = {
             "docker info",
             "docker info --format {{.DockerRootDir}}",
@@ -1334,6 +1344,7 @@ exit 96
             "sudo ctr -n moby tasks list -q",
             stale_reclaim_command,
             stale_audit_command,
+            *metadata_layout_commands,
         }
         zero_runtime_commands = [
             command
@@ -1400,6 +1411,10 @@ exit 96
                 for command in online_commands
             )
             or online_commands.count(stale_audit_command) != 4
+            or any(
+                online_commands.count(command) != 3
+                for command in metadata_layout_commands
+            )
             or len(image_inventories) < 7
             or len(set(image_inventories)) != 1
             or any(
@@ -1578,6 +1593,10 @@ exit 96
             )
             or forced_commands.count(stale_reclaim_command) != 1
             or forced_commands.count(stale_audit_command) != 4
+            or any(
+                forced_commands.count(command) != 3
+                for command in metadata_layout_commands
+            )
             or len(forced_image_inventories) < 6
             or len(set(forced_image_inventories)) != 1
             or forced_image_inventories[0].split(",") != list(forced_image_ids)

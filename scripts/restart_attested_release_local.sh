@@ -20,6 +20,7 @@ GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-$PRODUCTION_GATEWAY_PYTHON_BI
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_V2_HOTKEY_CONFIG_PATH="${LEADPOET_VALIDATOR_V2_HOTKEY_CONFIG_PATH:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_CHAIN_SIGNING_PROFILE_PATH="${LEADPOET_VALIDATOR_CHAIN_SIGNING_PROFILE_PATH:-$VALIDATOR_REPO_ROOT/validator_tee/enclave/chain_signing_profile_v2.json}"
+VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH}"
 GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-}"
 VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-}"
@@ -1112,7 +1113,10 @@ prepare_running_validator_release_requirements() {
      test \"\$(git rev-parse --verify HEAD)\" = '$commit'
      running_commit=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' leadpoet-validator-main | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p')
      test \"\$running_commit\" = '$commit'
-     lineage_id=\$(PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id; print(_lineage_id())')
+     test -f '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
+     test ! -L '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
+     test -s '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
+     lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id; print(_lineage_id())')
      sudo env PYTHONPATH='$VALIDATOR_REPO_ROOT' \
        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
        python3 -m gateway.tee.prepare_active_release_lineage_v2 \

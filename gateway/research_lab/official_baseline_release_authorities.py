@@ -43,6 +43,9 @@ from gateway.research_lab.official_baseline_model_runner import (
 from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
 )
+from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+)
 from research_lab.canonical import sha256_json
 from research_lab.common_model_runner_host import HostActionResult
 from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
@@ -87,6 +90,12 @@ _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _BARE_HASH_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SAFE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}")
+_SOURCE_ADD_PROVIDER_ID_RE = re.compile(r"[a-z][a-z0-9_-]{1,79}")
+_SOURCE_ADD_QUERY_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+_SOURCE_ADD_SECRET_KEY_RE = re.compile(
+    r"(?:api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)",
+    re.IGNORECASE,
+)
 _PROVIDER_ACTION_TYPES = frozenset(
     {
         "normalize_icp",
@@ -622,6 +631,71 @@ def _reviewed_provider_transport_available(provider: Any) -> bool:
     )
 
 
+def _source_add_registry_transport_available(
+    entry: Mapping[str, Any],
+    ready_provider_ids: frozenset[str],
+) -> bool:
+    provider_id = str(entry.get("provider") or "")
+    return bool(
+        entry.get("action_type") == "execute_intent_tool"
+        and entry.get("tool_id") == f"intent.source_add.{provider_id}"
+        and entry.get("compiler_id")
+        == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        and _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider_id)
+        and provider_id in ready_provider_ids
+    )
+
+
+def _source_add_registry_credential_binding(provider_id: str) -> dict[str, Any]:
+    return {
+        "location": "source_add_registry",
+        "name": provider_id,
+        "scheme": "v2_envelope",
+        "source": "source_add_registry",
+        "persist": False,
+    }
+
+
+def _source_add_registry_request_valid(
+    request: Mapping[str, Any],
+    *,
+    provider_id: str,
+) -> bool:
+    path = str(request.get("path") or "")
+    query = request.get("query")
+    headers = request.get("static_headers")
+    credential = request.get("credential_binding")
+    return bool(
+        set(request)
+        == {
+            "method",
+            "path",
+            "static_headers",
+            "query",
+            "credential_binding",
+        }
+        and request.get("method") == "GET"
+        and path.startswith("/")
+        and path != "/"
+        and all(item not in path for item in ("?", "#", "\\", "//"))
+        and all(segment not in {"", ".", ".."} for segment in path.split("/")[1:])
+        and isinstance(query, Mapping)
+        and 1 <= len(query) <= 8
+        and all(
+            _SOURCE_ADD_QUERY_KEY_RE.fullmatch(str(key) or "")
+            and _SOURCE_ADD_SECRET_KEY_RE.search(str(key)) is None
+            and isinstance(value, str)
+            and 0 < len(value) <= 256
+            and not any(ord(character) < 32 for character in value)
+            for key, value in query.items()
+        )
+        and headers == {"Accept": "application/json"}
+        and isinstance(credential, Mapping)
+        and dict(credential)
+        == _source_add_registry_credential_binding(provider_id)
+    )
+
+
 def _official_host_availability(
     *,
     catalog: Mapping[str, Any],
@@ -638,18 +712,28 @@ def _official_host_availability(
         action_type = binding["action_type"]
         entry = indexed[(action_type, binding["tool_id"])]
         if action_type in _PROVIDER_ACTION_TYPES:
+            source_add_transport_ready = (
+                _source_add_registry_transport_available(
+                    entry,
+                    ready_providers,
+                )
+            )
+            static_transport_ready = bool(
+                not source_add_transport_ready
+                and entry.get("compiler_id")
+                != SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+                and _reviewed_provider_transport_available(entry.get("provider"))
+                and _PROXY_ROUTE_BY_PROVIDER.get(
+                    str(entry.get("provider") or "")
+                )
+                in ready_providers
+            )
             available = bool(
                 entry.get("status") == "supported"
                 and entry.get("execution_mode") == "invoke"
                 and isinstance(entry.get("compiler_id"), str)
                 and _SAFE_REF_RE.fullmatch(entry.get("compiler_id") or "")
-                and _reviewed_provider_transport_available(
-                    entry.get("provider")
-                )
-                and _PROXY_ROUTE_BY_PROVIDER.get(
-                    str(entry.get("provider") or "")
-                )
-                in ready_providers
+                and (static_transport_ready or source_add_transport_ready)
             )
         else:
             available = bool(
@@ -701,7 +785,31 @@ class _GatewayEvidenceProxyClient:
         self._proxy_url = _proxy_base_url(proxy_url)
         self._opener = opener
 
-    def _proxied_url(self, *, provider: str, upstream_url: str) -> str:
+    def _proxied_url(
+        self,
+        *,
+        provider: str,
+        upstream_url: str,
+        source_add_path: str = "",
+    ) -> str:
+        if source_add_path:
+            if (
+                upstream_url
+                or _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider) is None
+                or not source_add_path.startswith("/")
+                or source_add_path == "/"
+                or any(
+                    item in source_add_path for item in ("?", "#", "\\", "//")
+                )
+                or any(
+                    segment in {"", ".", ".."}
+                    for segment in source_add_path.split("/")[1:]
+                )
+            ):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline SOURCE_ADD proxy path is invalid"
+                )
+            return f"{self._proxy_url}/{provider}{source_add_path}"
         route = _PROXY_ROUTE_BY_PROVIDER.get(provider)
         expected_host = _UPSTREAM_HOST_BY_PROVIDER.get(provider)
         try:
@@ -737,6 +845,7 @@ class _GatewayEvidenceProxyClient:
         timeout_seconds: float,
         max_response_bytes: int,
         cost_scope: str,
+        source_add_path: str = "",
         replay_only: bool = False,
     ) -> tuple[int, Mapping[str, Any], Mapping[str, str]]:
         normalized_method = str(method or "").upper()
@@ -762,7 +871,11 @@ class _GatewayEvidenceProxyClient:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider transport bounds are invalid"
             )
-        target = self._proxied_url(provider=provider, upstream_url=upstream_url)
+        target = self._proxied_url(
+            provider=provider,
+            upstream_url=upstream_url,
+            source_add_path=source_add_path,
+        )
         if query:
             if not isinstance(query, Mapping):
                 raise OfficialBaselineProtectedAuthorityError(
@@ -962,19 +1075,50 @@ class ArtifactPreparedActionExecutor:
             provider
         )
         credential = request.get("credential_binding")
+        source_add_dispatch = bool(
+            isinstance(inventory, Mapping)
+            and inventory.get("action_type") == "execute_intent_tool"
+            and inventory.get("tool_id") == f"intent.source_add.{provider}"
+            and inventory.get("compiler_id")
+            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            and value.get("action_type") == "execute_intent_tool"
+            and value.get("tool_id") == f"intent.source_add.{provider}"
+            and value.get("compiler_id")
+            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        )
+        credential_valid = bool(
+            isinstance(credential, Mapping)
+            and (
+                (
+                    source_add_dispatch
+                    and dict(credential)
+                    == _source_add_registry_credential_binding(provider)
+                )
+                or (
+                    not source_add_dispatch
+                    and expected_credential is not None
+                    and credential.get("location") == expected_credential[0]
+                    and credential.get("name") == expected_credential[1]
+                    and credential.get("source") == expected_credential[2]
+                    and credential.get("persist") is False
+                    and bool(str(credential.get("scheme") or "").strip())
+                )
+            )
+        )
         if (
             not isinstance(inventory, Mapping)
             or inventory.get("status") != "supported"
             or inventory.get("execution_mode") != "invoke"
             or inventory.get("provider") != provider
             or inventory.get("compiler_id") != value.get("compiler_id")
-            or expected_credential is None
-            or not isinstance(credential, Mapping)
-            or credential.get("location") != expected_credential[0]
-            or credential.get("name") != expected_credential[1]
-            or credential.get("source") != expected_credential[2]
-            or credential.get("persist") is not False
-            or not str(credential.get("scheme") or "").strip()
+            or not credential_valid
+            or (
+                source_add_dispatch
+                and not _source_add_registry_request_valid(
+                    request,
+                    provider_id=provider,
+                )
+            )
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact credential binding differs"
@@ -1296,6 +1440,7 @@ class ArtifactPreparedActionExecutor:
             provider=provider,
             method=method,
             upstream_url=str(request.get("url") or ""),
+            source_add_path=str(request.get("path") or ""),
             static_headers=(
                 request.get("static_headers")
                 if isinstance(request.get("static_headers"), Mapping)

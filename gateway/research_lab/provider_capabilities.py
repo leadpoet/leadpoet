@@ -26,6 +26,12 @@ import urllib.request
 from typing import Any, Callable, Mapping, Sequence
 
 from gateway.research_lab.code_build import CodeEditBuildError, _run_git_apply
+from gateway.research_lab.source_add_execution_plan import (
+    SourceAddExecutionPlanError,
+    bind_source_add_execution_plan_to_probes,
+    is_supported_source_add_execution_plan,
+    normalize_source_add_execution_plan,
+)
 from research_lab.canonical import sha256_json
 
 
@@ -100,6 +106,7 @@ _SOURCE_ADD_REGISTRATION_FIELDS = (
     "best_for_description",
     "avoid_when_description",
 )
+_SOURCE_ADD_EXECUTION_PLAN_FIELD = "execution_plan_identity"
 _SOURCE_ADD_V7_REGISTRATION_FIELDS = tuple(
     field
     for field in _SOURCE_ADD_REGISTRATION_FIELDS
@@ -182,6 +189,7 @@ _SOURCE_ADD_V8_PLANNER_FIELDS = (
     "avoid_when_features",
     "best_for",
     "avoid_when",
+    _SOURCE_ADD_EXECUTION_PLAN_FIELD,
 )
 _COMPANY_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
@@ -295,7 +303,7 @@ def _source_add_binding_manifest(
 ) -> dict[str, Any]:
     stage = str(normalized["stage"])
     provider_id = str(normalized["provider_id"])
-    return {
+    manifest = {
         "schema_version": _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION,
         "tool_id": (
             "candidate" if stage == "candidate_acquisition" else "intent"
@@ -327,6 +335,10 @@ def _source_add_binding_manifest(
         ],
         "binding_requirements": list(normalized["binding_requirements"]),
     }
+    execution_plan = normalized.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD)
+    if execution_plan:
+        manifest[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = dict(execution_plan)
+    return manifest
 
 
 def _source_add_binding_manifest_digest(
@@ -551,6 +563,30 @@ def _normalize_source_add_v8_registration(
         if raw_requirements
         else ()
     )
+    raw_execution_plan = normalized.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD)
+    if raw_execution_plan:
+        if not is_supported_source_add_execution_plan(raw_execution_plan):
+            raise ValueError("execution_plan_identity schema is unsupported")
+        try:
+            normalized[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = (
+                normalize_source_add_execution_plan(
+                    raw_execution_plan,
+                    provider_id=provider_id,
+                    tool_id=(
+                        "candidate" if stage == "candidate_acquisition" else "intent"
+                    )
+                    + f".source_add.{provider_id}",
+                    stage=stage,
+                    execution_mode=normalized["execution_mode"],
+                    intent_categories=normalized["intent_categories"],
+                    max_calls=normalized["max_calls"],
+                    max_results=normalized["max_results"],
+                )
+            )
+        except SourceAddExecutionPlanError as exc:
+            raise ValueError(str(exc)) from exc
+    else:
+        normalized.pop(_SOURCE_ADD_EXECUTION_PLAN_FIELD, None)
     computed_manifest = _source_add_binding_manifest_digest(normalized)
     configured_manifest = str(normalized.get("manifest_sha256") or "").strip()
     if configured_manifest and configured_manifest != computed_manifest:
@@ -561,10 +597,15 @@ def _normalize_source_add_v8_registration(
     if configured_revision and configured_revision != expected_revision:
         raise ValueError("revision does not match binding manifest")
     normalized["revision"] = expected_revision
-    return {
+    result = {
         field: normalized[field]
         for field in _SOURCE_ADD_REGISTRATION_FIELDS
     }
+    if _SOURCE_ADD_EXECUTION_PLAN_FIELD in normalized:
+        result[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = normalized[
+            _SOURCE_ADD_EXECUTION_PLAN_FIELD
+        ]
+    return result
 
 
 def normalize_source_add_planner_contract(
@@ -572,6 +613,8 @@ def normalize_source_add_planner_contract(
     contract: Mapping[str, Any],
     *,
     estimated_cost_microusd_per_call: int = 0,
+    probe_endpoints: Sequence[Mapping[str, Any]] = (),
+    tested_probes: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Validate a provisioning-time planner contract against v8 exactly.
 
@@ -584,7 +627,10 @@ def normalize_source_add_planner_contract(
 
     if not isinstance(contract, Mapping) or not contract:
         raise ValueError("routing_contract must be a non-empty object")
-    allowed = set(_SOURCE_ADD_REGISTRATION_FIELDS) - {
+    allowed = (
+        set(_SOURCE_ADD_REGISTRATION_FIELDS)
+        | {_SOURCE_ADD_EXECUTION_PLAN_FIELD}
+    ) - {
         "provider_id",
         "revision",
         "manifest_sha256",
@@ -650,9 +696,23 @@ def normalize_source_add_planner_contract(
         "avoid_when": contract.get("avoid_when", ()),
         "best_for_description": contract.get("best_for_description"),
         "avoid_when_description": contract.get("avoid_when_description"),
+        _SOURCE_ADD_EXECUTION_PLAN_FIELD: contract.get(
+            _SOURCE_ADD_EXECUTION_PLAN_FIELD
+        ),
     }
     normalized = _normalize_source_add_v8_registration(values)
-    return {
+    execution_plan = normalized.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD)
+    if execution_plan:
+        try:
+            bind_source_add_execution_plan_to_probes(
+                execution_plan,
+                provider_id=provider_id,
+                probe_endpoints=probe_endpoints,
+                tested_probes=tested_probes,
+            )
+        except SourceAddExecutionPlanError as exc:
+            raise ValueError(str(exc)) from exc
+    result = {
         "stage": normalized["stage"],
         "execution_mode": normalized["execution_mode"],
         "priority": normalized["priority"],
@@ -678,6 +738,9 @@ def normalize_source_add_planner_contract(
         "best_for": normalized["best_for_description"],
         "avoid_when": normalized["avoid_when_description"],
     }
+    if execution_plan:
+        result[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = dict(execution_plan)
+    return result
 
 
 def _normalize_source_add_v7_registration(
@@ -1304,6 +1367,10 @@ def approved_source_router_suggestions(
                 or "Avoid when the consumer binding is unavailable, unhealthy, "
                 "outside its approved categories, or over budget.",
             }
+            if planner.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD):
+                registration_value[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = (
+                    planner[_SOURCE_ADD_EXECUTION_PLAN_FIELD]
+                )
             try:
                 registration = _normalize_source_add_v8_registration(
                     registration_value
@@ -1356,6 +1423,15 @@ def approved_source_router_suggestions(
                         )
                         for field in _SOURCE_ADD_REGISTRATION_FIELDS
                     },
+                    **(
+                        {
+                            _SOURCE_ADD_EXECUTION_PLAN_FIELD: registration[
+                                _SOURCE_ADD_EXECUTION_PLAN_FIELD
+                            ]
+                        }
+                        if _SOURCE_ADD_EXECUTION_PLAN_FIELD in registration
+                        else {}
+                    ),
                     "runtime_binding_id": provider_id,
                 }
             )
@@ -1436,6 +1512,10 @@ def validate_source_add_registration_diff(
             field: request.get(field)
             for field in _SOURCE_ADD_REGISTRATION_FIELDS
         }
+        if request.get(_SOURCE_ADD_EXECUTION_PLAN_FIELD):
+            values[_SOURCE_ADD_EXECUTION_PLAN_FIELD] = request[
+                _SOURCE_ADD_EXECUTION_PLAN_FIELD
+            ]
         if schema_version == _SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION:
             provenance = str(
                 request.get("provisioning_provenance_sha256") or ""
@@ -1505,7 +1585,9 @@ def validate_source_add_registration_diff(
         if contract_version == 8:
             if (
                 not _SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS <= keyword_set
-                or not keyword_set <= set(_SOURCE_ADD_REGISTRATION_FIELDS)
+                or not keyword_set
+                <= set(_SOURCE_ADD_REGISTRATION_FIELDS)
+                | {_SOURCE_ADD_EXECUTION_PLAN_FIELD}
             ):
                 raise ValueError(
                     "registration fields differ from the v8 contract"

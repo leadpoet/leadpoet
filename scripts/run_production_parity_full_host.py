@@ -1039,6 +1039,13 @@ def _materialize_run_owned_runtime_identity(identity_dir: Path) -> dict[str, str
 
     try:
         identity_dir.mkdir(mode=0o700)
+        os.chown(
+            identity_dir,
+            -1,
+            os.getgid(),
+            follow_symlinks=False,
+        )
+        os.chmod(identity_dir, 0o700, follow_symlinks=False)
     except OSError as exc:
         raise FullParityError(
             "run-owned runtime identity directory is unavailable"

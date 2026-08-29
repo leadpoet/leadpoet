@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 
 import pytest
@@ -20,6 +23,24 @@ from scripts import production_parity_acceptance_transfer as transfer
 
 CANDIDATE_SHA = "a" * 40
 RELEASE_HASH = "sha256:" + "b" * 64
+
+
+def test_direct_cli_bootstraps_candidate_repository_imports(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(transfer.__file__).resolve()),
+            "--help",
+        ],
+        cwd=tmp_path,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def _hash(label: str) -> str:

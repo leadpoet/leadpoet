@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "3d5fc312cf93d24b93bcb6af3521f6a9aa109ca7",
+  "baseline_commit": "48245904bafa94be1539a72633701c002d35b8cc",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1322,7 +1322,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:a611a127dc76015d7a3f3d673e389eefa833d63e88f7bc13cb7b3a7a074d4c6c",
+      "ast_sha256": "sha256:adfe3efadccf7f1b441fed8fc140927d29c55b0990be5f5ad9eaa6d467d4e0ff",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1432,7 +1432,7 @@
       "symbol": "_validated_protected_action_authority_sha256"
     },
     {
-      "ast_sha256": "sha256:1f8d66a478cf4548e1f1ea4af361833b2c0caa89f4f511d70eb421020522c41b",
+      "ast_sha256": "sha256:d50d3af946c64cc51c8d932c8e1dc547fb0a83b14351a89e74bbebfb41a9449f",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "load_official_baseline_release_components"
     },
@@ -6717,7 +6717,7 @@
       "symbol": "HostActionResult"
     },
     {
-      "ast_sha256": "sha256:8314cdbbae3b1c2210932e97ce03eb6a489a2fec213ff469adcfdf231f00ff78",
+      "ast_sha256": "sha256:7e8f37cd365b486b32ebd86fb028ca139327d65fe5258dca8d74390bac49faed",
       "path": "research_lab/docker_model_runner_transport.py",
       "symbol": "DockerModelRunnerTransport"
     },
@@ -8217,7 +8217,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:3eb92f6d38599130504cddb0e67979efeac3556e6f6525fac9fbcb1c740cac0a",
-  "protected_source_commit": "3d5fc312cf93d24b93bcb6af3521f6a9aa109ca7",
+  "manifest_hash": "sha256:e390e1b9e7aa7f50562165a91f16f167315fa56b7709fa8b1095453849dc4235",
+  "protected_source_commit": "48245904bafa94be1539a72633701c002d35b8cc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

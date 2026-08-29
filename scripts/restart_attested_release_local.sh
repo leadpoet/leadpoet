@@ -6,6 +6,7 @@ PRODUCTION_GATEWAY_HOST="ec2-user@52.91.135.79"
 PRODUCTION_GATEWAY_RESTART="/home/ec2-user/gw_restart.sh"
 PRODUCTION_GATEWAY_REPO_ROOT="/home/ec2-user/leadpoet_repo"
 PRODUCTION_GATEWAY_PYTHON_BIN="/home/ec2-user/venv311/bin/python3"
+PRODUCTION_VALIDATOR_PYTHON_BIN="/home/ec2-user/venv311/bin/python3"
 PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH="/home/ec2-user/gateway/deploy_readiness.json"
 PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT="/home/ec2-user/.config/leadpoet/restart-controller/gateway"
 PRODUCTION_GATEWAY_RESTART_CONTROLLER_CURRENT="$PRODUCTION_GATEWAY_RESTART_CONTROLLER_ROOT/current"
@@ -18,6 +19,7 @@ VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_r
 GATEWAY_REPO_ROOT="${LEADPOET_GATEWAY_REPO_ROOT:-$PRODUCTION_GATEWAY_REPO_ROOT}"
 GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-$PRODUCTION_GATEWAY_PYTHON_BIN}"
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
+VALIDATOR_PYTHON_BIN="${LEADPOET_VALIDATOR_PYTHON_BIN:-$PRODUCTION_VALIDATOR_PYTHON_BIN}"
 VALIDATOR_V2_HOTKEY_CONFIG_PATH="${LEADPOET_VALIDATOR_V2_HOTKEY_CONFIG_PATH:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_CHAIN_SIGNING_PROFILE_PATH="${LEADPOET_VALIDATOR_CHAIN_SIGNING_PROFILE_PATH:-$VALIDATOR_REPO_ROOT/validator_tee/enclave/chain_signing_profile_v2.json}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -333,6 +335,7 @@ if [ "$disable_miner_submissions_before_restart" = "1" ]; then
       || [ "$GATEWAY_RESTART" != "$PRODUCTION_GATEWAY_RESTART" ] \
       || [ "$GATEWAY_REPO_ROOT" != "$PRODUCTION_GATEWAY_REPO_ROOT" ] \
       || [ "$GATEWAY_PYTHON_BIN" != "$PRODUCTION_GATEWAY_PYTHON_BIN" ] \
+      || [ "$VALIDATOR_PYTHON_BIN" != "$PRODUCTION_VALIDATOR_PYTHON_BIN" ] \
       || [ "$GATEWAY_DEPLOY_READINESS_PATH" != "$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH" ]; then
     echo "ERROR: miner-maintenance bootstrap requires the fixed production gateway topology" >&2
     exit 2
@@ -364,6 +367,7 @@ done
 for remote_path in \
   "$GATEWAY_REPO_ROOT" \
   "$GATEWAY_PYTHON_BIN" \
+  "$VALIDATOR_PYTHON_BIN" \
   "$GATEWAY_DEPLOY_READINESS_PATH" \
   "$GATEWAY_ACTIVE_RELEASE_REQUIREMENTS_PATH" \
   "$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH"; do
@@ -1116,10 +1120,11 @@ prepare_running_validator_release_requirements() {
      test -f '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
      test ! -L '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
      test -s '$VALIDATOR_STATEFUL_CUTOVER_MANIFEST'
-     lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' python3 -c 'from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id; print(_lineage_id())')
+     test -x '$VALIDATOR_PYTHON_BIN'
+     lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' '$VALIDATOR_PYTHON_BIN' -c 'from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover; from leadpoet_canonical.ancestry_checkpoint_v2 import derive_ancestry_lineage_id_v2; cutover = load_subnet_epoch_cutover(); print(derive_ancestry_lineage_id_v2(cutover_mapping_hash=str(cutover.mapping_hash), network_genesis_hash=str(cutover.network_genesis_hash), netuid=int(cutover.netuid)))')
      sudo env PYTHONPATH='$VALIDATOR_REPO_ROOT' \
        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
-       python3 -m gateway.tee.prepare_active_release_lineage_v2 \
+       '$VALIDATOR_PYTHON_BIN' -m gateway.tee.prepare_active_release_lineage_v2 \
        --phase validator-initial \
        --candidate-commit '$commit' \
        --authority-commit '$branch_commit' \
@@ -1662,11 +1667,13 @@ run_validator_restart() {
     GIT_NO_REPLACE_OBJECTS=1 git -C '$VALIDATOR_REPO_ROOT' archive '$branch_commit' | tar -xf - -C \"\$authority_root\"
     test -r \"\$authority_root/validator_restart.sh\"
     test -r \"\$authority_root/gateway/tee/prepare_active_release_lineage_v2.py\"
+    test -x '$VALIDATOR_PYTHON_BIN'
     test \"\$(git -C '$VALIDATOR_REPO_ROOT' hash-object --no-filters \"\$authority_root/validator_restart.sh\")\" = \"\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse '$branch_commit:validator_restart.sh')\"
     find \"\$authority_root\" -type f -exec chmod 400 {} +
     find \"\$authority_root\" -type d -exec chmod 500 {} +
     exec env \\
       VALIDATOR_ROOT='$VALIDATOR_REPO_ROOT' \\
+      VALIDATOR_PYTHON_BIN='$VALIDATOR_PYTHON_BIN' \\
       VALIDATOR_HOST_RESTART_SCRIPT='$VALIDATOR_RESTART' \\
       VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=\"\$authority_root\" \\
       VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit' \\

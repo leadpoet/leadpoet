@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "e7ef91814009778bbff992273aec25262f2f5ebf",
+  "baseline_commit": "0baa2d8dc80287bd42ee3c8ebaa403480ced7532",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1082,7 +1082,7 @@
       "symbol": "OFFICIAL_BASELINE_TRANSITION_SCHEMA_VERSION"
     },
     {
-      "ast_sha256": "sha256:462ede266f669f90094fd988635db081a4883d9bd64665be24dc0b4c3781d04d",
+      "ast_sha256": "sha256:1d4888fe29814e5500e9552b6e92d9c053ed00e9ec2e0cf9f5cd09a1b956c200",
       "path": "gateway/research_lab/official_baseline_custody.py",
       "symbol": "S3OfficialBaselineDocumentCustody"
     },
@@ -1322,7 +1322,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:34abb34d1cb11c4628e9f6fa9f6d502046a39fed280309e95ce81065c8afb78a",
+      "ast_sha256": "sha256:636d5c24bfa4797e30edfb0ed9d56ff51464c4f62175bfaf4496fe8fbb6d87c9",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1377,7 +1377,7 @@
       "symbol": "SITE_PROTECTED_ACTION_AUTHORITY_SOURCE_COMMIT"
     },
     {
-      "ast_sha256": "sha256:1536dfb458fd64e691f8b3d84690f3e017d503ccf333f44cedbfe2fc368b0e53",
+      "ast_sha256": "sha256:a33eda85fd768291f56c85da33c4b872e0f7b964a4b8386dccb9ce90654ac77e",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient"
     },
@@ -1387,12 +1387,22 @@
       "symbol": "_GatewayEvidenceProxyClient._proxied_url"
     },
     {
-      "ast_sha256": "sha256:ab80e8f01c12e946295e14da9d3d6c988865a53310217dbf272705ded5c1967f",
+      "ast_sha256": "sha256:7046f2001ccd426266c7bef56268d1530cbcb486b1693859a0c5894d153daff5",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_GatewayEvidenceProxyClient.request"
     },
     {
-      "ast_sha256": "sha256:bbfe69d1f0b978a04e8f3444b117cff1058a129dbf512d9235b6f9041e91f267",
+      "ast_sha256": "sha256:94b72df538fd6e8c14084a3e58f0b230089b18b12bb3256ea5ea851c4350e12c",
+      "path": "gateway/research_lab/official_baseline_release_authorities.py",
+      "symbol": "_artifact_wire_sha256"
+    },
+    {
+      "ast_sha256": "sha256:b73d269a0e72cd709b2f8236817ab38bef68b0b0d781b20c8939262f8720bf6e",
+      "path": "gateway/research_lab/official_baseline_release_authorities.py",
+      "symbol": "_canonical_bytes"
+    },
+    {
+      "ast_sha256": "sha256:8add45417a6927f76f3c327852f9091d1231f8cb674cf141a36cd6c7fde383c3",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_catalog_bindings"
     },
@@ -1412,7 +1422,7 @@
       "symbol": "_reviewed_provider_transport_available"
     },
     {
-      "ast_sha256": "sha256:dfa293ee66040f143e10adc9b219be2993ef7f91a14df717e75d4a878381686b",
+      "ast_sha256": "sha256:297c4606ab0607fd9ee574a1752aa555016aba9277df646e50c530bc4003247c",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_validate_inventory_catalog"
     },
@@ -1422,7 +1432,7 @@
       "symbol": "_validated_protected_action_authority_sha256"
     },
     {
-      "ast_sha256": "sha256:da83569d5708f42bfe5622533b2c2a0cd7a308d0b920a71d1ff6310d54ae813a",
+      "ast_sha256": "sha256:1f8d66a478cf4548e1f1ea4af361833b2c0caa89f4f511d70eb421020522c41b",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "load_official_baseline_release_components"
     },
@@ -1942,7 +1952,7 @@
       "symbol": "validate_source_add_registration_diff"
     },
     {
-      "ast_sha256": "sha256:d77384bbfad2b7fe682ba8703f242555363899f6a17fcd6bb2bb24fed7ada9a4",
+      "ast_sha256": "sha256:f8eb06ff4d31210b3e57c5c708498b91275a6e27dded868846c576bb6016a7f1",
       "path": "gateway/research_lab/provider_evidence_proxy.py",
       "symbol": "EvidenceStore.acquire_or_wait"
     },
@@ -5742,24 +5752,44 @@
       "symbol": "vsock_rpc_transport_health_lock"
     },
     {
+      "ast_sha256": "sha256:992453cca7209352c9020a1ff94d1b297d33bb3d14752ca2bd1654f9c77785c0",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_FIRST_PASS_CONCURRENCY_ENV"
+    },
+    {
+      "ast_sha256": "sha256:4c21743ad594f6c0e6103470c89ef6e3a9a1ff79fa8df7d9aa22aece719f6cb2",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_MAX_FIRST_PASS_CONCURRENCY"
+    },
+    {
+      "ast_sha256": "sha256:1e88a8c89d285ff142f07a5ed791d8ae6101127c2152e8204b98de0cfc7d4b04",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "_bounded_first_pass_concurrency"
+    },
+    {
       "ast_sha256": "sha256:3fb69b53608890f5ccfe1791a72447118a8193dbf3708701ab0b2840e8d34e22",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_json_object_without_duplicates"
     },
     {
-      "ast_sha256": "sha256:754feaee3d4c470aa8310357ac5e82cab87aa195c96c7da7beecac84e38d8bea",
+      "ast_sha256": "sha256:4fdfb1b70cac96fc96f57e56ad4b886f98068c0423724402d6105e4e68dc05e5",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_parse_environment"
     },
     {
-      "ast_sha256": "sha256:1c4e81131331e539dcce605b3a82a67cadb19cae729652fc593a0f8a203f473e",
+      "ast_sha256": "sha256:070c0b870a678bc574224dac18b5e8aaaf9df24422b55564c47cdaa7b3518012",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_parse_shell_environment"
     },
     {
-      "ast_sha256": "sha256:8352cc3946b967db7551e201bcca127d4c40d89de50afe09d5beefef9a7d8b23",
+      "ast_sha256": "sha256:29bcbc4adcbfaa59c4a0706e6783b2381dd4c0aa02abe17d1029329e2ad990b8",
       "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
       "symbol": "_render_environment"
+    },
+    {
+      "ast_sha256": "sha256:e0bd2ad6dea348372245a203dc4cc6d4f2122f9f751b47346ca51bf0e208b8b4",
+      "path": "gateway/tee/update_gateway_rebenchmark_retry_secret.py",
+      "symbol": "update_gateway_rebenchmark_concurrency_secret"
     },
     {
       "ast_sha256": "sha256:2b1a8074a1b313094036519d84707890273df78569b69ec805a8e07f7ed17921",
@@ -5852,7 +5882,7 @@
       "symbol": "_docker_operation_admission_lock_file"
     },
     {
-      "ast_sha256": "sha256:e6cc1830904563437f36cccbd826bcac23b47e3e4b87aa8db1468ed6af07146b",
+      "ast_sha256": "sha256:6963029110d19b0eec8f84df6df9e71ae3d1f60074998d6557bb95670db7e742",
       "path": "gateway/utils/pcr0_builder.py",
       "symbol": "_docker_operation_lock_scope"
     },
@@ -6697,7 +6727,7 @@
       "symbol": "_COMMON_RUNNER_BOOTSTRAP"
     },
     {
-      "ast_sha256": "sha256:d037eff37714b7336f164f9b4dfaf0b0e60db047a94db912056fd40e0327c7c4",
+      "ast_sha256": "sha256:7db7e77d016bea0777ed99dbe89e4f60ae7fae6ff8109c2b932d514c048213fc",
       "path": "research_lab/docker_model_runner_transport.py",
       "symbol": "_COMMON_RUNNER_SESSION_BOOTSTRAP"
     },
@@ -8187,7 +8217,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:82c18935755532f7a89208d15bcad34ac7e74efc09702a0de4fb8229ecc11991",
-  "protected_source_commit": "e7ef91814009778bbff992273aec25262f2f5ebf",
+  "manifest_hash": "sha256:3e4be955af8d32311a17823ef5df585ddb9b4d2d2779f1b31c069974c39eec1b",
+  "protected_source_commit": "d93b1a17b970547c4318d2c3ec6c94f23c68e046",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -365,16 +365,178 @@ _COMMON_RUNNER_SESSION_SCHEMA_VERSION = (
 )
 _COMMON_RUNNER_MAX_PARALLEL_SESSIONS = 4
 _COMMON_RUNNER_SESSION_BOOTSTRAP = r"""
+import contextlib
+import importlib
+import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+import traceback
 
 schema_version = "leadpoet.research_lab.common_runner_session.v1"
 common_bootstrap, module_name = sys.argv[1:3]
 if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,191}", module_name) is None:
     raise RuntimeError("common runner session module name is invalid")
+
+session_provider_cost_scope = str(
+    os.environ.get("RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE") or ""
+).strip()
+if re.fullmatch(r"sha256:[0-9a-f]{64}", session_provider_cost_scope) is None:
+    raise RuntimeError("common runner session provider cost scope is invalid")
+os.environ["RESEARCH_LAB_PROVIDER_COST_SCOPE"] = session_provider_cost_scope
+
+common_code = compile(common_bootstrap, "<common_runner_bootstrap>", "exec")
+fork_enabled = callable(getattr(os, "fork", None))
+if fork_enabled:
+    preload_stdout = io.StringIO()
+    preload_stderr = io.StringIO()
+    with contextlib.redirect_stdout(preload_stdout):
+        with contextlib.redirect_stderr(preload_stderr):
+            importlib.import_module(module_name)
+    fork_enabled = threading.active_count() == 1
+    task_root = "/proc/self/task"
+    if fork_enabled and os.path.isdir(task_root):
+        try:
+            fork_enabled = len(os.listdir(task_root)) == 1
+        except OSError:
+            fork_enabled = False
+
+
+def anonymous_binary_file(name):
+    create = getattr(os, "memfd_create", None)
+    if callable(create):
+        descriptor = create(name, flags=getattr(os, "MFD_CLOEXEC", 0))
+        return os.fdopen(descriptor, "w+b", buffering=0)
+    return tempfile.TemporaryFile(mode="w+b")
+
+
+def run_in_fresh_fork(operation, payload, timeout_seconds, provider_cost_scope):
+    encoded_payload = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    with (
+        anonymous_binary_file("leadpoet-runner-stdin") as stdin_file,
+        anonymous_binary_file("leadpoet-runner-stdout") as stdout_file,
+        anonymous_binary_file("leadpoet-runner-stderr") as stderr_file,
+    ):
+        stdin_file.write(encoded_payload)
+        stdin_file.seek(0)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        child_pid = os.fork()
+        if child_pid == 0:
+            exit_code = 1
+            try:
+                try:
+                    os.setsid()
+                except OSError:
+                    pass
+                os.dup2(stdin_file.fileno(), 0)
+                os.dup2(stdout_file.fileno(), 1)
+                os.dup2(stderr_file.fileno(), 2)
+                sys.stdin = open(
+                    0,
+                    mode="r",
+                    encoding="utf-8",
+                    errors="strict",
+                    closefd=False,
+                )
+                sys.stdout = open(
+                    1,
+                    mode="w",
+                    encoding="utf-8",
+                    errors="strict",
+                    buffering=1,
+                    closefd=False,
+                )
+                sys.stderr = open(
+                    2,
+                    mode="w",
+                    encoding="utf-8",
+                    errors="replace",
+                    buffering=1,
+                    closefd=False,
+                )
+                sys.__stdin__ = sys.stdin
+                sys.__stdout__ = sys.stdout
+                sys.__stderr__ = sys.stderr
+                sys.argv = ["-c", module_name, operation]
+                os.environ["RESEARCH_LAB_PROVIDER_COST_SCOPE"] = (
+                    provider_cost_scope
+                )
+                for loaded_module in tuple(sys.modules.values()):
+                    namespace = getattr(loaded_module, "__dict__", None)
+                    if (
+                        isinstance(namespace, dict)
+                        and "_research_lab_provider_cost_scope" in namespace
+                    ):
+                        namespace["_research_lab_provider_cost_scope"] = (
+                            provider_cost_scope
+                        )
+                exec(common_code, {"__name__": "__main__"})
+                exit_code = 0
+            except BaseException:
+                traceback.print_exc()
+            finally:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except BaseException:
+                    pass
+                os._exit(exit_code)
+
+        timed_out = False
+        child_status = 0
+        deadline = time.monotonic() + float(timeout_seconds)
+        while True:
+            try:
+                waited_pid, child_status = os.waitpid(child_pid, os.WNOHANG)
+            except InterruptedError:
+                continue
+            if waited_pid == child_pid:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except OSError:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                while True:
+                    try:
+                        os.waitpid(child_pid, 0)
+                        break
+                    except InterruptedError:
+                        continue
+                    except ChildProcessError:
+                        break
+                break
+            time.sleep(min(0.01, remaining))
+
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", "replace")
+        stderr = stderr_file.read().decode("utf-8", "replace")
+        if timed_out:
+            return None, stdout, stderr, True
+        if os.WIFEXITED(child_status):
+            returncode = os.WEXITSTATUS(child_status)
+        elif os.WIFSIGNALED(child_status):
+            returncode = -os.WTERMSIG(child_status)
+        else:
+            returncode = -1
+        return returncode, stdout, stderr, False
 
 sys.stdout.write(json.dumps({
     "schema_version": schema_version,
@@ -416,33 +578,51 @@ for line in sys.stdin:
             raise RuntimeError("common runner session request is invalid")
         environment = dict(os.environ)
         environment["RESEARCH_LAB_PROVIDER_COST_SCOPE"] = provider_cost_scope
-        try:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    common_bootstrap,
-                    module_name,
-                    operation,
-                ],
-                input=json.dumps(
-                    payload,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                text=True,
-                capture_output=True,
-                timeout=float(timeout_seconds),
-                env=environment,
-                check=False,
+        if fork_enabled:
+            returncode, stdout, stderr, timed_out = run_in_fresh_fork(
+                operation,
+                payload,
+                float(timeout_seconds),
+                provider_cost_scope,
             )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout
-            stderr = exc.stderr
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode("utf-8", "replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode("utf-8", "replace")
+            completed = None
+        else:
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        common_bootstrap,
+                        module_name,
+                        operation,
+                    ],
+                    input=json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=float(timeout_seconds),
+                    env=environment,
+                    check=False,
+                )
+                returncode = int(completed.returncode)
+                stdout = str(completed.stdout or "")
+                stderr = str(completed.stderr or "")
+                timed_out = False
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout
+                stderr = exc.stderr
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", "replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", "replace")
+                returncode = None
+                stdout = str(stdout or "")
+                stderr = str(stderr or "")
+                timed_out = True
+        if timed_out:
             response = {
                 "schema_version": schema_version,
                 "request_id": request_id,
@@ -456,11 +636,11 @@ for line in sys.stdin:
                 "schema_version": schema_version,
                 "request_id": request_id,
                 "status": (
-                    "succeeded" if completed.returncode == 0 else "failed"
+                    "succeeded" if returncode == 0 else "failed"
                 ),
-                "returncode": int(completed.returncode),
-                "stdout": str(completed.stdout or ""),
-                "stderr": str(completed.stderr or ""),
+                "returncode": int(returncode),
+                "stdout": str(stdout or ""),
+                "stderr": str(stderr or ""),
             }
     except BaseException as exc:
         response = {

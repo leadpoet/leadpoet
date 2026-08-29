@@ -127,6 +127,9 @@ _ARTIFACT_CREDENTIAL_BINDING_BY_PROVIDER = {
 }
 _HTTP_METHODS = frozenset({"GET", "POST"})
 _MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+_PROXY_REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
+_PROXY_REQUEST_PENDING_EVIDENCE = "request_pending"
+_PROXY_RESPONSE_RESERVE_SECONDS = 5.0
 _DEEPLINE_TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "cancelled"}
 )
@@ -392,6 +395,12 @@ def _canonical_bytes(value: Any) -> bytes:
         ) from exc
 
 
+def _artifact_wire_sha256(value: Any) -> str:
+    """Hash one model-owned wire document with the signed artifact contract."""
+
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
 def _load_json_object(value: bytes) -> Mapping[str, Any]:
     def _closed_pairs(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
         output: dict[str, Any] = {}
@@ -529,12 +538,12 @@ def _catalog_bindings(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             catalog.get("binding_contracts_sha256"),
             "official baseline binding catalog hash",
         )
-        != sha256_json(normalized).removeprefix("sha256:")
+        != _artifact_wire_sha256(normalized)
         or _bare_hash(
             catalog.get("catalog_sha256"),
             "official baseline catalog identity",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 "schema_version": OFFICIAL_BINDING_CATALOG_SCHEMA_VERSION,
                 "bindings": normalized,
@@ -561,12 +570,12 @@ def _validate_inventory_catalog(
             inventory.get("entries_sha256"),
             "official baseline compiler entries hash",
         )
-        != sha256_json(entries).removeprefix("sha256:")
+        != _artifact_wire_sha256(entries)
         or _bare_hash(
             inventory.get("inventory_sha256"),
             "official baseline compiler inventory hash",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 key: item
                 for key, item in inventory.items()
@@ -896,13 +905,26 @@ class _GatewayEvidenceProxyClient:
         headers = {
             str(key): str(value)
             for key, value in static_headers.items()
-            if str(key).casefold() != "x-research-lab-replay-only"
+            if str(key).casefold()
+            not in {
+                "x-research-lab-replay-only",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER.casefold(),
+            }
         }
+        proxy_reserve_seconds = min(
+            _PROXY_RESPONSE_RESERVE_SECONDS,
+            max(0.05, float(timeout_seconds) * 0.05),
+        )
+        proxy_timeout_ms = max(
+            1,
+            int((float(timeout_seconds) - proxy_reserve_seconds) * 1000),
+        )
         headers.update(
             {
                 "Accept": headers.get("Accept", "application/json"),
                 "X-Research-Lab-Cost-Scope": cost_scope,
                 "X-Research-Lab-Budget-Soft-Stop": "1",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER: str(proxy_timeout_ms),
             }
         )
         if replay_only:
@@ -943,7 +965,24 @@ class _GatewayEvidenceProxyClient:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider response exceeds artifact bound"
             )
-        return status, _load_json_object(raw), response_headers
+        parsed_body = _load_json_object(raw)
+        evidence = next(
+            (
+                str(value).strip().casefold()
+                for key, value in response_headers.items()
+                if str(key).casefold() == "x-research-lab-evidence"
+            ),
+            "",
+        )
+        if evidence == _PROXY_REQUEST_PENDING_EVIDENCE:
+            if status != 409 or parsed_body != {"error": "request_pending"}:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline evidence proxy pending response is invalid"
+                )
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline provider request remains pending reconciliation"
+            )
+        return status, parsed_body, response_headers
 
 
 class ArtifactPreparedActionExecutor:
@@ -1058,8 +1097,8 @@ class ArtifactPreparedActionExecutor:
                 value.get("request_sha256"),
                 "official baseline provider request hash",
             )
-            != sha256_json(dict(request)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(request))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact provider dispatch identity differs"
@@ -2021,8 +2060,8 @@ class ArtifactPreparedActionExecutor:
                 execution.get("result_sha256"),
                 "official baseline verifier result hash",
             )
-            != sha256_json(dict(result)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(result))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact verifier identity differs"
@@ -2302,7 +2341,7 @@ def load_official_baseline_release_components(
             compiler_preflight.get("preflight_sha256"),
             "official baseline compiler preflight hash",
         )
-        != sha256_json(preflight_payload).removeprefix("sha256:")
+        != _artifact_wire_sha256(preflight_payload)
     ):
         raise OfficialBaselineAuthorityUnavailable(
             "official baseline artifact compiler preflight failed"

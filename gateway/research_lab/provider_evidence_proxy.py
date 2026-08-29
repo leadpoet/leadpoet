@@ -94,6 +94,12 @@ CALLER_TOKEN_HEADER = "X-Research-Lab-Caller-Token"
 REPLAY_ONLY_HEADER = "X-Research-Lab-Replay-Only"
 BUDGET_SOFT_STOP_HEADER = "X-Research-Lab-Budget-Soft-Stop"
 BUDGET_SOFT_STOP_RESPONSE_HEADER = "X-Research-Lab-Budget-Soft-Stopped"
+REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
+REQUEST_PENDING_EVIDENCE = "request_pending"
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 180.0
+_MAX_REQUEST_TIMEOUT_MILLISECONDS = 900_000
+_SINGLE_FLIGHT_WAIT_SECONDS = 175.0
+_PROXY_RESPONSE_RESERVE_SECONDS = 0.25
 OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
     "RESEARCH_LAB_OPENROUTER_MANAGEMENT_KEY",
     "OPENROUTER_MANAGEMENT_KEY",
@@ -355,6 +361,7 @@ def _reconcile_openrouter_generation_cost(
     credential: str,
     management_credential: str = "",
     estimate: ProviderCostEstimate,
+    deadline: float | None = None,
 ) -> ProviderCostEstimate:
     generation_id = str(estimate.generation_id or "").strip()
     if not generation_id:
@@ -370,12 +377,22 @@ def _reconcile_openrouter_generation_cost(
     last_error: Exception | None = None
     for attempt, delay in enumerate((0.0, 2.0, 5.0, 10.0, 20.0)):
         if delay:
+            if deadline is not None:
+                remaining = deadline - time.monotonic() - _PROXY_RESPONSE_RESERVE_SECONDS
+                if remaining <= delay:
+                    return estimate
             time.sleep(delay)
         for token in credentials:
+            request_timeout = 30.0
+            if deadline is not None:
+                remaining = deadline - time.monotonic() - _PROXY_RESPONSE_RESERVE_SECONDS
+                if remaining <= 0:
+                    return estimate
+                request_timeout = min(request_timeout, remaining)
             gen_headers = {"Authorization": "Bearer " + token}
             gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
             try:
-                with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
+                with urllib.request.urlopen(gen_req, timeout=request_timeout) as gen_response:
                     if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) >= 400:
                         continue
                     generation_body = gen_response.read()
@@ -651,17 +668,27 @@ class ExaConcurrencyGate:
                 target=_cancel_abandoned_exa_run, args=(rid,), daemon=True
             ).start()
 
-    def acquire(self, provider: str, method: str, path: str) -> tuple[str, bool]:
+    def acquire(
+        self,
+        provider: str,
+        method: str,
+        path: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[str, bool]:
         """Returns (kind, acquired). kind '' means this request is not gated."""
         if provider != "exa":
             return "", True
         self._reap_expired_runs()
+        wait_seconds = self._wait_seconds
+        if timeout_seconds is not None:
+            wait_seconds = min(wait_seconds, max(0.0, float(timeout_seconds)))
         clean = (path or "").split("?")[0].rstrip("/")
         if method.upper() == "POST" and clean == "/agent/runs":
-            return "agent_run", self._agent_sem.acquire(timeout=self._wait_seconds)
+            return "agent_run", self._agent_sem.acquire(timeout=wait_seconds)
         if clean.startswith("/agent/runs/"):
             return "", True  # status polls are cheap and must never queue
-        return "search", self._search_sem.acquire(timeout=self._wait_seconds)
+        return "search", self._search_sem.acquire(timeout=wait_seconds)
 
     def release_on_failure(self, kind: str) -> None:
         if kind == "search":
@@ -733,11 +760,20 @@ class SdConcurrencyGate:
         self._sem = threading.BoundedSemaphore(self.request_limit)
         self._wait_seconds = float(os.getenv("SD_GATE_WAIT_SECONDS", "20"))
 
-    def acquire(self, provider: str, path: str) -> tuple[str, bool]:
+    def acquire(
+        self,
+        provider: str,
+        path: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[str, bool]:
         """Returns (kind, acquired). kind '' means this request is not gated."""
         if provider != "sd":
             return "", True
-        return "sd_request", self._sem.acquire(timeout=self._wait_seconds)
+        wait_seconds = self._wait_seconds
+        if timeout_seconds is not None:
+            wait_seconds = min(wait_seconds, max(0.0, float(timeout_seconds)))
+        return "sd_request", self._sem.acquire(timeout=wait_seconds)
 
     def release(self, kind: str) -> None:
         if kind == "sd_request":
@@ -1053,16 +1089,20 @@ class EvidenceStore:
             self._rollover_if_needed_locked()
             return self._cached_locked(fingerprint)
 
-    def acquire_or_wait(self, fingerprint: str, timeout: float = 175.0) -> tuple[dict[str, Any] | None, bool]:
+    def acquire_or_wait(
+        self,
+        fingerprint: str,
+        timeout: float = _SINGLE_FLIGHT_WAIT_SECONDS,
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Single-flight gate.
 
         Returns (record, is_leader):
         - (record, False): already recorded — replay it, do not call live.
         - (None, True): you are the leader — make the live call, then call
           record() (or release_lead() on failure).
-        - (None, False): timed out waiting for the leader — fall back to a
-          live call without leadership (rare; keeps a stuck leader from
-          blocking forever).
+        - (None, False): timed out waiting for the leader — the caller must
+          return a reconciliation-pending result and must not make a duplicate
+          live call without leadership.
         """
         with self._cond:
             deadline = time.monotonic() + max(0.0, float(timeout))
@@ -1331,7 +1371,33 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             sidecar_spend_kind=sidecar_spend_kind,
         )
 
+    def _request_deadline(self, *, started: float) -> float:
+        raw = str(self.headers.get(REQUEST_TIMEOUT_MS_HEADER) or "").strip()
+        if not raw:
+            timeout_seconds = _DEFAULT_REQUEST_TIMEOUT_SECONDS
+        elif (
+            not raw.isascii()
+            or not raw.isdigit()
+            or raw.startswith("0")
+            or not 1 <= int(raw) <= _MAX_REQUEST_TIMEOUT_MILLISECONDS
+        ):
+            raise ValueError("invalid request timeout")
+        else:
+            timeout_seconds = min(
+                _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                int(raw) / 1000.0,
+            )
+        return started + timeout_seconds
+
+    @staticmethod
+    def _remaining_request_seconds(deadline: float) -> float:
+        return max(
+            0.0,
+            deadline - time.monotonic() - _PROXY_RESPONSE_RESERVE_SECONDS,
+        )
+
     def _handle(self) -> None:
+        request_started = time.monotonic()
         routed = self._provider()
         if routed is None:
             self._respond(404, b'{"error":"unknown provider route"}')
@@ -1417,6 +1483,23 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
         )
         cost_ledger = self.store.cost_ledger(scope, cap_usd)
+        try:
+            request_deadline = self._request_deadline(started=request_started)
+        except ValueError:
+            self._ledger_row(
+                entry,
+                rest,
+                fingerprint,
+                evidence="blocked",
+                status=400,
+                live_cost=False,
+            )
+            self._respond(
+                400,
+                b'{"error":"invalid research lab request timeout"}',
+                evidence="blocked",
+            )
+            return
         # Global read-through with single-flight: the first run of the day to
         # make a request calls the provider live while every concurrent
         # identical request (e.g. another candidate on the same ICP) waits and
@@ -1434,7 +1517,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         cached, is_leader = (
             (self.store.lookup(fingerprint), False)
             if replay_only
-            else self.store.acquire_or_wait(fingerprint)
+            else self.store.acquire_or_wait(
+                fingerprint,
+                timeout=min(
+                    _SINGLE_FLIGHT_WAIT_SECONDS,
+                    self._remaining_request_seconds(request_deadline),
+                ),
+            )
         )
         if cached is not None:
             try:
@@ -1454,6 +1543,21 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         if replay_only:
             self._ledger_row(entry, rest, fingerprint, evidence="replay_miss", status=409, live_cost=False)
             self._respond(409, b'{"error":"replay_miss"}')
+            return
+        if not is_leader:
+            self._ledger_row(
+                entry,
+                rest,
+                fingerprint,
+                evidence=REQUEST_PENDING_EVIDENCE,
+                status=409,
+                live_cost=False,
+            )
+            self._respond(
+                409,
+                b'{"error":"request_pending"}',
+                evidence=REQUEST_PENDING_EVIDENCE,
+            )
             return
         endpoint = redacted_endpoint(entry.id, upstream_url)
         if cost_ledger.should_block_paid_call():
@@ -1548,7 +1652,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             method=self.command,
         )
         response_headers: dict[str, str] = {}
-        gate_kind, gate_ok = _EXA_GATE.acquire(entry.id, self.command, rest)
+        gate_kind, gate_ok = _EXA_GATE.acquire(
+            entry.id,
+            self.command,
+            rest,
+            timeout_seconds=self._remaining_request_seconds(request_deadline),
+        )
         if not gate_ok:
             # Queue-wait timed out: surface a transient 429 so the model's
             # bounded retry ladder backs off — never a fake bad score.
@@ -1560,7 +1669,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             "transient": True}).encode("utf-8"),
             )
             return
-        sd_gate_kind, sd_gate_ok = _SD_GATE.acquire(entry.id, rest)
+        sd_gate_kind, sd_gate_ok = _SD_GATE.acquire(
+            entry.id,
+            rest,
+            timeout_seconds=self._remaining_request_seconds(request_deadline),
+        )
         if not sd_gate_ok:
             if is_leader:
                 self.store.release_lead(fingerprint)
@@ -1570,8 +1683,27 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             "transient": True}).encode("utf-8"),
             )
             return
+        upstream_timeout = self._remaining_request_seconds(request_deadline)
+        if upstream_timeout <= 0:
+            _EXA_GATE.release_on_failure(gate_kind)
+            _SD_GATE.release(sd_gate_kind)
+            self.store.release_lead(fingerprint)
+            self._ledger_row(
+                entry,
+                rest,
+                fingerprint,
+                evidence=REQUEST_PENDING_EVIDENCE,
+                status=409,
+                live_cost=False,
+            )
+            self._respond(
+                409,
+                b'{"error":"request_pending"}',
+                evidence=REQUEST_PENDING_EVIDENCE,
+            )
+            return
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with urllib.request.urlopen(request, timeout=upstream_timeout) as response:
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
                 response_headers = _headers_to_dict(getattr(response, "headers", None))
                 body = response.read()
@@ -1653,6 +1785,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 credential=credential,
                 management_credential=management_credential,
                 estimate=estimate,
+                deadline=request_deadline,
             )
         event = cost_ledger.record_live_event(
             provider=entry.id,

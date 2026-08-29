@@ -252,8 +252,8 @@ _build_in_progress = False
 
 
 @asynccontextmanager
-async def _docker_operation_lock_scope():
-    """Coordinate background PCR0 builds with release and restart Docker work."""
+async def _docker_operation_lock_scope(*, opportunistic: bool = False):
+    """Coordinate PCR0 builds with release, restart, and model Docker work."""
 
     admission_lock_file = _docker_operation_admission_lock_file()
     resource_lock_file = os.path.realpath(DOCKER_OPERATION_LOCK_FILE)
@@ -277,38 +277,53 @@ async def _docker_operation_lock_scope():
     acquired = False
     deadline = time.monotonic() + DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS
     try:
-        logger.info(
-            "[PCR0] Waiting for exclusive Docker maintenance admission: %s",
-            admission_lock_file,
-        )
-        while True:
-            try:
-                fcntl.flock(
-                    admission_fd,
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
-                admission_acquired = True
-                break
-            except BlockingIOError:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "timed out waiting for exclusive Docker "
-                        "maintenance admission"
+        admission_wait_logged = False
+        resource_wait_logged = False
+        while not acquired:
+            if not admission_acquired:
+                if not admission_wait_logged:
+                    logger.info(
+                        "[PCR0] Waiting for exclusive Docker maintenance "
+                        "admission: %s",
+                        admission_lock_file,
                     )
-                await asyncio.sleep(
-                    min(DOCKER_OPERATION_LOCK_POLL_SECONDS, remaining)
+                    admission_wait_logged = True
+                try:
+                    fcntl.flock(
+                        admission_fd,
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    admission_acquired = True
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "timed out waiting for exclusive Docker "
+                            "maintenance admission"
+                        )
+                    await asyncio.sleep(
+                        min(DOCKER_OPERATION_LOCK_POLL_SECONDS, remaining)
+                    )
+                    continue
+
+            if not resource_wait_logged:
+                logger.info(
+                    "[PCR0] Waiting for exclusive Docker build/maintenance "
+                    "access: %s",
+                    resource_lock_file,
                 )
-        logger.info(
-            "[PCR0] Waiting for exclusive Docker build/maintenance access: %s",
-            resource_lock_file,
-        )
-        while True:
+                resource_wait_logged = True
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
-                break
             except BlockingIOError:
+                if opportunistic:
+                    # Optional historical warming must never hold the writer
+                    # turnstile while an active model lifecycle owns shared
+                    # Docker access. Required current/deployed PCR0 builds use
+                    # the strict default and retain writer priority.
+                    fcntl.flock(admission_fd, fcntl.LOCK_UN)
+                    admission_acquired = False
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
@@ -1850,7 +1865,9 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                 logger.warning(f"[PCR0] Failed to compute content hash for {commit_hash[:8]}")
                 continue
 
-            async with _docker_operation_lock_scope():
+            async with _docker_operation_lock_scope(
+                opportunistic=commit_hash not in required_commit_hashes,
+            ):
                 if not await ensure_base_image_exists(repo_dir):
                     logger.warning(
                         f"[PCR0] Failed to prepare base image for {commit_hash[:8]}"

@@ -10,7 +10,14 @@ import sys
 from typing import Sequence
 
 
-REQUIRED_PACKAGES = ("bittensor", "boto3", "cryptography", "httpx", "supabase")
+REQUIRED_PACKAGES = (
+    "arweave-python-client",
+    "bittensor",
+    "boto3",
+    "cryptography",
+    "httpx",
+    "supabase",
+)
 NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)")
 
 

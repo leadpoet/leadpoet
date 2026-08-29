@@ -3925,10 +3925,18 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
     assert "research_lab_private_model_deploy" not in full_source
 
 
-def test_controller_dependency_closure_includes_gateway_database_client():
+def test_controller_dependency_closure_includes_runtime_identity_and_database_clients():
     selected = resolve_controller_requirements(ROOT / "requirements.txt")
     names = {re.split(r"[<>=!~ ]", item, maxsplit=1)[0].lower() for item in selected}
-    assert names == {"bittensor", "boto3", "cryptography", "httpx", "supabase"}
+    assert names == {
+        "arweave-python-client",
+        "bittensor",
+        "boto3",
+        "cryptography",
+        "httpx",
+        "supabase",
+    }
+    assert "arweave-python-client>=1.0.19" in selected
     assert 'bittensor==10.5.0; python_version >= "3.10"' in selected
 
 

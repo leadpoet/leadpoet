@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -3828,6 +3829,30 @@ def test_full_runtime_identity_is_run_owned_and_non_production(tmp_path: Path):
         assert metadata.st_uid == os.getuid()
         assert metadata.st_gid == os.getgid()
         assert metadata.st_mode & 0o777 == 0o600
+
+
+def test_full_runtime_identity_normalizes_inherited_setgid_directory(
+    monkeypatch,
+    tmp_path: Path,
+):
+    identity_dir = tmp_path / "runtime-identity"
+    original_mkdir = Path.mkdir
+
+    def mkdir_with_inherited_setgid(path: Path, *args, **kwargs) -> None:
+        original_mkdir(path, *args, **kwargs)
+        if path == identity_dir:
+            os.chmod(path, 0o2700)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_inherited_setgid)
+
+    identity = full_host._materialize_run_owned_runtime_identity(identity_dir)
+
+    metadata = identity_dir.lstat()
+    assert metadata.st_uid == os.getuid()
+    assert metadata.st_gid == os.getgid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert Path(identity["gateway_private_key_path"]).is_file()
+    assert Path(identity["arweave_keyfile_path"]).is_file()
 
 
 def test_full_runtime_identity_rejects_existing_directory(tmp_path: Path):

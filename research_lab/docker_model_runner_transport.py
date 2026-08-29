@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import math
 import os
 import queue
 import re
 import subprocess
 import threading
+import time
 import uuid
 from typing import Any, Mapping, Sequence
 
@@ -995,6 +997,7 @@ class DockerModelRunnerTransport:
         self._pool_lock = threading.Lock()
         self._idle_sessions: list[_DockerModelRunnerSession] = []
         self._sessions: set[_DockerModelRunnerSession] = set()
+        self._call_timing = threading.local()
         self._closed = False
 
     def _checkout_session(self) -> _DockerModelRunnerSession:
@@ -1045,11 +1048,14 @@ class DockerModelRunnerTransport:
             raise PrivateModelRuntimeError(
                 "common model runner operation is invalid"
             )
+        self._call_timing.execution_latency_ms = None
         self._pool_slots.acquire()
         session: _DockerModelRunnerSession | None = None
+        execution_seconds = 0.0
         try:
             for session_attempt in range(2):
                 session = self._checkout_session()
+                execution_started = time.monotonic()
                 try:
                     result = session.call(operation, payload)
                 except _DockerModelRunnerSessionError:
@@ -1065,13 +1071,36 @@ class DockerModelRunnerTransport:
                     self._return_session(session)
                     session = None
                     return result
+                finally:
+                    execution_seconds += max(
+                        0.0,
+                        time.monotonic() - execution_started,
+                    )
             raise PrivateModelRuntimeError(
                 "common model runner session did not return"
             )
         finally:
+            self._call_timing.execution_latency_ms = max(
+                0,
+                int(math.ceil(execution_seconds * 1000.0)),
+            )
             if session is not None:
                 self._return_session(session)
             self._pool_slots.release()
+
+    def last_call_execution_latency_ms(self) -> int | None:
+        """Return this thread's admitted OCI execution time for its last call.
+
+        Pool admission can wait behind unrelated model operations for hours
+        during a wide rebenchmark. It is scheduling delay, not execution
+        latency for the verifier action persisted by the official authority.
+        Thread-local storage keeps concurrent ICP measurements independent.
+        """
+
+        value = getattr(self._call_timing, "execution_latency_ms", None)
+        if type(value) is not int or value < 0:
+            return None
+        return value
 
     def close(self) -> None:
         with self._pool_lock:

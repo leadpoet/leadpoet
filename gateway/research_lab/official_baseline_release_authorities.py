@@ -997,6 +997,7 @@ class ArtifactPreparedActionExecutor:
         custody: S3OfficialBaselineDocumentCustody,
         proxy_url: str,
         proxy_client: _GatewayEvidenceProxyClient | None = None,
+        model_transport: DockerModelRunnerTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -1006,6 +1007,12 @@ class ArtifactPreparedActionExecutor:
         ):
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline release executor dependencies are invalid"
+            )
+        if model_transport is not None and not isinstance(
+            model_transport, DockerModelRunnerTransport
+        ):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline model transport is invalid"
             )
         bindings = _catalog_bindings(catalog)
         _validate_inventory_catalog(inventory, catalog)
@@ -1026,6 +1033,7 @@ class ArtifactPreparedActionExecutor:
         self._proxy = proxy_client or _GatewayEvidenceProxyClient(
             proxy_url=proxy_url
         )
+        self._model_transport = model_transport
         self._clock = clock
         self._sleep = sleep
 
@@ -2066,7 +2074,20 @@ class ArtifactPreparedActionExecutor:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact verifier identity differs"
             )
-        latency_ms = max(0, int(math.ceil((self._clock() - started) * 1000)))
+        admitted_latency_ms = (
+            self._model_transport.last_call_execution_latency_ms()
+            if self._model_transport is not None
+            else None
+        )
+        latency_ms = (
+            admitted_latency_ms
+            if admitted_latency_ms is not None
+            else max(0, int(math.ceil((self._clock() - started) * 1000)))
+        )
+        if latency_ms > 900_000:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline artifact verifier exceeded the host timeout"
+            )
         reason = str(result.get("reason_code") or "artifact_verifier_completed")
         if not re.fullmatch(r"[a-z][a-z0-9_]{1,127}", reason):
             raise OfficialBaselineProtectedAuthorityError(
@@ -2362,6 +2383,7 @@ def load_official_baseline_release_components(
         inventory=inventory,
         custody=custody,
         proxy_url=proxy_url,
+        model_transport=transport,
     )
     bridge = GatewayLocalProtectedActionBridge(
         custody=custody,

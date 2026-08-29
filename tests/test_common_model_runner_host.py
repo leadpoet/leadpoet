@@ -1608,6 +1608,71 @@ def test_oci_runner_transport_reuses_one_credential_free_session(monkeypatch):
     assert sessions[0].closed is True
 
 
+def test_oci_runner_transport_latency_excludes_pool_admission_wait(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    clock = {"value": 0.0}
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+
+        def call(self, _operation, payload):
+            if payload["index"] == 0:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            else:
+                clock["value"] += 0.005
+            return dict(payload)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_common_runner_session_capacity",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    monkeypatch.setattr(
+        docker_model_runner_transport.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    def invoke(index):
+        result = transport._call("continue_runner", {"index": index})
+        return result, transport.last_call_execution_latency_ms()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(invoke, 0)
+        assert first_entered.wait(timeout=1)
+        second = executor.submit(invoke, 1)
+        clock["value"] = 1000.0
+        release_first.set()
+        first.result(timeout=2)
+        second_result, second_latency_ms = second.result(timeout=2)
+
+    assert second_result == {"index": 1}
+    assert second_latency_ms == 5
+    transport.close()
+
+
 def test_oci_runner_transport_runs_independent_calls_in_parallel(monkeypatch):
     source = object.__new__(DockerPrivateModelRunner)
     source.spec = DockerPrivateModelSpec(

@@ -32,6 +32,7 @@ from gateway.research_lab.source_add_execution_plan import (
     SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
 )
 from research_lab.canonical import sha256_bytes, sha256_json
+from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
 from research_lab.model_runner_protocol import ExactModelRunnerRegistration
 
 
@@ -983,6 +984,8 @@ def test_artifact_verifier_result_is_zero_call_known_terminal(
             "timeout_seconds": 0.0,
         }
     )
+    model_transport = object.__new__(DockerModelRunnerTransport)
+    model_transport.last_call_execution_latency_ms = lambda: 17
     executor = ArtifactPreparedActionExecutor(
         registration=_registration(protocol),
         catalog=catalog,
@@ -990,6 +993,7 @@ def test_artifact_verifier_result_is_zero_call_known_terminal(
         custody=_custody(),
         proxy_url="http://127.0.0.1:8765",
         proxy_client=_Proxy([]),
+        model_transport=model_transport,
     )
     preparation = executor.prepare(
         run_identity={"run": "three"},
@@ -1007,6 +1011,7 @@ def test_artifact_verifier_result_is_zero_call_known_terminal(
     assert host.provider_response == result
     assert host.calls == 0
     assert host.cost_credits == 0.0
+    assert host.latency_ms == 17.0
     assert terminal.protected_action_result.provider_receipt is None
     assert terminal.provider_request_ref is None
 

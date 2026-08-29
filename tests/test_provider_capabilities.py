@@ -12,6 +12,7 @@ from gateway.research_lab.provider_capabilities import (
     _normalize_source_add_v8_registration,
     approved_source_router_suggestions,
     load_effective_provider_capabilities_sync,
+    normalize_source_add_planner_contract,
     provider_request_allowed,
     summary_mentions_private_capability,
     validate_candidate_provider_diff,
@@ -171,6 +172,13 @@ def _v8_router_registration_source(request: dict) -> str:
         category_contracts = "(\n" + category_contracts + "\n        )"
     else:
         category_contracts = "()"
+    execution_plan = (
+        "        execution_plan_identity="
+        + repr(request["execution_plan_identity"])
+        + ",\n"
+        if request.get("execution_plan_identity")
+        else ""
+    )
     return _EMPTY_V8_ROUTER_RUNTIME.replace(
         "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
         f"""SOURCE_ADD_ROUTING_REGISTRATIONS = (
@@ -179,7 +187,7 @@ def _v8_router_registration_source(request: dict) -> str:
         stage={request['stage']!r},
         revision={request['revision']!r},
         manifest_sha256={request['manifest_sha256']!r},
-        execution_mode={request['execution_mode']!r},
+{execution_plan}        execution_mode={request['execution_mode']!r},
         priority={request['priority']!r},
         capabilities={tuple(request['capabilities'])!r},
         idempotency={request['idempotency']!r},
@@ -268,6 +276,56 @@ def _provider_doc(
     return provider
 
 
+def _builtwith_execution_plan() -> dict:
+    return {
+        "schema_version": "source-add-static-json-intent-plan:v1",
+        "provider_id": "builtwith_trends",
+        "tool_id": "intent.source_add.builtwith_trends",
+        "request": {
+            "method": "GET",
+            "path": "/api.json",
+            "query": {"TECH": "Shopify"},
+        },
+        "response_projection": {
+            "kind": "technology_context",
+            "category": "TECHSTACK",
+            "object_field": "Tech",
+            "identity_field": "name",
+            "expected_identity": "Shopify",
+            "canonical_url_field": "trends_link",
+            "canonical_url_host": "trends.builtwith.com",
+            "canonical_url_path_prefix": "/shop/",
+            "excerpt_fields": ["description"],
+        },
+    }
+
+
+def _builtwith_probe_endpoint() -> dict:
+    return {
+        "endpoint_id": "builtwith_trends.technology",
+        "provider_id": "builtwith_trends",
+        "method": "GET",
+        "path": "/api.json",
+        "params": [
+            {
+                "name": "TECH",
+                "type": "string",
+                "required": True,
+                "location": "query",
+            }
+        ],
+    }
+
+
+def _builtwith_tested_probe() -> dict:
+    return {
+        "method": "GET",
+        "path": "/api.json",
+        "query": {"TECH": "Shopify"},
+        "body_json": None,
+    }
+
+
 def test_source_add_v8_normalizer_matches_upstream_golden_manifest():
     normalized = _normalize_source_add_v8_registration(
         {
@@ -287,6 +345,151 @@ def test_source_add_v8_normalizer_matches_upstream_golden_manifest():
         "e914fee915b37739edc34f964406e3935841e00ff6d2baba45b6ad4b64f32897"
     )
     assert normalized["revision"] == "source-add-e914fee915b3"
+
+
+def test_source_add_execution_plan_is_bound_to_tested_provisioned_route():
+    contract = {
+        "stage": "intent_evidence",
+        "execution_mode": "invoke",
+        "priority": 35,
+        "capabilities": ["intent.provider_evidence"],
+        "idempotency": "idempotent",
+        "cost_class": "free",
+        "unit_cost": 0.0,
+        "max_calls": 1,
+        "max_results": 1,
+        "timeout_seconds": 30.0,
+        "intent_categories": ["TECHSTACK"],
+        "evidence_types": ["reputable_publisher"],
+        "category_contracts": [],
+        "binding_requirements": [],
+        "best_for": ["intent.techstack"],
+        "avoid_when": [],
+        "execution_plan_identity": _builtwith_execution_plan(),
+    }
+    normalized = normalize_source_add_planner_contract(
+        "builtwith_trends",
+        contract,
+        probe_endpoints=[_builtwith_probe_endpoint()],
+        tested_probes=[_builtwith_tested_probe()],
+    )
+
+    assert normalized["execution_plan_identity"] == _builtwith_execution_plan()
+
+    source_row = {
+        "adapter_id": "adapter:builtwith-trends",
+        "miner_hotkey": "hk-builtwith-trends",
+        "provision_status": "provisioned_autoresearch_eligible",
+        "credential_envelope": {},
+        "provision_doc": {
+            "provider_registry_entry": {
+                "id": "builtwith_trends",
+                "base_url": "https://api.builtwith.com/trends/v6",
+                "auth_kind": "none",
+                "credential_ref": [],
+                "planner_summary": {
+                    **normalized,
+                    "provider_alias": "BuiltWith trends",
+                },
+            },
+            "probe_endpoints": [_builtwith_probe_endpoint()],
+        },
+    }
+    capabilities = load_effective_provider_capabilities_sync(
+        [],
+        private_row_loader=lambda: None,
+        source_row_loader=lambda: [source_row],
+    )
+    provider = capabilities.providers[0]
+    assert provider["planner_summary"]["execution_plan_identity"] == (
+        _builtwith_execution_plan()
+    )
+    context = approved_source_router_suggestions(
+        "Use builtwith_trends for intent discovery.",
+        capabilities.providers,
+    )
+    request = context["requests"][0]
+    assert request["execution_plan_identity"] == _builtwith_execution_plan()
+    assert request["binding_manifest"]["execution_plan_identity"] == (
+        _builtwith_execution_plan()
+    )
+
+    generated = _v8_router_registration_source(request)
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(_EMPTY_V8_ROUTER_RUNTIME, generated),
+        context,
+        existing_runtime_source=_EMPTY_V8_ROUTER_RUNTIME,
+    ) == []
+    changed = generated.replace("'Shopify'", "'WooCommerce'", 1)
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(_EMPTY_V8_ROUTER_RUNTIME, changed),
+        context,
+        existing_runtime_source=_EMPTY_V8_ROUTER_RUNTIME,
+    ) != []
+
+
+@pytest.mark.parametrize(
+    "probe_endpoints,tested_probes,error",
+    (
+        (
+            [],
+            [_builtwith_tested_probe()],
+            "must match one provisioned endpoint",
+        ),
+        (
+            [{**_builtwith_probe_endpoint(), "method": "POST"}],
+            [_builtwith_tested_probe()],
+            "must match one provisioned endpoint",
+        ),
+        (
+            [_builtwith_probe_endpoint()],
+            [],
+            "must match one successful test probe",
+        ),
+        (
+            [_builtwith_probe_endpoint()],
+            [{**_builtwith_tested_probe(), "query": {"TECH": "React"}}],
+            "must match one successful test probe",
+        ),
+        (
+            [
+                {
+                    **_builtwith_probe_endpoint(),
+                    "params": [
+                        *_builtwith_probe_endpoint()["params"],
+                        {
+                            "name": "required_extra",
+                            "required": True,
+                            "location": "query",
+                        },
+                    ],
+                }
+            ],
+            [_builtwith_tested_probe()],
+            "query differs from the provisioned endpoint",
+        ),
+    ),
+)
+def test_source_add_execution_plan_rejects_untested_route_drift(
+    probe_endpoints,
+    tested_probes,
+    error,
+):
+    with pytest.raises(ValueError, match=error):
+        normalize_source_add_planner_contract(
+            "builtwith_trends",
+            {
+                "stage": "intent_evidence",
+                "cost_class": "free",
+                "unit_cost": 0.0,
+                "max_calls": 1,
+                "max_results": 1,
+                "intent_categories": ["TECHSTACK"],
+                "execution_plan_identity": _builtwith_execution_plan(),
+            },
+            probe_endpoints=probe_endpoints,
+            tested_probes=tested_probes,
+        )
 
 
 def _private_row(*providers: dict) -> dict:

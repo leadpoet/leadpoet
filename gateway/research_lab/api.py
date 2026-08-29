@@ -1265,6 +1265,12 @@ async def provision_research_lab_source_adapter(
                             )
                             or 0
                         ),
+                        probe_endpoints=probe_endpoints,
+                        tested_probes=[
+                            dict(item)
+                            for item in probe_doc.get("probes") or []
+                            if isinstance(item, Mapping)
+                        ],
                     )
                 )
             except (TypeError, ValueError) as exc:

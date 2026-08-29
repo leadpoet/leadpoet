@@ -28,6 +28,9 @@ from gateway.research_lab.official_baseline_release_authorities import (
     _proxy_base_url,
     protected_action_authority_contract_identity,
 )
+from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+)
 from research_lab.canonical import sha256_bytes, sha256_json
 from research_lab.model_runner_protocol import ExactModelRunnerRegistration
 
@@ -388,6 +391,80 @@ def _openrouter_provider_fixture():
             "provider": dispatch["provider"],
             "compiler_contract_sha256": binding,
             "timeout_seconds": 120.0,
+        }
+    )
+    return action, dispatch, catalog, inventory
+
+
+def _source_add_provider_fixture():
+    binding = "c" * 64
+    provider_id = "builtwith_trends"
+    tool_id = f"intent.source_add.{provider_id}"
+    action = {
+        "sequence": 3,
+        "action_type": "execute_intent_tool",
+        "tool_id": tool_id,
+        "binding_contract_sha256": binding,
+        "response_schema_version": "model-provider-response:v3",
+        "max_response_bytes": 1_048_576,
+        "idempotency_key": "4" * 64,
+        "action_sha256": "5" * 64,
+        "request_fingerprint_sha256": "6" * 64,
+    }
+    request = {
+        "method": "GET",
+        "path": "/api.json",
+        "static_headers": {"Accept": "application/json"},
+        "query": {"TECH": "Shopify"},
+        "credential_binding": {
+            "location": "source_add_registry",
+            "name": provider_id,
+            "scheme": "v2_envelope",
+            "source": "source_add_registry",
+            "persist": False,
+        },
+    }
+    dispatch_body = {
+        "schema_version": "model-runner-provider-dispatch:v1",
+        "action_sha256": action["action_sha256"],
+        "action_type": action["action_type"],
+        "tool_id": action["tool_id"],
+        "compiler_id": SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+        "compiler_contract_sha256": binding,
+        "provider": provider_id,
+        "request": request,
+        "request_sha256": _hash(request),
+        "response_contract": {"schema_version": "provider-response-contract:v1"},
+        "budgets": {
+            "call_cap": 1,
+            "credit_cap": 0.0,
+            "timeout_seconds": 30.0,
+            "max_results": 1,
+            "max_response_bytes": 1_048_576,
+        },
+        "idempotency_key": "model-action:" + action["action_sha256"],
+    }
+    dispatch = {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)}
+    catalog = _catalog(
+        _catalog_row(
+            action_type=action["action_type"],
+            tool_id=tool_id,
+            binding=binding,
+            response_schema=action["response_schema_version"],
+        )
+    )
+    catalog["bindings"][0]["max_response_bytes"] = 1_048_576
+    catalog = _catalog(*catalog["bindings"])
+    inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": tool_id,
+            "status": "supported",
+            "execution_mode": "invoke",
+            "compiler_id": dispatch["compiler_id"],
+            "provider": dispatch["provider"],
+            "compiler_contract_sha256": binding,
+            "timeout_seconds": 30.0,
         }
     )
     return action, dispatch, catalog, inventory
@@ -1085,6 +1162,31 @@ def test_host_availability_requires_artifact_provider_and_reviewed_proxy_route()
     ) == {tool_id: False}
 
 
+def test_host_availability_requires_exact_ready_source_add_transport():
+    _action, _dispatch, catalog, inventory = _source_add_provider_fixture()
+    tool_id = "intent.source_add.builtwith_trends"
+
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=inventory,
+        ready_provider_ids=("builtwith_trends",),
+    ) == {tool_id: True}
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=inventory,
+        ready_provider_ids=(),
+    ) == {tool_id: False}
+
+    wrong_entry = dict(inventory["entries"][0])
+    wrong_entry["compiler_id"] = "source_add.unreviewed:v1"
+    wrong_inventory = _inventory(wrong_entry)
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=wrong_inventory,
+        ready_provider_ids=("builtwith_trends",),
+    ) == {tool_id: False}
+
+
 @pytest.mark.parametrize(
     "value",
     (
@@ -1192,6 +1294,125 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
             max_response_bytes=10_000,
             cost_scope="official-baseline-fixture",
         )
+
+
+def test_source_add_transport_uses_only_registry_proxy_route_without_secret():
+    captured = {}
+
+    class _Response:
+        status = 200
+        headers = {}
+
+        def read(self, _limit):
+            return b'{"Tech":{"name":"Shopify"}}'
+
+        def close(self):
+            captured["closed"] = True
+
+    def opener(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=opener
+    )
+    status, body, _headers = client.request(
+        provider="builtwith_trends",
+        method="GET",
+        upstream_url="",
+        source_add_path="/api.json",
+        static_headers={"Accept": "application/json"},
+        body=None,
+        query={"TECH": "Shopify"},
+        timeout_seconds=10,
+        max_response_bytes=1_048_576,
+        cost_scope="official-baseline-source-add-fixture",
+    )
+
+    assert status == 200
+    assert body == {"Tech": {"name": "Shopify"}}
+    assert captured["url"] == (
+        "http://127.0.0.1:8765/builtwith_trends/api.json?TECH=Shopify"
+    )
+    lowered_headers = {
+        key.casefold(): value for key, value in captured["headers"].items()
+    }
+    assert "authorization" not in lowered_headers
+    assert "x-api-key" not in lowered_headers
+    assert captured["body"] is None
+    assert captured["closed"] is True
+
+
+@pytest.mark.parametrize(
+    ("upstream_url", "path"),
+    (
+        ("https://api.builtwith.com", "/api.json"),
+        ("", "//api.json"),
+        ("", "/api.json?TECH=Shopify"),
+        ("", "/../api.json"),
+        ("", "/"),
+    ),
+)
+def test_source_add_proxy_path_rejects_host_or_path_drift(upstream_url, path):
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=lambda *_args, **_kwargs: None
+    )
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="SOURCE_ADD proxy path is invalid",
+    ):
+        client._proxied_url(
+            provider="builtwith_trends",
+            upstream_url=upstream_url,
+            source_add_path=path,
+        )
+
+
+def test_source_add_dispatch_requires_exact_registry_credential_and_request():
+    action, dispatch, catalog, inventory = _source_add_provider_fixture()
+
+    def executor(candidate_dispatch):
+        return ArtifactPreparedActionExecutor(
+            registration=_registration(_Protocol(dispatch=candidate_dispatch)),
+            catalog=catalog,
+            inventory=inventory,
+            custody=_custody(),
+            proxy_url="http://127.0.0.1:8765",
+        )
+
+    assert executor(dispatch)._provider_dispatch(action) == dispatch
+
+    invalid_requests = []
+    for mutate in (
+        lambda request: request.update(method="POST"),
+        lambda request: request.update(url="https://api.builtwith.com/api.json"),
+        lambda request: request.update(body={"TECH": "Shopify"}),
+        lambda request: request["credential_binding"].update(
+            source="BUILTWITH_API_KEY"
+        ),
+        lambda request: request["query"].update(api_key="redacted"),
+    ):
+        request = json.loads(json.dumps(dispatch["request"]))
+        mutate(request)
+        invalid_requests.append(request)
+
+    for request in invalid_requests:
+        body = {
+            key: value
+            for key, value in dispatch.items()
+            if key != "dispatch_sha256"
+        }
+        body["request"] = request
+        body["request_sha256"] = _hash(request)
+        candidate = {**body, "dispatch_sha256": _hash(body)}
+        with pytest.raises(
+            OfficialBaselineProtectedAuthorityError,
+            match="credential binding differs",
+        ):
+            executor(candidate)._provider_dispatch(action)
 
 
 def test_official_proxy_replay_only_header_is_host_owned():

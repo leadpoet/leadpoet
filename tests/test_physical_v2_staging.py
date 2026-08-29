@@ -954,6 +954,17 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert 'get("acceptance_corpus", {}).get("copied_exact") is not True' in source
     assert 'get("acceptance_corpus", {}).get("candidate_sha")' in source
     assert 'get("acceptance_corpus", {}).get("fixture_count", 0) <= 0' in source
+    transfer = source.index(
+        "python3 scripts/production_parity_acceptance_transfer.py"
+    )
+    execute = source.index(
+        '"$host_python" scripts/run_production_parity_full_host.py'
+    )
+    assert transfer < execute
+    assert "/home/ec2-user/.config/leadpoet/v2" in source
+    assert "acceptance-corpus-v2-binding.json" in source
+    assert '"validated_exact"' in source
+    assert '"run-scoped-object-lock"' in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
 

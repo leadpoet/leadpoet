@@ -37,6 +37,9 @@ from urllib.request import (
 )
 
 import boto3
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +68,10 @@ from scripts.materialize_production_parity_secrets import (  # noqa: E402
 from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
     restore_snapshot,
+)
+from scripts.production_parity_acceptance_transfer import (  # noqa: E402
+    AcceptanceTransferError,
+    fetch_and_unpack_transfer,
 )
 from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
 from gateway.tee.acceptance_corpus_v2 import (  # noqa: E402
@@ -109,20 +116,6 @@ EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
 )
 FULL_WORK_ROOT = Path("/opt/leadpoet-production-parity")
-PRODUCTION_V2_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
-PRODUCTION_GATEWAY_PRIVATE_KEY_PATH = Path(
-    "/home/ec2-user/gateway/secrets/gateway_private_key.pem"
-)
-PRODUCTION_ARWEAVE_KEYFILE_PATH = Path(
-    "/home/ec2-user/gateway/secrets/arweave_keyfile.json"
-)
-PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH = Path(
-    "/home/ec2-user/.ssh/research_lab_private_model_deploy"
-)
-PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH = Path(
-    "/home/ec2-user/.ssh/known_hosts"
-)
-PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER = (1000, 1000)
 ATTESTED_V2_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 ATTESTED_V2_RELEASE_PREFIX = "attested-v2/releases"
 ATTESTED_V2_KMS_KEY_ID = (
@@ -142,9 +135,7 @@ FULL_FAILURE_STAGES = frozenset(
         "public-origin",
         "checkout-identity",
         "early-boot-isolation",
-        "gateway-key-identity",
-        "arweave-key-identity",
-        "private-model-ssh-identity",
+        "runtime-identity",
         "work-root",
         "runtime-config-capture",
         "parity-contract",
@@ -154,6 +145,7 @@ FULL_FAILURE_STAGES = frozenset(
         "snapshot-restore",
         "clone-http-origin",
         "clone-secret",
+        "acceptance-transfer",
         "acceptance-corpus",
         "gateway-restart",
         "gateway-health",
@@ -173,6 +165,7 @@ FULL_ERROR_TYPES = frozenset(
     {
         "BotoCoreError",
         "AcceptanceCorpusV2Error",
+        "AcceptanceTransferError",
         "CalledProcessError",
         "ClientError",
         "CleanupError",
@@ -994,56 +987,131 @@ def _validated_clone_environment(
     return values
 
 
-def _validated_baked_secret_path(path: Path, *, field: str) -> str:
-    """Return an AMI-baked secret path without reading its contents."""
-
+def _write_run_owned_secret(path: Path, payload: bytes, *, field: str) -> str:
+    if not payload:
+        raise FullParityError(f"run-owned {field} payload is empty")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_CLOEXEC
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
     try:
-        metadata = path.lstat()
-        resolved = path.resolve(strict=True)
-    except OSError as exc:
-        raise FullParityError(f"baked {field} path is unavailable") from exc
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise FullParityError(f"run-owned {field} write failed")
+            view = view[written:]
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(descriptor)
+    metadata = path.lstat()
     if (
-        resolved != path
-        or path.is_symlink()
+        path.is_symlink()
+        or path.resolve(strict=True) != path
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size <= 0
+        or metadata.st_size != len(payload)
         or stat.S_IMODE(metadata.st_mode) != 0o600
-        or (metadata.st_uid, metadata.st_gid)
-        != PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER
+        or (metadata.st_uid, metadata.st_gid) != (os.getuid(), os.getgid())
     ):
-        raise FullParityError(f"baked {field} path identity differs")
+        raise FullParityError(f"run-owned {field} identity differs")
     return str(path)
 
 
-def _validated_baked_gateway_private_key_path() -> str:
-    return _validated_baked_secret_path(
-        PRODUCTION_GATEWAY_PRIVATE_KEY_PATH,
+def _b64url_uint(value: int) -> str:
+    if not isinstance(value, int) or value < 0:
+        raise FullParityError("run-owned RSA identity is invalid")
+    width = max(1, (value.bit_length() + 7) // 8)
+    return base64.urlsafe_b64encode(value.to_bytes(width, "big")).decode(
+        "ascii"
+    ).rstrip("=")
+
+
+def _materialize_run_owned_runtime_identity(identity_dir: Path) -> dict[str, str]:
+    """Create non-production signing material for the non-forwarding clone."""
+
+    try:
+        identity_dir.mkdir(mode=0o700)
+    except OSError as exc:
+        raise FullParityError(
+            "run-owned runtime identity directory is unavailable"
+        ) from exc
+    directory_metadata = identity_dir.lstat()
+    if (
+        identity_dir.is_symlink()
+        or not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        or (directory_metadata.st_uid, directory_metadata.st_gid)
+        != (os.getuid(), os.getgid())
+    ):
+        raise FullParityError("run-owned runtime identity directory differs")
+
+    gateway_key = Ed25519PrivateKey.generate()
+    gateway_private_key = gateway_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    gateway_public_key = gateway_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    gateway_private_key_path = _write_run_owned_secret(
+        identity_dir / "gateway_private_key.pem",
+        gateway_private_key,
         field="gateway private-key",
     )
 
-
-def _validated_baked_arweave_keyfile_path() -> str:
-    return _validated_baked_secret_path(
-        PRODUCTION_ARWEAVE_KEYFILE_PATH,
+    arweave_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=4096,
+    )
+    numbers = arweave_key.private_numbers()
+    public_numbers = numbers.public_numbers
+    arweave_jwk = {
+        "d": _b64url_uint(numbers.d),
+        "dp": _b64url_uint(numbers.dmp1),
+        "dq": _b64url_uint(numbers.dmq1),
+        "e": _b64url_uint(public_numbers.e),
+        "kty": "RSA",
+        "n": _b64url_uint(public_numbers.n),
+        "p": _b64url_uint(numbers.p),
+        "q": _b64url_uint(numbers.q),
+        "qi": _b64url_uint(numbers.iqmp),
+    }
+    arweave_payload = (
+        json.dumps(arweave_jwk, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("ascii")
+    arweave_keyfile_path = _write_run_owned_secret(
+        identity_dir / "arweave_keyfile.json",
+        arweave_payload,
         field="Arweave keyfile",
     )
+    try:
+        from arweave.arweave_lib import Wallet
 
+        arweave_address = str(Wallet(arweave_keyfile_path).address or "")
+    except Exception as exc:
+        raise FullParityError("run-owned Arweave identity is invalid") from exc
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", arweave_address):
+        raise FullParityError("run-owned Arweave identity is invalid")
 
-def _validated_baked_private_model_ssh_command() -> str:
-    deploy_key = _validated_baked_secret_path(
-        PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH,
-        field="private-model deploy key",
-    )
-    known_hosts = _validated_baked_secret_path(
-        PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH,
-        field="private-model known-hosts",
-    )
-    return (
-        f"ssh -i {deploy_key} -o IdentitiesOnly=yes -o BatchMode=yes "
-        "-o StrictHostKeyChecking=yes "
-        f"-o UserKnownHostsFile={known_hosts} "
-        "-o GlobalKnownHostsFile=/dev/null"
-    )
+    return {
+        "gateway_private_key_path": gateway_private_key_path,
+        "gateway_public_key": gateway_public_key,
+        "gateway_public_key_hash": "sha256:"
+        + hashlib.sha256(bytes.fromhex(gateway_public_key)).hexdigest(),
+        "arweave_keyfile_path": arweave_keyfile_path,
+        "arweave_address_hash": "sha256:"
+        + hashlib.sha256(arweave_address.encode("ascii")).hexdigest(),
+    }
 
 
 @contextmanager
@@ -2568,17 +2636,26 @@ def run_full(
             raise FullParityError(
                 "transient host early production-service isolation differs"
             )
-        failure_stage = "gateway-key-identity"
-        gateway_private_key_path = _validated_baked_gateway_private_key_path()
-        failure_stage = "arweave-key-identity"
-        arweave_keyfile_path = _validated_baked_arweave_keyfile_path()
-        failure_stage = "private-model-ssh-identity"
-        private_model_git_ssh_command = (
-            _validated_baked_private_model_ssh_command()
-        )
         failure_stage = "work-root"
         work.mkdir(parents=True, mode=0o700, exist_ok=False)
         scoring_cache.mkdir(mode=0o700)
+        failure_stage = "runtime-identity"
+        runtime_identity = _materialize_run_owned_runtime_identity(
+            work / "runtime-identity"
+        )
+        gateway_private_key_path = runtime_identity["gateway_private_key_path"]
+        arweave_keyfile_path = runtime_identity["arweave_keyfile_path"]
+        evidence["runtime_identity"] = {
+            "gateway": "run-scoped-ephemeral",
+            "gateway_public_key_hash": runtime_identity[
+                "gateway_public_key_hash"
+            ],
+            "arweave": "run-scoped-ephemeral-write-blocked",
+            "arweave_address_hash": runtime_identity[
+                "arweave_address_hash"
+            ],
+            "private_model_source": "signed-immutable-artifact",
+        }
         secrets_client = boto3.client("secretsmanager", region_name=region)
         database = _DockerDatabase(
             candidate_sha=candidate_sha,
@@ -2674,6 +2751,7 @@ def run_full(
             source_secret_id=production_gateway_secret_id,
             run_id=run_id,
             candidate_sha=candidate_sha,
+            gateway_public_key=runtime_identity["gateway_public_key"],
             supabase_origin=supabase_origin,
             artifact_bucket=artifact_bucket,
             benchmark_date=manifest["database"]["target_rebenchmark_date"],
@@ -2698,21 +2776,55 @@ def run_full(
             encoding="utf-8",
         )
         artifact_policy.chmod(0o600)
-        failure_stage = "acceptance-corpus"
+        candidate_s3 = boto3.client("s3", region_name=region)
+        failure_stage = "acceptance-transfer"
         release_channel = fetch_release_channel_v2(
             bucket=ATTESTED_V2_RELEASE_BUCKET,
             commit_sha=candidate_sha,
             prefix=ATTESTED_V2_RELEASE_PREFIX,
-            s3_client=boto3.client("s3", region_name=region),
+            s3_client=candidate_s3,
         )
+        transferred_config = work / "transferred-v2-config"
+        acceptance_transfer = fetch_and_unpack_transfer(
+            s3_client=candidate_s3,
+            artifact_bucket=artifact_bucket,
+            run_id=run_id,
+            candidate_sha=candidate_sha,
+            destination_config_dir=transferred_config,
+            candidate_release_manifest=release_channel[
+                "gateway_release_manifest"
+            ],
+        )
+        failure_stage = "acceptance-corpus"
         acceptance_corpus = _materialize_acceptance_corpus(
-            source_config_dir=PRODUCTION_V2_CONFIG_DIR,
+            source_config_dir=transferred_config,
             destination_config_dir=artifact_policy.parent,
             candidate_sha=candidate_sha,
             candidate_release_manifest=release_channel[
                 "gateway_release_manifest"
             ],
         )
+        compared_fields = (
+            "candidate_sha",
+            "release_hash",
+            "manifest_hash",
+            "fixture_count",
+        )
+        if any(
+            acceptance_transfer.get(field) != acceptance_corpus.get(field)
+            for field in compared_fields
+        ):
+            raise FullParityError(
+                "transferred acceptance corpus identity differs"
+            )
+        acceptance_corpus["transfer"] = {
+            "archive_sha256": acceptance_transfer["archive_sha256"],
+            "archive_size_bytes": acceptance_transfer["archive_size_bytes"],
+            "binding_hash": acceptance_transfer["binding_hash"],
+            "source": "run-scoped-object-lock",
+            "validated_exact": acceptance_transfer.get("copied_exact") is True,
+        }
+        shutil.rmtree(transferred_config)
         env = _full_restart_environment(
             region=region,
             updates={
@@ -2724,9 +2836,6 @@ def run_full(
                 "GATEWAY_LOG_FILE": str(work / "gateway" / "gateway.log"),
                 "GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path,
                 "ARWEAVE_KEYFILE_PATH": arweave_keyfile_path,
-                "GATEWAY_RESTART_GIT_SSH_COMMAND": (
-                    private_model_git_ssh_command
-                ),
                 "GATEWAY_RESTART_CONTROLLER_ROOT": str(work / "restart-controller"),
                 "GATEWAY_DEPLOYMENT_DIR": str(work / "deployments"),
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),
@@ -2743,7 +2852,7 @@ def run_full(
                 "GATEWAY_RESTART_LOCK_FILE": str(work / "gateway-restart.lock"),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
-                "GATEWAY_PYTHON_BIN": "/home/ec2-user/venv311/bin/python3",
+                "GATEWAY_PYTHON_BIN": sys.executable,
                 "GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET,
                 "GATEWAY_V2_RELEASE_PREFIX": ATTESTED_V2_RELEASE_PREFIX,
                 "GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID,
@@ -2806,7 +2915,7 @@ def run_full(
         failure_stage = "weight-readiness"
         readiness = _run(
             [
-                "/home/ec2-user/venv311/bin/python3",
+                sys.executable,
                 "-m",
                 "gateway.tee.verify_weight_submission_ready_v2",
                 "--gateway-url",

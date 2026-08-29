@@ -67,6 +67,7 @@ ALWAYS_COMMITTED_PATHS = (
     "scripts/cleanup_production_parity_staging.py",
     "scripts/materialize_production_parity_secrets.py",
     "scripts/operate_rebenchmark_iam_policy.py",
+    "scripts/production_parity_acceptance_transfer.py",
     "scripts/production_parity_snapshot.py",
     "scripts/provision_production_parity_staging.py",
     "scripts/resolve_production_parity_deployed_sha.py",

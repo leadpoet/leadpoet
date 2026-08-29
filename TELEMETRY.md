@@ -76,6 +76,23 @@ traces. A background task that stalls, a worker fleet that stops consuming, or
 a restart that never finishes leaves nothing at all in the OTel store — "we
 have Sentry" does not close that gap.
 
+### Host metrics: shipped, not running
+
+Host CPU / memory / disk / network are out of scope for the in-process
+exporter by design, but this repository does ship a standalone collector for
+them — see
+[`gateway/observability/HOST_METRICS.md`](gateway/observability/HOST_METRICS.md)
+(`otelcol-hostmetrics.yaml` plus `install_hostmetrics_collector.sh`), which
+exports to `GATEWAY_OTEL_METRICS_ENDPOINT`.
+
+**As of 2026-08-29 no host metrics are arriving**: the collector's metrics and
+histogram tables hold zero rows from this deployment over the trailing 7 days.
+This is an ops item, not a code defect — the installer is deliberately not
+called by `gw_restart.sh`, so either
+`sudo gateway/observability/install_hostmetrics_collector.sh` has not been run
+on the gateway host, or the unit's endpoint/token is wrong. Until it is fixed,
+host resource questions cannot be answered from telemetry.
+
 ## Enabling (gateway host only)
 
 ```bash

@@ -77,12 +77,23 @@ The miner will ask which mode to run:
 
 - **Auto Research**
 - **Fulfillment**
+- **Submit API Source**
 
 ### Research Lab
 
 Research Lab lets miners contribute direction and compute toward improving the AI sales agent.
 
 The current sourcing model and sealed benchmark are not published in full. Keeping them private helps prevent benchmark overfitting, fixture memorization, and leakage of evaluation data while still letting miners submit and evaluate improvements through the Research Lab flow.
+
+#### Submit API Source
+
+Choose **Submit API Source** in the miner menu and enter:
+
+- The source/API name and source type.
+- Its HTTPS API base URL and documentation URL.
+- The authentication type, rate-limit notes, and at least one endpoint example (method, path, purpose, and example query or body).
+
+Do not submit API keys or other secrets. The gateway reviews the source and tests the API; an operator adds any required credential after submission.
 
 How it works:
 

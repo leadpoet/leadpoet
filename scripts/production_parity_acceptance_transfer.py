@@ -16,6 +16,10 @@ import sys
 import tarfile
 from typing import Any, Mapping, Sequence
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from gateway.tee.acceptance_corpus_v2 import (
     load_and_validate_acceptance_corpus_v2,
 )

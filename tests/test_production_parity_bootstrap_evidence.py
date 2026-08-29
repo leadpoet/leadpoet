@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -847,6 +848,7 @@ def _run_rendered_ssm(
     metadata_bundle_sha256: str | None = None,
     metadata_bundle_size_bytes: str | None = None,
     metadata_raw_json: str | None = None,
+    docker_preinstalled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     controller_bundle_bytes = (
         CANDIDATE_BUNDLE_BYTES
@@ -978,13 +980,38 @@ case "$operation" in
   mkdir) exec mkdir "$@" ;;
   chown) exit 0 ;;
   */dnf) exec "$operation" "$@" ;;
+  */docker|*/systemctl) exec "$operation" "$@" ;;
   *) exit 2 ;;
 esac
 """,
         encoding="utf-8",
     )
     dnf_stub = fake_bin / "dnf"
-    dnf_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    dnf_stub.write_text(
+        """#!/bin/sh
+set -eu
+case " $* " in
+  *" docker "*)
+    cp "$DOCKER_STUB_TEMPLATE" "$DOCKER_STUB_PATH"
+    chmod 700 "$DOCKER_STUB_PATH"
+    ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    docker_template = fake_bin / "docker-template"
+    docker_template.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker_stub = fake_bin / "docker"
+    if docker_preinstalled:
+        shutil.copyfile(docker_template, docker_stub)
+    rpm_stub = fake_bin / "rpm"
+    rpm_stub.write_text(
+        "#!/bin/sh\nprintf '%s\\n' docker-25.0.13-test\n",
+        encoding="utf-8",
+    )
+    systemctl_stub = fake_bin / "systemctl"
+    systemctl_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     stat_stub = fake_bin / "stat"
     stat_stub.write_text(
         """#!/usr/bin/env python3
@@ -1035,11 +1062,16 @@ else:
         git_stub,
         sudo_stub,
         dnf_stub,
+        docker_template,
+        rpm_stub,
+        systemctl_stub,
         stat_stub,
         sha256sum_stub,
         host_python,
     ):
         executable.chmod(0o700)
+    if docker_preinstalled:
+        docker_stub.chmod(0o700)
 
     early_root = tmp_path / "missing-early-parent"
     work_root = tmp_path / "work"
@@ -1067,6 +1099,9 @@ else:
     )
     command = command.replace("/usr/bin/git", str(git_stub))
     command = command.replace("/usr/bin/dnf", str(dnf_stub))
+    command = command.replace("/usr/bin/docker", str(docker_stub))
+    command = command.replace("/usr/bin/rpm", str(rpm_stub))
+    command = command.replace("/usr/bin/systemctl", str(systemctl_stub))
     command = command.replace("/usr/bin/env -i", "/usr/bin/env")
     if stage is not None:
         assert category is not None
@@ -1108,6 +1143,8 @@ else:
         "GIT_CALLS": str(git_calls),
         "HOST_PYTHON_CALLS": str(host_python_calls),
         "METADATA_RAW_JSON": metadata_raw_json,
+        "DOCKER_STUB_TEMPLATE": str(docker_template),
+        "DOCKER_STUB_PATH": str(docker_stub),
         "PROVIDER_SECRET": "must-never-enter-evidence",
     }
     result = subprocess.run(
@@ -1173,6 +1210,17 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
     assert not list((tmp_path / "work").glob("candidate-bundle-binding.*"))
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_rendered_ssm_installs_missing_container_runtime(tmp_path: Path) -> None:
+    result, capture = _run_rendered_ssm(
+        tmp_path,
+        docker_preinstalled=False,
+    )
+
+    assert result.returncode == 0
+    assert (tmp_path / "bin" / "docker").is_file()
+    assert json.loads(capture.read_text(encoding="utf-8"))["status"] == "passed"
 
 
 def test_rendered_ssm_builds_isolated_candidate_controller_before_entrypoint(

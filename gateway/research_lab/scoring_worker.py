@@ -2783,6 +2783,91 @@ def _baseline_attempt_ledger_doc(
     return {**payload, "ledger_hash": canonical_hash(payload)}
 
 
+async def _replay_exact_baseline_checkpoints(
+    *,
+    runner: ExactOfficialBaselineRunner,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    progress_rows: Sequence[Mapping[str, Any]],
+    attempt_ledger: Sequence[Mapping[str, Any]],
+    max_concurrency: int,
+) -> int:
+    """Revalidate independent closed checkpoints without serial replay."""
+
+    items_by_ref = {
+        _benchmark_item_ref_for_progress(item): item
+        for item in benchmark_items
+    }
+    attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in attempt_ledger:
+        if isinstance(entry, Mapping):
+            attempts_by_ref.setdefault(
+                str(entry.get("icp_ref") or ""), []
+            ).append(entry)
+
+    replay_inputs: list[
+        tuple[Mapping[str, Any], str, int, Mapping[str, Any]]
+    ] = []
+    for resumed_row in progress_rows:
+        resumed_ref = _benchmark_item_ref_for_progress(resumed_row)
+        item = items_by_ref.get(resumed_ref)
+        attempts = sorted(
+            attempts_by_ref.get(resumed_ref) or [],
+            key=lambda value: int(value.get("retry_round") or 0),
+        )
+        latest_result = attempts[-1].get("result_row") if attempts else None
+        latest_retry_round = (
+            int(attempts[-1].get("retry_round") or 0)
+            if attempts
+            else 0
+        )
+        checkpoint = (
+            latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
+            if isinstance(latest_result, Mapping)
+            else None
+        )
+        if item is None or not isinstance(checkpoint, Mapping):
+            raise RuntimeError(
+                "official baseline v3 checkpoint is missing its exact model frontier"
+            )
+        replay_inputs.append(
+            (item, resumed_ref, latest_retry_round, checkpoint)
+        )
+
+    if not replay_inputs:
+        return 0
+    semaphore = asyncio.Semaphore(
+        max(1, min(len(replay_inputs), int(max_concurrency or 1)))
+    )
+
+    async def replay_one(
+        item: Mapping[str, Any],
+        resumed_ref: str,
+        retry_round: int,
+        checkpoint: Mapping[str, Any],
+    ) -> None:
+        async with semaphore:
+            await asyncio.to_thread(
+                runner.run_icp,
+                raw_icp=item["icp"],
+                icp_ref=resumed_ref,
+                target_count=_icp_company_goal(item["icp"]) or 1,
+                attempt_ordinal=retry_round,
+                expected_checkpoint=checkpoint,
+            )
+
+    settled = await asyncio.gather(
+        *(
+            replay_one(item, resumed_ref, retry_round, checkpoint)
+            for item, resumed_ref, retry_round, checkpoint in replay_inputs
+        ),
+        return_exceptions=True,
+    )
+    for outcome in settled:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    return len(replay_inputs)
+
+
 def _baseline_distribution_complete(
     rows: Sequence[Mapping[str, Any]],
     benchmark_items: Sequence[Mapping[str, Any]],
@@ -6234,7 +6319,10 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _run_lease_held_recovery_and_preflight(
-        self, maintenance_state: Mapping[str, Any]
+        self,
+        maintenance_state: Mapping[str, Any],
+        *,
+        force_full_fleet_measurement: bool = False,
     ) -> Mapping[str, Any]:
         """Run scoring maintenance under a continuously renewed lease."""
 
@@ -6313,11 +6401,22 @@ class ResearchLabGatewayScoringWorker:
                     maintenance_state=maintenance_state,
                     heartbeat=heartbeat,
                     force_measurement=(
-                        self._is_private_baseline_owner()
-                        and not baseline_full_fleet_proven
+                        force_full_fleet_measurement
+                        or (
+                            self._is_private_baseline_owner()
+                            and not baseline_full_fleet_proven
+                        )
                     ),
                 )
             else:
+                if force_full_fleet_measurement:
+                    return {
+                        "proceed": False,
+                        "reason": (
+                            "provider_preflight_full_fleet_owner_pending"
+                        ),
+                        "verdicts": [],
+                    }
                 if (
                     bool(
                         getattr(
@@ -6588,6 +6687,33 @@ class ResearchLabGatewayScoringWorker:
             completed_icps=completed_icps,
             total_icps=total_icps,
         )
+
+    def _baseline_full_fleet_preflight_is_fresh(self) -> bool:
+        """Return whether every bound scoring profile has a live proof."""
+
+        ttl_seconds = max(
+            60.0,
+            float(provider_preflight_settings().get("ttl_seconds") or 600.0),
+        )
+        worker_count = max(
+            1,
+            int(getattr(self.config, "scoring_worker_total_workers", 1) or 1),
+        )
+        measurements = dict(
+            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
+        )
+        now = _baseline_preflight_monotonic()
+        for worker_index in range(worker_count):
+            measured_at = measurements.get(worker_index)
+            if measured_at is None:
+                return False
+            try:
+                age_seconds = now - float(measured_at)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if age_seconds < 0 or age_seconds >= ttl_seconds:
+                return False
+        return True
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
         from leadpoet_canonical.production_parity_boundary_v2 import (
@@ -14159,48 +14285,34 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
 
+        exact_checkpoint_replay_count = 0
         if isinstance(runner, ExactOfficialBaselineRunner):
-            items_by_ref = {
-                _benchmark_item_ref_for_progress(item): item
-                for item in window.benchmark_items
-            }
-            attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
-            for entry in baseline_progress_attempt_ledger:
-                if isinstance(entry, Mapping):
-                    attempts_by_ref.setdefault(
-                        str(entry.get("icp_ref") or ""), []
-                    ).append(entry)
-            for resumed_row in baseline_progress_rows:
-                resumed_ref = _benchmark_item_ref_for_progress(resumed_row)
-                item = items_by_ref.get(resumed_ref)
-                attempts = sorted(
-                    attempts_by_ref.get(resumed_ref) or [],
-                    key=lambda value: int(value.get("retry_round") or 0),
+            replay_started = time.monotonic()
+            exact_checkpoint_replay_count = (
+                await _replay_exact_baseline_checkpoints(
+                    runner=runner,
+                    benchmark_items=window.benchmark_items,
+                    progress_rows=baseline_progress_rows,
+                    attempt_ledger=baseline_progress_attempt_ledger,
+                    max_concurrency=self.config.private_baseline_concurrency,
                 )
-                latest_result = (
-                    attempts[-1].get("result_row") if attempts else None
-                )
-                latest_retry_round = (
-                    int(attempts[-1].get("retry_round") or 0)
-                    if attempts
-                    else 0
-                )
-                checkpoint = (
-                    latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
-                    if isinstance(latest_result, Mapping)
-                    else None
-                )
-                if item is None or checkpoint is None:
-                    raise RuntimeError(
-                        "official baseline v3 checkpoint is missing its exact model frontier"
-                    )
-                await asyncio.to_thread(
-                    runner.run_icp,
-                    raw_icp=item["icp"],
-                    icp_ref=resumed_ref,
-                    target_count=_icp_company_goal(item["icp"]) or 1,
-                    attempt_ordinal=latest_retry_round,
-                    expected_checkpoint=checkpoint,
+            )
+            if exact_checkpoint_replay_count:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_model_replay",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    row_count=exact_checkpoint_replay_count,
+                    concurrency=min(
+                        exact_checkpoint_replay_count,
+                        max(1, self.config.private_baseline_concurrency),
+                    ),
+                    duration_seconds=time.monotonic() - replay_started,
                 )
 
         if baseline_telemetry_session is not None:
@@ -14517,6 +14629,58 @@ class ResearchLabGatewayScoringWorker:
                     }
                 )
             total_icps = len(window.benchmark_items)
+            if (
+                exact_checkpoint_replay_count
+                and not self._baseline_full_fleet_preflight_is_fresh()
+            ):
+                refresh_state = await get_scoring_maintenance_state()
+                if _operator_scoring_pause_active(refresh_state):
+                    raise BaselineMaintenancePause(
+                        completed_icps=len(baseline_progress_rows),
+                        total_icps=total_icps,
+                        maintenance_state=refresh_state,
+                    )
+                refreshed = await self._run_lease_held_recovery_and_preflight(
+                    refresh_state,
+                    force_full_fleet_measurement=True,
+                )
+                if (
+                    not refreshed.get("proceed")
+                    or not self._baseline_full_fleet_preflight_is_fresh()
+                ):
+                    raise BaselineCheckpointRecycle(
+                        pressure={
+                            "reason": str(
+                                refreshed.get("reason")
+                                or "provider_preflight_refresh_proof_missing"
+                            ),
+                            "provider_preflight_profile_count": max(
+                                1,
+                                int(
+                                    self.config.scoring_worker_total_workers
+                                    or 1
+                                ),
+                            ),
+                        },
+                        completed_icps=len(baseline_progress_rows),
+                        total_icps=total_icps,
+                    )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_restore_preflight_refresh",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    completed_icp_count=len(baseline_progress_rows),
+                    selected_icp_count=total_icps,
+                    row_count=max(
+                        1,
+                        int(self.config.scoring_worker_total_workers or 1),
+                    ),
+                )
             if batch_execution and not legacy_v1_enabled():
                 _require_v2_baseline_receipt_capacity(total_icps)
             _record_private_baseline_stage(

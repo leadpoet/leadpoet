@@ -2151,6 +2151,88 @@ async def test_any_worker_owner_requires_fleet_lease_until_baseline_ready(
     assert ready["proceed"] is True
     assert [int(call["worker_index"]) for call in profile_calls] == [7]
 
+    profile_calls.clear()
+    forced = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""},
+        force_full_fleet_measurement=True,
+    )
+    assert forced == {
+        "proceed": False,
+        "reason": "provider_preflight_full_fleet_owner_pending",
+        "verdicts": [],
+    }
+    assert profile_calls == []
+
+
+@pytest.mark.asyncio
+async def test_exact_checkpoint_replay_is_bounded_and_concurrent():
+    barrier = threading.Barrier(2, timeout=2.0)
+    calls: list[dict[str, object]] = []
+
+    class Runner:
+        def run_icp(self, **kwargs):  # noqa: ANN003
+            barrier.wait()
+            calls.append(dict(kwargs))
+
+    progress_rows = [{"icp_ref": "icp-a"}, {"icp_ref": "icp-b"}]
+    attempt_ledger = [
+        {
+            "icp_ref": "icp-a",
+            "retry_round": 0,
+            "result_row": {
+                sw._OFFICIAL_BASELINE_CHECKPOINT_FIELD: {"checkpoint": "a"}
+            },
+        },
+        {
+            "icp_ref": "icp-b",
+            "retry_round": 1,
+            "result_row": {
+                sw._OFFICIAL_BASELINE_CHECKPOINT_FIELD: {"checkpoint": "b"}
+            },
+        },
+    ]
+
+    replayed = await sw._replay_exact_baseline_checkpoints(
+        runner=Runner(),
+        benchmark_items=[
+            {"icp_ref": "icp-a", "icp": {"max_companies": 2}},
+            {"icp_ref": "icp-b", "icp": {"max_companies": 3}},
+        ],
+        progress_rows=progress_rows,
+        attempt_ledger=attempt_ledger,
+        max_concurrency=2,
+    )
+
+    assert replayed == 2
+    by_ref = {str(call["icp_ref"]): call for call in calls}
+    assert set(by_ref) == {"icp-a", "icp-b"}
+    assert by_ref["icp-a"]["target_count"] == 2
+    assert by_ref["icp-a"]["attempt_ordinal"] == 0
+    assert by_ref["icp-b"]["target_count"] == 3
+    assert by_ref["icp-b"]["attempt_ordinal"] == 1
+
+
+def test_full_fleet_preflight_freshness_requires_every_live_measurement(
+    monkeypatch,
+):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(scoring_worker_total_workers=2)
+    worker._baseline_profile_preflight_monotonic_at = {0: 100.0, 1: 101.0}
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: 150.0)
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0},
+    )
+
+    assert worker._baseline_full_fleet_preflight_is_fresh() is True
+    worker._baseline_profile_preflight_monotonic_at.pop(1)
+    assert worker._baseline_full_fleet_preflight_is_fresh() is False
+    worker._baseline_profile_preflight_monotonic_at[1] = 151.0
+    assert worker._baseline_full_fleet_preflight_is_fresh() is False
+    worker._baseline_profile_preflight_monotonic_at[1] = -500.0
+    assert worker._baseline_full_fleet_preflight_is_fresh() is False
+
 
 @pytest.mark.asyncio
 async def test_forced_owned_preflight_records_only_complete_fleet(monkeypatch):
@@ -2214,6 +2296,63 @@ async def test_forced_owned_preflight_records_only_complete_fleet(monkeypatch):
 
     assert failed["proceed"] is False
     assert worker._baseline_profile_preflight_monotonic_at == {}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_forces_fresh_owned_fleet_measurement(
+    monkeypatch,
+):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_rebenchmark_enabled=True,
+        scoring_worker_index=0,
+        scoring_worker_total_workers=2,
+    )
+    worker._lease_holder_ref = "baseline-lease-holder"
+    worker._holds_maintenance_lease = False
+    worker._is_private_baseline_owner = lambda: True
+    worker._baseline_profile_preflight_monotonic_at = {0: 1.0, 1: 1.0}
+    calls: list[dict[str, object]] = []
+
+    async def lease_acquired(**_kwargs):
+        return True
+
+    async def no_recovery_work():
+        return None
+
+    async def owned_preflight(**kwargs):  # noqa: ANN003
+        calls.append(dict(kwargs))
+        return {"proceed": True, "verdicts": []}
+
+    class Heartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def start(self):
+            pass
+
+        def ensure_held(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(sw, "try_acquire_maintenance_lease", lease_acquired)
+    monkeypatch.setattr(sw, "MaintenanceLeaseHeartbeat", Heartbeat)
+    worker._recover_stale_candidate_claims = no_recovery_work
+    worker._alert_stuck_candidates = no_recovery_work
+    worker._requeue_quarantined_candidates = no_recovery_work
+    worker._run_owned_provider_preflight = owned_preflight
+
+    result = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""},
+        force_full_fleet_measurement=True,
+    )
+
+    assert result["proceed"] is True
+    assert len(calls) == 1
+    assert calls[0]["force_measurement"] is True
 
 
 @pytest.mark.asyncio

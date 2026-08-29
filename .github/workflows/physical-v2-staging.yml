@@ -475,7 +475,7 @@ jobs:
             if [ "$final_status" -ne 0 ] && \
                [ "$failure_stage" = host-python-bootstrap ]; then
               case "$host_bootstrap_step" in
-                venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
+                container-runtime-package|container-runtime-identity|container-runtime-service|venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
                   printf 'LEADPOET_BOOTSTRAP_STEP=%s\n' \
                     "$host_bootstrap_step" >&2
                   ;;
@@ -612,6 +612,19 @@ jobs:
           host_python="$host_venv/bin/python3"
           failure_stage=host-python-bootstrap
           failure_category=CommandFailed
+          host_bootstrap_step=container-runtime-package
+          if [ ! -x /usr/bin/docker ]; then
+            test -x /usr/bin/dnf
+            sudo -n /usr/bin/dnf -q -y install docker >/dev/null 2>&1
+          fi
+          host_bootstrap_step=container-runtime-identity
+          test -x /usr/bin/docker
+          /usr/bin/rpm -qf /usr/bin/docker \
+            | /usr/bin/grep -Eq '^docker-[0-9]'
+          host_bootstrap_step=container-runtime-service
+          sudo -n /usr/bin/systemctl start docker.service >/dev/null 2>&1
+          sudo -n /usr/bin/systemctl is-active --quiet docker.service
+          sudo -n /usr/bin/docker info >/dev/null 2>&1
           host_bootstrap_step=venv-absence
           test ! -e "$host_venv"
           host_bootstrap_step=runtime-package
@@ -744,6 +757,9 @@ jobs:
           import sys
 
           allowed = {
+              "container-runtime-package",
+              "container-runtime-identity",
+              "container-runtime-service",
               "venv-absence",
               "runtime-package",
               "venv-create",

@@ -1030,9 +1030,31 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         '/usr/bin/python3.11 -I -m venv "$host_venv"'
         in source
     )
-    runtime_package = source.index("host_bootstrap_step=runtime-package")
+    container_runtime_package = source.index(
+        "host_bootstrap_step=container-runtime-package"
+    )
+    container_runtime_identity = source.index(
+        "host_bootstrap_step=container-runtime-identity"
+    )
+    container_runtime_service = source.index(
+        "host_bootstrap_step=container-runtime-service"
+    )
+    venv_absence = source.index("host_bootstrap_step=venv-absence")
+    python_runtime_package = source.index("host_bootstrap_step=runtime-package")
     venv_create = source.index("host_bootstrap_step=venv-create")
-    assert runtime_package < venv_create
+    assert (
+        container_runtime_package
+        < container_runtime_identity
+        < container_runtime_service
+        < venv_absence
+        < python_runtime_package
+        < venv_create
+    )
+    assert "if [ ! -x /usr/bin/docker ]; then" in source
+    assert "sudo -n /usr/bin/dnf -q -y install docker" in source
+    assert "/usr/bin/rpm -qf /usr/bin/docker" in source
+    assert "sudo -n /usr/bin/systemctl start docker.service" in source
+    assert "sudo -n /usr/bin/docker info" in source
     assert "python3.11-pip-wheel" not in source
     assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
@@ -1096,6 +1118,9 @@ def test_full_bootstrap_diagnostic_exposes_only_a_bounded_substage():
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
     allowed = {
+        "container-runtime-package",
+        "container-runtime-identity",
+        "container-runtime-service",
         "venv-absence",
         "runtime-package",
         "venv-create",

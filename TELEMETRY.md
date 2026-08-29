@@ -1,8 +1,9 @@
 # Gateway infra-only telemetry
 
 Opt-in OpenTelemetry for the gateway HOST process. One server span per HTTP
-request; nothing else. See `gateway/observability/otel_bootstrap.py` for the
-full contract.
+request; nothing else from that process. See
+`gateway/observability/otel_bootstrap.py` for the full contract, and
+"What is NOT instrumented" below for everything this leaves dark.
 
 ## What a span contains — and all it can ever contain
 
@@ -52,6 +53,28 @@ only 4xx signal is the `http.response.status_code` attribute.
 `StatusCode.OK` is never set, so a `status != Ok` test matches every span:
 over the trailing 7 days the gateway's spans are 439,148 `Unset` (11,692 of
 them 4xx), 2,003 `Error`, and 0 `Ok`.
+
+## What is NOT instrumented
+
+`configure_gateway_otel` is imported in exactly one place (`gateway/main.py`),
+and its middleware returns early unless `scope["type"] == "http"`. The
+gateway's HTTP request path is therefore the only thing in this repository
+that reaches the OTel collector. Everything else is dark to it:
+
+| dark to OTel | what it does have |
+|---|---|
+| The gateway's own in-process background tasks — epoch monitor, checkpoint, daily Arweave anchor, hourly Arweave batch, ICP rotation, rate-limiter and hotkey-bucket cleanup, fulfillment lifecycle, the SOURCE_ADD dispatcher and the PCR0 builder (all `asyncio.create_task` in the `main.py` lifespan) | nothing — they never pass through the ASGI middleware |
+| Research Lab worker fleets — separate OS processes (`gateway/research_lab/worker_process.py`, `scripts/run_research_lab_*worker*.py`) | Sentry only |
+| Validator, miner and auditor neurons (`neurons/*.py`) | Sentry only |
+| Validator TEE **host-side** tooling (`validator_tee/host/*`: runtime bootstrap, release gate, gateway PCR0 builder) | Sentry only — it runs outside the enclave, so it *could* carry spans |
+| The TEE **enclave** itself (`validator_tee/enclave/`) | nothing, deliberately: any added dependency changes PCR0 |
+| `gw_restart.sh` and the GitHub Actions workflows | nothing |
+
+**Sentry is not coverage for any of these.** Sentry events go to a third-party
+vendor, never to the OTLP endpoint, and they are error events rather than
+traces. A background task that stalls, a worker fleet that stops consuming, or
+a restart that never finishes leaves nothing at all in the OTel store — "we
+have Sentry" does not close that gap.
 
 ## Enabling (gateway host only)
 

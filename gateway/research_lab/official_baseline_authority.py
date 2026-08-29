@@ -1432,12 +1432,26 @@ def _production_custody() -> S3OfficialBaselineDocumentCustody:
         ) from exc
     try:
         import boto3  # type: ignore
+        from botocore.config import Config as BotocoreConfig  # type: ignore
     except Exception as exc:  # pragma: no cover - production dependency
         raise OfficialBaselineAuthorityUnavailable(
             "official baseline encrypted custody client is unavailable"
         ) from exc
+    # One custody client is shared by every concurrent official-baseline unit.
+    # Keep the pool above the model's maximum supported 40-way wave and bound
+    # every transport attempt so a small immutable-document readback cannot
+    # strand an otherwise completed model action indefinitely.  These are
+    # durable code defaults rather than release- or environment-specific
+    # identities; SDK retries never relax the append-only byte comparisons.
+    transport = BotocoreConfig(
+        connect_timeout=5,
+        read_timeout=15,
+        max_pool_connections=64,
+        retries={"mode": "standard", "total_max_attempts": 3},
+        tcp_keepalive=True,
+    )
     return S3OfficialBaselineDocumentCustody(
-        client=boto3.client("s3"),
+        client=boto3.client("s3", config=transport),
         bucket=configuration["bucket"],
         prefix=configuration["prefix"],
         kms_key_id=configuration["kms_key_id"],

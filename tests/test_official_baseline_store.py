@@ -5,6 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.research_lab import (
+    official_baseline_store as official_baseline_store_module,
+)
+
 from gateway.research_lab.official_baseline_model_runner import (
     EXACT_MODEL_RUNNER_FAMILY,
     OFFICIAL_BASELINE_ACTION_AUTHORIZATION_SCHEMA_VERSION,
@@ -257,6 +261,19 @@ class _Client:
         return _RpcCall(response)
 
 
+class _SequencedClient(_Client):
+    def __init__(self, responses, sequence):
+        super().__init__(responses)
+        self.sequence = list(sequence)
+
+    def rpc(self, name, params):
+        self.calls.append((name, deepcopy(params)))
+        response = self.sequence.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return _RpcCall(response)
+
+
 def _responses() -> dict:
     registration = _registration()
     authorization = _authorization()
@@ -346,6 +363,52 @@ def test_supabase_store_uses_all_seven_exact_rpc_shapes():
         {"p_completion"},
         {"p_run_sha256", "p_unit_ref"},
     ]
+
+
+def test_supabase_store_retries_exact_rpc_after_ambiguous_timeout(monkeypatch):
+    responses = _responses()
+    response = responses[OFFICIAL_BASELINE_RPCS[2]]
+    client = _SequencedClient(
+        responses,
+        [TimeoutError("fixture timeout"), response],
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        official_baseline_store_module.time,
+        "sleep",
+        sleeps.append,
+    )
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    result = store.record_terminal_known(terminal=_terminal_known())
+
+    assert result["state"] == "terminal_known"
+    assert client.calls == [
+        (OFFICIAL_BASELINE_RPCS[2], {"p_terminal": _terminal_known()}),
+        (OFFICIAL_BASELINE_RPCS[2], {"p_terminal": _terminal_known()}),
+    ]
+    assert sleeps == [0.1]
+
+
+def test_supabase_store_never_retries_logic_or_conflict_error(monkeypatch):
+    responses = _responses()
+    client = _SequencedClient(
+        responses,
+        [ValueError("fixture conflict")],
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        official_baseline_store_module.time,
+        "sleep",
+        sleeps.append,
+    )
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    with pytest.raises(OfficialBaselineStoreError, match="ValueError"):
+        store.record_terminal_known(terminal=_terminal_known())
+
+    assert len(client.calls) == 1
+    assert sleeps == []
 
 
 def test_supabase_store_accepts_exact_zero_call_verifier_authorization():

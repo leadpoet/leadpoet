@@ -7,7 +7,9 @@ boundary. Provider responses and projected company data never enter Supabase.
 from __future__ import annotations
 
 from datetime import date, datetime
+import logging
 import re
+import time
 from typing import Any, Mapping
 
 from gateway.db.client import get_write_client
@@ -24,6 +26,7 @@ from gateway.research_lab.official_baseline_model_runner import (
     OFFICIAL_BASELINE_UNIT_COMPLETION_SCHEMA_VERSION,
     validate_official_baseline_provider_closure,
 )
+from gateway.research_lab.store import _is_transient_store_error
 from research_lab.canonical import sha256_json
 
 
@@ -52,6 +55,15 @@ OFFICIAL_BASELINE_RPCS = (
     OFFICIAL_BASELINE_RPC_CLOSE_UNIT,
     OFFICIAL_BASELINE_RPC_LOAD_FRONTIER,
 )
+
+logger = logging.getLogger(__name__)
+
+# Every RPC below is exact-document idempotent in migration 164: an identical
+# retry returns the durable row and any conflicting document still fails.  A
+# bounded retry is therefore safe even when a timeout leaves commit status
+# ambiguous, unlike a generic non-idempotent Supabase write.
+_OFFICIAL_BASELINE_RPC_ATTEMPTS = 3
+_OFFICIAL_BASELINE_RPC_BACKOFF_SECONDS = (0.1, 0.25)
 
 _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _UNIT_REF_RE = re.compile(r"baseline_icp:[0-9a-f]{64}")
@@ -802,12 +814,32 @@ class SupabaseOfficialBaselineAttemptStore:
         return self._client if self._client is not None else get_write_client()
 
     def _rpc(self, name: str, params: Mapping[str, Any]) -> Any:
-        try:
-            response = self.client.rpc(name, dict(params)).execute()
-        except Exception as exc:  # noqa: BLE001 - fail closed at SQL authority
+        for attempt in range(_OFFICIAL_BASELINE_RPC_ATTEMPTS):
+            try:
+                response = self.client.rpc(name, dict(params)).execute()
+                break
+            except Exception as exc:  # noqa: BLE001 - classified fail closed
+                if (
+                    attempt + 1 >= _OFFICIAL_BASELINE_RPC_ATTEMPTS
+                    or not _is_transient_store_error(exc)
+                ):
+                    raise OfficialBaselineStoreError(
+                        "official baseline authority RPC failed:"
+                        f"{name}:{type(exc).__name__}"
+                    ) from exc
+                logger.warning(
+                    "official_baseline_rpc_transient_retry rpc=%s "
+                    "attempt=%s/%s error=%s",
+                    name,
+                    attempt + 1,
+                    _OFFICIAL_BASELINE_RPC_ATTEMPTS,
+                    type(exc).__name__,
+                )
+                time.sleep(_OFFICIAL_BASELINE_RPC_BACKOFF_SECONDS[attempt])
+        else:  # pragma: no cover - the bounded loop returns or raises
             raise OfficialBaselineStoreError(
-                f"official baseline authority RPC failed:{name}:{type(exc).__name__}"
-            ) from exc
+                f"official baseline authority RPC failed:{name}:unknown"
+            )
         data = _response_data(response)
         if not isinstance(data, Mapping):
             raise OfficialBaselineStoreError(

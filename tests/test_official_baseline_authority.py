@@ -180,6 +180,41 @@ def test_custody_closes_s3_body_when_stream_read_fails():
     assert body.closed is True
 
 
+def test_production_custody_uses_bounded_concurrent_s3_transport(monkeypatch):
+    import boto3
+
+    captured = {}
+    s3 = _S3()
+
+    def client(service, **kwargs):
+        captured.update(service=service, **kwargs)
+        return s3
+
+    monkeypatch.setenv(
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
+        "s3://fixture-bucket/research-lab/traces",
+    )
+    monkeypatch.setenv(
+        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID",
+        "alias/fixture-encryption",
+    )
+    monkeypatch.setattr(boto3, "client", client)
+
+    custody = official_baseline_authority_module._production_custody()
+    transport = captured["config"]
+
+    assert isinstance(custody, S3OfficialBaselineDocumentCustody)
+    assert captured["service"] == "s3"
+    assert transport.connect_timeout == 5
+    assert transport.read_timeout == 15
+    assert transport.max_pool_connections == 64
+    assert transport.retries == {
+        "mode": "standard",
+        "total_max_attempts": 3,
+    }
+    assert transport.tcp_keepalive is True
+
+
 def test_fresh_daily_attempt_zero_is_a_valid_frozen_context():
     runner, _projector, _authority_value, _terminal = _exact_fixture()
     context = replace(_context(runner), benchmark_attempt=0)

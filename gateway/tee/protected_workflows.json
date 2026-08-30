@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "c8ffbc521da7529e7d795fc5fb572e65deb17d15",
+  "baseline_commit": "ae77143f3762e6654440cdcd04441344b1bcd051",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1572,7 +1572,7 @@
       "symbol": "PRIVATE_MODEL_EXACT_GIT_SHA_RE"
     },
     {
-      "ast_sha256": "sha256:e25a5393c1d00d53924db53cd37462371afbfb844830195af458a9c71c3ab201",
+      "ast_sha256": "sha256:9f81cb9fe97238a811300914db419a8ca3466fcfeb8a450800ca587ac9b03e07",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards"
     },
@@ -8217,7 +8217,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6a036ac3d0f54b99d6633cc58ea165e49e137a797fd51fc11374069166a7905f",
-  "protected_source_commit": "c8ffbc521da7529e7d795fc5fb572e65deb17d15",
+  "manifest_hash": "sha256:4d045f304312321dd4b73022eca161fae8978d175b24131467aa919724775533",
+  "protected_source_commit": "ae77143f3762e6654440cdcd04441344b1bcd051",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

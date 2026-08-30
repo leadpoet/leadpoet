@@ -25,6 +25,7 @@ MIGRATIONS = (
     "86-research-lab-attested-v2-authority.sql",
     "96-research-lab-source-add-functional-workflow.sql",
     "145-research-lab-source-add-admission-control.sql",
+    "167-research-lab-source-add-post-accept-leg1.sql",
 )
 DOCKER = shutil.which("docker")
 pytestmark = pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
@@ -249,6 +250,7 @@ def _seed_receipt(
     job_id: str,
     output_root: str,
     sequence: int,
+    parent_receipt_hashes: tuple[str, ...] = (),
 ) -> None:
     marker = "%064x" % (sequence + 20)
     cursor.execute(
@@ -264,7 +266,7 @@ def _seed_receipt(
             %s, 'leadpoet.attested_execution_receipt.v2',
             'gateway_coordinator', %s, %s, 700, %s, %s, %s, %s, %s, %s,
             %s, %s, %s, %s, %s, %s, 'succeeded', NULL, %s, %s,
-            '{}'::JSONB, NOW()
+            %s::JSONB, NOW()
         )
         """,
         (
@@ -285,6 +287,7 @@ def _seed_receipt(
             "sha256:" + "2" * 64,
             "c" * 64,
             "d" * 128,
+            _json({"parent_receipt_hashes": sorted(parent_receipt_hashes)}),
         ),
     )
 
@@ -304,6 +307,19 @@ def _seed_business_link(
         ) VALUES (%s, %s, %s, %s)
         """,
         (receipt_hash, artifact_kind, artifact_ref, artifact_hash),
+    )
+
+
+def _seed_receipt_edge(
+    cursor, *, child_receipt_hash: str, parent_receipt_hash: str
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO public.research_lab_attested_receipt_edges_v2 (
+            child_receipt_hash, parent_receipt_hash
+        ) VALUES (%s, %s)
+        """,
+        (child_receipt_hash, parent_receipt_hash),
     )
 
 
@@ -356,6 +372,17 @@ def test_source_add_complete_database_workflow(database):
         )
         assert contract["control_row_present"] is True
         assert contract["trigger_enabled"] is True
+        post_accept_contract = _scalar(
+            cursor,
+            "SELECT public.research_lab_source_add_post_accept_leg1_contract_v1()",
+        )
+        assert post_accept_contract == {
+            "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
+            "intent_trigger_enabled": True,
+            "work_trigger_enabled": True,
+            "reward_trigger_enabled": True,
+            "finalizer_present": True,
+        }
         assert _scalar(
             cursor,
             "SELECT public.research_lab_source_add_claim_work('paused-worker', 180)",
@@ -469,39 +496,40 @@ def test_source_add_complete_database_workflow(database):
         assert _finish_work(
             cursor,
             work=functional,
-            stage="leg1_queued",
+            stage="functional_probe_passed",
             submission_doc=record_doc,
             precheck_status="provenance_precheck_passed",
             functional_attempt=functional_attempt,
-            reward_intent={
-                "intent_id": REWARD_INTENT,
-                "miner_hotkey": MINER_HOTKEY,
-                "functional_receipt_hash": FUNCTIONAL_RECEIPT,
-                "business_artifact_hash": FUNCTIONAL_ARTIFACT,
-            },
-            next_work={
-                "work_id": REWARD_WORK,
-                "work_kind": "leg1_reward",
-                "priority": 30,
-                "job_doc": {"intent_id": REWARD_INTENT},
-            },
         )["status"] == "completed"
-
-        reward_work = _scalar(
+        assert _scalar(
             cursor,
             "SELECT public.research_lab_source_add_claim_work('postgres-e2e', 180)",
-        )["work"]
-        assert reward_work["work_kind"] == "leg1_reward"
-        slot = _scalar(
+        )["status"] == "empty"
+        assert _scalar(
             cursor,
-            """
-            SELECT public.research_lab_source_add_reserve_leg1_slot(
-                %s, %s, %s::UUID, 10, 300
+            "SELECT COUNT(*) FROM public.research_lab_source_add_reward_intents",
+        ) == 0
+        with pytest.raises(
+            psycopg2.errors.ObjectNotInPrerequisiteState,
+            match="requires accepted eligible provisioning",
+        ):
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_intents (
+                    intent_id, submission_id, adapter_id, miner_hotkey,
+                    intent_status, functional_receipt_hash,
+                    business_artifact_hash
+                ) VALUES (%s, %s, %s, %s, 'queued', %s, %s)
+                """,
+                (
+                    REWARD_INTENT,
+                    SUBMISSION_ID,
+                    ADAPTER_ID,
+                    MINER_HOTKEY,
+                    FUNCTIONAL_RECEIPT,
+                    FUNCTIONAL_ARTIFACT,
+                ),
             )
-            """,
-            (REWARD_INTENT, REWARD_WORK, reward_work["lease_token"]),
-        )
-        assert slot["status"] == "reserved"
 
         _seed_boot_identity(cursor)
         _seed_receipt(
@@ -519,60 +547,6 @@ def test_source_add_complete_database_workflow(database):
             artifact_ref=FUNCTIONAL_ATTEMPT,
             artifact_hash=FUNCTIONAL_ARTIFACT,
         )
-        _seed_receipt(
-            cursor,
-            receipt_hash=DECISION_RECEIPT,
-            purpose="research_lab.reward_decision.v2",
-            job_id="source-add-reward-postgres-e2e",
-            output_root=DECISION_ARTIFACT,
-            sequence=2,
-        )
-        _seed_business_link(
-            cursor,
-            receipt_hash=DECISION_RECEIPT,
-            artifact_kind="source_add_reward_decision",
-            artifact_ref=REWARD_REF,
-            artifact_hash=DECISION_ARTIFACT,
-        )
-        trigger = {
-            "functional_probe_passed": True,
-            "attempt_ref": FUNCTIONAL_ATTEMPT,
-            "functional_probe_receipt_hash": FUNCTIONAL_RECEIPT,
-            "business_artifact_hash": FUNCTIONAL_ARTIFACT,
-            "functional_probe_result_hash": FUNCTIONAL_ARTIFACT,
-            "evaluator_version": result_doc["evaluator_version"],
-            "route_hash": ROUTE_HASH,
-        }
-        finalized = _scalar(
-            cursor,
-            """
-            SELECT public.research_lab_source_add_finalize_leg1(
-                %s, %s, %s::UUID, %s::UUID, 10, %s::JSONB, %s::JSONB
-            )
-            """,
-            (
-                REWARD_INTENT,
-                REWARD_WORK,
-                reward_work["lease_token"],
-                slot["slot_lease_token"],
-                _json(
-                    {
-                        "reward_ref": REWARD_REF,
-                        "reward_kind": "source_acceptance",
-                        "alpha_percent": 1.0,
-                        "reward_epochs": 20,
-                        "start_epoch": 701,
-                        "state": "active",
-                        "trigger_evidence_doc": trigger,
-                        "public_label": "SOURCE_ADD Leg 1",
-                        "decision_receipt_hash": DECISION_RECEIPT,
-                        "decision_artifact_hash": DECISION_ARTIFACT,
-                    }
-                ),
-                _json(record_doc),
-            ),
-        )
-        assert finalized == {"status": "created", "reward_ref": REWARD_REF}
 
         catalog_row = {
             "catalog_id": CATALOG_ID,
@@ -706,8 +680,9 @@ def test_source_add_complete_database_workflow(database):
         smoke_finalized = _scalar(
             cursor,
             """
-            SELECT public.research_lab_source_add_finalize_provision_smoke(
-                %s, %s::UUID, %s, %s::JSONB, %s::JSONB, %s::JSONB
+            SELECT public.research_lab_source_add_finalize_provision_smoke_v2(
+                %s, %s::UUID, %s, %s::JSONB, %s::JSONB, %s::JSONB,
+                %s::JSONB, %s::JSONB
             )
             """,
             (
@@ -717,9 +692,158 @@ def test_source_add_complete_database_workflow(database):
                 _json(catalog_row),
                 _json(eligible_row),
                 _json(smoke_attempt),
+                _json(
+                    {
+                        "intent_id": REWARD_INTENT,
+                        "miner_hotkey": MINER_HOTKEY,
+                        "functional_receipt_hash": FUNCTIONAL_RECEIPT,
+                        "business_artifact_hash": FUNCTIONAL_ARTIFACT,
+                    }
+                ),
+                _json(
+                    {
+                        "work_id": REWARD_WORK,
+                        "work_kind": "leg1_reward",
+                        "priority": 30,
+                        "job_doc": {
+                            "intent_id": REWARD_INTENT,
+                            "attempt_ref": FUNCTIONAL_ATTEMPT,
+                        },
+                    }
+                ),
             ),
         )
         assert smoke_finalized["status"] == "provisioned"
+        assert smoke_finalized["leg1_status"] == "queued"
+        assert smoke_finalized["intent_id"] == REWARD_INTENT
+        assert smoke_finalized["work_id"] == REWARD_WORK
+        assert _scalar(
+            cursor,
+            """
+            SELECT COUNT(*) FROM public.research_lab_source_add_submissions
+            WHERE submission_id = %s AND stage = 'accepted'
+            """,
+            (SUBMISSION_ID,),
+        ) == 1
+
+        reward_work = _scalar(
+            cursor,
+            "SELECT public.research_lab_source_add_claim_work('postgres-e2e', 180)",
+        )["work"]
+        assert reward_work["work_kind"] == "leg1_reward"
+        slot = _scalar(
+            cursor,
+            """
+            SELECT public.research_lab_source_add_reserve_leg1_slot(
+                %s, %s, %s::UUID, 10, 300
+            )
+            """,
+            (REWARD_INTENT, REWARD_WORK, reward_work["lease_token"]),
+        )
+        assert slot["status"] == "reserved"
+
+        _seed_receipt(
+            cursor,
+            receipt_hash=DECISION_RECEIPT,
+            purpose="research_lab.reward_decision.v2",
+            job_id="source-add-reward-postgres-e2e",
+            output_root=DECISION_ARTIFACT,
+            sequence=2,
+            parent_receipt_hashes=(FUNCTIONAL_RECEIPT, SMOKE_RECEIPT),
+        )
+        _seed_receipt_edge(
+            cursor,
+            child_receipt_hash=DECISION_RECEIPT,
+            parent_receipt_hash=FUNCTIONAL_RECEIPT,
+        )
+        _seed_business_link(
+            cursor,
+            receipt_hash=DECISION_RECEIPT,
+            artifact_kind="source_add_reward_decision",
+            artifact_ref=REWARD_REF,
+            artifact_hash=DECISION_ARTIFACT,
+        )
+        trigger = {
+            "functional_probe_passed": True,
+            "attempt_ref": FUNCTIONAL_ATTEMPT,
+            "functional_probe_receipt_hash": FUNCTIONAL_RECEIPT,
+            "business_artifact_hash": FUNCTIONAL_ARTIFACT,
+            "functional_probe_result_hash": FUNCTIONAL_ARTIFACT,
+            "evaluator_version": result_doc["evaluator_version"],
+            "route_hash": ROUTE_HASH,
+            "provisioning_smoke_passed": True,
+            "provisioning_smoke_attempt_ref": SMOKE_ATTEMPT,
+            "provisioning_smoke_receipt_hash": SMOKE_RECEIPT,
+            "provisioning_smoke_business_artifact_hash": SMOKE_ARTIFACT,
+            "provisioning_smoke_result_hash": SMOKE_ARTIFACT,
+            "submission_id": SUBMISSION_ID,
+            "final_acceptance_stage": "accepted",
+            "provision_ref": eligible_row["provision_ref"],
+            "catalog_id": CATALOG_ID,
+            "registry_provider_id": REGISTRY_PROVIDER_ID,
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+        reward_doc = {
+            "reward_ref": REWARD_REF,
+            "reward_kind": "source_acceptance",
+            "alpha_percent": 1.0,
+            "reward_epochs": 20,
+            "start_epoch": 701,
+            "state": "active",
+            "trigger_evidence_doc": trigger,
+            "public_label": "SOURCE_ADD Leg 1",
+            "decision_receipt_hash": DECISION_RECEIPT,
+            "decision_artifact_hash": DECISION_ARTIFACT,
+        }
+        with pytest.raises(
+            psycopg2.errors.ObjectNotInPrerequisiteState,
+            match="approval or receipt graph differs",
+        ):
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_finalize_leg1(
+                    %s, %s, %s::UUID, %s::UUID, 10, %s::JSONB, %s::JSONB
+                )
+                """,
+                (
+                    REWARD_INTENT,
+                    REWARD_WORK,
+                    reward_work["lease_token"],
+                    slot["slot_lease_token"],
+                    _json(reward_doc),
+                    _json(record_doc),
+                ),
+            )
+        assert _scalar(
+            cursor,
+            "SELECT COUNT(*) FROM public.research_lab_source_add_reward_obligations",
+        ) == 0
+        assert _scalar(
+            cursor,
+            "SELECT intent_status FROM public.research_lab_source_add_reward_intents",
+        ) == "leased"
+        _seed_receipt_edge(
+            cursor,
+            child_receipt_hash=DECISION_RECEIPT,
+            parent_receipt_hash=SMOKE_RECEIPT,
+        )
+        finalized = _scalar(
+            cursor,
+            """
+            SELECT public.research_lab_source_add_finalize_leg1(
+                %s, %s, %s::UUID, %s::UUID, 10, %s::JSONB, %s::JSONB
+            )
+            """,
+            (
+                REWARD_INTENT,
+                REWARD_WORK,
+                reward_work["lease_token"],
+                slot["slot_lease_token"],
+                _json(reward_doc),
+                _json(record_doc),
+            ),
+        )
+        assert finalized == {"status": "created", "reward_ref": REWARD_REF}
 
         summary = _scalar(
             cursor,
@@ -756,6 +880,10 @@ def test_source_add_complete_database_workflow(database):
                 'reward_count', (
                     SELECT COUNT(*) FROM public.research_lab_source_add_reward_obligations
                     WHERE adapter_id = %s AND leg = 1
+                ),
+                'reward_catalog_id', (
+                    SELECT catalog_id FROM public.research_lab_source_add_reward_obligations
+                    WHERE adapter_id = %s AND leg = 1
                 )
             )
             """,
@@ -768,10 +896,11 @@ def test_source_add_complete_database_workflow(database):
                 ADAPTER_ID,
                 SUBMISSION_ID,
                 ADAPTER_ID,
+                ADAPTER_ID,
             ),
         )
         assert summary == {
-            "stage": "accepted",
+            "stage": "leg1_created",
             "probe": "passed",
             "smoke": "passed",
             "reward_status": "active",
@@ -779,6 +908,7 @@ def test_source_add_complete_database_workflow(database):
             "provision_status": "provisioned_autoresearch_eligible",
             "completed_work": 4,
             "reward_count": 1,
+            "reward_catalog_id": CATALOG_ID,
         }
         assert _scalar(
             cursor,

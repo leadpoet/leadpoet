@@ -4,8 +4,9 @@ Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
 emission streams within a separate, first-priority SOURCE_ADD allocation:
 
 - **Leg 1 — functional source submission**: 1% of miner emissions ×
-  ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created only after a measured V2
-  functional probe passes. Flat, one per adapter, ever.
+  ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created only after operator acceptance,
+  eligible provisioning, and measured V2 functional and smoke probes pass.
+  Flat, one per adapter, ever.
 - **Leg 2 — implementation rider**: +5% × 20 epochs to the ADAPTER OWNER,
   created alongside the implementing merge's champion grant only when the
   LLM final judge decides the already-winning change was helped by a known
@@ -158,7 +159,7 @@ def create_leg1_reward(
     state: str = SourceAddRewardState.ACTIVE.value,
     trigger_evidence: Mapping[str, Any] | None = None,
 ) -> SourceAddRewardRecord | None:
-    """Create the measured-functional-source leg. One per adapter, ever.
+    """Create the accepted, provisioned, measured-source leg. One per adapter.
 
     Queue policy is normal FIFO on the allocation rails: pass
     ``state="queued"`` when the lab cap cannot pay right now, exactly like

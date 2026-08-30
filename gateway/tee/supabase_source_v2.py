@@ -254,6 +254,18 @@ QUERY_POLICIES = {
         max_pages=1,
         limit=2,
     ),
+    "source_add_accepted_submission_by_id": SupabaseQueryV2(
+        policy_id="source_add_accepted_submission_by_id",
+        table="research_lab_source_add_submissions",
+        select=(
+            "submission_id,adapter_id,miner_hotkey,stage,precheck_status,"
+            "source_identity_hash,source_identity_version,seq"
+        ),
+        parameter_names=("submission_id",),
+        max_pages=1,
+        order="seq.desc",
+        limit=2,
+    ),
     "source_add_probe_config_by_submission": SupabaseQueryV2(
         policy_id="source_add_probe_config_by_submission",
         table="research_lab_source_add_probe_config_current",
@@ -277,6 +289,18 @@ QUERY_POLICIES = {
         max_pages=1,
         limit=2,
     ),
+    "source_add_provisioning_smoke_by_submission": SupabaseQueryV2(
+        policy_id="source_add_provisioning_smoke_by_submission",
+        table="research_lab_source_add_provisioning_smoke_current",
+        select=(
+            "attempt_ref,submission_id,adapter_id,evaluation_mode,config_ref,"
+            "result_status,route_hash,receipt_hash,business_artifact_hash,"
+            "result_doc,created_at"
+        ),
+        parameter_names=("submission_id",),
+        max_pages=1,
+        limit=2,
+    ),
     "source_add_leg1_events_since": SupabaseQueryV2(
         policy_id="source_add_leg1_events_since",
         table="research_lab_source_add_reward_events",
@@ -295,6 +319,17 @@ QUERY_POLICIES = {
         parameter_names=("adapter_id",),
         max_pages=1,
         order="adapter_id.asc",
+        limit=2,
+    ),
+    "source_add_catalog_by_adapter": SupabaseQueryV2(
+        policy_id="source_add_catalog_by_adapter",
+        table="research_lab_source_catalog",
+        select=(
+            "catalog_id,adapter_id,miner_ref,registry_provider_id,"
+            "source_identity_hash"
+        ),
+        parameter_names=("adapter_id",),
+        max_pages=1,
         limit=2,
     ),
     "source_add_provisioning_eligible": SupabaseQueryV2(
@@ -945,8 +980,10 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         )
     if policy.policy_id in {
         "source_add_submission_by_id",
+        "source_add_accepted_submission_by_id",
         "source_add_probe_config_by_submission",
         "source_add_functional_probe_by_submission",
+        "source_add_provisioning_smoke_by_submission",
     }:
         submission_id = _identifier(parameters["submission_id"], "submission_id")
         if not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id):
@@ -954,6 +991,8 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         filters = [("submission_id", "eq.%s" % submission_id)]
         if policy.policy_id == "source_add_probe_config_by_submission":
             filters.append(("config_status", "eq.active"))
+        if policy.policy_id == "source_add_accepted_submission_by_id":
+            filters.append(("stage", "eq.accepted"))
         return tuple(filters)
     if policy.policy_id == "source_add_leg1_events_since":
         day_start = _identifier(parameters["day_start"], "day_start")
@@ -966,14 +1005,20 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ),
             ("created_at", "gte.%s" % day_start),
         )
-    if policy.policy_id == "source_add_provisioning_by_adapter":
-        return (
+    if policy.policy_id in {
+        "source_add_provisioning_by_adapter",
+        "source_add_catalog_by_adapter",
+    }:
+        filters = [
             (
                 "adapter_id",
                 "eq.%s" % _identifier(parameters["adapter_id"], "adapter_id"),
-            ),
-            ("provision_status", "eq.provisioned_autoresearch_eligible"),
-        )
+            )
+        ]
+        if policy.policy_id == "source_add_catalog_by_adapter":
+            return tuple(filters)
+        filters.append(("provision_status", "eq.provisioned_autoresearch_eligible"))
+        return tuple(filters)
     if policy.policy_id in {
         "source_add_provisioning_eligible",
         "provider_registry_recent",

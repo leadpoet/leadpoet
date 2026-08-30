@@ -51,17 +51,22 @@ from leadpoet_canonical.weight_authority_v2 import (
 from research_lab.eval.promotion_metric import promotion_improvement_metric
 
 
-def test_reward_ancestry_accepts_checkpointed_source_add_parent() -> None:
+def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
     parent_hash = "sha256:" + "1" * 64
+    smoke_parent_hash = "sha256:" + "2" * 64
     functional_result = {
         "schema_version": "leadpoet.source_add_functional_probe_result.v2",
         "result_status": "passed",
+    }
+    smoke_result = {
+        **functional_result,
+        "evaluation_mode": "provisioning_smoke",
     }
     context = ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
-        parent_receipt_hashes=(parent_hash,),
+        parent_receipt_hashes=(parent_hash, smoke_parent_hash),
         external_ancestry_proofs=[
             {
                 "certificate": {
@@ -80,7 +85,23 @@ def test_reward_ancestry_accepts_checkpointed_source_add_parent() -> None:
                         "output_root": sha256_json(functional_result),
                     }
                 ],
-            }
+            },
+            {
+                "certificate": {
+                    "claim": {
+                        "lineage_id": "gateway:test",
+                        "output_root_receipt_hash": smoke_parent_hash,
+                    }
+                },
+                "disclosed_boot_identities": [],
+                "disclosed_receipts": [
+                    {
+                        "receipt_hash": smoke_parent_hash,
+                        "purpose": "research_lab.source_add_functional_probe.v2",
+                        "output_root": sha256_json(smoke_result),
+                    }
+                ],
+            },
         ],
     )
 
@@ -89,6 +110,7 @@ def test_reward_ancestry_accepts_checkpointed_source_add_parent() -> None:
             "decision_kind": "source_add_leg1",
             "decision_payload": {
                 "functional_probe_result": functional_result,
+                "provisioning_smoke_result": smoke_result,
             },
         },
         context,
@@ -97,11 +119,17 @@ def test_reward_ancestry_accepts_checkpointed_source_add_parent() -> None:
 
 def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
     parent_hash = "sha256:" + "1" * 64
+    smoke_parent_hash = "sha256:" + "3" * 64
+    functional_result = {"result_status": "passed"}
+    smoke_result = {
+        "evaluation_mode": "provisioning_smoke",
+        "result_status": "passed",
+    }
     context = ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
-        parent_receipt_hashes=(parent_hash,),
+        parent_receipt_hashes=(parent_hash, smoke_parent_hash),
         external_ancestry_proofs=[
             {
                 "certificate": {
@@ -120,16 +148,33 @@ def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
                         "output_root": "sha256:" + "2" * 64,
                     }
                 ],
-            }
+            },
+            {
+                "certificate": {
+                    "claim": {
+                        "lineage_id": "gateway:test",
+                        "output_root_receipt_hash": smoke_parent_hash,
+                    }
+                },
+                "disclosed_boot_identities": [],
+                "disclosed_receipts": [
+                    {
+                        "receipt_hash": smoke_parent_hash,
+                        "purpose": "research_lab.source_add_functional_probe.v2",
+                        "output_root": sha256_json(smoke_result),
+                    }
+                ],
+            },
         ],
     )
 
-    with pytest.raises(ValueError, match="parent output differs"):
+    with pytest.raises(ValueError, match="exact functional and smoke parents"):
         CoordinatorExecutorV2._validate_reward_ancestry(
             {
                 "decision_kind": "source_add_leg1",
                 "decision_payload": {
-                    "functional_probe_result": {"result_status": "passed"},
+                    "functional_probe_result": functional_result,
+                    "provisioning_smoke_result": smoke_result,
                 },
             },
             context,

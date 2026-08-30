@@ -406,6 +406,20 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "research_lab_source_add_submissions",
+        (
+            "submission_id",
+            "adapter_id",
+            "miner_hotkey",
+            "stage",
+            "seq",
+            "precheck_status",
+            "source_identity_hash",
+            "source_identity_version",
+        ),
+    ),
+    (
+        "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_submission_current",
         (
             "submission_id",
@@ -480,8 +494,10 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "evaluation_mode",
             "config_ref",
             "result_status",
+            "route_hash",
             "receipt_hash",
             "business_artifact_hash",
+            "result_doc",
         ),
     ),
     (
@@ -1047,6 +1063,14 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/145-research-lab-source-add-admission-control.sql",
         "research_lab_source_add_admission_control_contract_v1",
+    ),
+    (
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_provision_smoke_v2",
+    ),
+    (
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_post_accept_leg1_contract_v1",
     ),
     (
         "scripts/153-research-lab-private-model-lineage-generation.sql",

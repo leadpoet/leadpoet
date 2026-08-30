@@ -15,6 +15,7 @@ SUBMISSION_ID = "source_add_submission:1234567890abcdef"
 HASH = "sha256:" + "a" * 64
 FUNCTIONAL_RECEIPT_HASH = "sha256:" + "b" * 64
 JUDGE_RECEIPT_HASH = "sha256:" + "c" * 64
+SMOKE_RECEIPT_HASH = "sha256:" + "d" * 64
 
 
 class FakeReader:
@@ -78,6 +79,11 @@ def _context(
         "purpose": "research_lab.source_add_functional_probe.v2",
         "output_root": sha256_json(functional),
     }
+    smoke_receipt = {
+        "receipt_hash": SMOKE_RECEIPT_HASH,
+        "purpose": "research_lab.source_add_functional_probe.v2",
+        "output_root": sha256_json(_smoke_result()),
+    }
     judge_receipt = {
         "receipt_hash": JUDGE_RECEIPT_HASH,
         "role": "gateway_scoring",
@@ -93,7 +99,7 @@ def _context(
             (JUDGE_RECEIPT_HASH,)
             if with_judge_parent
             else (
-                (FUNCTIONAL_RECEIPT_HASH,)
+                (FUNCTIONAL_RECEIPT_HASH, SMOKE_RECEIPT_HASH)
                 if with_functional_parent or with_functional_proof
                 else ()
             )
@@ -111,7 +117,11 @@ def _context(
                     {
                         "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
                         "receipts": [functional_receipt],
-                    }
+                    },
+                    {
+                        "root_receipt_hash": SMOKE_RECEIPT_HASH,
+                        "receipts": [smoke_receipt],
+                    },
                 ]
                 if with_functional_parent
                 else []
@@ -128,7 +138,17 @@ def _context(
                     },
                     "disclosed_boot_identities": [],
                     "disclosed_receipts": [functional_receipt],
-                }
+                },
+                {
+                    "certificate": {
+                        "claim": {
+                            "lineage_id": "gateway:test",
+                            "output_root_receipt_hash": SMOKE_RECEIPT_HASH,
+                        }
+                    },
+                    "disclosed_boot_identities": [],
+                    "disclosed_receipts": [smoke_receipt],
+                },
             ]
             if with_functional_proof
             else []
@@ -161,6 +181,60 @@ def _functional_row():
     }
 
 
+def _smoke_result():
+    return {
+        **_functional_result(),
+        "evaluation_mode": "provisioning_smoke",
+        "route_hash": "sha256:" + "e" * 64,
+    }
+
+
+def _smoke_row():
+    smoke = _smoke_result()
+    return {
+        "attempt_ref": "source_add_probe_attempt:fedcba0987654321",
+        "submission_id": SUBMISSION_ID,
+        "adapter_id": "adapter:test",
+        "evaluation_mode": "provisioning_smoke",
+        "config_ref": smoke["config_ref"],
+        "result_status": "passed",
+        "receipt_hash": SMOKE_RECEIPT_HASH,
+        "business_artifact_hash": sha256_json(smoke),
+        "result_doc": smoke,
+    }
+
+
+def _accepted_row(*, miner_hotkey: str = "miner"):
+    return {
+        "submission_id": SUBMISSION_ID,
+        "adapter_id": "adapter:test",
+        "miner_hotkey": miner_hotkey,
+        "stage": "accepted",
+        "precheck_status": "provenance_precheck_passed",
+    }
+
+
+def _provision_row(*, miner_hotkey: str = "miner"):
+    return {
+        "provision_ref": "source_add_provision:1234567890abcdef",
+        "catalog_id": "source_catalog:1234567890abcdef",
+        "submission_id": SUBMISSION_ID,
+        "adapter_id": "adapter:test",
+        "miner_hotkey": miner_hotkey,
+        "registry_provider_id": "provider:test",
+        "provision_status": "provisioned_autoresearch_eligible",
+    }
+
+
+def _catalog_row(*, miner_hotkey: str = "miner"):
+    return {
+        "catalog_id": "source_catalog:1234567890abcdef",
+        "adapter_id": "adapter:test",
+        "miner_ref": miner_hotkey,
+        "registry_provider_id": "provider:test",
+    }
+
+
 def _functional_trigger():
     functional = _functional_result()
     measured = _functional_row()
@@ -172,6 +246,56 @@ def _functional_trigger():
         "functional_probe_result_hash": sha256_json(functional),
         "evaluator_version": functional["evaluator_version"],
         "route_hash": functional["route_hash"],
+        "provisioning_smoke_passed": True,
+        "provisioning_smoke_attempt_ref": _smoke_row()["attempt_ref"],
+        "provisioning_smoke_receipt_hash": SMOKE_RECEIPT_HASH,
+        "provisioning_smoke_business_artifact_hash": _smoke_row()[
+            "business_artifact_hash"
+        ],
+        "provisioning_smoke_result_hash": sha256_json(_smoke_result()),
+        "submission_id": SUBMISSION_ID,
+        "final_acceptance_stage": "accepted",
+        "provision_ref": _provision_row()["provision_ref"],
+        "catalog_id": _provision_row()["catalog_id"],
+        "registry_provider_id": _provision_row()["registry_provider_id"],
+        "provision_status": "provisioned_autoresearch_eligible",
+    }
+
+
+def _leg1_rows(*, miner_hotkey: str = "miner", rewards=None):
+    return {
+        "source_add_rewards_by_adapter": list(rewards or ()),
+        "source_add_accepted_submission_by_id": [
+            _accepted_row(miner_hotkey=miner_hotkey)
+        ],
+        "source_add_functional_probe_by_submission": [_functional_row()],
+        "source_add_provisioning_smoke_by_submission": [_smoke_row()],
+        "source_add_provisioning_by_adapter": [
+            _provision_row(miner_hotkey=miner_hotkey)
+        ],
+        "source_add_catalog_by_adapter": [
+            _catalog_row(miner_hotkey=miner_hotkey)
+        ],
+    }
+
+
+def _leg1_payload(*, miner_ref: str = "miner"):
+    return {
+        "decision_kind": "source_add_leg1",
+        "decision_payload": {
+            "adapter_id": "adapter:test",
+            "miner_ref": miner_ref,
+            "start_epoch": 101,
+            "existing_rewards": [],
+            "alpha_percent": 1.0,
+            "reward_epochs": 20,
+            "functional_probe_result": _functional_result(),
+            "provisioning_smoke_result": _smoke_result(),
+            "accepted_submission": _accepted_row(),
+            "provision": _provision_row(),
+            "catalog": _catalog_row(),
+            "trigger_evidence": _functional_trigger(),
+        },
     }
 
 
@@ -254,39 +378,17 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
             "current_reward_status": "active",
         }
     ]
-    reader = FakeReader(
-        {
-            "source_add_rewards_by_adapter": authenticated,
-            "source_add_submission_by_id": [
-                {
-                    "submission_id": SUBMISSION_ID,
-                    "adapter_id": "adapter:test",
-                    "miner_hotkey": "miner",
-                    "precheck_status": "provenance_precheck_passed",
-                }
-            ],
-            "source_add_functional_probe_by_submission": [_functional_row()],
-        }
-    )
+    reader = FakeReader(_leg1_rows(rewards=authenticated))
     resolver = CoordinatorRewardSourceV2(
         reader=reader,
         chain_source=FakeChain(),
         config_supplier=_config,
         clock=lambda: datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
     )
-    payload = {
-        "decision_kind": "source_add_leg1",
-        "decision_payload": {
-            "adapter_id": "adapter:test",
-            "miner_ref": "miner",
-            "start_epoch": 101,
-            "existing_rewards": [{"adapter_id": "forged", "leg": 1}],
-            "alpha_percent": 1.0,
-            "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "trigger_evidence": _functional_trigger(),
-        },
-    }
+    payload = _leg1_payload()
+    payload["decision_payload"]["existing_rewards"] = [
+        {"adapter_id": "forged", "leg": 1}
+    ]
 
     resolved = resolver.resolve(
         payload=payload,
@@ -296,26 +398,16 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
     assert resolved["decision_payload"]["existing_rewards"] == authenticated
     assert reader.calls == [
         ("source_add_rewards_by_adapter", {"adapter_id": "adapter:test"}),
-        ("source_add_submission_by_id", {"submission_id": SUBMISSION_ID}),
+        ("source_add_accepted_submission_by_id", {"submission_id": SUBMISSION_ID}),
         ("source_add_functional_probe_by_submission", {"submission_id": SUBMISSION_ID}),
+        ("source_add_provisioning_smoke_by_submission", {"submission_id": SUBMISSION_ID}),
+        ("source_add_provisioning_by_adapter", {"adapter_id": "adapter:test"}),
+        ("source_add_catalog_by_adapter", {"adapter_id": "adapter:test"}),
     ]
 
 
 def test_leg1_accepts_checkpointed_functional_parent_proof():
-    reader = FakeReader(
-        {
-            "source_add_rewards_by_adapter": [],
-            "source_add_submission_by_id": [
-                {
-                    "submission_id": SUBMISSION_ID,
-                    "adapter_id": "adapter:test",
-                    "miner_hotkey": "miner",
-                    "precheck_status": "provenance_precheck_passed",
-                }
-            ],
-            "source_add_functional_probe_by_submission": [_functional_row()],
-        }
-    )
+    reader = FakeReader(_leg1_rows())
     resolver = CoordinatorRewardSourceV2(
         reader=reader,
         chain_source=FakeChain(),
@@ -323,19 +415,7 @@ def test_leg1_accepts_checkpointed_functional_parent_proof():
     )
 
     resolved = resolver.resolve(
-        payload={
-            "decision_kind": "source_add_leg1",
-            "decision_payload": {
-                "adapter_id": "adapter:test",
-                "miner_ref": "miner",
-                "start_epoch": 101,
-                "existing_rewards": [],
-                "alpha_percent": 1.0,
-                "reward_epochs": 20,
-                "functional_probe_result": _functional_result(),
-                "trigger_evidence": _functional_trigger(),
-            },
-        },
+        payload=_leg1_payload(),
         context=_context(with_functional_proof=True),
     )
 
@@ -474,41 +554,17 @@ def test_source_add_migration_reconstructs_reward_and_measured_submission():
 
 
 def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
-    reader = FakeReader(
-        {
-            "source_add_rewards_by_adapter": [],
-            "source_add_submission_by_id": [
-                {
-                    "submission_id": SUBMISSION_ID,
-                    "adapter_id": "adapter:test",
-                    "miner_hotkey": "miner",
-                    "precheck_status": "provenance_precheck_passed",
-                }
-            ],
-            "source_add_functional_probe_by_submission": [_functional_row()],
-            "source_add_leg1_events_since": [
-                {"reward_ref": "reward-%d" % index} for index in range(10)
-            ],
-        }
-    )
+    rows = _leg1_rows()
+    rows["source_add_leg1_events_since"] = [
+        {"reward_ref": "reward-%d" % index} for index in range(10)
+    ]
+    reader = FakeReader(rows)
     resolver = CoordinatorRewardSourceV2(
         reader=reader,
         chain_source=FakeChain(),
         config_supplier=_config,
     )
-    payload = {
-        "decision_kind": "source_add_leg1",
-        "decision_payload": {
-            "adapter_id": "adapter:test",
-            "miner_ref": "miner",
-            "start_epoch": 101,
-            "existing_rewards": [],
-            "alpha_percent": 1.0,
-            "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "trigger_evidence": _functional_trigger(),
-        },
-    }
+    payload = _leg1_payload()
 
     resolved = resolver.resolve(
         payload=payload,
@@ -630,37 +686,13 @@ def test_leg2_requires_authenticated_adapter_owner():
 
 
 def test_leg1_rejects_host_substituted_miner():
-    reader = FakeReader(
-        {
-            "source_add_rewards_by_adapter": [],
-            "source_add_submission_by_id": [
-                {
-                    "submission_id": SUBMISSION_ID,
-                    "adapter_id": "adapter:test",
-                    "miner_hotkey": "real-owner",
-                    "precheck_status": "provenance_precheck_passed",
-                }
-            ],
-        }
-    )
+    reader = FakeReader(_leg1_rows(miner_hotkey="real-owner"))
     resolver = CoordinatorRewardSourceV2(
         reader=reader,
         chain_source=FakeChain(),
         config_supplier=_config,
     )
-    payload = {
-        "decision_kind": "source_add_leg1",
-        "decision_payload": {
-            "adapter_id": "adapter:test",
-            "miner_ref": "forged-owner",
-            "start_epoch": 101,
-            "existing_rewards": [],
-            "alpha_percent": 1.0,
-            "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "trigger_evidence": _functional_trigger(),
-        },
-    }
+    payload = _leg1_payload(miner_ref="forged-owner")
     with pytest.raises(CoordinatorRewardSourceV2Error, match="owner or status"):
         resolver.resolve(
             payload=payload,

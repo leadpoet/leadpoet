@@ -1,4 +1,4 @@
-"""Structural fail-closed checks for the SOURCE_ADD functional workflow migration."""
+"""Historical migration-96 structure, superseded at runtime by migration 167."""
 
 from pathlib import Path
 import re
@@ -91,7 +91,7 @@ def test_provider_execution_fence_prevents_ambiguous_restart_replay():
     assert "- 'provider_execution_recovery'" in finish
 
 
-def test_finish_work_persists_exact_probe_then_queues_one_reward_intent():
+def test_historical_migration_96_queued_reward_intent_on_functional_pass():
     section = _function(
         "research_lab_source_add_finish_work",
         "research_lab_source_add_configure_probe",
@@ -134,7 +134,7 @@ def test_leg1_slot_counts_legacy_and_functional_rewards_with_fifo_overflow():
     )
 
 
-def test_leg1_finalization_binds_current_slot_functional_receipt_and_null_catalog():
+def test_historical_migration_96_leg1_finalization_used_null_catalog():
     section = _function(
         "research_lab_source_add_finalize_leg1",
         "research_lab_source_add_finalize_provision",

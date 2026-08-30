@@ -698,14 +698,26 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         "reason_codes": ["bounded_json_data_response"],
         "probe_summaries": [],
     }
-    root_hash = HASH_A
-    graph = {
-        "root_receipt_hash": root_hash,
+    smoke = {**functional, "evaluation_mode": "provisioning_smoke"}
+    functional_root_hash = HASH_A
+    smoke_root_hash = "sha256:" + "c" * 64
+    functional_graph = {
+        "root_receipt_hash": functional_root_hash,
         "receipts": [
             {
-                "receipt_hash": root_hash,
+                "receipt_hash": functional_root_hash,
                 "purpose": "research_lab.source_add_functional_probe.v2",
                 "output_root": sha256_json(functional),
+            }
+        ],
+    }
+    smoke_graph = {
+        "root_receipt_hash": smoke_root_hash,
+        "receipts": [
+            {
+                "receipt_hash": smoke_root_hash,
+                "purpose": "research_lab.source_add_functional_probe.v2",
+                "output_root": sha256_json(smoke),
             }
         ],
     }
@@ -713,8 +725,10 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         job_id="reward-job",
         purpose="research_lab.reward_decision.v2",
         epoch_id=10,
-        parent_receipt_hashes=(root_hash,),
-        external_receipt_graphs=[graph],
+        parent_receipt_hashes=tuple(
+            sorted((functional_root_hash, smoke_root_hash))
+        ),
+        external_receipt_graphs=[functional_graph, smoke_graph],
     )
     payload = {
         "decision_kind": "source_add_leg1",
@@ -726,9 +740,12 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "alpha_percent": 1.0,
             "reward_epochs": 20,
             "functional_probe_result": functional,
+            "provisioning_smoke_result": smoke,
             "trigger_evidence": {
                 "functional_probe_passed": True,
                 "functional_probe_result_hash": sha256_json(functional),
+                "provisioning_smoke_passed": True,
+                "provisioning_smoke_result_hash": sha256_json(smoke),
             },
         },
     }
@@ -743,7 +760,7 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
     )
     assert outcome.output["reward"]["leg"] == 1
 
-    context.external_receipt_graphs[0]["receipts"][0]["output_root"] = HASH_B
+    context.external_receipt_graphs[1]["receipts"][0]["output_root"] = HASH_B
     with pytest.raises(ValueError, match="parent output"):
         await executor(OP_RESEARCH_LAB_REWARD_DECISION, payload, context)
 

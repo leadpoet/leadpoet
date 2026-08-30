@@ -267,6 +267,21 @@ CANDIDATE_WATERFALL_SIDECARS_MIGRATION = (
 MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION = (
     "163-research-lab-model-transition-artifact-custody.sql"
 )
+OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION = (
+    "164-research-lab-official-baseline-action-authority.sql"
+)
+CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION = (
+    "165-research-lab-candidate-derived-artifact-event.sql"
+)
+ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION = (
+    "166-research-lab-zero-call-verifier-timeout.sql"
+)
+SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION = (
+    "167-research-lab-source-add-post-accept-leg1.sql"
+)
+SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION = (
+    "168-research-lab-source-add-provider-origin-uniqueness.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -331,6 +346,11 @@ EXPECTED_APPLIED_MIGRATIONS = (
     EXACT_MODEL_TRANSITIONS_MIGRATION,
     CANDIDATE_WATERFALL_SIDECARS_MIGRATION,
     MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION,
+    OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION,
+    CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION,
+    ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION,
+    SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
+    SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -367,6 +387,11 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_161_exact_model_transition_contract_valid",
     "post_162_candidate_waterfall_sidecars_valid",
     "post_163_model_transition_artifact_custody_valid",
+    "post_164_official_baseline_action_authority_valid",
+    "post_165_candidate_derived_artifact_event_valid",
+    "post_166_zero_call_verifier_timeout_valid",
+    "post_167_source_add_post_accept_leg1_valid",
+    "post_168_source_add_provider_origin_contract_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5785,6 +5810,240 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-163 Model transition artifact custody contract differs"
+            )
+        database.apply_migration(
+            scripts / OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION
+        )
+        applied.append(OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION)
+        official_baseline_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'relation_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relname IN (
+                              'research_lab_official_baseline_runs_v1',
+                              'research_lab_official_baseline_action_attempts_v1',
+                              'research_lab_official_baseline_action_terminals_v1',
+                              'research_lab_official_baseline_unit_closures_v1'
+                          )
+                    ),
+                    'forced_rls_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.pg_class relation_meta
+                        JOIN pg_catalog.pg_namespace namespace_meta
+                          ON namespace_meta.oid = relation_meta.relnamespace
+                        WHERE namespace_meta.nspname = 'public'
+                          AND relation_meta.relname IN (
+                              'research_lab_official_baseline_runs_v1',
+                              'research_lab_official_baseline_action_attempts_v1',
+                              'research_lab_official_baseline_action_terminals_v1',
+                              'research_lab_official_baseline_unit_closures_v1'
+                          )
+                          AND relation_meta.relrowsecurity
+                          AND relation_meta.relforcerowsecurity
+                    ),
+                    'service_rpc_count', (
+                        SELECT pg_catalog.count(*)
+                        FROM pg_catalog.unnest(ARRAY[
+                            'public.research_lab_official_baseline_register_run_v1(jsonb)',
+                            'public.research_lab_official_baseline_reserve_action_v1(jsonb)',
+                            'public.research_lab_official_baseline_record_terminal_known_v1(jsonb)',
+                            'public.research_lab_official_baseline_record_terminal_uncertain_v1(jsonb)',
+                            'public.research_lab_official_baseline_load_replay_v1(jsonb)',
+                            'public.research_lab_official_baseline_close_unit_v1(jsonb)',
+                            'public.research_lab_official_baseline_load_frontier_v1(text,text)'
+                        ]) function_name
+                        WHERE pg_catalog.to_regprocedure(function_name) IS NOT NULL
+                          AND pg_catalog.has_function_privilege(
+                              'service_role', function_name, 'EXECUTE'
+                          )
+                    )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if official_baseline_contract != {
+            "relation_count": 4,
+            "forced_rls_count": 4,
+            "service_rpc_count": 7,
+        }:
+            raise PostgresContractProbeError(
+                "post-164 official baseline action authority differs"
+            )
+        database.apply_migration(
+            scripts / CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION
+        )
+        applied.append(CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION)
+        candidate_derived_event_enabled = database.psql(
+            """
+            SELECT pg_catalog.bool_and(
+                constraint_meta.convalidated
+                AND pg_catalog.pg_get_constraintdef(constraint_meta.oid)
+                    LIKE '%candidate_derived_artifact_failed%'
+            )
+            FROM pg_catalog.pg_constraint constraint_meta
+            WHERE constraint_meta.conrelid =
+                'public.research_lab_auto_research_loop_events'::regclass
+              AND constraint_meta.conname =
+                'research_lab_auto_research_loop_events_event_type_check';
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+        if candidate_derived_event_enabled != "t":
+            raise PostgresContractProbeError(
+                "post-165 candidate-derived artifact event differs"
+            )
+        database.apply_migration(
+            scripts / ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION
+        )
+        applied.append(ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION)
+        zero_call_timeout_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'constraint_valid', COALESCE((
+                        SELECT constraint_meta.convalidated
+                           AND pg_catalog.pg_get_constraintdef(
+                               constraint_meta.oid
+                           ) LIKE '%timeout_ms = 0%'
+                        FROM pg_catalog.pg_constraint constraint_meta
+                        WHERE constraint_meta.conrelid =
+                            'public.research_lab_official_baseline_action_attempts_v1'::regclass
+                          AND constraint_meta.conname =
+                            'research_lab_official_baseline_action_timeout_by_type_v1'
+                    ), FALSE),
+                    'reserve_rpc_service_callable',
+                        pg_catalog.has_function_privilege(
+                            'service_role',
+                            'public.research_lab_official_baseline_reserve_action_v1(jsonb)',
+                            'EXECUTE'
+                        )
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if zero_call_timeout_contract != {
+            "constraint_valid": True,
+            "reserve_rpc_service_callable": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-166 zero-call verifier timeout contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION
+        )
+        applied.append(SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION)
+        post_accept_leg1_contract = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.jsonb_build_object(
+                    'finalizer_present',
+                        pg_catalog.to_regprocedure(
+                            'public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)'
+                        ) IS NOT NULL,
+                    'acceptance_trigger_enabled', COALESCE((
+                        SELECT trigger_meta.tgenabled IN ('O', 'A')
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE trigger_meta.tgrelid =
+                            'public.research_lab_source_add_submissions'::regclass
+                          AND trigger_meta.tgname =
+                            'trg_source_add_acceptance_v2'
+                          AND NOT trigger_meta.tgisinternal
+                    ), FALSE),
+                    'eligible_trigger_enabled', COALESCE((
+                        SELECT trigger_meta.tgenabled IN ('O', 'A')
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE trigger_meta.tgrelid =
+                            'public.research_lab_source_add_provisioning_events'::regclass
+                          AND trigger_meta.tgname =
+                            'trg_source_add_eligible_v2'
+                          AND NOT trigger_meta.tgisinternal
+                    ), FALSE),
+                    'leg1_work_trigger_enabled', COALESCE((
+                        SELECT trigger_meta.tgenabled IN ('O', 'A')
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE trigger_meta.tgrelid =
+                            'public.research_lab_source_add_work_items'::regclass
+                          AND trigger_meta.tgname =
+                            'trg_source_add_leg1_work_v2'
+                          AND NOT trigger_meta.tgisinternal
+                    ), FALSE),
+                    'leg1_slot_trigger_enabled', COALESCE((
+                        SELECT trigger_meta.tgenabled IN ('O', 'A')
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE trigger_meta.tgrelid =
+                            'public.research_lab_source_add_reward_slots'::regclass
+                          AND trigger_meta.tgname =
+                            'trg_source_add_leg1_slot_v2'
+                          AND NOT trigger_meta.tgisinternal
+                    ), FALSE),
+                    'leg1_obligation_trigger_enabled', COALESCE((
+                        SELECT trigger_meta.tgenabled IN ('O', 'A')
+                        FROM pg_catalog.pg_trigger trigger_meta
+                        WHERE trigger_meta.tgrelid =
+                            'public.research_lab_source_add_reward_obligations'::regclass
+                          AND trigger_meta.tgname =
+                            'trg_source_add_leg1_obligation_v2'
+                          AND NOT trigger_meta.tgisinternal
+                    ), FALSE)
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if post_accept_leg1_contract != {
+            "finalizer_present": True,
+            "acceptance_trigger_enabled": True,
+            "eligible_trigger_enabled": True,
+            "leg1_work_trigger_enabled": True,
+            "leg1_slot_trigger_enabled": True,
+            "leg1_obligation_trigger_enabled": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-167 SOURCE_ADD post-accept Leg 1 contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION)
+        source_add_provider_origin_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_provider_origin_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_provider_origin_contract != {
+            "schema_version": (
+                "leadpoet.source_add_provider_origin_contract.v1"
+            ),
+            "identity_version": "v1",
+            "identity_scope": "normalized_exact_host",
+            "admission_rpc": "research_lab_source_add_admit_v2",
+            "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+            "owner_count": 0,
+            "reserved_count": 0,
+            "coverage_complete": True,
+            "collision_free": True,
+            "submission_trigger_enabled": True,
+            "catalog_trigger_enabled": True,
+            "provision_trigger_enabled": True,
+            "terminal_release_trigger_enabled": True,
+            "append_only_trigger_enabled": True,
+            "row_level_security_enabled": True,
+            "service_role_policy_enabled": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-168 SOURCE_ADD provider-origin contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

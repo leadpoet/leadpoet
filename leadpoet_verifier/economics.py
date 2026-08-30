@@ -7,6 +7,7 @@ weight submission. All inputs are anchored/public records or golden fixtures.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
@@ -339,10 +340,12 @@ def allocate_research_lab_epoch(
     Inputs are public/anchored obligation records. The output is deterministic
     and intended to be stored as the per-epoch Lab allocation snapshot.
 
-    SOURCE_ADD is an independent, first-priority allocation. Its fixed payment
-    is deducted from the configured Lab cap, then the reimbursement/champion
-    allocator runs against the remainder. Calls without SOURCE_ADD obligations
-    retain the legacy output shape.
+    SOURCE_ADD is an independent, first-priority allocation. Each active
+    obligation contributes its own fixed percentage; those percentages sum in
+    chronological creation order up to the configured Lab cap. The paid total
+    is deducted from that cap before the reimbursement/champion allocator runs
+    against the remainder. Calls without SOURCE_ADD obligations retain the
+    legacy output shape.
     """
     if not active_source_add_obligations:
         return _allocate_research_lab_epoch_existing(
@@ -368,7 +371,13 @@ def allocate_research_lab_epoch(
         if _champion_obligation_active(item, epoch, default_epoch_count=reward_epochs)
     ]
     source_add = [item for item in source_add if item["desired_alpha_percent"] > 0 and item["uid"] >= 0]
-    source_add.sort(key=lambda item: (item["start_epoch"], item["source_id"]))
+    source_add.sort(
+        key=lambda item: (
+            item["start_epoch"],
+            item["created_at"],
+            item["source_id"],
+        )
+    )
     source_add_allocations = _allocate_source_add(source_add, lab_cap)
     _cap_allocation_sections_to_pool((source_add_allocations,), lab_cap)
     source_add_paid = sum(
@@ -1448,6 +1457,7 @@ def _normalize_source_add_obligation(
         remaining=remaining,
     )
     current_due = min(desired, remaining)
+    created_at = _canonical_source_add_created_at(obligation.get("created_at"))
     return {
         "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
         "miner_hotkey": str(obligation.get("miner_hotkey", "")),
@@ -1455,6 +1465,7 @@ def _normalize_source_add_obligation(
         "adapter_id": str(obligation.get("adapter_id") or ""),
         "leg": leg,
         "reward_kind": reward_kind,
+        "created_at": created_at,
         "start_epoch": start_epoch,
         "epoch_count": epoch_count,
         "intended_alpha_percent": current_due,
@@ -1466,6 +1477,23 @@ def _normalize_source_add_obligation(
         "nominal_end_epoch": start_epoch + epoch_count,
         "replay_status": str(obligation.get("replay_status") or ""),
     }
+
+
+def _canonical_source_add_created_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("source add created_at is required for FIFO ordering")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("source add created_at is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("source add created_at must include a timezone")
+    return (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _champion_total_due_alpha_percent(

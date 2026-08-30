@@ -508,6 +508,61 @@ def _candidate_hybrid_purpose_contract_response() -> bytes:
     ).encode()
 
 
+def _source_add_provider_origin_contract_response(**overrides) -> bytes:
+    contract = {
+        "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
+        "identity_version": "v1",
+        "identity_scope": "normalized_exact_host",
+        "admission_rpc": "research_lab_source_add_admit_v2",
+        "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+        "owner_count": 2,
+        "reserved_count": 2,
+        "coverage_complete": True,
+        "collision_free": True,
+        "submission_trigger_enabled": True,
+        "catalog_trigger_enabled": True,
+        "provision_trigger_enabled": True,
+        "terminal_release_trigger_enabled": True,
+        "append_only_trigger_enabled": True,
+        "row_level_security_enabled": True,
+        "service_role_policy_enabled": True,
+    }
+    contract.update(overrides)
+    return json.dumps(contract).encode()
+
+
+def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
+    contract = {
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
+        "daily_cap": 10,
+        "leg1_alpha_percent": 1.0,
+        "leg1_reward_epochs": 20,
+        "functions": {
+            "configure_probe_v2": True,
+            "finalize_provision_v2": True,
+            "reject_current_builtin_v2": True,
+            "reserve_leg1_slot_v2": True,
+            "finalize_leg1_v2": True,
+            "finalize_provision_smoke_v2": True,
+        },
+        "triggers": {
+            "acceptance": True,
+            "eligible": True,
+            "leg1_work": True,
+            "leg1_slot": True,
+            "leg1_obligation": True,
+            "leg1_initial_event": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v2_callable": True,
+            "legacy_not_callable": True,
+        },
+    }
+    contract.update(overrides)
+    return json.dumps(contract).encode()
+
+
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     requests = []
 
@@ -537,6 +592,18 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             return _SchemaResponse(
                 body=_candidate_hybrid_purpose_contract_response()
             )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_provider_origin_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_provider_origin_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_post_accept_leg1_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -550,14 +617,14 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 3
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 5
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
-    assert result["data_probe_count"] == 3
+    assert result["data_probe_count"] == 5
     assert result["schema_document_probe_count"] == 1
     assert result["chain_realized_settlement_activation_http_probe_count"] == 1
     assert result["chain_realized_settlement_activation_source"] == "postgrest"
@@ -588,7 +655,13 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             _candidate_hybrid_constraint_definition().encode("utf-8")
         ).hexdigest(),
     }
-    assert len(requests) == result["table_probe_count"] + 4
+    assert result["source_add_provider_origin_contract"] == json.loads(
+        _source_add_provider_origin_contract_response()
+    )
+    assert result["source_add_post_accept_leg1_contract"] == json.loads(
+        _source_add_post_accept_leg1_contract_response()
+    )
+    assert len(requests) == result["table_probe_count"] + 6
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -621,12 +694,28 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
         )
     ]
+    origin_contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_provider_origin_contract_v1"
+        )
+    ]
+    leg1_contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+        )
+    ]
     schema_table_requests = [
         request
         for request in table_requests
         if request not in activation_requests
         and request not in contract_requests
         and request not in hybrid_contract_requests
+        and request not in origin_contract_requests
+        and request not in leg1_contract_requests
     ]
     assert all(
         "limit=0" in request.full_url for request in schema_table_requests
@@ -634,6 +723,8 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert len(activation_requests) == 1
     assert len(contract_requests) == 1
     assert len(hybrid_contract_requests) == 1
+    assert len(origin_contract_requests) == 1
+    assert len(leg1_contract_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
@@ -662,6 +753,8 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "scripts/156-production-parity-readonly-role.sql",
         "scripts/161-research-lab-exact-model-transitions.sql",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
     }.issubset(set(result["migration_files"]))
     assert (
         "scripts/163-research-lab-model-transition-artifact-custody.sql"
@@ -709,6 +802,18 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
         ):
             return _SchemaResponse(
                 body=_candidate_hybrid_purpose_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_provider_origin_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_provider_origin_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_post_accept_leg1_contract_response()
             )
         return _SchemaResponse()
 
@@ -793,6 +898,18 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
             return _SchemaResponse(
                 body=_candidate_hybrid_purpose_contract_response()
             )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_provider_origin_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_provider_origin_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_post_accept_leg1_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -806,7 +923,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
     )
 
     assert result["status"] == "ready"
-    assert result["data_probe_count"] == 3
+    assert result["data_probe_count"] == 5
     assert result["chain_realized_settlement_activation_http_probe_count"] == 0
     assert result["chain_realized_settlement_activation_source"] == (
         "provided-authority"
@@ -823,7 +940,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
         and "limit=2" in request.full_url
         for request, _timeout in requests
     )
-    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 3
+    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 5
 
 
 def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
@@ -844,6 +961,86 @@ def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
         match="differs from canonical roles",
     ):
         schema_preflight._verify_candidate_hybrid_purpose_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "contract_field",
+    (
+        "coverage_complete",
+        "collision_free",
+        "submission_trigger_enabled",
+        "catalog_trigger_enabled",
+        "provision_trigger_enabled",
+        "terminal_release_trigger_enabled",
+        "append_only_trigger_enabled",
+        "row_level_security_enabled",
+        "service_role_policy_enabled",
+    ),
+)
+def test_source_add_provider_origin_contract_rejects_safety_drift(
+    contract_field,
+) -> None:
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(
+            body=_source_add_provider_origin_contract_response(
+                **{contract_field: False}
+            )
+        )
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD provider-origin contract differs",
+    ):
+        schema_preflight._verify_source_add_provider_origin_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    (
+        ("functions", "configure_probe_v2"),
+        ("functions", "finalize_provision_v2"),
+        ("functions", "reject_current_builtin_v2"),
+        ("functions", "reserve_leg1_slot_v2"),
+        ("functions", "finalize_leg1_v2"),
+        ("functions", "finalize_provision_smoke_v2"),
+        ("triggers", "acceptance"),
+        ("triggers", "eligible"),
+        ("triggers", "leg1_work"),
+        ("triggers", "leg1_slot"),
+        ("triggers", "leg1_obligation"),
+        ("triggers", "leg1_initial_event"),
+        ("permissions", "service_role_exists"),
+        ("permissions", "v2_callable"),
+        ("permissions", "legacy_not_callable"),
+    ),
+)
+def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
+    section,
+    field,
+) -> None:
+    contract = json.loads(_source_add_post_accept_leg1_contract_response())
+    contract[section][field] = False
+
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(body=json.dumps(contract).encode())
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD post-accept Leg 1 contract differs",
+    ):
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v1(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,

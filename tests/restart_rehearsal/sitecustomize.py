@@ -4450,6 +4450,46 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_provider_origin_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD provider-origin contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD provider-origin contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_provider_origin_contract.v1"
+                ),
+                "identity_version": "v1",
+                "identity_scope": "normalized_exact_host",
+                "admission_rpc": "research_lab_source_add_admit_v2",
+                "recheck_rpc": (
+                    "research_lab_source_add_requeue_provenance_v2"
+                ),
+                "owner_count": 0,
+                "reserved_count": 0,
+                "coverage_complete": True,
+                "collision_free": True,
+                "submission_trigger_enabled": True,
+                "catalog_trigger_enabled": True,
+                "provision_trigger_enabled": True,
+                "terminal_release_trigger_enabled": True,
+                "append_only_trigger_enabled": True,
+                "row_level_security_enabled": True,
+                "service_role_policy_enabled": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
         == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
         and "limit=2" in parsed.query
     ):

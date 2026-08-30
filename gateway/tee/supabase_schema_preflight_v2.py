@@ -526,6 +526,19 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
+        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_provider_origin_current",
+        (
+            "origin_version",
+            "provider_origin_hash",
+            "submission_id",
+            "adapter_id",
+            "miner_hotkey",
+            "reservation_status",
+            "seq",
+        ),
+    ),
+    (
         "scripts/78-research-lab-source-add-catalog-provisioning.sql",
         "research_lab_source_add_provisioning_current",
         (
@@ -1013,8 +1026,8 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_finish_work",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_configure_probe",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_configure_probe_v2",
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
@@ -1025,28 +1038,48 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_set_paused",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_reserve_leg1_slot",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_reserve_leg1_slot_v2",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_leg1",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_leg1_v2",
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_enqueue_provision_smoke",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_provision",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_provision_v2",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_provision_smoke",
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_reject_current_builtin_v2",
     ),
     (
         "scripts/145-research-lab-source-add-admission-control.sql",
         "research_lab_source_add_admission_control_contract_v1",
+    ),
+    (
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_provision_smoke_v2",
+    ),
+    (
+        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_post_accept_leg1_contract_v1",
+    ),
+    (
+        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_admit_v2",
+    ),
+    (
+        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_requeue_provenance_v2",
+    ),
+    (
+        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_provider_origin_contract_v1",
     ),
     (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
@@ -1428,6 +1461,178 @@ def _verify_candidate_hybrid_purpose_contract_v1(
     }
 
 
+def _verify_source_add_provider_origin_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_provider_origin_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract is unavailable; apply "
+            "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract is unavailable; apply "
+            "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract response is invalid"
+        ) from exc
+    expected_keys = {
+        "schema_version",
+        "identity_version",
+        "identity_scope",
+        "admission_rpc",
+        "recheck_rpc",
+        "owner_count",
+        "reserved_count",
+        "coverage_complete",
+        "collision_free",
+        "submission_trigger_enabled",
+        "catalog_trigger_enabled",
+        "provision_trigger_enabled",
+        "terminal_release_trigger_enabled",
+        "append_only_trigger_enabled",
+        "row_level_security_enabled",
+        "service_role_policy_enabled",
+    }
+    if not isinstance(contract, Mapping) or set(contract) != expected_keys:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract response is invalid"
+        )
+    owner_count = contract.get("owner_count")
+    reserved_count = contract.get("reserved_count")
+    required_true = expected_keys - {
+        "schema_version",
+        "identity_version",
+        "identity_scope",
+        "admission_rpc",
+        "recheck_rpc",
+        "owner_count",
+        "reserved_count",
+    }
+    if (
+        contract.get("schema_version")
+        != "leadpoet.source_add_provider_origin_contract.v1"
+        or contract.get("identity_version") != "v1"
+        or contract.get("identity_scope") != "normalized_exact_host"
+        or contract.get("admission_rpc") != "research_lab_source_add_admit_v2"
+        or contract.get("recheck_rpc")
+        != "research_lab_source_add_requeue_provenance_v2"
+        or type(owner_count) is not int
+        or type(reserved_count) is not int
+        or owner_count < 0
+        or reserved_count < 0
+        or owner_count != reserved_count
+        or any(contract.get(field) is not True for field in required_true)
+    ):
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract differs"
+        )
+    return dict(contract)
+
+
+def _verify_source_add_post_accept_leg1_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_post_accept_leg1_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
+            "scripts/167-research-lab-source-add-post-accept-leg1.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
+            "scripts/167-research-lab-source-add-post-accept-leg1.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
+        "daily_cap": 10,
+        "leg1_alpha_percent": 1.0,
+        "leg1_reward_epochs": 20,
+        "functions": {
+            "configure_probe_v2": True,
+            "finalize_provision_v2": True,
+            "reject_current_builtin_v2": True,
+            "reserve_leg1_slot_v2": True,
+            "finalize_leg1_v2": True,
+            "finalize_provision_smoke_v2": True,
+        },
+        "triggers": {
+            "acceptance": True,
+            "eligible": True,
+            "leg1_work": True,
+            "leg1_slot": True,
+            "leg1_obligation": True,
+            "leg1_initial_event": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v2_callable": True,
+            "legacy_not_callable": True,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract differs"
+        )
+    return dict(contract)
+
+
 def _verify_chain_realized_activation_v1(
     parent_environment: Mapping[str, str],
     *,
@@ -1668,17 +1873,33 @@ def verify_required_supabase_v2_schema(
             timeout_seconds=timeout_seconds,
         )
     )
+    source_add_provider_origin_contract = (
+        _verify_source_add_provider_origin_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    source_add_post_accept_leg1_contract = (
+        _verify_source_add_post_accept_leg1_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(required_rpcs)
-        + 3,
+        + 5,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(required_rpcs),
         "routing_model_transition_v2_required": (
             routing_model_transition_v2_required
         ),
-        "data_probe_count": 3,
+        "data_probe_count": 5,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation_http_probe_count": (
             1 if activation_source == "postgrest" else 0
@@ -1690,6 +1911,12 @@ def verify_required_supabase_v2_schema(
         ),
         "candidate_hybrid_purpose_contract": (
             candidate_hybrid_purpose_contract
+        ),
+        "source_add_provider_origin_contract": (
+            source_add_provider_origin_contract
+        ),
+        "source_add_post_accept_leg1_contract": (
+            source_add_post_accept_leg1_contract
         ),
         "migration_files": sorted(migrations),
     }

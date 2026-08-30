@@ -50,6 +50,7 @@ from gateway.tee.scoring_executor_v2 import (
 from gateway.tee.reward_executor_v2 import (
     OP_RESEARCH_LAB_REWARD_DECISION,
     reward_receipt_projection_v2,
+    source_add_reward_row_projection_v2,
 )
 from gateway.tee.coordinator_source_add_v2 import (
     OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
@@ -3060,7 +3061,21 @@ async def _load_allocation_parent_graphs_v2(
                 add_receipt_root(str(receipt_hash))
     for row in source_rows:
         reward_ref = str(row.get("reward_ref") or "")
-        add("source_add_reward_decision", reward_ref)
+        try:
+            decision_hash = sha256_json(
+                source_add_reward_row_projection_v2(
+                    "source_add_leg%d" % int(row.get("leg") or 0),
+                    {
+                        **dict(row),
+                        "initial_reward_status": "active",
+                    },
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ResearchLabV2AuthorityError(
+                "allocation SOURCE_ADD reward identity is invalid"
+            ) from exc
+        add_exact("source_add_reward_decision", reward_ref, decision_hash)
 
     exact_items = sorted(
         (kind, ref, digest)

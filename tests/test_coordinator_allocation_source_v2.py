@@ -489,6 +489,43 @@ def test_unreceipted_source_add_reward_fails_closed():
         )
 
 
+def test_source_add_obligation_carries_immutable_creation_time(monkeypatch):
+    resolver = CoordinatorAllocationSourceV2(
+        reader=FakeReader(),
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    monkeypatch.setattr(resolver, "_require_reward_receipt", lambda **_kwargs: None)
+
+    obligations, skipped = resolver._source_add(
+        epoch=100,
+        rows=[
+            {
+                "reward_ref": "source_add_reward:" + "f" * 16,
+                "adapter_id": "adapter:fifo",
+                "miner_hotkey": "miner",
+                "leg": 1,
+                "reward_kind": "source_acceptance",
+                "alpha_percent": 1.0,
+                "reward_epochs": 20,
+                "start_epoch": 100,
+                "current_reward_status": "active",
+                "desired_alpha_percent": 1.0,
+                "epoch_count": 20,
+                "created_at": "2026-08-01T00:00:00.123456Z",
+            }
+        ],
+        paid_by_reward={},
+        hotkey_uids={"miner": 1},
+        context=_context(),
+        required_parents=set(),
+    )
+
+    assert skipped == []
+    assert obligations[0]["created_at"] == "2026-08-01T00:00:00.123456Z"
+
+
 def test_business_receipt_lookup_binds_the_expected_artifact_hash(monkeypatch):
     artifact_hash = "sha256:" + "3" * 64
     receipt_hash = "sha256:" + "4" * 64

@@ -857,7 +857,7 @@ class ResearchLabGatewayConfig:
     source_add_sandbox_image: str = "python:3.11-slim"
     source_add_trial_timeout_seconds: int = 300
     source_add_leg1_alpha_percent: float = 1.0
-    # Leg 2 is opt-in. Zero leaves measured functional Leg 1 rewards enabled.
+    # Leg 2 is opt-in. Zero leaves post-acceptance Leg 1 rewards enabled.
     source_add_leg2_alpha_percent: float = 0.0
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3

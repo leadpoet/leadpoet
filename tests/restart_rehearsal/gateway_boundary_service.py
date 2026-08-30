@@ -519,6 +519,11 @@ def _migration_schema_contract(
             "161-research-lab-exact-model-transitions.sql",
             "162-research-lab-candidate-routing-experiments.sql",
             "163-research-lab-model-transition-artifact-custody.sql",
+            "164-research-lab-official-baseline-action-authority.sql",
+            "165-research-lab-candidate-derived-artifact-event.sql",
+            "166-research-lab-zero-call-verifier-timeout.sql",
+            "167-research-lab-source-add-post-accept-leg1.sql",
+            "168-research-lab-source-add-provider-origin-uniqueness.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -627,6 +632,7 @@ def _migration_schema_contract(
         "resume_research_lab_credit_blocked_run_v1",
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_candidate_hybrid_purpose_contract_v1",
+        "research_lab_source_add_provider_origin_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v2",
         "research_lab_routing_load_model_transition_v2",
@@ -2995,6 +3001,35 @@ class Handler(BaseHTTPRequestHandler):
                     "constraint_definition": (
                         _candidate_hybrid_constraint_definition()
                     ),
+                }
+            elif name == (
+                "research_lab_source_add_provider_origin_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD provider-origin contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.source_add_provider_origin_contract.v1"
+                    ),
+                    "identity_version": "v1",
+                    "identity_scope": "normalized_exact_host",
+                    "admission_rpc": "research_lab_source_add_admit_v2",
+                    "recheck_rpc": (
+                        "research_lab_source_add_requeue_provenance_v2"
+                    ),
+                    "owner_count": 0,
+                    "reserved_count": 0,
+                    "coverage_complete": True,
+                    "collision_free": True,
+                    "submission_trigger_enabled": True,
+                    "catalog_trigger_enabled": True,
+                    "provision_trigger_enabled": True,
+                    "terminal_release_trigger_enabled": True,
+                    "append_only_trigger_enabled": True,
+                    "row_level_security_enabled": True,
+                    "service_role_policy_enabled": True,
                 }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)

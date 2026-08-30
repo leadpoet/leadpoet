@@ -100,14 +100,23 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         "research_lab_source_add_begin_provider_execution",
         "research_lab_source_add_claim_work",
         "research_lab_source_add_finish_work",
-        "research_lab_source_add_configure_probe",
         "research_lab_source_add_requeue_provenance",
         "research_lab_source_add_set_paused",
-        "research_lab_source_add_reserve_leg1_slot",
-        "research_lab_source_add_finalize_leg1",
         "research_lab_source_add_enqueue_provision_smoke",
-        "research_lab_source_add_finalize_provision",
-        "research_lab_source_add_finalize_provision_smoke",
+    }
+    assert {
+        function
+        for declared_migration, function in REQUIRED_SUPABASE_V2_RPCS
+        if declared_migration
+        == "scripts/167-research-lab-source-add-post-accept-leg1.sql"
+    } == {
+        "research_lab_source_add_configure_probe_v2",
+        "research_lab_source_add_finalize_provision_v2",
+        "research_lab_source_add_reject_current_builtin_v2",
+        "research_lab_source_add_reserve_leg1_slot_v2",
+        "research_lab_source_add_finalize_leg1_v2",
+        "research_lab_source_add_finalize_provision_smoke_v2",
+        "research_lab_source_add_post_accept_leg1_contract_v1",
     }
     assert (
         "scripts/145-research-lab-source-add-admission-control.sql",

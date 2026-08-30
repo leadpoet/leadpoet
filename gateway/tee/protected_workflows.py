@@ -881,6 +881,7 @@ PROTECTED_SYMBOLS = {
         "process_source_add_work_item",
         "_process_provenance",
         "_process_functional_probe",
+        "_process_provisioning_smoke",
         "_process_leg1_reward",
         "_retry_allowed",
         "_retry_at",

@@ -506,6 +506,44 @@ def test_source_add_migration_reads_one_exact_measured_reward_reference():
         )
 
 
+def test_allocation_source_add_query_binds_fifo_creation_order():
+    provider = FakeProvider([{"rows": []}])
+
+    _read(
+        provider,
+        policy_id="allocation_source_add_rewards",
+        parameters={"epoch_id": 100},
+    )
+
+    url = urlsplit(provider.requests[0]["url"])
+    query = dict(parse_qsl(url.query, keep_blank_values=True))
+    assert "created_at" in query["select"].split(",")
+    assert query["order"] == "created_at.asc,reward_ref.asc"
+
+
+def test_source_add_functional_probe_query_binds_approval_config():
+    provider = FakeProvider([{"rows": []}])
+
+    _read(
+        provider,
+        policy_id="source_add_functional_probe_by_submission",
+        parameters={"submission_id": "source_add_submission:1234567890abcdef"},
+    )
+
+    url = urlsplit(provider.requests[0]["url"])
+    query = dict(parse_qsl(url.query, keep_blank_values=True))
+    assert url.path.endswith(
+        "/rest/v1/research_lab_source_add_functional_probe_current"
+    )
+    assert query["submission_id"] == (
+        "eq.source_add_submission:1234567890abcdef"
+    )
+    selected = query["select"].split(",")
+    assert "evaluation_mode" in selected
+    assert "config_ref" in selected
+    assert query["limit"] == "2"
+
+
 def test_unmeasured_policy_and_inverted_epoch_range_fail_before_network():
     provider = FakeProvider([{"rows": []}])
     with pytest.raises(SupabaseSourceV2Error, match="not measured"):

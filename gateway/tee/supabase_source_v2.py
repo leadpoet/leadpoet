@@ -217,11 +217,11 @@ QUERY_POLICIES = {
         select=(
             "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,alpha_percent,"
             "reward_epochs,start_epoch,current_reward_status,trigger_evidence_doc,"
-            "public_label,desired_alpha_percent,epoch_count"
+            "public_label,desired_alpha_percent,epoch_count,created_at"
         ),
         parameter_names=("epoch_id",),
         max_pages=50,
-        order="reward_ref.asc",
+        order="created_at.asc,reward_ref.asc",
     ),
     "source_add_reward_by_ref": SupabaseQueryV2(
         policy_id="source_add_reward_by_ref",
@@ -269,9 +269,21 @@ QUERY_POLICIES = {
         policy_id="source_add_functional_probe_by_submission",
         table="research_lab_source_add_functional_probe_current",
         select=(
-            "attempt_ref,submission_id,adapter_id,result_status,route_hash,"
-            "response_hash,status_class,content_type,byte_count,duration_ms,"
-            "reason_codes,receipt_hash,business_artifact_hash,result_doc,created_at"
+            "attempt_ref,submission_id,adapter_id,evaluation_mode,config_ref,"
+            "result_status,route_hash,response_hash,status_class,content_type,"
+            "byte_count,duration_ms,reason_codes,receipt_hash,"
+            "business_artifact_hash,result_doc,created_at"
+        ),
+        parameter_names=("submission_id",),
+        max_pages=1,
+        limit=2,
+    ),
+    "source_add_provisioning_smoke_by_submission": SupabaseQueryV2(
+        policy_id="source_add_provisioning_smoke_by_submission",
+        table="research_lab_source_add_provisioning_smoke_current",
+        select=(
+            "attempt_ref,submission_id,adapter_id,evaluation_mode,config_ref,"
+            "result_status,receipt_hash,business_artifact_hash,result_doc,created_at"
         ),
         parameter_names=("submission_id",),
         max_pages=1,
@@ -947,6 +959,7 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         "source_add_submission_by_id",
         "source_add_probe_config_by_submission",
         "source_add_functional_probe_by_submission",
+        "source_add_provisioning_smoke_by_submission",
     }:
         submission_id = _identifier(parameters["submission_id"], "submission_id")
         if not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id):

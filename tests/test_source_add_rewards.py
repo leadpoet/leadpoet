@@ -204,6 +204,7 @@ class TestAllocationRails:
             "source_add_reward_id": row["source_add_reward_id"],
             "adapter_id": row["adapter_id"],
             "leg": row["leg"],
+            "created_at": "2026-08-01T00:00:00Z",
             "status": "active",
             "start_epoch": row["start_epoch"],
             "epoch_count": row["epoch_count"],
@@ -387,6 +388,60 @@ class TestAllocationRails:
         assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(expected_remaining)
         assert allocation["reimbursement_allocations"] == expected_existing["reimbursement_allocations"]
         assert allocation["reimbursement_alpha_percent"] == expected_existing["reimbursement_alpha_percent"]
+
+    def test_same_start_source_rewards_use_creation_time_before_reward_hash(self):
+        older = self._source_obligation(
+            create_leg1_reward(
+                adapter_id="adapter:older",
+                miner_ref="miner:older",
+                start_epoch=100,
+            )
+        )
+        newer = self._source_obligation(
+            create_leg1_reward(
+                adapter_id="adapter:newer",
+                miner_ref="miner:newer",
+                start_epoch=100,
+            )
+        )
+        older.update(
+            {
+                "uid": 7,
+                "miner_uid": 7,
+                "source_id": "source_add_reward:ffffffffffffffff",
+                "source_add_reward_id": "source_add_reward:ffffffffffffffff",
+                "created_at": "2026-08-01T00:00:00Z",
+            }
+        )
+        newer.update(
+            {
+                "uid": 8,
+                "miner_uid": 8,
+                "source_id": "source_add_reward:0000000000000000",
+                "source_add_reward_id": "source_add_reward:0000000000000000",
+                "created_at": "2026-08-01T00:00:01Z",
+            }
+        )
+
+        allocation = allocate_research_lab_epoch(
+            105,
+            {**self.POLICY, "research_lab_emission_percent": 1.0},
+            [],
+            [],
+            active_source_add_obligations=[newer, older],
+        )
+
+        assert [
+            row["source_add_reward_id"]
+            for row in allocation["source_add_allocations"]
+        ] == [
+            "source_add_reward:ffffffffffffffff",
+            "source_add_reward:0000000000000000",
+        ]
+        assert [
+            row["paid_alpha_percent"]
+            for row in allocation["source_add_allocations"]
+        ] == pytest.approx([1.0, 0.0])
 
     def test_combined_champion_and_reimbursement_sections_match_legacy_reduced_cap(self):
         source = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:a", start_epoch=100)

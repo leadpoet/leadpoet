@@ -2409,9 +2409,30 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "constraint_valid": True,
             "constraint_definition": purpose_definition,
         }
+        source_add_origin_contract = {
+            "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
+            "identity_version": "v1",
+            "identity_scope": "normalized_exact_host",
+            "admission_rpc": "research_lab_source_add_admit_v2",
+            "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+            "owner_count": 0,
+            "reserved_count": 0,
+            "coverage_complete": True,
+            "collision_free": True,
+            "submission_trigger_enabled": True,
+            "catalog_trigger_enabled": True,
+            "provision_trigger_enabled": True,
+            "terminal_release_trigger_enabled": True,
+            "append_only_trigger_enabled": True,
+            "row_level_security_enabled": True,
+            "service_role_policy_enabled": True,
+        }
         contract_functions = {
             "research_lab_compact_weight_settlement_contract_v1": compact_contract,
             "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
+            "research_lab_source_add_provider_origin_contract_v1": (
+                source_add_origin_contract
+            ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
             assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
@@ -2455,7 +2476,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         assert result["status"] == "ready"
-        assert result["data_probe_count"] == 3
+        assert result["data_probe_count"] == 4
         assert (
             result["chain_realized_settlement_activation_http_probe_count"] == 0
         )
@@ -2470,6 +2491,10 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
         }
         assert result["compact_weight_settlement_contract"] == compact_contract
         assert result["candidate_hybrid_purpose_contract"]["constraint_valid"] is True
+        assert (
+            result["source_add_provider_origin_contract"]
+            == source_add_origin_contract
+        )
         assert result["rpc_probe_count"] == len(
             schema_preflight.REQUIRED_SUPABASE_V2_RPCS
         )

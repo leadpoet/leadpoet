@@ -1074,6 +1074,99 @@ async def test_allocation_parent_loader_uses_finalized_allocation_hash(
 
 
 @pytest.mark.asyncio
+async def test_allocation_parent_loader_selects_exact_source_add_retry_hash(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+
+    reward_ref = "source_add_reward:0123456789abcdef"
+    decision_receipt = "sha256:" + "7" * 64
+    source_row = {
+        "reward_ref": reward_ref,
+        "adapter_id": "adapter:exact-source-add-retry",
+        "miner_hotkey": "5ExactSourceAddRetry",
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": 1.0,
+        "reward_epochs": 20,
+        "start_epoch": 99,
+        "trigger_evidence_doc": {"final_acceptance_stage": "accepted"},
+        "public_label": "Source acceptance reward",
+        "current_reward_status": "active",
+        "epoch_count": 20,
+        "desired_alpha_percent": 1.0,
+    }
+    expected_hash = v2_authority.sha256_json(
+        v2_authority.source_add_reward_row_projection_v2(
+            "source_add_leg1",
+            {**source_row, "initial_reward_status": "active"},
+        )
+    )
+    exact_requests = []
+    by_ref_requests = []
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_source_add_reward_current":
+            status = next(
+                (value for field, value in filters if field == "current_reward_status"),
+                "",
+            )
+            return [source_row] if status == "active" else []
+        return []
+
+    async def load_exact(artifacts):
+        requested = sorted(artifacts)
+        exact_requests.extend(requested)
+        return {
+            key: {
+                "root_receipt_hash": decision_receipt,
+                "receipts": [{"receipt_hash": decision_receipt}],
+            }
+            for key in requested
+        }
+
+    async def load_by_ref(artifacts):
+        by_ref_requests.extend(sorted(artifacts))
+        return {}
+
+    async def load_receipts(receipt_hashes):
+        assert not list(receipt_hashes)
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_v2",
+        load_exact,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_by_ref,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+        finalized_champion_history=(),
+    )
+
+    assert exact_requests == [
+        ("source_add_reward_decision", reward_ref, expected_hash)
+    ]
+    assert by_ref_requests == []
+    assert [graph["root_receipt_hash"] for graph in graphs] == [
+        decision_receipt
+    ]
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_reuses_raw_authority_graphs(
     monkeypatch,
 ):
@@ -1814,11 +1907,25 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     settlement_receipt = "sha256:" + "e" * 64
     source_row = {
         "reward_ref": reward_ref,
+        "adapter_id": "adapter:fully-paid-source",
+        "miner_hotkey": "5FullyPaidSource",
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": 1.0,
+        "reward_epochs": 1,
         "current_reward_status": "active",
         "start_epoch": 99,
         "epoch_count": 1,
         "desired_alpha_percent": 1.0,
+        "trigger_evidence_doc": {},
+        "public_label": "Source acceptance reward",
     }
+    expected_decision_hash = v2_authority.sha256_json(
+        v2_authority.source_add_reward_row_projection_v2(
+            "source_add_leg1",
+            {**source_row, "initial_reward_status": "active"},
+        )
+    )
     business_refs = []
     receipt_roots = []
     source_statuses = []
@@ -1889,6 +1996,11 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     )
     monkeypatch.setattr(
         attested_v2_store,
+        "load_business_artifact_graphs_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
         "load_business_artifact_graphs_by_ref_v2",
         load_business,
     )
@@ -1906,7 +2018,7 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
 
     assert source_statuses == ["active", "queued", "partially_paid"]
     assert business_refs == [
-        ("source_add_reward_decision", reward_ref)
+        ("source_add_reward_decision", reward_ref, expected_decision_hash)
     ]
     assert receipt_roots == [settlement_receipt]
     assert [graph["root_receipt_hash"] for graph in graphs] == [

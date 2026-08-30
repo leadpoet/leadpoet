@@ -200,8 +200,62 @@ def _compact_weight_settlement_contract_fixture() -> dict[str, Any]:
     }
 
 
+def _source_add_provider_origin_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
+        "identity_version": "v1",
+        "identity_scope": "normalized_exact_host",
+        "admission_rpc": "research_lab_source_add_admit_v2",
+        "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+        "owner_count": 0,
+        "reserved_count": 0,
+        "coverage_complete": True,
+        "collision_free": True,
+        "submission_trigger_enabled": True,
+        "catalog_trigger_enabled": True,
+        "provision_trigger_enabled": True,
+        "terminal_release_trigger_enabled": True,
+        "append_only_trigger_enabled": True,
+        "row_level_security_enabled": True,
+        "service_role_policy_enabled": True,
+    }
+
+
 def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
+
+
+def test_local_schema_adapter_returns_full_source_add_origin_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://example.invalid/rest/v1/rpc/"
+            "research_lab_source_add_provider_origin_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_provider_origin_contract_fixture()
 
 
 def test_gateway_cli_secret_matches_initial_durable_secret(
@@ -1330,6 +1384,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_source_add_provider_origin_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_routing_load_model_transition_v2",
@@ -1624,6 +1679,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_source_add_provider_origin_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_candidate_append_model_unit_terminal_v1",

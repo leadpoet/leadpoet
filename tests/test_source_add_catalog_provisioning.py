@@ -25,10 +25,12 @@ from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK
 from research_lab.source_add_execution import SourceAddRejectionReason, intake_source_add_submission
 from research_lab.source_add_identity import (
     normalize_source_add_domain,
+    normalize_source_add_provider_origin,
     normalize_source_add_url,
     source_documentation_identity_hash,
     source_identity_alias_hashes_from_metadata,
     source_identity_hash,
+    source_provider_origin_hash,
 )
 
 
@@ -178,6 +180,71 @@ def test_v2_api_identity_cannot_be_bypassed_by_changing_documentation():
     assert original != different_api_path
 
 
+def test_provider_origin_identity_is_path_independent_but_subdomain_specific():
+    first_path = source_provider_origin_hash(
+        "https://API.test-source.example/v1"
+    )
+    second_path = source_provider_origin_hash(
+        "https://api.test-source.example/v2/search"
+    )
+    distinct_subdomain = source_provider_origin_hash(
+        "https://data.test-source.example/v1"
+    )
+
+    assert normalize_source_add_provider_origin(
+        "https://api.test-source.example/v3"
+    ) == "api.test-source.example"
+    assert first_path == second_path
+    assert first_path != distinct_subdomain
+
+
+def test_current_model_gate_uses_exact_submitted_and_tested_origin(monkeypatch):
+    from gateway.research_lab import provider_evidence_proxy
+
+    monkeypatch.setattr(
+        provider_evidence_proxy,
+        "reserved_builtin_provider_domains_sync",
+        lambda: {"openrouter.ai"},
+    )
+
+    assert source_add_catalog.source_add_api_is_current_builtin_sync(
+        "https://openrouter.ai/api/v1",
+        tested_base_url="https://OPENROUTER.ai:443/api/v2",
+    ) is True
+    assert source_add_catalog.source_add_api_is_current_builtin_sync(
+        "https://api.new-source.example/v1",
+        tested_base_url="https://api.new-source.example/v2",
+    ) is False
+    with pytest.raises(ValueError, match="submitted/tested provider origin differs"):
+        source_add_catalog.source_add_api_is_current_builtin_sync(
+            "https://api.new-source.example/v1",
+            tested_base_url="https://other.new-source.example/v1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("https://api.test-source.example:443/v1", "api.test-source.example"),
+        ("https://www.api.test-source.example./v1", "api.test-source.example"),
+        ("https://[2001:0db8:0000::1]/v1", "2001:db8::1"),
+        ("https://[::ffff:192.0.2.1]/v1", ""),
+        ("https://[::ffff:c000:201]/v1", ""),
+        ("https://192.0.2.1/v1", "192.0.2.1"),
+        ("https://b\N{LATIN SMALL LETTER U WITH DIAERESIS}cher.example/v1", ""),
+        ("https://localhost/v1", ""),
+        ("https://api.test-source.example:8443/v1", ""),
+        ("https://127.1/v1", ""),
+        ("https://api.test-source.example/path with space", ""),
+    ),
+)
+def test_provider_origin_normalization_has_one_strict_exact_host_contract(
+    value, expected
+):
+    assert normalize_source_add_provider_origin(value) == expected
+    assert bool(source_provider_origin_hash(value)) is bool(expected)
+
+
 def test_v2_documentation_alias_is_reserved_separately_and_stably():
     first = source_documentation_identity_hash(
         "https://docs.test-source.example/docs/quickstart"
@@ -237,7 +304,11 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
         "_enforce_research_lab_submission_rate_limit",
         lambda *_args, **_kwargs: _async_none(),
     )
-    monkeypatch.setattr(api, "reserved_builtin_provider_domains_sync", lambda: set())
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
     observed = {}
 
     async def fake_rpc(name, params):
@@ -262,12 +333,19 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
     response = await api.submit_research_lab_source_adapter(payload)
 
     assert response.stage == "provenance_queued"
-    assert observed["name"] == "research_lab_source_add_admit"
+    assert observed["name"] == "research_lab_source_add_admit_v2"
     assert observed["params"]["p_max_open"] == 3
     assert observed["params"]["p_max_day"] == 5
     assert observed["params"]["p_max_30d"] == 10
     assert observed["params"]["p_documentation_identity_hash"].startswith(
         "sha256:"
+    )
+    assert observed["params"]["p_provider_origin_hash"].startswith("sha256:")
+    assert observed["params"]["p_record_doc"]["provider_origin_host"] == (
+        "api.test-source.example"
+    )
+    assert observed["params"]["p_record_doc"]["provider_origin_hash"] == (
+        observed["params"]["p_provider_origin_hash"]
     )
     assert observed["params"]["p_record_doc"]["manifest"]["credential_policy"] == "no_credentials"
     assert observed["params"]["p_record_doc"]["credential_envelope"] == {}
@@ -309,7 +387,11 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
         "_enforce_research_lab_submission_rate_limit",
         lambda *_args, **_kwargs: _async_none(),
     )
-    monkeypatch.setattr(api, "reserved_builtin_provider_domains_sync", lambda: set())
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
     async def duplicate_rpc(*_args, **_kwargs):
         return {"status": "duplicate"}
 
@@ -371,9 +453,9 @@ async def test_current_builtin_provider_is_rejected_generically_before_admission
         lambda *_args, **_kwargs: _async_none(),
     )
     monkeypatch.setattr(
-        api,
-        "reserved_builtin_provider_domains_sync",
-        lambda: {"openrouter.ai"},
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: True,
     )
 
     async def fail_rpc(*_args, **_kwargs):
@@ -444,9 +526,11 @@ async def test_builtin_provider_catalog_failure_blocks_admission(monkeypatch):
         lambda *_args, **_kwargs: _async_none(),
     )
     monkeypatch.setattr(
-        api,
-        "reserved_builtin_provider_domains_sync",
-        lambda: (_ for _ in ()).throw(RuntimeError("catalog unavailable")),
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("catalog unavailable")
+        ),
     )
 
     async def fail_rpc(*_args, **_kwargs):
@@ -522,8 +606,10 @@ async def test_exact_operator_probe_config_is_one_logical_work_across_retries(mo
     work_ids = []
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_configure_probe"
+        assert name == "research_lab_source_add_configure_probe_v2"
         work_ids.append(params["p_work_id"])
+        if len(work_ids) == 3:
+            return {"status": "final_approval_frozen"}
         return {
             "status": "queued" if len(work_ids) == 1 else "already_configured",
             "stage": "functional_probe_queued" if len(work_ids) == 1 else "functional_probe_passed",
@@ -551,11 +637,112 @@ async def test_exact_operator_probe_config_is_one_logical_work_across_retries(mo
     second = await api.configure_research_lab_source_adapter_test(
         submission_id, payload, authorization="Bearer service-role-test"
     )
+    with pytest.raises(api.HTTPException) as frozen:
+        await api.configure_research_lab_source_adapter_test(
+            submission_id, payload, authorization="Bearer service-role-test"
+        )
 
-    assert work_ids[0] == work_ids[1]
+    assert work_ids[0] == work_ids[1] == work_ids[2]
     assert first.queue_status == "queued"
     assert second.queue_status == "already_configured"
     assert second.stage == "functional_probe_passed"
+    assert frozen.value.status_code == 409
+    assert frozen.value.detail == "SOURCE_ADD final approval is frozen"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ("accepted", "leg1_queued", "leg1_created"))
+async def test_operator_probe_config_rejects_frozen_final_approval_stage(
+    monkeypatch,
+    stage,
+):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "select_one",
+        lambda *_args, **_kwargs: _async_value({"stage": stage}),
+    )
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("frozen final approval must not reach configuration RPC")
+
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+    payload = ResearchLabSourceAdapterProbeConfigureRequest(
+        base_url="https://api.test-source.example",
+        auth_kind="none",
+        probes=[
+            {
+                "method": "GET",
+                "path": "/search",
+                "query": {"q": "test"},
+                "body_json": None,
+            }
+        ],
+    )
+
+    with pytest.raises(api.HTTPException) as frozen:
+        await api.configure_research_lab_source_adapter_test(
+            "source_add_submission:" + "d" * 16,
+            payload,
+            authorization="Bearer service-role-test",
+        )
+
+    assert frozen.value.status_code == 409
+    assert frozen.value.detail == "SOURCE_ADD final approval is frozen"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ("accepted", "leg1_queued", "leg1_created"))
+async def test_owner_provision_rejects_frozen_final_approval_stage(
+    monkeypatch,
+    stage,
+):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "select_one",
+        lambda *_args, **_kwargs: _async_value({"stage": stage}),
+    )
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("frozen final approval must not reach provisioning RPC")
+
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+
+    with pytest.raises(api.HTTPException) as frozen:
+        await api.provision_research_lab_source_adapter(
+            "source_add_submission:" + "d" * 16,
+            ResearchLabSourceAdapterProvisionRequest(
+                registry_provider_id="test_source",
+                provision_status=PROVISION_STATUS_APPROVED_PENDING,
+            ),
+            authorization="Bearer service-role-test",
+        )
+
+    assert frozen.value.status_code == 409
+    assert frozen.value.detail == "SOURCE_ADD final approval is frozen"
 
 
 @pytest.mark.asyncio
@@ -633,7 +820,7 @@ async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atom
     finalized = {}
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_finalize_provision"
+        assert name == "research_lab_source_add_finalize_provision_v2"
         finalized.update(params)
         return {
             "status": "provisioned",
@@ -791,10 +978,13 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
         return None
 
     rpc_calls = []
+    freeze_final_approval = {"enabled": True}
 
     async def fake_rpc(name, params):
         rpc_calls.append((name, params))
-        if name == "research_lab_source_add_finalize_provision":
+        if name == "research_lab_source_add_finalize_provision_v2":
+            if freeze_final_approval["enabled"]:
+                return {"status": "final_approval_frozen"}
             assert params["p_provision_row"]["provision_status"] == (
                 PROVISION_STATUS_APPROVED_PENDING
             )
@@ -825,6 +1015,36 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
     monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
     monkeypatch.setattr(api, "reserved_builtin_provider_ids_sync", lambda: set())
 
+    with pytest.raises(api.HTTPException) as frozen:
+        await api.provision_research_lab_source_adapter(
+            submission_id,
+            ResearchLabSourceAdapterProvisionRequest(
+                registry_provider_id="test_source",
+                provision_status=PROVISION_STATUS_ELIGIBLE,
+                probe_endpoints=[
+                    {
+                        "endpoint_id": "test_source.search",
+                        "provider_id": "test_source",
+                        "method": "GET",
+                        "path": "/search",
+                        "params": [
+                            {
+                                "name": "q",
+                                "type": "string",
+                                "required": True,
+                                "location": "query",
+                            }
+                        ],
+                    }
+                ],
+            ),
+            authorization="Bearer service-role-test",
+        )
+    assert frozen.value.status_code == 409
+    assert frozen.value.detail == "SOURCE_ADD final approval is frozen"
+
+    freeze_final_approval["enabled"] = False
+    rpc_calls.clear()
     response = await api.provision_research_lab_source_adapter(
         submission_id,
         ResearchLabSourceAdapterProvisionRequest(
@@ -851,7 +1071,7 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
     )
 
     assert [name for name, _params in rpc_calls] == [
-        "research_lab_source_add_finalize_provision",
+        "research_lab_source_add_finalize_provision_v2",
         "research_lab_source_add_enqueue_provision_smoke",
     ]
     assert response.provision_status == PROVISION_STATUS_APPROVED_PENDING
@@ -1110,7 +1330,7 @@ async def test_owner_recheck_only_queues_provenance_and_never_creates_leg1(monke
     queued = {}
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_requeue_provenance"
+        assert name == "research_lab_source_add_requeue_provenance_v2"
         queued.update(params)
         return {
             "status": "queued",
@@ -1131,6 +1351,7 @@ async def test_owner_recheck_only_queues_provenance_and_never_creates_leg1(monke
     assert response.leg1_reward_status == "not_evaluated"
     assert queued["p_submission_id"] == submission_id
     assert queued["p_identity_hash"].startswith("sha256:")
+    assert queued["p_provider_origin_hash"].startswith("sha256:")
 
 
 @pytest.mark.asyncio

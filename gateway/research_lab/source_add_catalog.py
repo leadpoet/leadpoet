@@ -13,6 +13,7 @@ from gateway.db.client import get_write_client
 from gateway.research_lab.key_vault import decrypt_source_add_credential
 from research_lab.canonical import sha256_json
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
+from research_lab.source_add_identity import normalize_source_add_provider_origin
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,33 @@ ALREADY_SUBMITTED_DETAIL = "Already submitted"
 _SECRET_RE = re.compile(r"(?i)(sk-or-|sb_secret|service_role|raw_secret|password|api[_-]?key\s*=)")
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _TRUTHY = {"1", "true", "yes", "on"}
+
+
+def source_add_api_is_current_builtin_sync(
+    api_base_url: str,
+    *,
+    tested_base_url: str | None = None,
+) -> bool:
+    """Return whether the exact submitted/tested API host is built in now.
+
+    This deliberately has no request or environment override. An isolated
+    rehearsal may replace the helper in process to exercise a built-in source,
+    but production always resolves the current provider catalog fail closed.
+    """
+
+    submitted_host = normalize_source_add_provider_origin(api_base_url)
+    tested_host = normalize_source_add_provider_origin(
+        api_base_url if tested_base_url is None else tested_base_url
+    )
+    if not submitted_host or not tested_host or submitted_host != tested_host:
+        raise ValueError("SOURCE_ADD submitted/tested provider origin differs")
+
+    # Local import avoids a source-catalog/provider-registry import cycle.
+    from gateway.research_lab.provider_evidence_proxy import (
+        reserved_builtin_provider_domains_sync,
+    )
+
+    return submitted_host in reserved_builtin_provider_domains_sync()
 
 
 def source_add_env_ref_resolves(env_name: str) -> bool:

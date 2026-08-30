@@ -31,6 +31,18 @@ EXPECTED_SOURCE_KINDS = (
 )
 
 
+def test_miner_defaults_to_live_research_lab_gateway():
+    source = (
+        Path(__file__).resolve().parents[1] / "neurons" / "miner.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'QUALIFICATION_GATEWAY_URL = os.environ.get('
+        '"GATEWAY_URL", "https://gateway.subnet71.com")'
+    ) in source
+    assert "https://gateway.leadpoet.com" not in source
+
+
 def test_source_add_kind_taxonomy_has_one_authority_and_descriptions():
     assert SOURCE_ADD_SOURCE_KINDS == EXPECTED_SOURCE_KINDS
     assert SOURCE_ADD_SOURCE_KINDS == tuple(kind.value for kind in SourceAddSourceKind)

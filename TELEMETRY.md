@@ -155,6 +155,56 @@ itself. Operationally the collector token should be ingest-only and
 rotated, repository access stays scoped, and the telemetry vendor's
 retention / no-training / deletion terms should be agreed in writing.
 
+## Deploy signal
+
+**What deploys this repo:** nothing in GitHub. Production rollout is
+`gw_restart.sh`, run on the gateway host by a person or by something host-side
+that is not in this repository. There is no deploy workflow, no GitHub
+Deployments API use, and no deploy commit status.
+
+**Consequence for telemetry:** the CI/CD event stream is empty. Zero rows have
+ever been ingested with `onepatch_source = 'cicd'` — re-confirmed over a 30-day
+window on 2026-08-30. Every rung of the usual deploy-signal ladder
+(`deployment_status`, commit `status`, `workflow_job`, `workflow_run`) is
+unreachable here, so no deploy-anchored alerting, and no post-deploy soak, can
+be built.
+
+**Best reachable proxy, and it is only a proxy.** A push to `main` in the
+repo-activity log stream:
+
+```
+onepatch_source = 'github' AND attrs.github.event = 'push' AND attrs.github.push.ref = 'refs/heads/main' AND attrs.github.repo = 'leadpoet/leadpoet'
+```
+
+A gateway restart typically follows such a push by about 25 minutes. It is not
+a deploy signal and should not be treated as one, in both directions:
+
+| date | pushes to `main` | gateway restarts |
+|---|---|---|
+| 2026-08-26 | 8 | 3 |
+| 2026-08-27 | 30 | 11 |
+| 2026-08-28 | 22 | 14 |
+| 2026-08-29 | 9 | 16 |
+
+Several pushes batch into one restart, so on a busy day the proxy over-counts;
+and on 2026-08-29 the gateway restarted twelve times with no push behind any of
+them, so it under-counts exactly when something is wrong. Restart counts above
+are taken from the 5.00-second `GET /health/v2-authority` poll that
+`gw_restart.sh` runs while waiting for the process to come back — that burst,
+not the push, is the only first-hand evidence of a rollout this deployment
+emits.
+
+**Confidence: low.** The proxy is good enough to ask "did a release plausibly
+cause this?" and not good enough to anchor anything to.
+
+**The one-shot escalation is spent.** PR #95 proposed a single `curl` at the end
+of a successful `gw_restart.sh` run, posting a deploy event to the OnePatch
+ingest endpoint — roughly one second, deletable in one line. It was closed
+unmerged on 2026-08-29. The same beacon now rides along in the still-open
+[#103](https://github.com/leadpoet/leadpoet/pull/103) alongside the liveness
+watchdog. If #103 merges, this section should be re-derived against the real
+event; until then this is the ceiling, and no further escalation will be opened.
+
 ## Related: error monitoring (Sentry)
 
 Error capture (crashes and ERROR-level logs) is a separate, equally

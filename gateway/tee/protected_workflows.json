@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "770b9675f3fa54093004bcee3cd67eb1c2d65522",
+  "baseline_commit": "30fa752dd15ccf06d84d27b95655279f77b12726",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -3322,7 +3322,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:870efcccbcefd3ae4aeccccb3c60a1b260ce34000b5a00c4070f5edbe9073c41",
+      "ast_sha256": "sha256:333f0197eaca8c9083546700fde08d548c65134a843e56909eeae50988bd17b7",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -8247,7 +8247,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:af7d24b01a10be700bcc8e1383fd1d141962d11d1b34de8fe7c786d5cd46ac28",
-  "protected_source_commit": "770b9675f3fa54093004bcee3cd67eb1c2d65522",
+  "manifest_hash": "sha256:887c14d078b580f77413ab78730ad7fb4714f5a24abcdb42fb92a6741a2e2013",
+  "protected_source_commit": "30fa752dd15ccf06d84d27b95655279f77b12726",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

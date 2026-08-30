@@ -2860,6 +2860,108 @@ async def test_private_baseline_repo_head_check_allows_same_sha(monkeypatch):
     assert sync_called is False
 
 
+def test_private_baseline_repo_head_change_signal_raises_at_progress_boundary():
+    base_progress = []
+    signal = sw._PrivateBaselineRepoHeadChangeSignal(expected_git_sha="old-sha")
+    progress = signal.wrap_progress_callback(
+        lambda: base_progress.append("progress"),
+        item_index=7,
+        total_icps=40,
+    )
+
+    progress()
+    signal.mark_changed("new-sha")
+
+    with pytest.raises(sw.PrivateBaselineRepoHeadChanged) as exc_info:
+        progress()
+
+    assert base_progress == ["progress", "progress"]
+    assert exc_info.value.expected_git_sha == "old-sha"
+    assert exc_info.value.repo_main_sha == "new-sha"
+    assert exc_info.value.item_index == 7
+    assert exc_info.value.total_icps == 40
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_repo_head_watcher_retries_then_signals(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    signal = sw._PrivateBaselineRepoHeadChangeSignal(expected_git_sha="old-sha")
+    checks = 0
+
+    async def fake_ensure(**_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise RuntimeError("temporary control-plane failure")
+        raise sw.PrivateBaselineRepoHeadChanged(
+            expected_git_sha="old-sha",
+            repo_main_sha="new-sha",
+            item_index=0,
+            total_icps=40,
+        )
+
+    monkeypatch.setattr(sw, "_baseline_repo_head_watch_interval_seconds", lambda: 0.001)
+    worker._ensure_private_baseline_repo_head_unchanged = fake_ensure
+
+    await worker._watch_private_baseline_repo_head_change(
+        expected_git_sha="old-sha",
+        benchmark_date="2026-08-30",
+        total_icps=40,
+        signal=signal,
+    )
+
+    assert checks == 2
+    assert signal.repo_main_sha() == "new-sha"
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_batch_preempts_inflight_model_at_progress_boundary(
+    monkeypatch,
+):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+        scoring_worker_total_workers=1,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}]
+    )
+
+    async def boundary(**_kwargs):
+        return None
+
+    async def fake_watch(*, signal, **_kwargs):
+        signal.mark_changed("new-sha")
+
+    async def fake_run_baseline_icp(*, progress_callback, **_kwargs):
+        await asyncio.sleep(0)
+        progress_callback()
+        raise AssertionError("repo-head progress boundary did not preempt")
+
+    monkeypatch.setattr(sw, "_enforce_baseline_wave_maintenance_boundary", boundary)
+    worker._watch_private_baseline_repo_head_change = fake_watch
+    worker._run_baseline_icp = fake_run_baseline_icp
+
+    with pytest.raises(sw.PrivateBaselineRepoHeadChanged) as exc_info:
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=0.0,
+            expected_repo_main_git_sha="old-sha",
+            benchmark_date="2026-08-30",
+        )
+
+    assert exc_info.value.expected_git_sha == "old-sha"
+    assert exc_info.value.repo_main_sha == "new-sha"
+    assert exc_info.value.item_index == 1
+
+
 def _retry_test_runner(*, image_digest: str, scope: str):
     manifest_payload = {
         "model_artifact_hash": "sha256:" + "9" * 64,

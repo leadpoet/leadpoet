@@ -4028,7 +4028,7 @@ class ResearchLabPromotionController:
         if not getattr(self.config, "source_add_rewards_enabled", False):
             return {"source_add_reward_status": "disabled"}
         leg2_alpha_percent = float(
-            getattr(self.config, "source_add_leg2_alpha_percent", 5.0)
+            getattr(self.config, "source_add_leg2_alpha_percent", 0.0)
         )
         if leg2_alpha_percent <= 0.0:
             return {"source_add_reward_status": "disabled"}

@@ -237,6 +237,7 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
         "_enforce_research_lab_submission_rate_limit",
         lambda *_args, **_kwargs: _async_none(),
     )
+    monkeypatch.setattr(api, "reserved_builtin_provider_domains_sync", lambda: set())
     observed = {}
 
     async def fake_rpc(name, params):
@@ -308,6 +309,7 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
         "_enforce_research_lab_submission_rate_limit",
         lambda *_args, **_kwargs: _async_none(),
     )
+    monkeypatch.setattr(api, "reserved_builtin_provider_domains_sync", lambda: set())
     async def duplicate_rpc(*_args, **_kwargs):
         return {"status": "duplicate"}
 
@@ -326,6 +328,145 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Already submitted"
+
+
+@pytest.mark.asyncio
+async def test_current_builtin_provider_is_rejected_generically_before_admission(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "is_autoresearch_maintenance_paused",
+        lambda *a, **k: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_enforce_research_lab_submission_rate_limit",
+        lambda *_args, **_kwargs: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "reserved_builtin_provider_domains_sync",
+        lambda: {"openrouter.ai"},
+    )
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("built-in provider rejection must not persist")
+
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-openrouter-1",
+        manifest=_manifest_doc(
+            source_name="OpenRouter",
+            declared_base_domains=["attacker-declared.example"],
+        ),
+        source_metadata=_source_metadata_doc(
+            api_base_url="https://openrouter.ai/api/v1",
+            documentation_url="https://openrouter.ai/docs/quickstart",
+            auth_type="bearer",
+        ),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Already submitted"
+
+
+@pytest.mark.asyncio
+async def test_builtin_provider_catalog_failure_blocks_admission(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance,
+        "is_scoring_maintenance_paused",
+        lambda *a, **k: _async_none(),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "is_autoresearch_maintenance_paused",
+        lambda *a, **k: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_enforce_research_lab_submission_rate_limit",
+        lambda *_args, **_kwargs: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "reserved_builtin_provider_domains_sync",
+        lambda: (_ for _ in ()).throw(RuntimeError("catalog unavailable")),
+    )
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("catalog failure must not persist")
+
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-catalog-failure-1",
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "SOURCE_ADD workflow temporarily unavailable"
 
 
 @pytest.mark.asyncio

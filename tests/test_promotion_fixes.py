@@ -4328,6 +4328,25 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     }
 
 
+@pytest.mark.asyncio
+async def test_source_add_leg2_zero_alpha_disables_before_attribution(store):
+    config = _source_add_reward_config()
+    config.source_add_leg2_alpha_percent = 0.0
+    controller = ResearchLabPromotionController(config, worker_ref="test-worker")
+
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate-leg1-only"},
+        score_bundle_row={"score_bundle_id": "score-leg1-only"},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created"},
+    )
+
+    assert result == {"source_add_reward_status": "disabled"}
+    assert store.reward_obligation_writes == []
+
+
 def _install_source_add_v2_judge(
     monkeypatch,
     judge,

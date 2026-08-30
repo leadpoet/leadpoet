@@ -158,6 +158,7 @@ from .store import (
 )
 from gateway.research_lab.provider_evidence_proxy import (
     ProviderRegistryEntry,
+    reserved_builtin_provider_domains_sync,
     reserved_builtin_provider_ids_sync,
     validate_provider_registry_entries,
 )
@@ -171,6 +172,7 @@ from research_lab.source_add_execution import intake_source_add_submission
 from research_lab.source_add_identity import (
     SOURCE_ADD_IDENTITY_VERSION,
     legacy_source_identity_hash,
+    normalize_source_add_domain,
     source_identity_alias_hashes_from_metadata,
     source_identity_hash_from_metadata,
 )
@@ -726,6 +728,23 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         )
 
     source_metadata = payload.source_metadata.model_dump(mode="json")
+    try:
+        current_model_domains = await asyncio.to_thread(
+            reserved_builtin_provider_domains_sync
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_BUILTIN_CATALOG_UNAVAILABLE type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="SOURCE_ADD workflow temporarily unavailable",
+        ) from exc
+    if normalize_source_add_domain(
+        str(source_metadata.get("api_base_url") or "")
+    ) in current_model_domains:
+        raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
     declared_domains = (
         payload.manifest.get("declared_base_domains")
         if isinstance(payload.manifest, Mapping)

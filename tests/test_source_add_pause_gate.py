@@ -33,6 +33,8 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
 
     config = SimpleNamespace(
         api_enabled=False,
+        production_writes_enabled=True,
+        miner_submissions_enabled=True,
         source_add_enabled=True,
         source_add_dispatcher_enabled=True,
         public_status=lambda: {
@@ -50,6 +52,11 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
     monkeypatch.setattr(
         api,
         "get_autoresearch_maintenance_state",
+        _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_scoring_maintenance_state",
         _async_value({"paused": False, "status": "active"}),
     )
     monkeypatch.setattr(
@@ -79,6 +86,85 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
         "unavailable": False,
     }
     assert status["source_add"]["effective_dispatcher_enabled"] is False
+    assert status["source_add"]["intake_enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("closed_gate", "closed_value", "expected"),
+    (
+        (None, None, True),
+        ("api_enabled", False, False),
+        ("production_writes_enabled", False, False),
+        ("miner_submissions_enabled", False, False),
+        ("source_add_enabled", False, False),
+        ("autoresearch_paused", True, False),
+        ("scoring_paused", True, False),
+        ("source_add_paused", True, False),
+    ),
+)
+async def test_public_status_source_add_intake_gate_matches_admission_state(
+    monkeypatch,
+    closed_gate,
+    closed_value,
+    expected,
+):
+    from types import SimpleNamespace
+
+    values = {
+        "api_enabled": True,
+        "production_writes_enabled": True,
+        "miner_submissions_enabled": True,
+        "source_add_enabled": True,
+        "autoresearch_paused": False,
+        "scoring_paused": False,
+        "source_add_paused": False,
+    }
+    if closed_gate is not None:
+        values[closed_gate] = closed_value
+    config = SimpleNamespace(
+        api_enabled=values["api_enabled"],
+        production_writes_enabled=values["production_writes_enabled"],
+        miner_submissions_enabled=values["miner_submissions_enabled"],
+        source_add_enabled=values["source_add_enabled"],
+        source_add_dispatcher_enabled=True,
+        reports_enabled=False,
+        public_status=lambda: {
+            "source_add": {
+                "enabled": values["source_add_enabled"],
+                "dispatcher_enabled": True,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(lambda: config),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_autoresearch_maintenance_state",
+        _async_value({"paused": values["autoresearch_paused"]}),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_scoring_maintenance_state",
+        _async_value({"paused": values["scoring_paused"]}),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        _async_value({"paused": values["source_add_paused"]}),
+    )
+    monkeypatch.setattr(
+        api,
+        "private_repo_head_alignment_status",
+        _async_value({"status": "aligned"}),
+    )
+
+    status = await api.research_lab_status()
+
+    assert status["source_add"]["intake_enabled"] is expected
 
 
 @pytest.mark.asyncio

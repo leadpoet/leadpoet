@@ -10,6 +10,7 @@ from research_lab.source_add_miner import (
     build_source_add_submission_docs,
     build_source_add_metadata,
     parse_source_add_domains,
+    source_add_submission_ready,
 )
 
 
@@ -41,6 +42,35 @@ def test_miner_defaults_to_live_research_lab_gateway():
         '"GATEWAY_URL", "https://gateway.subnet71.com")'
     ) in source
     assert "https://gateway.leadpoet.com" not in source
+
+
+def test_source_add_submission_readiness_uses_authoritative_gateway_gate():
+    assert source_add_submission_ready(
+        {"source_add": {"enabled": True, "intake_enabled": True}}
+    )
+
+    for status in (
+        {},
+        {"source_add_enabled": True},
+        {"source_add": {"enabled": True}},
+        {"source_add": {"enabled": True, "intake_enabled": False}},
+        {"source_add": {"intake_enabled": 1}},
+        {"source_add": "enabled"},
+    ):
+        assert source_add_submission_ready(status) is False
+
+
+def test_miner_checks_intake_readiness_before_prompting_for_source_details():
+    source = (
+        Path(__file__).resolve().parents[1] / "neurons" / "miner.py"
+    ).read_text(encoding="utf-8")
+    status_check = source.index("if not source_add_submission_ready(status):")
+    first_prompt = source.index(
+        '_research_lab_prompt_required_text("   Source/API name: "',
+        status_check,
+    )
+
+    assert status_check < first_prompt
 
 
 def test_source_add_kind_taxonomy_has_one_authority_and_descriptions():

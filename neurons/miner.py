@@ -70,6 +70,7 @@ from research_lab.source_add_miner import (
     SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
     SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
+    source_add_submission_ready,
 )
 from leadpoet_canonical.credential_recipient_v2 import (
     CredentialRecipientV2Error,
@@ -3200,10 +3201,8 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     status = _get_research_lab_status(gateway_url)
     if status is None:
         return
-    source_add_status = status.get("source_add") if isinstance(status.get("source_add"), dict) else {}
-    source_add_enabled = bool(status.get("source_add_enabled") or source_add_status.get("enabled"))
-    if not source_add_enabled:
-        print("SOURCE_ADD submissions are not live yet on this gateway.")
+    if not source_add_submission_ready(status):
+        print("SOURCE_ADD submissions are not accepting new submissions on this gateway.")
         print("No source details were collected or sent.")
         return
 

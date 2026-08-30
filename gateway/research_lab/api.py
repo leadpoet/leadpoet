@@ -61,7 +61,10 @@ from .key_vault import (
 from .v2_credential_envelopes import (
     persist_openrouter_credential_envelope_v2,
 )
-from .maintenance import get_autoresearch_maintenance_state
+from .maintenance import (
+    get_autoresearch_maintenance_state,
+    get_scoring_maintenance_state,
+)
 from .ticket_intake_validation import validate_ticket_direction
 from .ticket_lifecycle import (
     TERMINAL_TICKET_STATUSES,
@@ -491,8 +494,9 @@ async def _seal_openrouter_credential_v2(
 @router.get("/status")
 async def research_lab_status() -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
-    maintenance, source_add_control = await asyncio.gather(
+    maintenance, scoring_maintenance, source_add_control = await asyncio.gather(
         get_autoresearch_maintenance_state(),
+        get_scoring_maintenance_state(),
         source_add_control_state(),
     )
     maintenance_public = {
@@ -535,6 +539,18 @@ async def research_lab_status() -> dict[str, object]:
     source_add_public["effective_dispatcher_enabled"] = bool(
         config.source_add_enabled
         and config.source_add_dispatcher_enabled
+        and not source_add_control.get("paused", True)
+    )
+    # This is the public, fail-closed projection of every launch gate checked
+    # before the source-adapter POST verifies a miner or persists anything.
+    # Miner clients use it to exit before prompting when intake is closed.
+    source_add_public["intake_enabled"] = bool(
+        config.api_enabled
+        and config.production_writes_enabled
+        and config.miner_submissions_enabled
+        and config.source_add_enabled
+        and not maintenance.get("paused", True)
+        and not scoring_maintenance.get("paused", True)
         and not source_add_control.get("paused", True)
     )
     return {

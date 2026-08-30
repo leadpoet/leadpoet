@@ -1781,6 +1781,8 @@ class CoordinatorAllocationSourceV2:
             else self._non_negative_int(history_start, "history_start")
         )
         history_end = epoch - 1
+        if normalized_history_start > history_end:
+            return []
         activation_rows = self._read(
             "chain_realized_settlement_activation",
             {"netuid": netuid},

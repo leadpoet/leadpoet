@@ -2427,11 +2427,56 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "row_level_security_enabled": True,
             "service_role_policy_enabled": True,
         }
+        source_add_duplicate_privacy_contract = {
+            "schema_version": (
+                "leadpoet.source_add_duplicate_privacy_contract.v1"
+            ),
+            "admission_rpc": "research_lab_source_add_admit_v3",
+            "admission_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+            ),
+            "compatibility_rpc": "research_lab_source_add_admit_v2",
+            "compatibility_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer"
+            ),
+            "compatibility_cooldown_seconds": 20,
+            "cooldown_parameter_min_seconds": 1,
+            "cooldown_parameter_max_seconds": 3600,
+            "cooldown_clock": "clock_timestamp_after_advisory_locks",
+            "cooldown_source": "durable_miner_provenance_work",
+            "duplicate_precedes_cooldown": True,
+            "lock_order": [
+                "provider_origin_or_identity",
+                "hotkey",
+                "submission_or_work",
+            ],
+            "function_authority_sha256": (
+                schema_preflight.SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
+            ),
+            "functions": {
+                "admit_v1": True,
+                "admit_v2_compatibility": True,
+                "admit_v3": True,
+                "provider_origin_hash_v1": True,
+                "provider_origin_host_v1": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "v3_service_role_callable": True,
+                "v2_service_role_callable": True,
+                "contract_service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        }
         contract_functions = {
             "research_lab_compact_weight_settlement_contract_v1": compact_contract,
             "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
             "research_lab_source_add_provider_origin_contract_v1": (
                 source_add_origin_contract
+            ),
+            "research_lab_source_add_duplicate_privacy_contract_v1": (
+                source_add_duplicate_privacy_contract
             ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:

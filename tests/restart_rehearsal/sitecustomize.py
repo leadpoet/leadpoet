@@ -4490,6 +4490,67 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD duplicate-privacy contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD duplicate-privacy contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_duplicate_privacy_contract.v1"
+                ),
+                "admission_rpc": "research_lab_source_add_admit_v3",
+                "admission_signature": (
+                    "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+                ),
+                "compatibility_rpc": "research_lab_source_add_admit_v2",
+                "compatibility_signature": (
+                    "jsonb,text,text,text,text,text,integer,integer,integer"
+                ),
+                "compatibility_cooldown_seconds": 20,
+                "cooldown_parameter_min_seconds": 1,
+                "cooldown_parameter_max_seconds": 3600,
+                "cooldown_clock": "clock_timestamp_after_advisory_locks",
+                "cooldown_source": "durable_miner_provenance_work",
+                "duplicate_precedes_cooldown": True,
+                "lock_order": [
+                    "provider_origin_or_identity",
+                    "hotkey",
+                    "submission_or_work",
+                ],
+                "function_authority_sha256": (
+                    "sha256:26bf34c94725b855f81c2e48b6afbd72"
+                    "d68db36a4aeffb5642494a5da32233e0"
+                ),
+                "functions": {
+                    "admit_v1": True,
+                    "admit_v2_compatibility": True,
+                    "admit_v3": True,
+                    "provider_origin_hash_v1": True,
+                    "provider_origin_host_v1": True,
+                },
+                "permissions": {
+                    "service_role_exists": True,
+                    "v3_service_role_callable": True,
+                    "v2_service_role_callable": True,
+                    "contract_service_role_callable": True,
+                    "anon_callable": False,
+                    "authenticated_callable": False,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
         == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
     ):
         if str(getattr(request, "method", None) or "GET").upper() != "POST":

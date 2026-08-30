@@ -1424,6 +1424,106 @@ def test_declared_root_lookup_still_rejects_conflicting_graphs(monkeypatch):
         )
 
 
+def test_first_source_add_epoch_has_no_settlement_history():
+    reader = FakeReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    assert (
+        resolver._finalized_champion_history(
+            epoch=100,
+            netuid=71,
+            champion_rows=[
+                {
+                    "reward_kind": "source_add_leg1",
+                    "start_epoch": 100,
+                }
+            ],
+            context=_context(),
+            required_parents=set(),
+        )
+        == []
+    )
+    assert reader.calls == []
+
+
+@pytest.mark.parametrize(
+    ("champion_rows", "history_start"),
+    (
+        ([{"reward_kind": "source_add_leg1", "start_epoch": 100}], None),
+        ([], 100),
+    ),
+)
+def test_actual_settlement_history_requires_activation(
+    champion_rows,
+    history_start,
+):
+    reader = FakeReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="chain realized settlement activation is unavailable or ambiguous",
+    ):
+        resolver._finalized_champion_history(
+            epoch=101,
+            netuid=71,
+            champion_rows=champion_rows,
+            history_start=history_start,
+            context=_context(),
+            required_parents=set(),
+        )
+
+    assert reader.calls == [
+        ("chain_realized_settlement_activation", {"netuid": 71})
+    ]
+
+
+def test_actual_settlement_history_validates_activation():
+    reader = FakeReader(
+        {
+            "chain_realized_settlement_activation": [
+                {
+                    **_chain_realized_activation(first_epoch_id=100),
+                    "source_bundle_epoch_id": 99,
+                }
+            ]
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="chain realized settlement activation is invalid",
+    ):
+        resolver._finalized_champion_history(
+            epoch=101,
+            netuid=71,
+            champion_rows=[
+                {
+                    "reward_kind": "source_add_leg1",
+                    "start_epoch": 100,
+                }
+            ],
+            context=_context(),
+            required_parents=set(),
+        )
+
+
 def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
     finalization_root = "sha256:" + "1" * 64
     allocation_receipt = "sha256:" + "2" * 64

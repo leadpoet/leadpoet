@@ -221,6 +221,50 @@ def _source_add_provider_origin_contract_fixture() -> dict[str, Any]:
     }
 
 
+def _source_add_duplicate_privacy_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_duplicate_privacy_contract.v1",
+        "admission_rpc": "research_lab_source_add_admit_v3",
+        "admission_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+        ),
+        "compatibility_rpc": "research_lab_source_add_admit_v2",
+        "compatibility_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer"
+        ),
+        "compatibility_cooldown_seconds": 20,
+        "cooldown_parameter_min_seconds": 1,
+        "cooldown_parameter_max_seconds": 3600,
+        "cooldown_clock": "clock_timestamp_after_advisory_locks",
+        "cooldown_source": "durable_miner_provenance_work",
+        "duplicate_precedes_cooldown": True,
+        "lock_order": [
+            "provider_origin_or_identity",
+            "hotkey",
+            "submission_or_work",
+        ],
+        "function_authority_sha256": (
+            "sha256:26bf34c94725b855f81c2e48b6afbd72"
+            "d68db36a4aeffb5642494a5da32233e0"
+        ),
+        "functions": {
+            "admit_v1": True,
+            "admit_v2_compatibility": True,
+            "admit_v3": True,
+            "provider_origin_hash_v1": True,
+            "provider_origin_host_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v3_service_role_callable": True,
+            "v2_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+
+
 def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
     return {
         "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
@@ -228,8 +272,8 @@ def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
         "leg1_alpha_percent": 1.0,
         "leg1_reward_epochs": 20,
         "function_authority_sha256": (
-            "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
-            "b369628d0cea2fd0a3fa39d601f34b06"
+            "sha256:035b4dc17bc8e8b63524df2c123892aa"
+            "3ddaf0a01d08c69fc2d756921e8e96be"
         ),
         "functions": {
             "configure_probe_v2": True,
@@ -290,6 +334,39 @@ def test_local_schema_adapter_returns_full_source_add_origin_contract(
         contract = json.loads(response.read().decode("utf-8"))
 
     assert contract == _source_add_provider_origin_contract_fixture()
+
+
+def test_local_schema_adapter_returns_duplicate_privacy_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://example.invalid/rest/v1/rpc/"
+            "research_lab_source_add_duplicate_privacy_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_duplicate_privacy_contract_fixture()
 
 
 def test_local_schema_adapter_returns_full_source_add_leg1_contract(
@@ -1452,6 +1529,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
+            "research_lab_source_add_duplicate_privacy_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
@@ -1748,6 +1826,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
             "research_lab_source_add_provider_origin_contract_v1",
+            "research_lab_source_add_duplicate_privacy_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",

@@ -1083,6 +1083,14 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_provider_origin_contract_v1",
     ),
     (
+        "scripts/169-research-lab-source-add-duplicate-privacy.sql",
+        "research_lab_source_add_admit_v3",
+    ),
+    (
+        "scripts/169-research-lab-source-add-duplicate-privacy.sql",
+        "research_lab_source_add_duplicate_privacy_contract_v1",
+    ),
+    (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
         "research_lab_private_model_lineage_generation",
     ),
@@ -1500,6 +1508,100 @@ def _verify_candidate_hybrid_purpose_contract_v1(
     }
 
 
+SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
+)
+
+
+def _verify_source_add_duplicate_privacy_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_duplicate_privacy_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
+            "scripts/169-research-lab-source-add-duplicate-privacy.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
+            "scripts/169-research-lab-source-add-duplicate-privacy.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_duplicate_privacy_contract.v1",
+        "admission_rpc": "research_lab_source_add_admit_v3",
+        "admission_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+        ),
+        "compatibility_rpc": "research_lab_source_add_admit_v2",
+        "compatibility_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer"
+        ),
+        "compatibility_cooldown_seconds": 20,
+        "cooldown_parameter_min_seconds": 1,
+        "cooldown_parameter_max_seconds": 3600,
+        "cooldown_clock": "clock_timestamp_after_advisory_locks",
+        "cooldown_source": "durable_miner_provenance_work",
+        "duplicate_precedes_cooldown": True,
+        "lock_order": [
+            "provider_origin_or_identity",
+            "hotkey",
+            "submission_or_work",
+        ],
+        "function_authority_sha256": (
+            SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admit_v1": True,
+            "admit_v2_compatibility": True,
+            "admit_v3": True,
+            "provider_origin_hash_v1": True,
+            "provider_origin_host_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v3_service_role_callable": True,
+            "v2_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract differs"
+        )
+    return dict(contract)
+
+
 def _verify_source_add_provider_origin_contract_v1(
     *,
     headers: Mapping[str, str],
@@ -1593,6 +1695,15 @@ def _verify_source_add_provider_origin_contract_v1(
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD provider-origin contract differs"
         )
+    # Keep the provider-origin verification as the one protected preflight
+    # seam while binding the v3 route's exact implementation, compatibility
+    # wrapper, policy, signatures, and ACLs in migration 169.
+    _verify_source_add_duplicate_privacy_contract_v1(
+        headers=headers,
+        supabase_url=supabase_url,
+        opener=opener,
+        timeout_seconds=timeout_seconds,
+    )
     return dict(contract)
 
 

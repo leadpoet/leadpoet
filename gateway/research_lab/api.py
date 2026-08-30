@@ -192,6 +192,7 @@ from gateway.research_lab import allocation_handoff_disk_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/research-lab", tags=["research-lab"])
+_SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS = 20
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
@@ -733,7 +734,6 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             detail="SOURCE_ADD workflow is paused",
         )
     await _verify_signed_miner(payload)
-    await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
 
     if payload.adapter_credential is not None or payload.adapter_credential_v2 is not None:
         raise HTTPException(
@@ -824,7 +824,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         "%s:%s" % (payload.idempotency_key, payload.timestamp),
     )
     admitted = await _source_add_rpc(
-        "research_lab_source_add_admit_v2",
+        "research_lab_source_add_admit_v3",
         {
             "p_record_doc": record_doc,
             "p_identity_hash": source_identity_ref,
@@ -837,11 +837,49 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             "p_max_open": int(config.source_add_max_concurrent_per_hotkey),
             "p_max_day": int(config.source_add_max_per_day_per_hotkey),
             "p_max_30d": int(config.source_add_max_per_30d_per_hotkey),
+            "p_cooldown_seconds": _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS,
         },
     )
     status = str(admitted.get("status") or "")
     if status == "duplicate":
         raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
+    if status == "route_cooldown":
+        try:
+            cooldown_seconds = int(admitted.get("cooldown_seconds") or 0)
+            wait_seconds = int(admitted.get("wait_seconds") or 0)
+        except (TypeError, ValueError):
+            cooldown_seconds = 0
+            wait_seconds = 0
+        if (
+            cooldown_seconds != _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS
+            or wait_seconds < 1
+            or wait_seconds > cooldown_seconds
+        ):
+            logger.warning(
+                "SOURCE_ADD_ADMISSION_INVALID_COOLDOWN cooldown=%s wait=%s",
+                cooldown_seconds,
+                wait_seconds,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD workflow temporarily unavailable",
+            )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "research_lab_rate_limited",
+                "route": "source_adapters",
+                "message": (
+                    f"Please wait {wait_seconds} seconds before submitting "
+                    "another lead (anti-spam cooldown)."
+                ),
+                "stats": {
+                    "limit_type": "cooldown",
+                    "cooldown_seconds": cooldown_seconds,
+                    "wait_seconds": wait_seconds,
+                },
+            },
+        )
     if status in {"hotkey_open_cap", "hotkey_day_cap", "hotkey_30d_cap"}:
         raise HTTPException(status_code=429, detail="SOURCE_ADD submission limit reached")
     if status != "admitted":

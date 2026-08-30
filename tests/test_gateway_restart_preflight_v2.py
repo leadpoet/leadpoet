@@ -531,6 +531,51 @@ def _source_add_provider_origin_contract_response(**overrides) -> bytes:
     return json.dumps(contract).encode()
 
 
+def _source_add_duplicate_privacy_contract_response(**overrides) -> bytes:
+    contract = {
+        "schema_version": "leadpoet.source_add_duplicate_privacy_contract.v1",
+        "admission_rpc": "research_lab_source_add_admit_v3",
+        "admission_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+        ),
+        "compatibility_rpc": "research_lab_source_add_admit_v2",
+        "compatibility_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer"
+        ),
+        "compatibility_cooldown_seconds": 20,
+        "cooldown_parameter_min_seconds": 1,
+        "cooldown_parameter_max_seconds": 3600,
+        "cooldown_clock": "clock_timestamp_after_advisory_locks",
+        "cooldown_source": "durable_miner_provenance_work",
+        "duplicate_precedes_cooldown": True,
+        "lock_order": [
+            "provider_origin_or_identity",
+            "hotkey",
+            "submission_or_work",
+        ],
+        "function_authority_sha256": (
+            schema_preflight.SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admit_v1": True,
+            "admit_v2_compatibility": True,
+            "admit_v3": True,
+            "provider_origin_hash_v1": True,
+            "provider_origin_host_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v3_service_role_callable": True,
+            "v2_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    contract.update(overrides)
+    return json.dumps(contract).encode()
+
+
 def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
     contract = {
         "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
@@ -603,6 +648,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 body=_source_add_provider_origin_contract_response()
             )
         if request.full_url.endswith(
+            "/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_duplicate_privacy_contract_response()
+            )
+        if request.full_url.endswith(
             "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
         ):
             return _SchemaResponse(
@@ -672,7 +723,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "reward_epochs": 20,
         "daily_cap": 10,
     }
-    assert len(requests) == result["table_probe_count"] + 6
+    assert len(requests) == result["table_probe_count"] + 7
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -712,6 +763,13 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             "/rpc/research_lab_source_add_provider_origin_contract_v1"
         )
     ]
+    privacy_contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+        )
+    ]
     leg1_contract_requests = [
         request
         for request in table_requests
@@ -726,6 +784,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         and request not in contract_requests
         and request not in hybrid_contract_requests
         and request not in origin_contract_requests
+        and request not in privacy_contract_requests
         and request not in leg1_contract_requests
     ]
     assert all(
@@ -735,6 +794,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert len(contract_requests) == 1
     assert len(hybrid_contract_requests) == 1
     assert len(origin_contract_requests) == 1
+    assert len(privacy_contract_requests) == 1
     assert len(leg1_contract_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
@@ -766,6 +826,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/161-research-lab-exact-model-transitions.sql",
         "scripts/167-research-lab-source-add-post-accept-leg1.sql",
         "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/169-research-lab-source-add-duplicate-privacy.sql",
     }.issubset(set(result["migration_files"]))
     assert (
         "scripts/163-research-lab-model-transition-artifact-custody.sql"
@@ -819,6 +880,12 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
         ):
             return _SchemaResponse(
                 body=_source_add_provider_origin_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
             "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
@@ -916,6 +983,12 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
                 body=_source_add_provider_origin_contract_response()
             )
         if request.full_url.endswith(
+            "/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_duplicate_privacy_contract_response()
+            )
+        if request.full_url.endswith(
             "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
         ):
             return _SchemaResponse(
@@ -951,7 +1024,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
         and "limit=2" in request.full_url
         for request, _timeout in requests
     )
-    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 5
+    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 6
 
 
 def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
@@ -1009,6 +1082,36 @@ def test_source_add_provider_origin_contract_rejects_safety_drift(
         match="SOURCE_ADD provider-origin contract differs",
     ):
         schema_preflight._verify_source_add_provider_origin_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"function_authority_sha256": "sha256:" + "f" * 64},
+        {"compatibility_cooldown_seconds": 19},
+        {"cooldown_clock": "transaction_start"},
+        {"duplicate_precedes_cooldown": False},
+    ),
+)
+def test_source_add_duplicate_privacy_contract_rejects_drift(
+    overrides,
+) -> None:
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(
+            body=_source_add_duplicate_privacy_contract_response(**overrides)
+        )
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD duplicate-privacy contract differs",
+    ):
+        schema_preflight._verify_source_add_duplicate_privacy_contract_v1(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,

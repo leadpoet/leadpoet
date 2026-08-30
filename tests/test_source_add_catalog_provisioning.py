@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from gateway.research_lab import api, source_add_catalog
@@ -333,10 +334,13 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
     response = await api.submit_research_lab_source_adapter(payload)
 
     assert response.stage == "provenance_queued"
-    assert observed["name"] == "research_lab_source_add_admit_v2"
+    assert observed["name"] == "research_lab_source_add_admit_v3"
     assert observed["params"]["p_max_open"] == 3
     assert observed["params"]["p_max_day"] == 5
     assert observed["params"]["p_max_30d"] == 10
+    assert observed["params"]["p_cooldown_seconds"] == (
+        api._SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS
+    )
     assert observed["params"]["p_documentation_identity_hash"].startswith(
         "sha256:"
     )
@@ -382,10 +386,13 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
         "source_add_control_state",
         lambda *a, **k: _async_value({"paused": False, "status": "active"}),
     )
+    async def fail_route_cooldown(*_args, **_kwargs):
+        raise AssertionError("durable duplicate classification must run first")
+
     monkeypatch.setattr(
         api,
         "_enforce_research_lab_submission_rate_limit",
-        lambda *_args, **_kwargs: _async_none(),
+        fail_route_cooldown,
     )
     monkeypatch.setattr(
         source_add_catalog,
@@ -410,6 +417,90 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Already submitted"
+    assert JSONResponse(
+        status_code=exc_info.value.status_code,
+        content={"detail": exc_info.value.detail},
+    ).body == b'{"detail":"Already submitted"}'
+
+
+@pytest.mark.asyncio
+async def test_distinct_source_cooldown_response_remains_generic_429(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "is_autoresearch_maintenance_paused",
+        lambda *a, **k: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def cooldown_rpc(name, params):
+        assert name == "research_lab_source_add_admit_v3"
+        assert (
+            params["p_cooldown_seconds"]
+            == api._SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS
+        )
+        return {
+            "status": "route_cooldown",
+            "cooldown_seconds": api._SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS,
+            "wait_seconds": 7,
+        }
+
+    monkeypatch.setattr(api, "_source_add_rpc", cooldown_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-distinct-cooldown-1",
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == {
+        "code": "research_lab_rate_limited",
+        "route": "source_adapters",
+        "message": (
+            "Please wait 7 seconds before submitting another lead "
+            "(anti-spam cooldown)."
+        ),
+        "stats": {
+            "limit_type": "cooldown",
+            "cooldown_seconds": api._SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS,
+            "wait_seconds": 7,
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -447,10 +538,13 @@ async def test_current_builtin_provider_is_rejected_generically_before_admission
         "source_add_control_state",
         lambda *a, **k: _async_value({"paused": False, "status": "active"}),
     )
+    async def fail_route_cooldown(*_args, **_kwargs):
+        raise AssertionError("built-in duplicate classification must run first")
+
     monkeypatch.setattr(
         api,
         "_enforce_research_lab_submission_rate_limit",
-        lambda *_args, **_kwargs: _async_none(),
+        fail_route_cooldown,
     )
     monkeypatch.setattr(
         source_add_catalog,
@@ -483,6 +577,10 @@ async def test_current_builtin_provider_is_rejected_generically_before_admission
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Already submitted"
+    assert JSONResponse(
+        status_code=exc_info.value.status_code,
+        content={"detail": exc_info.value.detail},
+    ).body == b'{"detail":"Already submitted"}'
 
 
 @pytest.mark.asyncio

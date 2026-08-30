@@ -524,6 +524,7 @@ def _migration_schema_contract(
             "166-research-lab-zero-call-verifier-timeout.sql",
             "167-research-lab-source-add-post-accept-leg1.sql",
             "168-research-lab-source-add-provider-origin-uniqueness.sql",
+            "169-research-lab-source-add-duplicate-privacy.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -633,6 +634,7 @@ def _migration_schema_contract(
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_source_add_provider_origin_contract_v1",
+        "research_lab_source_add_duplicate_privacy_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v2",
@@ -3031,6 +3033,58 @@ class Handler(BaseHTTPRequestHandler):
                     "append_only_trigger_enabled": True,
                     "row_level_security_enabled": True,
                     "service_role_policy_enabled": True,
+                }
+            elif name == (
+                "research_lab_source_add_duplicate_privacy_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD duplicate-privacy contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.source_add_duplicate_privacy_contract.v1"
+                    ),
+                    "admission_rpc": "research_lab_source_add_admit_v3",
+                    "admission_signature": (
+                        "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+                    ),
+                    "compatibility_rpc": "research_lab_source_add_admit_v2",
+                    "compatibility_signature": (
+                        "jsonb,text,text,text,text,text,integer,integer,integer"
+                    ),
+                    "compatibility_cooldown_seconds": 20,
+                    "cooldown_parameter_min_seconds": 1,
+                    "cooldown_parameter_max_seconds": 3600,
+                    "cooldown_clock": (
+                        "clock_timestamp_after_advisory_locks"
+                    ),
+                    "cooldown_source": "durable_miner_provenance_work",
+                    "duplicate_precedes_cooldown": True,
+                    "lock_order": [
+                        "provider_origin_or_identity",
+                        "hotkey",
+                        "submission_or_work",
+                    ],
+                    "function_authority_sha256": (
+                        "sha256:26bf34c94725b855f81c2e48b6afbd72"
+                        "d68db36a4aeffb5642494a5da32233e0"
+                    ),
+                    "functions": {
+                        "admit_v1": True,
+                        "admit_v2_compatibility": True,
+                        "admit_v3": True,
+                        "provider_origin_hash_v1": True,
+                        "provider_origin_host_v1": True,
+                    },
+                    "permissions": {
+                        "service_role_exists": True,
+                        "v3_service_role_callable": True,
+                        "v2_service_role_callable": True,
+                        "contract_service_role_callable": True,
+                        "anon_callable": False,
+                        "authenticated_callable": False,
+                    },
                 }
             elif name == (
                 "research_lab_source_add_post_accept_leg1_contract_v1"

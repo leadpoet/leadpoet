@@ -282,6 +282,9 @@ SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION = (
 SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION = (
     "168-research-lab-source-add-provider-origin-uniqueness.sql"
 )
+SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION = (
+    "169-research-lab-source-add-duplicate-privacy.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -351,6 +354,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION,
     SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
     SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
+    SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -392,6 +396,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_166_zero_call_verifier_timeout_valid",
     "post_167_source_add_post_accept_leg1_valid",
     "post_168_source_add_provider_origin_contract_valid",
+    "post_169_source_add_duplicate_privacy_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6020,6 +6025,65 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-168 SOURCE_ADD provider-origin contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION
+        )
+        applied.append(SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION)
+        source_add_duplicate_privacy_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_duplicate_privacy_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_duplicate_privacy_contract != {
+            "schema_version": (
+                "leadpoet.source_add_duplicate_privacy_contract.v1"
+            ),
+            "admission_rpc": "research_lab_source_add_admit_v3",
+            "admission_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+            ),
+            "compatibility_rpc": "research_lab_source_add_admit_v2",
+            "compatibility_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer"
+            ),
+            "compatibility_cooldown_seconds": 20,
+            "cooldown_parameter_min_seconds": 1,
+            "cooldown_parameter_max_seconds": 3600,
+            "cooldown_clock": "clock_timestamp_after_advisory_locks",
+            "cooldown_source": "durable_miner_provenance_work",
+            "duplicate_precedes_cooldown": True,
+            "lock_order": [
+                "provider_origin_or_identity",
+                "hotkey",
+                "submission_or_work",
+            ],
+            "function_authority_sha256": (
+                "sha256:26bf34c94725b855f81c2e48b6afbd72"
+                "d68db36a4aeffb5642494a5da32233e0"
+            ),
+            "functions": {
+                "admit_v1": True,
+                "admit_v2_compatibility": True,
+                "admit_v3": True,
+                "provider_origin_hash_v1": True,
+                "provider_origin_host_v1": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "v3_service_role_callable": True,
+                "v2_service_role_callable": True,
+                "contract_service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        }:
+            raise PostgresContractProbeError(
+                "post-169 SOURCE_ADD duplicate-privacy contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

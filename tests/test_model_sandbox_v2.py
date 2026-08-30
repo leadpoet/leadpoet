@@ -2461,6 +2461,51 @@ def test_runsc_dev_provider_replay_preserves_typed_evidence_miss_after_marker(
         transport.restore()
 
 
+def test_runsc_dev_provider_replay_propagates_typed_snapshot_miss(tmp_path):
+    request_key = "exa|GET|api.exa.ai/search|abc"
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=PRIVATE_RUNTIME_FAILURE_EXIT_CODE,
+                stdout="",
+                stderr=SNAPSHOT_MISS_SENTINEL + request_key + "\n",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    request = _request(tmp_path)
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(SnapshotMiss, match="api.exa.ai/search"):
+            sandbox.execute_dev_provider_replay(
+                artifact_doc=request["artifact"],
+                source_bundle=request["source_bundle"],
+                module_name="research_lab_adapter",
+                callable_name="run_icp",
+                icp={"industry": "Software", "intent_signal": "Hiring"},
+                context={"dev_eval": True},
+                environment={},
+                credential_env_names=[],
+                provider_evidence_cache={
+                    "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+                    "entries": {},
+                },
+                snapshot_root=snapshots,
+                timeout_seconds=30,
+                job_id="dev-provider-replay-snapshot-miss",
+            )
+    finally:
+        transport.restore()
+
+
 @pytest.mark.parametrize("replay_kind", ("snapshot", "provider"))
 def test_runsc_dev_non_sentinel_failure_is_secret_safe_and_projected(
     tmp_path,

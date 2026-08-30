@@ -3748,6 +3748,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             if EVIDENCE_MISS_SENTINEL in stderr:
                 fingerprint = stderr.rsplit(EVIDENCE_MISS_SENTINEL, 1)[-1].splitlines()[0]
                 raise SnapshotMiss("provider-evidence:" + fingerprint.strip())
+            if SNAPSHOT_MISS_SENTINEL in stderr:
+                request_key = stderr.rsplit(SNAPSHOT_MISS_SENTINEL, 1)[-1].splitlines()[0]
+                raise SnapshotMiss(request_key.strip())
             raise _runsc_model_sandbox_error(
                 stderr=stderr,
                 returncode=completed.returncode,

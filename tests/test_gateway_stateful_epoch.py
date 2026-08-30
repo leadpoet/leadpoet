@@ -724,11 +724,10 @@ async def test_research_lab_stateful_failure_does_not_fall_back_to_hint(
         raise RuntimeError("chain unavailable")
 
     monkeypatch.setattr(epoch_utils, "get_current_epoch_context_async", broken_context)
-    monkeypatch.setattr(
-        chain,
-        "_fetch_current_chain_epoch_direct",
-        lambda: (_ for _ in ()).throw(RuntimeError("direct unavailable")),
-    )
+    async def broken_direct():
+        raise RuntimeError("direct unavailable")
+
+    monkeypatch.setattr(chain, "_fetch_current_chain_epoch_direct", broken_direct)
     monkeypatch.setenv("RESEARCH_LAB_GATEWAY_EPOCH_HINT", "99999")
     monkeypatch.setenv("RESEARCH_LAB_GATEWAY_EPOCH_HINT_TS", "9999999999")
 

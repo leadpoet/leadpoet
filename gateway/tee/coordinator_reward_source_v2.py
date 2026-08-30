@@ -92,16 +92,18 @@ class CoordinatorRewardSourceV2:
                 "SOURCE_ADD start epoch differs from finalized chain state"
             )
 
-        expected_alpha = float(
-            getattr(
-                config,
-                "source_add_leg1_alpha_percent"
-                if kind == "source_add_leg1"
-                else "source_add_leg2_alpha_percent",
-                1.0 if kind == "source_add_leg1" else 5.0,
-            )
-            or (1.0 if kind == "source_add_leg1" else 5.0)
+        alpha_attr = (
+            "source_add_leg1_alpha_percent"
+            if kind == "source_add_leg1"
+            else "source_add_leg2_alpha_percent"
         )
+        expected_alpha = float(
+            getattr(config, alpha_attr, 1.0 if kind == "source_add_leg1" else 5.0)
+        )
+        if expected_alpha <= 0.0:
+            raise CoordinatorRewardSourceV2Error(
+                "SOURCE_ADD reward leg is disabled"
+            )
         expected_epochs = int(getattr(config, "lab_reward_epochs", 20) or 20)
         if (
             float(decision.get("alpha_percent") or 0.0) != expected_alpha

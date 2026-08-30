@@ -535,6 +535,22 @@ def test_leg2_requires_exact_signed_judge_parent():
     assert resolved["decision_payload"]["judge_result"] == _judge_result()
 
 
+def test_leg2_zero_alpha_fails_closed_at_reward_authority():
+    config = _config()
+    config.source_add_leg2_alpha_percent = 0.0
+    resolver = CoordinatorRewardSourceV2(
+        reader=_leg2_reader(),
+        chain_source=FakeChain(),
+        config_supplier=lambda: config,
+    )
+
+    with pytest.raises(CoordinatorRewardSourceV2Error, match="leg is disabled"):
+        resolver.resolve(
+            payload=_leg2_payload(),
+            context=_context(with_judge_parent=True),
+        )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

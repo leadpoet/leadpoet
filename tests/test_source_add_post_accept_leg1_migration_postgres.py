@@ -285,6 +285,87 @@ def test_migration_rejects_n_minus_one_preapproval_history(
         admin.close()
 
 
+def test_migration_preserves_terminal_legacy_obligation_as_audit_history(
+    base_database,
+):
+    psycopg2, dsn = base_database
+    database_name = "source_add_167_terminal_history"
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    with admin.cursor() as cursor:
+        cursor.execute("DROP DATABASE IF EXISTS " + database_name)
+        cursor.execute("CREATE DATABASE " + database_name)
+    admin.close()
+
+    case_dsn = {**dsn, "dbname": database_name}
+    connection = psycopg2.connect(**case_dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _install_test_extensions(cursor)
+            cursor.execute(
+                """
+                CREATE TABLE public.research_lab_auto_research_loop_events (
+                    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type TEXT NOT NULL,
+                    CONSTRAINT research_lab_auto_research_loop_events_event_type_check
+                        CHECK (event_type = 'loop_started')
+                )
+                """
+            )
+            for migration in PRE_MIGRATIONS:
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            _seed_n_minus_one_history(
+                cursor,
+                accepted_at="2026-08-02T00:00:00Z",
+                provisioned_at="2026-08-02T00:00:00Z",
+                intent_at="2026-08-02T00:00:00Z",
+                reward_at="2026-08-01T00:00:00Z",
+                mismatched_catalog=False,
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_events (
+                    reward_ref, seq, reward_status, reason
+                ) VALUES
+                    ('source_add_reward:0000000000000167', 0, 'active',
+                     'legacy_pre_accept_reward'),
+                    ('source_add_reward:0000000000000167', 1,
+                     'stopped_forward', 'legacy_reward_retired')
+                """
+            )
+
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+
+            cursor.execute(
+                """
+                SELECT current_reward_status
+                FROM public.research_lab_source_add_reward_current
+                WHERE reward_ref = 'source_add_reward:0000000000000167'
+                """
+            )
+            assert cursor.fetchone() == ("stopped_forward",)
+            cursor.execute(
+                "SELECT pg_catalog.to_regprocedure(%s)",
+                (
+                    "public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)",
+                ),
+            )
+            assert cursor.fetchone()[0] is not None
+    finally:
+        connection.close()
+        admin = psycopg2.connect(**dsn)
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database_name,),
+            )
+            cursor.execute("DROP DATABASE IF EXISTS " + database_name)
+        admin.close()
+
+
 def test_pre_migration_fixture_ends_immediately_before_167():
     assert PRE_ORIGIN_MIGRATIONS[-1] == MIGRATION.name
     assert PRE_MIGRATIONS[-1] == "145-research-lab-source-add-admission-control.sql"

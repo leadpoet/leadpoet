@@ -105,7 +105,8 @@ BEGIN
         public.research_lab_source_add_provisioning_events,
         public.research_lab_source_add_reward_intents,
         public.research_lab_source_add_reward_slots,
-        public.research_lab_source_add_reward_obligations
+        public.research_lab_source_add_reward_obligations,
+        public.research_lab_source_add_reward_events
         IN SHARE ROW EXCLUSIVE MODE NOWAIT;
     IF EXISTS (
         SELECT 1
@@ -168,8 +169,12 @@ BEGIN
     END IF;
     IF EXISTS (
         SELECT 1
-        FROM public.research_lab_source_add_reward_obligations reward
+        FROM public.research_lab_source_add_reward_current reward
         WHERE reward.leg = 1
+          -- Preserve terminal legacy obligations as audit history. They are
+          -- excluded from allocation; every absent or nonterminal status must
+          -- still prove final smoke-tested acceptance below.
+          AND reward.current_reward_status IS DISTINCT FROM 'stopped_forward'
           AND NOT EXISTS (
               SELECT 1
               FROM public.research_lab_source_add_provisioning_events provision

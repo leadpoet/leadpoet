@@ -16,6 +16,9 @@ from tests.test_source_add_end_to_end_postgres import (
 
 
 MIGRATION = SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql"
+ORIGIN_MIGRATION = (
+    SCRIPTS / "168-research-lab-source-add-provider-origin-uniqueness.sql"
+)
 PRE_MIGRATIONS = PRE_ORIGIN_MIGRATIONS[:-1]
 
 
@@ -315,13 +318,71 @@ def test_migration_preserves_terminal_legacy_obligation_as_audit_history(
             )
             for migration in PRE_MIGRATIONS:
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
-            _seed_n_minus_one_history(
-                cursor,
-                accepted_at="2026-08-02T00:00:00Z",
-                provisioned_at="2026-08-02T00:00:00Z",
-                intent_at="2026-08-02T00:00:00Z",
-                reward_at="2026-08-01T00:00:00Z",
-                mismatched_catalog=False,
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(FALSE, %s, %s)",
+                ("terminal fixture", "operator:terminal-fixture"),
+            )
+            terminal_submission = {
+                "submission_id": "source_add_submission:0000000000000167",
+                "adapter_id": "adapter:migration-167-terminal",
+                "miner_hotkey": "5Migration167TerminalMiner",
+                "credential_envelope": {},
+                "manifest": {
+                    "credential_policy": "no_credentials",
+                    "credential_ref": "",
+                    "source_name": "Migration 167 terminal fixture",
+                    "source_kind": "registry",
+                    "declared_base_domains": ["api.migration-167-terminal.test"],
+                },
+                "source_metadata": {
+                    "api_base_url": "https://api.migration-167-terminal.test/v1",
+                    "documentation_url": (
+                        "https://docs.migration-167-terminal.test/api"
+                    ),
+                    "auth_type": "none",
+                    "endpoint_examples": [
+                        {
+                            "method": "GET",
+                            "path": "/records",
+                            "purpose": "Return current registry records",
+                            "example_query": "limit=1",
+                        }
+                    ],
+                    "rate_limit_notes": "bounded",
+                },
+            }
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_admit(
+                    %s::JSONB, %s, %s, %s, %s, 10, 20, 30
+                )
+                """,
+                (
+                    json.dumps(terminal_submission, sort_keys=True),
+                    "sha256:" + "1" * 64,
+                    "",
+                    "",
+                    "source_add_work:0000000000000167",
+                ),
+            )
+            assert cursor.fetchone()[0]["status"] == "admitted"
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_obligations (
+                    reward_ref, adapter_id, catalog_id, miner_hotkey, leg,
+                    reward_kind, alpha_percent, reward_epochs, start_epoch,
+                    trigger_evidence_doc
+                ) VALUES (
+                    'source_add_reward:0000000000000167',
+                    'adapter:migration-167-terminal', NULL,
+                    '5Migration167TerminalMiner', 1, 'source_acceptance',
+                    1, 20, 100, '{}'::JSONB
+                )
+                """
+            )
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
+                ("terminal migration", "operator:terminal-fixture"),
             )
             cursor.execute(
                 """
@@ -346,12 +407,148 @@ def test_migration_preserves_terminal_legacy_obligation_as_audit_history(
             )
             assert cursor.fetchone() == ("stopped_forward",)
             cursor.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*)
+                     FROM public.research_lab_source_catalog
+                     WHERE adapter_id = 'adapter:migration-167-terminal'),
+                    (SELECT COUNT(*)
+                     FROM public.research_lab_source_add_provisioning_events
+                     WHERE adapter_id = 'adapter:migration-167-terminal'),
+                    (SELECT COUNT(*)
+                     FROM public.research_lab_source_add_submissions
+                     WHERE adapter_id = 'adapter:migration-167-terminal'
+                       AND stage = 'accepted')
+                """
+            )
+            assert cursor.fetchone() == (0, 0, 0)
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM public.research_lab_source_add_reward_current
+                WHERE reward_ref = 'source_add_reward:0000000000000167'
+                  AND current_reward_status IN (
+                      'active', 'queued', 'partially_paid'
+                  )
+                """
+            )
+            assert cursor.fetchone() == (0,)
+            with pytest.raises(psycopg2.Error, match="stopped reward is terminal"):
+                cursor.execute(
+                    """
+                    INSERT INTO public.research_lab_source_add_reward_events (
+                        reward_ref, seq, reward_status, reason
+                    ) VALUES (
+                        'source_add_reward:0000000000000167', 2, 'active',
+                        'invalid_legacy_reactivation'
+                    )
+                    """
+                )
+            cursor.execute("ROLLBACK")
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(ORIGIN_MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                """
+                SELECT current_reward_status, current_event_seq
+                FROM public.research_lab_source_add_reward_current
+                WHERE reward_ref = 'source_add_reward:0000000000000167'
+                """
+            )
+            assert cursor.fetchone() == ("stopped_forward", 1)
+            cursor.execute(
+                """
+                SELECT submission_id, reservation_status
+                FROM public.research_lab_source_add_provider_origin_current
+                WHERE adapter_id = 'adapter:migration-167-terminal'
+                """
+            )
+            assert cursor.fetchone() == (
+                terminal_submission["submission_id"],
+                "reserved",
+            )
+            cursor.execute(
                 "SELECT pg_catalog.to_regprocedure(%s)",
                 (
                     "public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)",
                 ),
             )
             assert cursor.fetchone()[0] is not None
+    finally:
+        connection.close()
+        admin = psycopg2.connect(**dsn)
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database_name,),
+            )
+            cursor.execute("DROP DATABASE IF EXISTS " + database_name)
+        admin.close()
+
+
+def test_migration_rejects_reactivated_terminal_legacy_history(base_database):
+    psycopg2, dsn = base_database
+    database_name = "source_add_167_reactivated_terminal"
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    with admin.cursor() as cursor:
+        cursor.execute("DROP DATABASE IF EXISTS " + database_name)
+        cursor.execute("CREATE DATABASE " + database_name)
+    admin.close()
+
+    case_dsn = {**dsn, "dbname": database_name}
+    connection = psycopg2.connect(**case_dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _install_test_extensions(cursor)
+            cursor.execute(
+                """
+                CREATE TABLE public.research_lab_auto_research_loop_events (
+                    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type TEXT NOT NULL,
+                    CONSTRAINT research_lab_auto_research_loop_events_event_type_check
+                        CHECK (event_type = 'loop_started')
+                )
+                """
+            )
+            for migration in PRE_MIGRATIONS:
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            _seed_n_minus_one_history(
+                cursor,
+                accepted_at="2026-08-01T00:00:00Z",
+                provisioned_at="2026-08-01T00:00:00Z",
+                intent_at="2026-08-01T00:00:00Z",
+                reward_at="2026-08-02T00:00:00Z",
+                mismatched_catalog=False,
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_events (
+                    reward_ref, seq, reward_status, reason
+                ) VALUES
+                    ('source_add_reward:0000000000000167', 0, 'active',
+                     'legacy_reward_created'),
+                    ('source_add_reward:0000000000000167', 1,
+                     'stopped_forward', 'legacy_reward_retired'),
+                    ('source_add_reward:0000000000000167', 2, 'active',
+                     'invalid_legacy_reactivation')
+                """
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match="terminal history requires adjudication",
+            ):
+                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                "SELECT pg_catalog.to_regprocedure(%s)",
+                (
+                    "public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)",
+                ),
+            )
+            assert cursor.fetchone()[0] is None
     finally:
         connection.close()
         admin = psycopg2.connect(**dsn)

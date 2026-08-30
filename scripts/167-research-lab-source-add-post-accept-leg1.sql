@@ -118,6 +118,19 @@ BEGIN
     END IF;
     IF EXISTS (
         SELECT 1
+        FROM public.research_lab_source_add_reward_events terminal
+        JOIN public.research_lab_source_add_reward_events later
+          ON later.reward_ref = terminal.reward_ref
+         AND later.seq > terminal.seq
+        JOIN public.research_lab_source_add_reward_obligations reward
+          ON reward.reward_ref = terminal.reward_ref
+         AND reward.leg = 1
+        WHERE terminal.reward_status = 'stopped_forward'
+    ) THEN
+        RAISE EXCEPTION 'SOURCE_ADD Leg 1 terminal history requires adjudication';
+    END IF;
+    IF EXISTS (
+        SELECT 1
         FROM public.research_lab_source_add_submissions accepted
         WHERE accepted.stage = 'accepted'
           AND NOT EXISTS (
@@ -1606,20 +1619,37 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
     v_leg INTEGER;
+    v_current_seq INTEGER;
 BEGIN
     SELECT reward.leg INTO v_leg
     FROM public.research_lab_source_add_reward_obligations reward
     WHERE reward.reward_ref = NEW.reward_ref;
-    IF v_leg = 1 AND NOT EXISTS (
-        SELECT 1
+    IF v_leg = 1 THEN
+        SELECT prior.seq
+        INTO v_current_seq
         FROM public.research_lab_source_add_reward_events prior
         WHERE prior.reward_ref = NEW.reward_ref
-    ) AND (
-        NEW.seq <> 0
-        OR NEW.reward_status <> 'active'
-        OR NEW.reason <> 'leg1_functional_probe_passed'
-    ) THEN
-        RAISE EXCEPTION 'SOURCE_ADD Leg 1 initial reward event differs';
+        ORDER BY prior.seq DESC, prior.created_at DESC
+        LIMIT 1;
+        IF v_current_seq IS NULL THEN
+            IF NEW.seq <> 0
+               OR NEW.reward_status <> 'active'
+               OR NEW.reason <> 'leg1_functional_probe_passed' THEN
+                RAISE EXCEPTION 'SOURCE_ADD Leg 1 initial reward event differs';
+            END IF;
+        ELSE
+            IF EXISTS (
+                SELECT 1
+                FROM public.research_lab_source_add_reward_events terminal
+                WHERE terminal.reward_ref = NEW.reward_ref
+                  AND terminal.reward_status = 'stopped_forward'
+            ) THEN
+                RAISE EXCEPTION 'SOURCE_ADD Leg 1 stopped reward is terminal';
+            END IF;
+            IF NEW.seq <> v_current_seq + 1 THEN
+                RAISE EXCEPTION 'SOURCE_ADD Leg 1 reward event sequence differs';
+            END IF;
+        END IF;
     END IF;
     RETURN NEW;
 END;

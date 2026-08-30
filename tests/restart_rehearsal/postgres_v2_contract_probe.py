@@ -5957,8 +5957,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "leg1_alpha_percent": 1.0,
             "leg1_reward_epochs": 20,
             "function_authority_sha256": (
-                "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
-                "b369628d0cea2fd0a3fa39d601f34b06"
+                "sha256:035b4dc17bc8e8b63524df2c123892aa"
+                "3ddaf0a01d08c69fc2d756921e8e96be"
             ),
             "functions": {
                 "configure_probe_v2": True,

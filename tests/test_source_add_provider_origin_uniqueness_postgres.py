@@ -782,6 +782,204 @@ def test_legacy_same_host_backfill_preserves_permanent_owner(origin_database):
         admin.close()
 
 
+def test_legacy_backfill_reconciles_live_three_group_shape(origin_database):
+    psycopg2, dsn = origin_database
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    database_name = "source_add_origin_live_shape"
+    with admin.cursor() as cursor:
+        cursor.execute(f"DROP DATABASE IF EXISTS {database_name}")
+        cursor.execute(f"CREATE DATABASE {database_name}")
+    admin.close()
+
+    live_shape_dsn = {**dsn, "dbname": database_name}
+    connection = psycopg2.connect(**live_shape_dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA extensions")
+            cursor.execute("CREATE EXTENSION pgcrypto WITH SCHEMA extensions")
+            cursor.execute(
+                """
+                CREATE TABLE public.research_lab_auto_research_loop_events (
+                    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type TEXT NOT NULL,
+                    CONSTRAINT research_lab_auto_research_loop_events_event_type_check
+                        CHECK (event_type = 'loop_started')
+                )
+                """
+            )
+            for migration in MIGRATIONS[:-1]:
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(FALSE, %s, %s)",
+                ("live-shape fixture", "operator:live-shape-fixture"),
+            )
+            records = []
+            for group, host in enumerate(
+                (
+                    "api.catalog-owner.example",
+                    "api.reward-owner.example",
+                    "api.fifo-owner.example",
+                ),
+                start=1,
+            ):
+                for member in (1, 2):
+                    suffix = f"22{group:02d}{member:02d}0000000000"
+                    record = _record(
+                        suffix=suffix,
+                        host=host,
+                        path=f"/v{member}",
+                        miner=f"5LiveShape{group}{member}",
+                    )
+                    legacy_record = dict(record)
+                    legacy_record.pop("provider_origin_host")
+                    legacy_record.pop("provider_origin_hash")
+                    cursor.execute(
+                        """
+                        SELECT public.research_lab_source_add_admit(
+                            %s::JSONB, %s, %s, %s, %s, 10, 20, 30
+                        )
+                        """,
+                        (
+                            _json(legacy_record),
+                            "sha256:" + str((group - 1) * 2 + member) * 64,
+                            "",
+                            "",
+                            f"source_add_work:{suffix}",
+                        ),
+                    )
+                    assert cursor.fetchone()[0]["status"] == "admitted"
+                    records.append(record)
+
+            catalog_owner = records[1]
+            reward_owner = records[3]
+            fifo_owner = records[4]
+            losers = (records[0], records[2], records[5])
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_catalog (
+                    catalog_id, adapter_id, miner_ref, source_name, source_kind,
+                    declared_base_domains, registry_provider_id,
+                    measured_trial_yield, catalog_doc, source_identity_hash
+                ) VALUES (%s, %s, %s, %s, %s, %s::JSONB, %s, 0, '{}'::JSONB, %s)
+                """,
+                (
+                    "source_catalog:2201020000000000",
+                    catalog_owner["adapter_id"],
+                    catalog_owner["miner_hotkey"],
+                    catalog_owner["manifest"]["source_name"],
+                    catalog_owner["manifest"]["source_kind"],
+                    _json(catalog_owner["manifest"]["declared_base_domains"]),
+                    "legacy_live_shape_catalog",
+                    "sha256:" + "2" * 64,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_obligations (
+                    reward_ref, adapter_id, catalog_id, miner_hotkey, leg,
+                    reward_kind, alpha_percent, reward_epochs, start_epoch,
+                    trigger_evidence_doc
+                ) VALUES (
+                    'source_add_reward:2202020000000000', %s, NULL, %s, 1,
+                    'source_acceptance', 1, 20, 100, '{}'::JSONB
+                )
+                """,
+                (reward_owner["adapter_id"], reward_owner["miner_hotkey"]),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_events (
+                    reward_ref, seq, reward_status, reason
+                ) VALUES
+                    ('source_add_reward:2202020000000000', 0, 'active',
+                     'legacy_pre_accept_reward'),
+                    ('source_add_reward:2202020000000000', 1,
+                     'stopped_forward', 'legacy_reward_retired')
+                """
+            )
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
+                ("live-shape migration", "operator:live-shape-fixture"),
+            )
+            cursor.execute(
+                (SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql")
+                .read_text(encoding="utf-8")
+            )
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+
+            cursor.execute(
+                """
+                SELECT submission_id
+                FROM public.research_lab_source_add_provider_origin_current
+                WHERE reservation_status = 'reserved'
+                ORDER BY submission_id
+                """
+            )
+            assert [row[0] for row in cursor.fetchall()] == sorted(
+                record["submission_id"]
+                for record in (catalog_owner, reward_owner, fifo_owner)
+            )
+            cursor.execute(
+                """
+                SELECT submission_id, stage
+                FROM public.research_lab_source_add_submission_current
+                WHERE submission_id = ANY(%s)
+                ORDER BY submission_id
+                """,
+                ([record["submission_id"] for record in records],),
+            )
+            observed_stages = dict(cursor.fetchall())
+            for winner in (catalog_owner, reward_owner, fifo_owner):
+                assert observed_stages[winner["submission_id"]] == "provenance_queued"
+            for loser in losers:
+                assert observed_stages[loser["submission_id"]] == "rejected_precheck"
+            cursor.execute(
+                """
+                SELECT submission_id, work_status
+                FROM public.research_lab_source_add_work_items
+                WHERE submission_id = ANY(%s)
+                ORDER BY submission_id
+                """,
+                ([record["submission_id"] for record in records],),
+            )
+            observed_work = dict(cursor.fetchall())
+            for winner in (catalog_owner, reward_owner, fifo_owner):
+                assert observed_work[winner["submission_id"]] == "queued"
+            for loser in losers:
+                assert observed_work[loser["submission_id"]] == "cancelled"
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM public.research_lab_source_add_submissions
+                WHERE submission_id = ANY(%s)
+                  AND stage = 'rejected_precheck'
+                """,
+                ([record["submission_id"] for record in losers],),
+            )
+            assert cursor.fetchone()[0] == 3
+            cursor.execute(
+                "SELECT public.research_lab_source_add_provider_origin_contract_v1()"
+            )
+            contract = cursor.fetchone()[0]
+            assert contract["coverage_complete"] is True
+            assert contract["collision_free"] is True
+    finally:
+        connection.close()
+        admin = psycopg2.connect(**dsn)
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database_name,),
+            )
+            cursor.execute(f"DROP DATABASE IF EXISTS {database_name}")
+        admin.close()
+
+
 def test_catalog_insert_without_reserved_origin_owner_fails_closed(origin_database):
     psycopg2, dsn = origin_database
     connection = psycopg2.connect(**dsn)

@@ -4490,6 +4490,57 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD post-accept Leg 1 contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD post-accept Leg 1 contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_post_accept_leg1_contract.v1"
+                ),
+                "daily_cap": 10,
+                "leg1_alpha_percent": 1.0,
+                "leg1_reward_epochs": 20,
+                "function_authority_sha256": (
+                    "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
+                    "b369628d0cea2fd0a3fa39d601f34b06"
+                ),
+                "functions": {
+                    "configure_probe_v2": True,
+                    "finalize_provision_v2": True,
+                    "reject_current_builtin_v2": True,
+                    "reserve_leg1_slot_v2": True,
+                    "finalize_leg1_v2": True,
+                    "finalize_provision_smoke_v2": True,
+                },
+                "triggers": {
+                    "acceptance": True,
+                    "eligible": True,
+                    "leg1_work": True,
+                    "leg1_slot": True,
+                    "leg1_obligation": True,
+                    "leg1_initial_event": True,
+                },
+                "permissions": {
+                    "service_role_exists": True,
+                    "v2_callable": True,
+                    "legacy_not_callable": True,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
         == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
         and "limit=2" in parsed.query
     ):

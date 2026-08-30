@@ -633,6 +633,7 @@ def _migration_schema_contract(
         "research_lab_compact_weight_settlement_contract_v1",
         "research_lab_candidate_hybrid_purpose_contract_v1",
         "research_lab_source_add_provider_origin_contract_v1",
+        "research_lab_source_add_post_accept_leg1_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v2",
         "research_lab_routing_load_model_transition_v2",
@@ -3030,6 +3031,46 @@ class Handler(BaseHTTPRequestHandler):
                     "append_only_trigger_enabled": True,
                     "row_level_security_enabled": True,
                     "service_role_policy_enabled": True,
+                }
+            elif name == (
+                "research_lab_source_add_post_accept_leg1_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD post-accept Leg 1 contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.source_add_post_accept_leg1_contract.v1"
+                    ),
+                    "daily_cap": 10,
+                    "leg1_alpha_percent": 1.0,
+                    "leg1_reward_epochs": 20,
+                    "function_authority_sha256": (
+                        "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
+                        "b369628d0cea2fd0a3fa39d601f34b06"
+                    ),
+                    "functions": {
+                        "configure_probe_v2": True,
+                        "finalize_provision_v2": True,
+                        "reject_current_builtin_v2": True,
+                        "reserve_leg1_slot_v2": True,
+                        "finalize_leg1_v2": True,
+                        "finalize_provision_smoke_v2": True,
+                    },
+                    "triggers": {
+                        "acceptance": True,
+                        "eligible": True,
+                        "leg1_work": True,
+                        "leg1_slot": True,
+                        "leg1_obligation": True,
+                        "leg1_initial_event": True,
+                    },
+                    "permissions": {
+                        "service_role_exists": True,
+                        "v2_callable": True,
+                        "legacy_not_callable": True,
+                    },
                 }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)

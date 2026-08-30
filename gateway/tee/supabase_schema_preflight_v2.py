@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -1291,6 +1292,44 @@ class SupabaseSchemaPreflightV2Error(RuntimeError):
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
+def _source_add_leg1_release_environment_policy_v1(
+    parent_environment: Mapping[str, str],
+) -> Dict[str, Any]:
+    expected = {
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("1.0"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT": Decimal("0.0"),
+        "RESEARCH_LAB_REWARD_EPOCHS": Decimal("20"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("10"),
+    }
+    observed: dict[str, Decimal] = {}
+    for name, default in expected.items():
+        raw = str(parent_environment.get(name, str(default))).strip()
+        try:
+            value = Decimal(raw)
+        except (InvalidOperation, ValueError) as exc:
+            raise SupabaseSchemaPreflightV2Error(
+                "SOURCE_ADD Leg 1 release environment is invalid"
+            ) from exc
+        if not value.is_finite() or value != default:
+            raise SupabaseSchemaPreflightV2Error(
+                "SOURCE_ADD Leg 1 release environment differs"
+            )
+        observed[name] = value
+    return {
+        "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
+        "leg1_alpha_percent": float(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT"]
+        ),
+        "leg2_alpha_percent": float(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT"]
+        ),
+        "reward_epochs": int(observed["RESEARCH_LAB_REWARD_EPOCHS"]),
+        "daily_cap": int(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY"]
+        ),
+    }
+
+
 def _verify_compact_weight_settlement_contract_v1(
     *,
     headers: Mapping[str, str],
@@ -1557,6 +1596,11 @@ def _verify_source_add_provider_origin_contract_v1(
     return dict(contract)
 
 
+SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:f35b1a4c7aa00609fe7e9929f0bd0eefb369628d0cea2fd0a3fa39d601f34b06"
+)
+
+
 def _verify_source_add_post_accept_leg1_contract_v1(
     *,
     headers: Mapping[str, str],
@@ -1604,6 +1648,9 @@ def _verify_source_add_post_accept_leg1_contract_v1(
         "daily_cap": 10,
         "leg1_alpha_percent": 1.0,
         "leg1_reward_epochs": 20,
+        "function_authority_sha256": (
+            SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
+        ),
         "functions": {
             "configure_probe_v2": True,
             "finalize_provision_v2": True,
@@ -1752,6 +1799,9 @@ def verify_required_supabase_v2_schema(
     chain_realized_activation_authority: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     required_rpcs = _required_supabase_v2_rpcs(parent_environment)
+    source_add_leg1_release_policy = (
+        _source_add_leg1_release_environment_policy_v1(parent_environment)
+    )
     routing_model_transition_v2_required = (
         _routing_model_transition_v2_required(parent_environment)
     )
@@ -1918,5 +1968,6 @@ def verify_required_supabase_v2_schema(
         "source_add_post_accept_leg1_contract": (
             source_add_post_accept_leg1_contract
         ),
+        "source_add_leg1_release_policy": source_add_leg1_release_policy,
         "migration_files": sorted(migrations),
     }

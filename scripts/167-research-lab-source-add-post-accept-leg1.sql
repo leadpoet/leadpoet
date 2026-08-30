@@ -1163,9 +1163,9 @@ BEGIN
     );
     IF EXISTS (
         SELECT 1
-        FROM public.research_lab_source_add_submissions accepted
-        WHERE accepted.submission_id = p_submission_id
-          AND accepted.stage = 'accepted'
+        FROM public.research_lab_source_add_submissions terminal
+        WHERE terminal.submission_id = p_submission_id
+          AND terminal.stage IN ('accepted', 'leg1_queued', 'leg1_created')
     ) AND NOT EXISTS (
         SELECT 1
         FROM public.research_lab_source_add_reward_intents intent
@@ -1214,8 +1214,11 @@ DECLARE
     v_work public.research_lab_source_add_work_items%ROWTYPE;
     v_smoke public.research_lab_source_add_functional_probe_attempts%ROWTYPE;
     v_provision RECORD;
+    v_catalog public.research_lab_source_catalog%ROWTYPE;
+    v_current RECORD;
     v_finish JSONB;
     v_disabled JSONB;
+    v_completed_replay BOOLEAN := FALSE;
 BEGIN
     IF p_work_id !~ '^source_add_work:[0-9a-f]{16}$'
        OR p_submission_id !~ '^source_add_submission:[0-9a-f]{16}$'
@@ -1223,7 +1226,10 @@ BEGIN
        OR pg_catalog.jsonb_typeof(p_precheck_doc) <> 'object'
        OR pg_catalog.jsonb_typeof(p_catalog_row) <> 'object'
        OR pg_catalog.jsonb_typeof(p_disabled_provision_row) <> 'object'
+       OR pg_catalog.jsonb_typeof(p_smoke_attempt) <> 'object'
        OR p_disabled_provision_row->>'provision_status' <> 'disabled'
+       OR p_disabled_provision_row#>'{provision_doc,provider_registry_entry,active}'
+          IS DISTINCT FROM 'false'::JSONB
        OR p_smoke_attempt->>'evaluation_mode' <> 'provisioning_smoke'
        OR p_smoke_attempt->>'result_status' <> 'passed' THEN
         RAISE EXCEPTION 'SOURCE_ADD current-provider rejection input is invalid';
@@ -1236,69 +1242,60 @@ BEGIN
         RETURN pg_catalog.jsonb_build_object('status', 'missing');
     END IF;
     IF v_work.work_status = 'completed' THEN
-        SELECT * INTO v_smoke
-        FROM public.research_lab_source_add_functional_probe_attempts
-        WHERE attempt_ref = p_smoke_attempt->>'attempt_ref';
-        SELECT * INTO v_provision
-        FROM public.research_lab_source_add_provisioning_current
-        WHERE submission_id = p_submission_id
-          AND provision_status = 'disabled';
-        IF v_smoke.attempt_ref IS NOT NULL
-           AND v_smoke.result_doc = p_smoke_attempt->'result_doc'
-           AND v_smoke.receipt_hash = p_smoke_attempt->>'receipt_hash'
-           AND v_smoke.business_artifact_hash =
-               p_smoke_attempt->>'business_artifact_hash'
-           AND v_provision.provision_ref =
-               p_disabled_provision_row->>'provision_ref' THEN
-            RETURN pg_catalog.jsonb_build_object('status', 'not_eligible');
+        IF v_work.work_kind <> 'provisioning_smoke'
+           OR v_work.submission_id <> p_submission_id
+           OR v_work.result_doc->>'status' <> 'not_eligible' THEN
+            RAISE EXCEPTION 'SOURCE_ADD current-provider rejection terminal state differs';
         END IF;
-        RAISE EXCEPTION 'SOURCE_ADD current-provider rejection idempotency differs';
-    END IF;
-    IF v_work.work_status <> 'leased'
-       OR v_work.work_kind <> 'provisioning_smoke'
-       OR v_work.lease_token IS DISTINCT FROM p_lease_token THEN
-        RETURN pg_catalog.jsonb_build_object('status', 'lease_lost');
-    END IF;
-    IF v_work.submission_id <> p_submission_id
-       OR p_smoke_attempt->>'work_id' <> p_work_id
-       OR COALESCE((p_smoke_attempt->>'attempt_number')::INTEGER, 0)
-          <> v_work.attempt_count
-       OR p_smoke_attempt->>'attempt_ref' <>
-          'source_add_probe_attempt:' || pg_catalog.substr(
-              public.research_lab_source_add_jsonb_hash_v2(
-                  pg_catalog.jsonb_build_object(
-                      'prefix', 'source_add_probe_attempt',
-                      'parts', pg_catalog.jsonb_build_array(
-                          p_submission_id, p_work_id, v_work.attempt_count
+        v_completed_replay := TRUE;
+    ELSE
+        IF v_work.work_status <> 'leased'
+           OR v_work.work_kind <> 'provisioning_smoke'
+           OR v_work.lease_token IS DISTINCT FROM p_lease_token THEN
+            RETURN pg_catalog.jsonb_build_object('status', 'lease_lost');
+        END IF;
+        IF v_work.submission_id <> p_submission_id
+           OR p_smoke_attempt->>'work_id' <> p_work_id
+           OR COALESCE((p_smoke_attempt->>'attempt_number')::INTEGER, 0)
+              <> v_work.attempt_count
+           OR p_smoke_attempt->>'attempt_ref' <>
+              'source_add_probe_attempt:' || pg_catalog.substr(
+                  public.research_lab_source_add_jsonb_hash_v2(
+                      pg_catalog.jsonb_build_object(
+                          'prefix', 'source_add_probe_attempt',
+                          'parts', pg_catalog.jsonb_build_array(
+                              p_submission_id, p_work_id, v_work.attempt_count
+                          )
                       )
-                  )
-              ),
-              8,
-              16
-          ) THEN
-        RAISE EXCEPTION 'SOURCE_ADD current-provider smoke lease binding differs';
+                  ),
+                  8,
+                  16
+              ) THEN
+            RAISE EXCEPTION 'SOURCE_ADD current-provider smoke lease binding differs';
+        END IF;
+
+        v_finish := public.research_lab_source_add_finish_work(
+            p_work_id,
+            p_lease_token,
+            'complete',
+            'functional_probe_failed',
+            p_submission_doc,
+            p_precheck_status,
+            p_precheck_doc,
+            pg_catalog.jsonb_build_object('status', 'not_eligible'),
+            p_smoke_attempt,
+            '{}'::JSONB,
+            '{}'::JSONB,
+            '{}'::JSONB,
+            NULL,
+            FALSE
+        );
+        IF COALESCE(v_finish->>'status', '') <> 'completed' THEN
+            RAISE EXCEPTION 'SOURCE_ADD current-provider work completion failed: %',
+                COALESCE(v_finish->>'status', 'missing');
+        END IF;
     END IF;
 
-    v_finish := public.research_lab_source_add_finish_work(
-        p_work_id,
-        p_lease_token,
-        'complete',
-        'functional_probe_failed',
-        p_submission_doc,
-        p_precheck_status,
-        p_precheck_doc,
-        pg_catalog.jsonb_build_object('status', 'not_eligible'),
-        p_smoke_attempt,
-        '{}'::JSONB,
-        '{}'::JSONB,
-        '{}'::JSONB,
-        NULL,
-        FALSE
-    );
-    IF COALESCE(v_finish->>'status', '') <> 'completed' THEN
-        RAISE EXCEPTION 'SOURCE_ADD current-provider work completion failed: %',
-            COALESCE(v_finish->>'status', 'missing');
-    END IF;
     SELECT * INTO v_smoke
     FROM public.research_lab_source_add_functional_probe_attempts
     WHERE attempt_ref = p_smoke_attempt->>'attempt_ref';
@@ -1326,17 +1323,88 @@ BEGIN
        OR v_smoke.result_doc <> p_smoke_attempt->'result_doc' THEN
         RAISE EXCEPTION 'SOURCE_ADD current-provider persisted smoke differs';
     END IF;
-    v_disabled := public.research_lab_source_add_finalize_provision(
-        p_submission_id,
-        p_catalog_row,
-        p_disabled_provision_row,
-        '{}'::JSONB
-    );
-    IF COALESCE(v_disabled->>'status', '') NOT IN (
-        'provisioned', 'already_provisioned'
-    ) THEN
-        RAISE EXCEPTION 'SOURCE_ADD current-provider disable failed: %',
-            COALESCE(v_disabled->>'status', 'missing');
+
+    IF NOT v_completed_replay THEN
+        v_disabled := public.research_lab_source_add_finalize_provision(
+            p_submission_id,
+            p_catalog_row,
+            p_disabled_provision_row,
+            '{}'::JSONB
+        );
+        IF COALESCE(v_disabled->>'status', '') NOT IN (
+            'provisioned', 'already_provisioned'
+        ) THEN
+            RAISE EXCEPTION 'SOURCE_ADD current-provider disable failed: %',
+                COALESCE(v_disabled->>'status', 'missing');
+        END IF;
+    END IF;
+
+    SELECT * INTO v_catalog
+    FROM public.research_lab_source_catalog
+    WHERE adapter_id = v_work.adapter_id;
+    SELECT * INTO v_provision
+    FROM public.research_lab_source_add_provisioning_current
+    WHERE submission_id = p_submission_id;
+    SELECT * INTO v_current
+    FROM public.research_lab_source_add_submission_current
+    WHERE submission_id = p_submission_id;
+    IF v_catalog.catalog_id IS NULL
+       OR v_provision.provision_ref IS NULL
+       OR v_current.submission_id IS NULL
+       OR v_catalog.catalog_id <> p_catalog_row->>'catalog_id'
+       OR v_catalog.miner_ref <> p_catalog_row->>'miner_ref'
+       OR v_catalog.source_name <> p_catalog_row->>'source_name'
+       OR v_catalog.source_kind <> p_catalog_row->>'source_kind'
+       OR pg_catalog.to_jsonb(v_catalog.declared_base_domains) <>
+          p_catalog_row->'declared_base_domains'
+       OR v_catalog.registry_provider_id <>
+          p_catalog_row->>'registry_provider_id'
+       OR v_catalog.catalog_doc <> p_catalog_row->'catalog_doc'
+       OR v_catalog.source_identity_hash <>
+          p_catalog_row->>'source_identity_hash'
+       OR v_provision.provision_ref <>
+          p_disabled_provision_row->>'provision_ref'
+       OR v_provision.catalog_id <> p_catalog_row->>'catalog_id'
+       OR v_provision.submission_id <> p_submission_id
+       OR v_provision.adapter_id <> v_work.adapter_id
+       OR v_provision.miner_hotkey <>
+          p_disabled_provision_row->>'miner_hotkey'
+       OR v_provision.source_identity_hash <>
+          p_disabled_provision_row->>'source_identity_hash'
+       OR v_provision.registry_provider_id <>
+          p_disabled_provision_row->>'registry_provider_id'
+       OR v_provision.provision_status <> 'disabled'
+       OR v_provision.provision_doc <>
+          p_disabled_provision_row->'provision_doc'
+       OR v_provision.credential_envelope <>
+          COALESCE(
+              p_disabled_provision_row->'credential_envelope', '{}'::JSONB
+          )
+       OR v_current.stage <> 'functional_probe_failed'
+       OR EXISTS (
+           SELECT 1
+           FROM public.research_lab_source_add_submissions terminal
+           WHERE terminal.submission_id = p_submission_id
+             AND terminal.stage IN ('accepted', 'leg1_queued', 'leg1_created')
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.research_lab_source_add_reward_intents intent
+           WHERE intent.submission_id = p_submission_id
+              OR intent.adapter_id = v_work.adapter_id
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.research_lab_source_add_reward_obligations reward
+           WHERE reward.adapter_id = v_work.adapter_id
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.research_lab_source_add_work_items reward_work
+           WHERE reward_work.submission_id = p_submission_id
+             AND reward_work.work_kind = 'leg1_reward'
+       ) THEN
+        RAISE EXCEPTION 'SOURCE_ADD current-provider rejection idempotency differs';
     END IF;
     RETURN pg_catalog.jsonb_build_object('status', 'not_eligible');
 END;
@@ -1390,6 +1458,26 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('source-add-leg1-day:' || v_day::TEXT, 0)
     );
+    -- A response-loss retry owns its existing live reservation. Refresh that
+    -- exact slot before considering later FIFO changes; demoting the work
+    -- while leaving its reserved slot live would consume the daily cap twice.
+    IF EXISTS (
+        SELECT 1
+        FROM public.research_lab_source_add_reward_slots existing_slot
+        WHERE existing_slot.intent_id = p_intent_id
+          AND existing_slot.work_id = p_work_id
+          AND existing_slot.slot_day = v_day
+          AND existing_slot.slot_status = 'reserved'
+          AND existing_slot.lease_expires_at > NOW()
+    ) THEN
+        RETURN public.research_lab_source_add_reserve_leg1_slot(
+            p_intent_id,
+            p_work_id,
+            p_work_lease_token,
+            10,
+            p_slot_lease_seconds
+        );
+    END IF;
     IF NOT EXISTS (
         SELECT 1
         FROM public.research_lab_source_add_reward_obligations reward
@@ -1608,6 +1696,126 @@ BEGIN
         'daily_cap', 10,
         'leg1_alpha_percent', 1.0,
         'leg1_reward_epochs', 20,
+        'function_authority_sha256', (
+            SELECT 'sha256:' || pg_catalog.encode(
+                extensions.digest(
+                    pg_catalog.convert_to(
+                        COALESCE(
+                            pg_catalog.jsonb_object_agg(
+                                authority.name,
+                                pg_catalog.jsonb_build_object(
+                                    'body', proc.prosrc,
+                                    'security_definer', proc.prosecdef,
+                                    'configuration', pg_catalog.to_jsonb(
+                                        proc.proconfig
+                                    ),
+                                    'language', language.lanname,
+                                    'volatility', proc.provolatile,
+                                    'parallel', proc.proparallel,
+                                    'kind', proc.prokind,
+                                    'return_type', proc.prorettype::REGTYPE::TEXT
+                                )
+                            ),
+                            '{}'::JSONB
+                        )::TEXT,
+                        'UTF8'
+                    ),
+                    'sha256'
+                ),
+                'hex'
+            )
+            FROM (
+                VALUES
+                    (
+                        'claim_work',
+                        'public.research_lab_source_add_claim_work(text,integer)'
+                    ),
+                    (
+                        'configure_probe',
+                        'public.research_lab_source_add_configure_probe(text,text,jsonb,jsonb,text,text,text)'
+                    ),
+                    (
+                        'configure_probe_v2',
+                        'public.research_lab_source_add_configure_probe_v2(text,text,jsonb,jsonb,text,text,text)'
+                    ),
+                    (
+                        'contract_v1',
+                        'public.research_lab_source_add_post_accept_leg1_contract_v1()'
+                    ),
+                    (
+                        'enqueue_provision_smoke',
+                        'public.research_lab_source_add_enqueue_provision_smoke(text,text,text,text,jsonb,jsonb)'
+                    ),
+                    (
+                        'final_approval_catalog_v2',
+                        'public.research_lab_source_add_final_approval_catalog_v2(text)'
+                    ),
+                    (
+                        'finalize_leg1',
+                        'public.research_lab_source_add_finalize_leg1(text,text,uuid,uuid,integer,jsonb,jsonb)'
+                    ),
+                    (
+                        'finalize_leg1_v2',
+                        'public.research_lab_source_add_finalize_leg1_v2(text,text,uuid,uuid,integer,jsonb,jsonb)'
+                    ),
+                    (
+                        'finalize_provision',
+                        'public.research_lab_source_add_finalize_provision(text,jsonb,jsonb,jsonb)'
+                    ),
+                    (
+                        'finalize_provision_smoke_v2',
+                        'public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)'
+                    ),
+                    (
+                        'finalize_provision_v2',
+                        'public.research_lab_source_add_finalize_provision_v2(text,jsonb,jsonb,jsonb)'
+                    ),
+                    (
+                        'finish_work',
+                        'public.research_lab_source_add_finish_work(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,timestamp with time zone,boolean)'
+                    ),
+                    (
+                        'reject_current_builtin_v2',
+                        'public.research_lab_source_add_reject_current_builtin_v2(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)'
+                    ),
+                    (
+                        'reserve_leg1_slot',
+                        'public.research_lab_source_add_reserve_leg1_slot(text,text,uuid,integer,integer)'
+                    ),
+                    (
+                        'reserve_leg1_slot_v2',
+                        'public.research_lab_source_add_reserve_leg1_slot_v2(text,text,uuid,integer,integer)'
+                    ),
+                    (
+                        'trigger_acceptance_v2',
+                        'public.enforce_research_lab_source_add_acceptance_v2()'
+                    ),
+                    (
+                        'trigger_eligible_v2',
+                        'public.enforce_research_lab_source_add_eligible_v2()'
+                    ),
+                    (
+                        'trigger_leg1_initial_event_v2',
+                        'public.enforce_research_lab_source_add_leg1_initial_event_v2()'
+                    ),
+                    (
+                        'trigger_leg1_obligation_v2',
+                        'public.enforce_research_lab_source_add_leg1_obligation_v2()'
+                    ),
+                    (
+                        'trigger_leg1_slot_v2',
+                        'public.enforce_research_lab_source_add_leg1_slot_v2()'
+                    ),
+                    (
+                        'trigger_leg1_work_v2',
+                        'public.enforce_research_lab_source_add_leg1_work_v2()'
+                    )
+            ) AS authority(name, signature)
+            LEFT JOIN pg_catalog.pg_proc proc
+              ON proc.oid = pg_catalog.to_regprocedure(authority.signature)
+            LEFT JOIN pg_catalog.pg_language language
+              ON language.oid = proc.prolang
+        ),
         'functions', pg_catalog.jsonb_build_object(
             'configure_probe_v2', pg_catalog.to_regprocedure(
                 'public.research_lab_source_add_configure_probe_v2(text,text,jsonb,jsonb,text,text,text)'
@@ -1639,6 +1847,10 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_submissions'
                   AND trigger_row.tgname = 'trg_source_add_acceptance_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 7
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_acceptance_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             ),
             'eligible', EXISTS (
@@ -1651,6 +1863,10 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_provisioning_events'
                   AND trigger_row.tgname = 'trg_source_add_eligible_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 7
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_eligible_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             ),
             'leg1_work', EXISTS (
@@ -1663,6 +1879,10 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_work_items'
                   AND trigger_row.tgname = 'trg_source_add_leg1_work_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 7
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_leg1_work_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             ),
             'leg1_slot', EXISTS (
@@ -1675,6 +1895,23 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_reward_slots'
                   AND trigger_row.tgname = 'trg_source_add_leg1_slot_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 23
+                  AND trigger_row.tgattr::TEXT = (
+                      SELECT pg_catalog.string_agg(
+                          attribute.attnum::TEXT,
+                          ' ' ORDER BY CASE attribute.attname
+                              WHEN 'slot_status' THEN 1
+                              WHEN 'intent_id' THEN 2
+                          END
+                      )
+                      FROM pg_catalog.pg_attribute attribute
+                      WHERE attribute.attrelid = relation.oid
+                        AND attribute.attname IN ('slot_status', 'intent_id')
+                        AND NOT attribute.attisdropped
+                  )
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_leg1_slot_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             ),
             'leg1_obligation', EXISTS (
@@ -1687,6 +1924,10 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_reward_obligations'
                   AND trigger_row.tgname = 'trg_source_add_leg1_obligation_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 7
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_leg1_obligation_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             ),
             'leg1_initial_event', EXISTS (
@@ -1699,6 +1940,10 @@ BEGIN
                   AND relation.relname = 'research_lab_source_add_reward_events'
                   AND trigger_row.tgname = 'trg_source_add_leg1_initial_event_v2'
                   AND trigger_row.tgenabled = 'O'
+                  AND trigger_row.tgtype = 7
+                  AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
+                      'public.enforce_research_lab_source_add_leg1_initial_event_v2()'
+                  )
                   AND NOT trigger_row.tgisinternal
             )
         ),
@@ -1724,6 +1969,10 @@ BEGIN
                 ) AND pg_catalog.has_function_privilege(
                     'service_role',
                     'public.research_lab_source_add_finalize_leg1_v2(text,text,uuid,uuid,integer,jsonb,jsonb)',
+                    'EXECUTE'
+                ) AND pg_catalog.has_function_privilege(
+                    'service_role',
+                    'public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)',
                     'EXECUTE'
                 ),
             'legacy_not_callable', v_service_role_exists AND NOT (

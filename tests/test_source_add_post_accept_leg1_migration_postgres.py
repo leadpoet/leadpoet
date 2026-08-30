@@ -348,6 +348,23 @@ def test_migration_reapplies_after_atomic_intent_precedes_final_approval(
                 """,
                 ("sha256:" + "1" * 64,),
             )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_functional_probe_attempts (
+                    attempt_ref, submission_id, adapter_id, work_id,
+                    attempt_number, evaluation_mode, config_ref,
+                    result_status, created_at
+                ) VALUES (
+                    'source_add_probe_attempt:0000000000001167',
+                    'source_add_submission:0000000000000167',
+                    'adapter:migration-167',
+                    'source_add_work:0000000000001167', 1,
+                    'provisioning_smoke',
+                    'source_add_probe_config:0000000000000167',
+                    'failed', '2026-08-06T00:00:00Z'
+                )
+                """
+            )
             cursor.execute(migration_sql)
             cursor.execute(
                 "SELECT pg_catalog.to_regprocedure(%s)",

@@ -67,6 +67,12 @@ PROTECTED_SYMBOLS = {
         "stage_external_protected_sources",
         "main",
     ),
+    "gateway/tee/supabase_schema_preflight_v2.py": (
+        "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256",
+        "_source_add_leg1_release_environment_policy_v1",
+        "_verify_source_add_post_accept_leg1_contract_v1",
+        "verify_required_supabase_v2_schema",
+    ),
     "gateway/tee/execution_job_manager_v2.py": (
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
         "_DEV_EVALUATION_JOB_SCOPES",
@@ -882,6 +888,7 @@ PROTECTED_SYMBOLS = {
         "_process_provenance",
         "_process_functional_probe",
         "_process_provisioning_smoke",
+        "_current_builtin_disabled_provision_row",
         "_process_leg1_reward",
         "_retry_allowed",
         "_retry_at",

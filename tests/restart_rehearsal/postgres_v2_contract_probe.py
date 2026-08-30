@@ -5943,68 +5943,44 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         post_accept_leg1_contract = json.loads(
             database.psql(
                 """
-                SELECT pg_catalog.jsonb_build_object(
-                    'finalizer_present',
-                        pg_catalog.to_regprocedure(
-                            'public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)'
-                        ) IS NOT NULL,
-                    'acceptance_trigger_enabled', COALESCE((
-                        SELECT trigger_meta.tgenabled IN ('O', 'A')
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE trigger_meta.tgrelid =
-                            'public.research_lab_source_add_submissions'::regclass
-                          AND trigger_meta.tgname =
-                            'trg_source_add_acceptance_v2'
-                          AND NOT trigger_meta.tgisinternal
-                    ), FALSE),
-                    'eligible_trigger_enabled', COALESCE((
-                        SELECT trigger_meta.tgenabled IN ('O', 'A')
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE trigger_meta.tgrelid =
-                            'public.research_lab_source_add_provisioning_events'::regclass
-                          AND trigger_meta.tgname =
-                            'trg_source_add_eligible_v2'
-                          AND NOT trigger_meta.tgisinternal
-                    ), FALSE),
-                    'leg1_work_trigger_enabled', COALESCE((
-                        SELECT trigger_meta.tgenabled IN ('O', 'A')
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE trigger_meta.tgrelid =
-                            'public.research_lab_source_add_work_items'::regclass
-                          AND trigger_meta.tgname =
-                            'trg_source_add_leg1_work_v2'
-                          AND NOT trigger_meta.tgisinternal
-                    ), FALSE),
-                    'leg1_slot_trigger_enabled', COALESCE((
-                        SELECT trigger_meta.tgenabled IN ('O', 'A')
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE trigger_meta.tgrelid =
-                            'public.research_lab_source_add_reward_slots'::regclass
-                          AND trigger_meta.tgname =
-                            'trg_source_add_leg1_slot_v2'
-                          AND NOT trigger_meta.tgisinternal
-                    ), FALSE),
-                    'leg1_obligation_trigger_enabled', COALESCE((
-                        SELECT trigger_meta.tgenabled IN ('O', 'A')
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE trigger_meta.tgrelid =
-                            'public.research_lab_source_add_reward_obligations'::regclass
-                          AND trigger_meta.tgname =
-                            'trg_source_add_leg1_obligation_v2'
-                          AND NOT trigger_meta.tgisinternal
-                    ), FALSE)
-                )::text;
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v1()
+                       ::text;
                 """,
                 tuples_only=True,
             ).stdout.strip()
         )
         if post_accept_leg1_contract != {
-            "finalizer_present": True,
-            "acceptance_trigger_enabled": True,
-            "eligible_trigger_enabled": True,
-            "leg1_work_trigger_enabled": True,
-            "leg1_slot_trigger_enabled": True,
-            "leg1_obligation_trigger_enabled": True,
+            "schema_version": (
+                "leadpoet.source_add_post_accept_leg1_contract.v1"
+            ),
+            "daily_cap": 10,
+            "leg1_alpha_percent": 1.0,
+            "leg1_reward_epochs": 20,
+            "function_authority_sha256": (
+                "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
+                "b369628d0cea2fd0a3fa39d601f34b06"
+            ),
+            "functions": {
+                "configure_probe_v2": True,
+                "finalize_provision_v2": True,
+                "reject_current_builtin_v2": True,
+                "reserve_leg1_slot_v2": True,
+                "finalize_leg1_v2": True,
+                "finalize_provision_smoke_v2": True,
+            },
+            "triggers": {
+                "acceptance": True,
+                "eligible": True,
+                "leg1_work": True,
+                "leg1_slot": True,
+                "leg1_obligation": True,
+                "leg1_initial_event": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "v2_callable": True,
+                "legacy_not_callable": True,
+            },
         }:
             raise PostgresContractProbeError(
                 "post-167 SOURCE_ADD post-accept Leg 1 contract differs"

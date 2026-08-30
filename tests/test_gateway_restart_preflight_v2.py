@@ -537,6 +537,10 @@ def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
         "daily_cap": 10,
         "leg1_alpha_percent": 1.0,
         "leg1_reward_epochs": 20,
+        "function_authority_sha256": (
+            "sha256:f35b1a4c7aa00609fe7e9929f0bd0eef"
+            "b369628d0cea2fd0a3fa39d601f34b06"
+        ),
         "functions": {
             "configure_probe_v2": True,
             "finalize_provision_v2": True,
@@ -661,6 +665,13 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["source_add_post_accept_leg1_contract"] == json.loads(
         _source_add_post_accept_leg1_contract_response()
     )
+    assert result["source_add_leg1_release_policy"] == {
+        "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
+        "leg1_alpha_percent": 1.0,
+        "leg2_alpha_percent": 0.0,
+        "reward_epochs": 20,
+        "daily_cap": 10,
+    }
     assert len(requests) == result["table_probe_count"] + 6
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
@@ -1045,6 +1056,50 @@ def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
             supabase_url="https://project.supabase.co",
             opener=opener,
             timeout_seconds=10.0,
+        )
+
+
+def test_source_add_post_accept_leg1_contract_rejects_function_authority_drift(
+) -> None:
+    contract = json.loads(_source_add_post_accept_leg1_contract_response())
+    contract["function_authority_sha256"] = "sha256:" + "0" * 64
+
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(body=json.dumps(contract).encode())
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD post-accept Leg 1 contract differs",
+    ):
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "0.5"),
+        ("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", "5"),
+        ("RESEARCH_LAB_REWARD_EPOCHS", "21"),
+        ("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", "100"),
+        ("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", "nan"),
+    ),
+)
+def test_source_add_leg1_release_environment_rejects_policy_drift(
+    name,
+    value,
+) -> None:
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD Leg 1 release environment differs",
+    ):
+        schema_preflight._source_add_leg1_release_environment_policy_v1(
+            {name: value}
         )
 
 

@@ -857,6 +857,7 @@ class ResearchLabGatewayConfig:
     source_add_sandbox_image: str = "python:3.11-slim"
     source_add_trial_timeout_seconds: int = 300
     source_add_leg1_alpha_percent: float = 1.0
+    # Zero disables Leg 2 without disabling measured functional Leg 1 rewards.
     source_add_leg2_alpha_percent: float = 5.0
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
@@ -1847,6 +1848,9 @@ class ResearchLabGatewayConfig:
                 "dispatcher_enabled": self.source_add_dispatcher_enabled,
                 "functional_probes_enabled": self.source_add_functional_probes_enabled,
                 "functional_rewards_enabled": self.source_add_functional_rewards_enabled,
+                "leg1_alpha_percent": self.source_add_leg1_alpha_percent,
+                "leg2_alpha_percent": self.source_add_leg2_alpha_percent,
+                "reward_epochs": self.lab_reward_epochs,
                 "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
                 "max_per_day_per_hotkey": self.source_add_max_per_day_per_hotkey,
                 "max_per_30d_per_hotkey": self.source_add_max_per_30d_per_hotkey,

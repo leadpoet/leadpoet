@@ -31,6 +31,7 @@ BEGIN
     LOCK TABLE
         public.research_lab_source_add_work_items,
         public.research_lab_source_add_submissions,
+        public.research_lab_source_add_identity_events,
         public.research_lab_source_add_functional_probe_attempts,
         public.research_lab_source_catalog,
         public.research_lab_source_add_provisioning_events,
@@ -267,6 +268,13 @@ WITH permanent_adapters AS (
         current.submission_id,
         current.adapter_id,
         current.miner_hotkey,
+        current.adapter_id IN (SELECT adapter_id FROM permanent_adapters)
+            AS permanent_owner,
+        (
+            SELECT MIN(history.created_at)
+            FROM public.research_lab_source_add_submissions history
+            WHERE history.submission_id = current.submission_id
+        ) AS admitted_at,
         current.submission_doc #>> '{source_metadata,api_base_url}'
             AS api_base_url
     FROM public.research_lab_source_add_submission_current current
@@ -282,9 +290,34 @@ SELECT
         AS provider_origin_hash
 FROM owner_rows;
 
+-- Legacy admission keyed uniqueness to the full source identity, so path
+-- aliases on one host can already have multiple owners. Preserve an existing
+-- rewarded/cataloged owner. Otherwise preserve the earliest admission, which
+-- is the owner atomic host-level admission would have selected at the time.
+-- Every non-permanent loser is terminalized append-only before the unique
+-- provider-origin reservation is installed.
+CREATE TEMP TABLE source_add_provider_origin_losers
+ON COMMIT DROP
+AS
+SELECT ranked.*
+FROM (
+    SELECT
+        backfill.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY backfill.provider_origin_hash
+            ORDER BY
+                backfill.permanent_owner DESC,
+                backfill.admitted_at ASC,
+                backfill.submission_id ASC
+        ) AS owner_rank,
+        COUNT(*) FILTER (WHERE backfill.permanent_owner) OVER (
+            PARTITION BY backfill.provider_origin_hash
+        ) AS permanent_owner_count
+    FROM source_add_provider_origin_backfill backfill
+) ranked
+WHERE ranked.owner_rank > 1;
+
 DO $backfill_checks$
-DECLARE
-    v_collision TEXT;
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -322,20 +355,166 @@ BEGIN
         WHERE COALESCE(api_base_url, '') = ''
            OR provider_origin_host = ''
            OR provider_origin_hash !~ '^sha256:[0-9a-f]{64}$'
+           OR admitted_at IS NULL
     ) THEN
         RAISE EXCEPTION 'SOURCE_ADD provider-origin backfill input is malformed';
     END IF;
-    SELECT provider_origin_hash INTO v_collision
-    FROM source_add_provider_origin_backfill
-    GROUP BY provider_origin_hash
-    HAVING COUNT(DISTINCT submission_id) > 1
-    ORDER BY provider_origin_hash
-    LIMIT 1;
-    IF v_collision IS NOT NULL THEN
-        RAISE EXCEPTION 'SOURCE_ADD provider-origin backfill collision';
+    IF EXISTS (
+        SELECT 1
+        FROM source_add_provider_origin_losers
+        WHERE permanent_owner_count > 1
+    ) THEN
+        RAISE EXCEPTION 'SOURCE_ADD provider-origin has multiple permanent owners';
     END IF;
 END;
 $backfill_checks$;
+
+UPDATE public.research_lab_source_add_work_items work
+SET work_status = 'cancelled',
+    lease_token = NULL,
+    leased_by = '',
+    lease_expires_at = NULL,
+    job_doc = work.job_doc
+        - 'provider_execution_state'
+        - 'provider_execution_attempt'
+        - 'provider_execution_started_at'
+        - 'provider_execution_recovery',
+    result_doc = work.result_doc || jsonb_build_object(
+        'status', 'provider_origin_duplicate_migration',
+        'reason_code', 'duplicate_provider_origin_existing_owner'
+    ),
+    completed_at = COALESCE(work.completed_at, NOW()),
+    updated_at = NOW()
+WHERE work.submission_id IN (
+    SELECT loser.submission_id
+    FROM source_add_provider_origin_losers loser
+)
+  AND work.work_status IN ('queued', 'leased', 'retry_wait');
+
+INSERT INTO public.research_lab_source_add_identity_events (
+    identity_version,
+    source_identity_hash,
+    submission_id,
+    adapter_id,
+    miner_hotkey,
+    reservation_status,
+    seq,
+    reason
+)
+SELECT
+    identity.identity_version,
+    identity.source_identity_hash,
+    identity.submission_id,
+    identity.adapter_id,
+    identity.miner_hotkey,
+    'released',
+    identity.seq + 1,
+    'provider_origin_duplicate_migration_168'
+FROM public.research_lab_source_add_identity_current identity
+JOIN source_add_provider_origin_losers loser
+  ON loser.submission_id = identity.submission_id
+ AND loser.adapter_id = identity.adapter_id
+ AND loser.miner_hotkey = identity.miner_hotkey
+WHERE identity.reservation_status = 'reserved';
+
+INSERT INTO public.research_lab_source_add_submissions (
+    submission_id,
+    schema_version,
+    adapter_id,
+    miner_hotkey,
+    stage,
+    seq,
+    measured_trial_yield,
+    submission_doc,
+    precheck_status,
+    precheck_doc,
+    source_identity_hash,
+    source_identity_version
+)
+SELECT
+    current.submission_id,
+    current.schema_version,
+    current.adapter_id,
+    current.miner_hotkey,
+    'rejected_precheck',
+    current.seq + 1,
+    current.measured_trial_yield,
+    current.submission_doc || jsonb_build_object(
+        'stage', 'rejected_precheck',
+        'provider_origin_migration', jsonb_build_object(
+            'migration', '168',
+            'reason_code', 'duplicate_provider_origin_existing_owner',
+            'status', 'rejected_duplicate'
+        )
+    ),
+    'rejected_precheck',
+    current.precheck_doc || jsonb_build_object(
+        'status', 'rejected_precheck',
+        'reason_codes', jsonb_build_array(
+            'duplicate_provider_origin_existing_owner'
+        ),
+        'migration', '168'
+    ),
+    current.source_identity_hash,
+    current.source_identity_version
+FROM public.research_lab_source_add_submission_current current
+JOIN source_add_provider_origin_losers loser
+  ON loser.submission_id = current.submission_id
+ AND loser.adapter_id = current.adapter_id
+ AND loser.miner_hotkey = current.miner_hotkey
+WHERE current.stage NOT IN (
+    'rejected', 'rejected_precheck', 'functional_probe_failed'
+);
+
+DO $reconciliation_checks$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM source_add_provider_origin_losers loser
+        JOIN public.research_lab_source_add_submission_current current
+          ON current.submission_id = loser.submission_id
+         AND current.adapter_id = loser.adapter_id
+         AND current.miner_hotkey = loser.miner_hotkey
+        WHERE current.stage <> 'rejected_precheck'
+           OR current.precheck_status <> 'rejected_precheck'
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.research_lab_source_add_work_items work
+        JOIN source_add_provider_origin_losers loser
+          ON loser.submission_id = work.submission_id
+        WHERE work.work_status IN ('queued', 'leased', 'retry_wait')
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.research_lab_source_add_identity_current identity
+        JOIN source_add_provider_origin_losers loser
+          ON loser.submission_id = identity.submission_id
+         AND loser.adapter_id = identity.adapter_id
+         AND loser.miner_hotkey = identity.miner_hotkey
+        WHERE identity.reservation_status = 'reserved'
+    ) THEN
+        RAISE EXCEPTION 'SOURCE_ADD provider-origin reconciliation differs';
+    END IF;
+END;
+$reconciliation_checks$;
+
+DELETE FROM source_add_provider_origin_backfill backfill
+USING source_add_provider_origin_losers loser
+WHERE loser.submission_id = backfill.submission_id
+  AND loser.adapter_id = backfill.adapter_id
+  AND loser.miner_hotkey = backfill.miner_hotkey;
+
+DO $post_reconciliation_collision_check$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM source_add_provider_origin_backfill
+        GROUP BY provider_origin_hash
+        HAVING COUNT(DISTINCT submission_id) > 1
+    ) THEN
+        RAISE EXCEPTION 'SOURCE_ADD provider-origin reconciliation is incomplete';
+    END IF;
+END;
+$post_reconciliation_collision_check$;
 
 INSERT INTO public.research_lab_source_add_provider_origin_events (
     origin_version, provider_origin_hash, submission_id, adapter_id,

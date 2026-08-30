@@ -488,7 +488,7 @@ def test_concurrent_same_host_admission_has_exactly_one_owner(origin_database):
     verify.close()
 
 
-def test_legacy_same_host_backfill_collision_aborts_migration(origin_database):
+def test_legacy_same_host_backfill_collision_preserves_fifo_owner(origin_database):
     psycopg2, dsn = origin_database
     admin = psycopg2.connect(**dsn)
     admin.autocommit = True
@@ -559,14 +559,215 @@ def test_legacy_same_host_backfill_collision_aborts_migration(origin_database):
                 "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
                 ("collision migration", "operator:collision-fixture"),
             )
-            with pytest.raises(psycopg2.Error, match="backfill collision"):
-                cursor.execute(MIGRATION.read_text(encoding="utf-8"))
-            cursor.execute("ROLLBACK")
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
             cursor.execute(
-                "SELECT pg_catalog.to_regclass(%s)",
-                ("public.research_lab_source_add_provider_origin_events",),
+                """
+                SELECT submission_id, stage, precheck_status
+                FROM public.research_lab_source_add_submission_current
+                WHERE submission_id IN (%s, %s)
+                ORDER BY submission_id
+                """,
+                (first["submission_id"], second["submission_id"]),
             )
-            assert cursor.fetchone()[0] is None
+            assert cursor.fetchall() == [
+                (first["submission_id"], "provenance_queued", ""),
+                (second["submission_id"], "rejected_precheck", "rejected_precheck"),
+            ]
+            cursor.execute(
+                """
+                SELECT submission_id, work_status,
+                       result_doc->>'reason_code'
+                FROM public.research_lab_source_add_work_items
+                WHERE submission_id IN (%s, %s)
+                ORDER BY submission_id
+                """,
+                (first["submission_id"], second["submission_id"]),
+            )
+            assert cursor.fetchall() == [
+                (first["submission_id"], "queued", None),
+                (
+                    second["submission_id"],
+                    "cancelled",
+                    "duplicate_provider_origin_existing_owner",
+                ),
+            ]
+            cursor.execute(
+                """
+                SELECT submission_id, array_agg(DISTINCT reservation_status)
+                FROM public.research_lab_source_add_identity_current
+                WHERE submission_id IN (%s, %s)
+                GROUP BY submission_id
+                ORDER BY submission_id
+                """,
+                (first["submission_id"], second["submission_id"]),
+            )
+            assert cursor.fetchall() == [
+                (first["submission_id"], ["reserved"]),
+                (second["submission_id"], ["released"]),
+            ]
+            cursor.execute(
+                """
+                SELECT submission_id, reservation_status
+                FROM public.research_lab_source_add_provider_origin_current
+                """
+            )
+            assert cursor.fetchall() == [(first["submission_id"], "reserved")]
+            cursor.execute(
+                "SELECT public.research_lab_source_add_provider_origin_contract_v1()"
+            )
+            contract = cursor.fetchone()[0]
+            assert contract["coverage_complete"] is True
+            assert contract["collision_free"] is True
+
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM public.research_lab_source_add_submissions
+                WHERE submission_id = %s AND stage = 'rejected_precheck'
+                """,
+                (second["submission_id"],),
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        connection.close()
+        admin = psycopg2.connect(**dsn)
+        admin.autocommit = True
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database_name,),
+            )
+            cursor.execute(f"DROP DATABASE IF EXISTS {database_name}")
+        admin.close()
+
+
+def test_legacy_same_host_backfill_preserves_permanent_owner(origin_database):
+    psycopg2, dsn = origin_database
+    admin = psycopg2.connect(**dsn)
+    admin.autocommit = True
+    database_name = "source_add_origin_permanent"
+    with admin.cursor() as cursor:
+        cursor.execute(f"DROP DATABASE IF EXISTS {database_name}")
+        cursor.execute(f"CREATE DATABASE {database_name}")
+    admin.close()
+
+    permanent_dsn = {**dsn, "dbname": database_name}
+    connection = psycopg2.connect(**permanent_dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA extensions")
+            cursor.execute("CREATE EXTENSION pgcrypto WITH SCHEMA extensions")
+            cursor.execute(
+                """
+                CREATE TABLE public.research_lab_auto_research_loop_events (
+                    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    event_type TEXT NOT NULL,
+                    CONSTRAINT research_lab_auto_research_loop_events_event_type_check
+                        CHECK (event_type = 'loop_started')
+                )
+                """
+            )
+            for migration in MIGRATIONS[:-1]:
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(FALSE, %s, %s)",
+                ("permanent fixture", "operator:permanent-fixture"),
+            )
+            first = _record(
+                suffix="2100000000000001",
+                host="api.permanent-collision.example",
+                path="/v1",
+                miner="5PermanentCollisionOne",
+            )
+            second = _record(
+                suffix="2100000000000002",
+                host="api.permanent-collision.example",
+                path="/v2",
+                miner="5PermanentCollisionTwo",
+            )
+            for index, record in enumerate((first, second), start=1):
+                legacy_record = dict(record)
+                legacy_record.pop("provider_origin_host")
+                legacy_record.pop("provider_origin_hash")
+                cursor.execute(
+                    """
+                    SELECT public.research_lab_source_add_admit(
+                        %s::JSONB, %s, %s, %s, %s, 10, 20, 30
+                    )
+                    """,
+                    (
+                        _json(legacy_record),
+                        "sha256:" + str(index) * 64,
+                        "",
+                        "",
+                        f"source_add_work:210000000000000{index}",
+                    ),
+                )
+                assert cursor.fetchone()[0]["status"] == "admitted"
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_catalog (
+                    catalog_id, adapter_id, miner_ref, source_name, source_kind,
+                    declared_base_domains, registry_provider_id,
+                    measured_trial_yield, catalog_doc, source_identity_hash
+                ) VALUES (%s, %s, %s, %s, %s, %s::JSONB, %s, 0, '{}'::JSONB, %s)
+                """,
+                (
+                    "source_catalog:2100000000000002",
+                    second["adapter_id"],
+                    second["miner_hotkey"],
+                    second["manifest"]["source_name"],
+                    second["manifest"]["source_kind"],
+                    _json(second["manifest"]["declared_base_domains"]),
+                    "legacy_permanent_collision",
+                    "sha256:" + "2" * 64,
+                ),
+            )
+            cursor.execute(
+                "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
+                ("permanent migration", "operator:permanent-fixture"),
+            )
+            cursor.execute(
+                (SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql")
+                .read_text(encoding="utf-8")
+            )
+            cursor.execute(MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(
+                """
+                SELECT submission_id, stage
+                FROM public.research_lab_source_add_submission_current
+                WHERE submission_id IN (%s, %s)
+                ORDER BY submission_id
+                """,
+                (first["submission_id"], second["submission_id"]),
+            )
+            assert cursor.fetchall() == [
+                (first["submission_id"], "rejected_precheck"),
+                (second["submission_id"], "provenance_queued"),
+            ]
+            cursor.execute(
+                """
+                SELECT submission_id, reservation_status
+                FROM public.research_lab_source_add_provider_origin_current
+                """
+            )
+            assert cursor.fetchall() == [(second["submission_id"], "reserved")]
+            cursor.execute(
+                """
+                SELECT submission_id, work_status
+                FROM public.research_lab_source_add_work_items
+                WHERE submission_id IN (%s, %s)
+                ORDER BY submission_id
+                """,
+                (first["submission_id"], second["submission_id"]),
+            )
+            assert cursor.fetchall() == [
+                (first["submission_id"], "cancelled"),
+                (second["submission_id"], "queued"),
+            ]
     finally:
         connection.close()
         admin = psycopg2.connect(**dsn)

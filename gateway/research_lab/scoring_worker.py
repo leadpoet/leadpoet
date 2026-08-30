@@ -1529,6 +1529,18 @@ _BASELINE_WAVE_STALL_GRACE_SECONDS = 180.0
 _BASELINE_WAVE_STALL_EXIT_CODE = 75
 
 
+def _baseline_repo_head_watch_interval_seconds() -> float:
+    """Bounded cadence for preempting work after the model branch advances."""
+
+    try:
+        configured = float(
+            os.getenv("RESEARCH_LAB_BASELINE_REPO_HEAD_WATCH_SECONDS", "30")
+        )
+    except ValueError:
+        configured = 30.0
+    return min(300.0, max(5.0, configured))
+
+
 def _baseline_wave_stall_timeout_seconds(config: Any) -> float:
     """Bound one checkpoint-backed wave beyond its full measured deadline."""
 
@@ -4951,6 +4963,57 @@ class PrivateBaselineRepoHeadChanged(RuntimeError):
             f"repo_head={compact_ref(repo_main_sha)} "
             f"before_icp={item_index}/{total_icps}"
         )
+
+
+class _PrivateBaselineRepoHeadChangeSignal:
+    """Thread-safe handoff from the async repo watcher to model runner threads."""
+
+    def __init__(self, *, expected_git_sha: str) -> None:
+        self.expected_git_sha = str(expected_git_sha or "").strip()
+        self._changed = threading.Event()
+        self._state_lock = threading.Lock()
+        self._repo_main_sha = ""
+
+    def mark_changed(self, repo_main_sha: str) -> None:
+        normalized = str(repo_main_sha or "").strip()
+        if not normalized:
+            return
+        with self._state_lock:
+            self._repo_main_sha = normalized
+        self._changed.set()
+
+    def repo_main_sha(self) -> str:
+        if not self._changed.is_set():
+            return ""
+        with self._state_lock:
+            return self._repo_main_sha
+
+    def raise_if_changed(self, *, item_index: int, total_icps: int) -> None:
+        repo_main_sha = self.repo_main_sha()
+        if repo_main_sha:
+            raise PrivateBaselineRepoHeadChanged(
+                expected_git_sha=self.expected_git_sha,
+                repo_main_sha=repo_main_sha,
+                item_index=item_index,
+                total_icps=total_icps,
+            )
+
+    def wrap_progress_callback(
+        self,
+        callback: Callable[[], None] | None,
+        *,
+        item_index: int,
+        total_icps: int,
+    ) -> Callable[[], None]:
+        def _progress() -> None:
+            if callback is not None:
+                callback()
+            self.raise_if_changed(
+                item_index=item_index,
+                total_icps=total_icps,
+            )
+
+        return _progress
 
 
 # Known-terminal error classes: validation / malformed-candidate style failures
@@ -16004,6 +16067,43 @@ class ResearchLabGatewayScoringWorker:
             total_icps=total_icps,
         )
 
+    async def _watch_private_baseline_repo_head_change(
+        self,
+        *,
+        expected_git_sha: str,
+        benchmark_date: str,
+        total_icps: int,
+        signal: _PrivateBaselineRepoHeadChangeSignal,
+    ) -> None:
+        """Detect a new signed model release while an ICP wave is in flight."""
+
+        expected = str(expected_git_sha or "").strip()
+        if not expected:
+            return
+        poll_seconds = _baseline_repo_head_watch_interval_seconds()
+        while True:
+            await asyncio.sleep(poll_seconds)
+            try:
+                await self._ensure_private_baseline_repo_head_unchanged(
+                    expected_git_sha=expected,
+                    benchmark_date=benchmark_date,
+                    item_index=0,
+                    total_icps=total_icps,
+                )
+            except PrivateBaselineRepoHeadChanged as exc:
+                signal.mark_changed(exc.repo_main_sha)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep watching after a transient control-plane failure
+                logger.warning(
+                    "research_lab_private_baseline_repo_head_watch_failed worker_ref=%s "
+                    "benchmark_date=%s error=%s",
+                    self.worker_ref,
+                    benchmark_date,
+                    _short_error(exc),
+                )
+
     async def _record_baseline_icp_traces(
         self,
         *,
@@ -17018,6 +17118,22 @@ class ResearchLabGatewayScoringWorker:
             max_workers=max(concurrency, self.config.private_baseline_retry_concurrency),
             thread_name_prefix="baseline-icp",
         )
+        repo_head_change_signal = _PrivateBaselineRepoHeadChangeSignal(
+            expected_git_sha=expected_repo_main_git_sha
+        )
+        repo_head_watch_task = (
+            asyncio.create_task(
+                self._watch_private_baseline_repo_head_change(
+                    expected_git_sha=expected_repo_main_git_sha,
+                    benchmark_date=benchmark_date,
+                    total_icps=total_icps,
+                    signal=repo_head_change_signal,
+                ),
+                name="private-baseline-repo-head-watch",
+            )
+            if str(expected_repo_main_git_sha or "").strip()
+            else None
+        )
         try:
             semaphore = asyncio.Semaphore(concurrency)
             persisted_attempt_indexes: set[int] = set()
@@ -17124,7 +17240,13 @@ class ResearchLabGatewayScoringWorker:
                             run_one(
                                 item_index,
                                 item,
-                                progress_callback=mark_wave_progress,
+                                progress_callback=(
+                                    repo_head_change_signal.wrap_progress_callback(
+                                        mark_wave_progress,
+                                        item_index=item_index,
+                                        total_icps=total_icps,
+                                    )
+                                ),
                             )
                             for item_index, item in wave
                         ),
@@ -17133,6 +17255,16 @@ class ResearchLabGatewayScoringWorker:
                 fatal = [entry for entry in settled if isinstance(entry, BaseException)]
                 if fatal:
                     raise fatal[0]
+                repo_head_change_signal.raise_if_changed(
+                    item_index=wave[-1][0],
+                    total_icps=total_icps,
+                )
+                await self._ensure_private_baseline_repo_head_unchanged(
+                    expected_git_sha=expected_repo_main_git_sha,
+                    benchmark_date=benchmark_date,
+                    item_index=wave[-1][0],
+                    total_icps=total_icps,
+                )
                 for entry in settled:
                     results[entry["_item_index"]] = entry
                 _record_private_baseline_stage(
@@ -17349,7 +17481,13 @@ class ResearchLabGatewayScoringWorker:
                             *(
                                 retry_one(
                                     item_index,
-                                    progress_callback=mark_wave_progress,
+                                    progress_callback=(
+                                        repo_head_change_signal.wrap_progress_callback(
+                                            mark_wave_progress,
+                                            item_index=item_index,
+                                            total_icps=total_icps,
+                                        )
+                                    ),
                                 )
                                 for item_index in wave_indexes
                             ),
@@ -17360,6 +17498,16 @@ class ResearchLabGatewayScoringWorker:
                     ]
                     if fatal:
                         raise fatal[0]
+                    repo_head_change_signal.raise_if_changed(
+                        item_index=wave_indexes[-1],
+                        total_icps=total_icps,
+                    )
+                    await self._ensure_private_baseline_repo_head_unchanged(
+                        expected_git_sha=expected_repo_main_git_sha,
+                        benchmark_date=benchmark_date,
+                        item_index=wave_indexes[-1],
+                        total_icps=total_icps,
+                    )
                     recovered = 0
                     for entry in retried:
                         if (
@@ -17461,6 +17609,10 @@ class ResearchLabGatewayScoringWorker:
                 },
             )
         finally:
+            if repo_head_watch_task is not None:
+                repo_head_watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await repo_head_watch_task
             executor.shutdown(wait=False, cancel_futures=True)
 
     async def _reusable_same_day_benchmark(

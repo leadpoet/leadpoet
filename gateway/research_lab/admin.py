@@ -1572,7 +1572,7 @@ async def _run_source_add_admin(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "probe_endpoints": endpoints,
             "operator_notes": args.operator_notes,
-        }).model_dump(mode="json", exclude_none=True)
+        }).model_dump(mode="json", exclude_none=True, exclude_unset=True)
         if not args.apply:
             return {
                 "ok": True,

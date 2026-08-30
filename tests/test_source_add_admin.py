@@ -130,6 +130,85 @@ async def test_source_add_configure_rejects_header_injection_and_case_duplicates
         await admin._run_source_add_admin(admin.build_parser().parse_args(argv))
 
 
+@pytest.mark.asyncio
+async def test_source_add_provision_omits_unsupplied_test_config_defaults(
+    monkeypatch,
+):
+    captured = {}
+
+    async def fake_http(*, gateway_url, path, payload):
+        captured.update(
+            {
+                "gateway_url": gateway_url,
+                "path": path,
+                "payload": payload,
+            }
+        )
+        return {
+            "submission_id": "source_add_submission:0123456789abcdef",
+            "provision_status": "approved_pending_provision",
+        }
+
+    monkeypatch.setattr(admin, "_source_add_admin_http", fake_http)
+    argv = [
+        "source-add",
+        "provision",
+        "--submission-id",
+        "source_add_submission:0123456789abcdef",
+        "--registry-provider-id",
+        "source_add_test",
+        "--status",
+        "provisioned_autoresearch_eligible",
+        "--probe-endpoint-json",
+        '{"endpoint_id":"source_add_test.records","provider_id":'
+        '"source_add_test","method":"GET","path":"/records",'
+        '"params":[],"est_cost_microusd":0,"description":"Read records."}',
+    ]
+
+    dry_run = await admin._run_source_add_admin(admin.build_parser().parse_args(argv))
+    applied = await admin._run_source_add_admin(
+        admin.build_parser().parse_args([*argv, "--apply"])
+    )
+
+    expected_payload = {
+        "registry_provider_id": "source_add_test",
+        "provision_status": "provisioned_autoresearch_eligible",
+        "cost_model": {},
+        "routing_contract": {},
+        "probe_endpoints": [
+            {
+                "endpoint_id": "source_add_test.records",
+                "provider_id": "source_add_test",
+                "method": "GET",
+                "path": "/records",
+                "params": [],
+                "est_cost_microusd": 0,
+                "description": "Read records.",
+            }
+        ],
+    }
+    assert dry_run["provisioning"] == expected_payload
+    assert captured == {
+        "gateway_url": "http://127.0.0.1:8000",
+        "path": (
+            "/research-lab/admin/source-adapters/"
+            "source_add_submission:0123456789abcdef/provision"
+        ),
+        "payload": expected_payload,
+    }
+    assert applied["dry_run"] is False
+    assert {
+        "base_url",
+        "auth_kind",
+        "auth_name",
+        "credential_env_refs",
+        "api_credential",
+        "api_credential_v2",
+        "request_headers",
+        "test_probes",
+    }.isdisjoint(expected_payload)
+
+
 def test_source_add_probe_body_enforces_size_depth_and_secret_limits():
     with pytest.raises(ValidationError, match="exceeds structural limits"):
         ResearchLabSourceAddProbeSpec(

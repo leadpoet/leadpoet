@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "e1e356d1de564582f4180312d94cf92ddcfc18bf",
+  "baseline_commit": "cce709bcca9c295ebfa87c4ab68aa379ec0cf90c",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1572,7 +1572,7 @@
       "symbol": "PRIVATE_MODEL_EXACT_GIT_SHA_RE"
     },
     {
-      "ast_sha256": "sha256:e25a5393c1d00d53924db53cd37462371afbfb844830195af458a9c71c3ab201",
+      "ast_sha256": "sha256:a39e940b1f20642a99701df55572ff741029e53d5d8ca155bffde66a89838aa4",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController._maybe_create_source_add_implementation_rewards"
     },
@@ -2877,12 +2877,12 @@
       "symbol": "build_source_add_sandbox_runner"
     },
     {
-      "ast_sha256": "sha256:eb58f58a3cff3bd9f0503ce0fd0150e46766dfd3d5da2fbfe6055156b34d953f",
+      "ast_sha256": "sha256:759e6f59131ff195fe157523162a378d3951e71c1a119215dc6ec721843b49c3",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_functional_probe"
     },
     {
-      "ast_sha256": "sha256:c7107427c91a081ab7c5795a5ef8609742b7f6cf88f44e490b9f37836490bf0e",
+      "ast_sha256": "sha256:b2cf79fa54af839115f4e6f6c3b4c65ff7cfc740be4d45d421f0d7f012b1aa6c",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_leg1_reward"
     },
@@ -3332,7 +3332,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:d338417e221382280fd23696f7b1dab8f47931b040249c85431fc75e6a04d0ec",
+      "ast_sha256": "sha256:ca8faf17c0ecb0cb4ba7447636fb642bc6f47f8ed22f1df31644e0abf25cbd20",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -3342,7 +3342,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:01ee1910dda0550468e613f49d1933a63226b4c7455415e761352e71dd531ec2",
+      "ast_sha256": "sha256:dcc2474e43278eaaf95ef037bc56fd88f9bb7f116c4a5b1813dc7f457c0882c8",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -5577,7 +5577,7 @@
       "symbol": "validate_source_add_sealed_job_envelope_v2"
     },
     {
-      "ast_sha256": "sha256:010f745bc0d1341476f56f18d0df211e55828c120736cf4783a5af2fe900b15e",
+      "ast_sha256": "sha256:e5507549277fb52720e4da3687be6bfa531328fcbdb45ebde9f08616967f7ace",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -5587,7 +5587,7 @@
       "symbol": "SupabaseSourceReaderV2"
     },
     {
-      "ast_sha256": "sha256:50693093114c6ba1097db715e2344424a6eaa24acddf3ab6db2b24c838ab08cc",
+      "ast_sha256": "sha256:b2d047ada36da5a1f4b4df918767d499b56b0d9bec2043e3a1d346c7df57042f",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "_filters"
     },
@@ -8217,7 +8217,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:67d2c0589d04580d2d31ddb9d12f7ede3494c0fe424c86b7fa4c97a21f9bf88d",
-  "protected_source_commit": "e1e356d1de564582f4180312d94cf92ddcfc18bf",
+  "manifest_hash": "sha256:3e1433ca1206154e00cffa7320a96ac2163a81e676cf063673eb5a1c1a25f947",
+  "protected_source_commit": "cce709bcca9c295ebfa87c4ab68aa379ec0cf90c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

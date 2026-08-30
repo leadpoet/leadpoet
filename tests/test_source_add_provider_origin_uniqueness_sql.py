@@ -104,7 +104,7 @@ def test_python_origin_rejects_noncanonical_authorities(value):
     assert source_provider_origin_hash(value) == ""
 
 
-def test_backfill_aborts_on_malformed_colliding_or_uncovered_owners():
+def test_backfill_reconciles_collisions_and_aborts_unsafe_owners():
     assert "source_add_provider_origin_backfill" in SQL
     assert "permanent_adapters" in SQL
     assert "research_lab_source_catalog" in SQL
@@ -113,7 +113,12 @@ def test_backfill_aborts_on_malformed_colliding_or_uncovered_owners():
     assert "provider-origin permanent owner is orphaned" in SQL
     assert "provider-origin backfill input is malformed" in SQL
     assert "COUNT(DISTINCT submission_id) > 1" in SQL
-    assert "provider-origin backfill collision" in SQL
+    assert "source_add_provider_origin_losers" in SQL
+    assert "backfill.permanent_owner DESC" in SQL
+    assert "backfill.admitted_at ASC" in SQL
+    assert "provider-origin has multiple permanent owners" in SQL
+    assert "duplicate_provider_origin_existing_owner" in SQL
+    assert "provider-origin reconciliation differs" in SQL
     assert "provider-origin backfill coverage differs" in SQL
     assert "IN SHARE ROW EXCLUSIVE MODE" in SQL
 

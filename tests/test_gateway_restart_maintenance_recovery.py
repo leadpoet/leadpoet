@@ -30,6 +30,36 @@ def _pause_state(
     }
 
 
+@pytest.mark.parametrize(
+    ("normalizer", "control_key"),
+    (
+        (
+            maintenance.normalize_autoresearch_maintenance_state,
+            maintenance.AUTORESEARCH_MAINTENANCE_CONTROL_KEY,
+        ),
+        (
+            maintenance.normalize_scoring_maintenance_state,
+            maintenance.SCORING_MAINTENANCE_CONTROL_KEY,
+        ),
+    ),
+    ids=("autoresearch", "scoring"),
+)
+def test_maintenance_state_normalizers_preserve_first_event_sequence(
+    normalizer,
+    control_key: str,
+) -> None:
+    state = normalizer(
+        {
+            "control_key": control_key,
+            "current_control_status": "active",
+            "current_event_seq": 0,
+            "seq": 9,
+        }
+    )
+
+    assert state["event_seq"] == 0
+
+
 @pytest.mark.asyncio
 async def test_restart_recovery_preserves_owned_autoresearch_and_scoring_pauses(
     monkeypatch,

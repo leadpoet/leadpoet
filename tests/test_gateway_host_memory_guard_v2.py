@@ -11,6 +11,7 @@ from gateway.tee.host_memory_guard_v2 import (
     cleanup_stale_vsock_probes,
     inspect_host,
     is_disposable_test_process,
+    stale_official_baseline_trace_diagnostic_label,
     stale_vsock_probe_label,
 )
 
@@ -113,6 +114,127 @@ def test_cleanup_revalidates_and_terminates_only_matching_process(
             "cwd": "/tmp/prtest",
             "command": "python3",
             "forced": False,
+        }
+    ]
+
+
+def _official_baseline_trace_snapshots(*, bounded: bool = False):
+    uid = os.getuid()
+    pagination = (
+        "token=r.get('NextContinuationToken'); "
+        "if not r.get('IsTruncated'): break"
+        if bounded
+        else ""
+    )
+    command = (
+        "python3 - <<'PY'\n"
+        "token=None\nwhile True:\n"
+        " if token:kw['ContinuationToken']=token\n"
+        " r=s3.list_objects_v2(**kw)\n"
+        f" {pagination}\n"
+        " pref='research-lab/incontainer-traces/official-baseline-v1/"
+        "protected-action/'\n"
+        " tool_id='candidate.company_evidence_judge'\nPY"
+    )
+    parent = ProcessSnapshot(
+        pid=122,
+        ppid=1,
+        uid=uid,
+        rss_kib=1024,
+        start_ticks=100,
+        cpu_ticks=0,
+        cwd=Path("/home/ec2-user"),
+        argv=("bash", "-c", command),
+    )
+    child = ProcessSnapshot(
+        pid=123,
+        ppid=parent.pid,
+        uid=uid,
+        rss_kib=5 * 1024 * 1024,
+        start_ticks=100,
+        cpu_ticks=0,
+        cwd=parent.cwd,
+        argv=("python3", "-"),
+    )
+    return child, parent
+
+
+def test_stale_official_baseline_trace_requires_exact_unbounded_identity() -> None:
+    child, parent = _official_baseline_trace_snapshots()
+    assert stale_official_baseline_trace_diagnostic_label(
+        child,
+        parent,
+        expected_uid=os.getuid(),
+        uptime_seconds=40_000,
+        clock_ticks_per_second=100,
+    ) == "official_baseline_trace_unbounded_pagination"
+
+    _, bounded_parent = _official_baseline_trace_snapshots(bounded=True)
+    assert stale_official_baseline_trace_diagnostic_label(
+        child,
+        bounded_parent,
+        expected_uid=os.getuid(),
+        uptime_seconds=40_000,
+        clock_ticks_per_second=100,
+    ) is None
+    assert stale_official_baseline_trace_diagnostic_label(
+        child,
+        parent,
+        expected_uid=os.getuid(),
+        uptime_seconds=10_000,
+        clock_ticks_per_second=100,
+    ) is None
+
+
+def test_disposable_cleanup_revalidates_stale_trace_child_and_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    proc_root = tmp_path / "proc"
+    child, parent = _official_baseline_trace_snapshots()
+    for process in (parent, child):
+        process_root = proc_root / str(process.pid)
+        process_root.mkdir(parents=True)
+        (process_root / "status").write_text(
+            f"Uid:\t{process.uid}\t{process.uid}\t{process.uid}\t{process.uid}\n"
+            f"VmRSS:\t{process.rss_kib} kB\n",
+            encoding="utf-8",
+        )
+        fields = ["0"] * 22
+        fields[0] = str(process.pid)
+        fields[1] = "(python3)"
+        fields[3] = str(process.ppid)
+        fields[21] = str(process.start_ticks)
+        (process_root / "stat").write_text(" ".join(fields), encoding="utf-8")
+        (process_root / "cmdline").write_bytes(
+            b"\0".join(value.encode() for value in process.argv) + b"\0"
+        )
+        (process_root / "cwd").symlink_to(process.cwd)
+
+    signals = []
+
+    def terminate(pid: int, sent_signal: int) -> None:
+        signals.append((pid, sent_signal))
+        shutil.rmtree(proc_root / str(pid))
+
+    monkeypatch.setattr("gateway.tee.host_memory_guard_v2.os.kill", terminate)
+    cleaned = cleanup_disposable_tests(
+        proc_root=proc_root,
+        expected_uid=os.getuid(),
+        terminate_timeout_seconds=0,
+        uptime_seconds=40_000,
+        clock_ticks_per_second=100,
+    )
+
+    assert signals == [(child.pid, 15)]
+    assert cleaned == [
+        {
+            "pid": child.pid,
+            "rss_mib": 5120.0,
+            "cwd": "/home/ec2-user",
+            "command": "python3",
+            "forced": False,
+            "label": "official_baseline_trace_unbounded_pagination",
         }
     ]
 

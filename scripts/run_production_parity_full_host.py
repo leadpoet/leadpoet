@@ -2858,6 +2858,7 @@ def run_full(
                 "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts" / "validator-runtime"),
                 "GATEWAY_RESTART_LOCK_FILE": str(work / "gateway-restart.lock"),
                 "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(work / "docker-operation.lock"),
+                "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity",
                 "GATEWAY_DEPLOY_COMMIT": candidate_sha,
                 "GATEWAY_PYTHON_BIN": sys.executable,
                 "GATEWAY_V2_RELEASE_BUCKET": ATTESTED_V2_RELEASE_BUCKET,

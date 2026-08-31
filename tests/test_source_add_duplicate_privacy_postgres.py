@@ -17,7 +17,7 @@ from tests.test_source_add_end_to_end_postgres import (
 )
 
 
-MIGRATION = "170-research-lab-source-add-duplicate-privacy.sql"
+MIGRATION = "171-research-lab-source-add-duplicate-privacy.sql"
 MIGRATIONS = PRE_PRIVACY_MIGRATIONS + (MIGRATION,)
 
 

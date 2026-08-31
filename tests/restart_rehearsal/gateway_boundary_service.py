@@ -523,9 +523,9 @@ def _migration_schema_contract(
             "165-research-lab-candidate-derived-artifact-event.sql",
             "166-research-lab-zero-call-verifier-timeout.sql",
             "167-research-lab-provider-request-attempt-scope.sql",
-            "168-research-lab-source-add-post-accept-leg1.sql",
-            "169-research-lab-source-add-provider-origin-uniqueness.sql",
-            "170-research-lab-source-add-duplicate-privacy.sql",
+            "169-research-lab-source-add-post-accept-leg1.sql",
+            "170-research-lab-source-add-provider-origin-uniqueness.sql",
+            "171-research-lab-source-add-duplicate-privacy.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (

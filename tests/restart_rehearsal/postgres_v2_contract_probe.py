@@ -280,13 +280,13 @@ PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION = (
     "167-research-lab-provider-request-attempt-scope.sql"
 )
 SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION = (
-    "168-research-lab-source-add-post-accept-leg1.sql"
+    "169-research-lab-source-add-post-accept-leg1.sql"
 )
 SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION = (
-    "169-research-lab-source-add-provider-origin-uniqueness.sql"
+    "170-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION = (
-    "170-research-lab-source-add-duplicate-privacy.sql"
+    "171-research-lab-source-add-duplicate-privacy.sql"
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"

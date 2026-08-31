@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (
     ROOT
     / "scripts"
-    / "169-research-lab-source-add-provider-origin-uniqueness.sql"
+    / "170-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 BACKFILL_SUFFIX = "0000000000000168"
 BACKFILL_IDENTITY_HASH = "sha256:" + "e" * 64
@@ -731,7 +731,7 @@ def test_legacy_same_host_backfill_preserves_permanent_owner(origin_database):
                 ("permanent migration", "operator:permanent-fixture"),
             )
             cursor.execute(
-                (SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql")
+                (SCRIPTS / "169-research-lab-source-add-post-accept-leg1.sql")
                 .read_text(encoding="utf-8")
             )
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))
@@ -904,7 +904,7 @@ def test_legacy_backfill_reconciles_live_three_group_shape(origin_database):
                 ("live-shape migration", "operator:live-shape-fixture"),
             )
             cursor.execute(
-                (SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql")
+                (SCRIPTS / "169-research-lab-source-add-post-accept-leg1.sql")
                 .read_text(encoding="utf-8")
             )
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))

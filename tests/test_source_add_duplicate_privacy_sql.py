@@ -6,7 +6,7 @@ from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = "scripts/170-research-lab-source-add-duplicate-privacy.sql"
+MIGRATION = "scripts/171-research-lab-source-add-duplicate-privacy.sql"
 SQL = (ROOT / MIGRATION).read_text(encoding="utf-8")
 
 

@@ -824,10 +824,10 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "scripts/156-production-parity-readonly-role.sql",
         "scripts/161-research-lab-exact-model-transitions.sql",
-        "scripts/167-research-lab-provider-request-attempt-scope.sql",
-        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
-        "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql",
-        "scripts/170-research-lab-source-add-duplicate-privacy.sql",
+        "scripts/168-research-lab-legacy-provider-terminal-custody.sql",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql",
     }.issubset(set(result["migration_files"]))
     assert (
         "scripts/163-research-lab-model-transition-artifact-custody.sql"

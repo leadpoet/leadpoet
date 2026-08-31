@@ -7,7 +7,7 @@ from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL = (
-    ROOT / "scripts" / "168-research-lab-source-add-post-accept-leg1.sql"
+    ROOT / "scripts" / "169-research-lab-source-add-post-accept-leg1.sql"
 ).read_text(encoding="utf-8")
 
 
@@ -180,7 +180,7 @@ def test_only_service_role_can_call_the_candidate_finalizer():
     assert f"GRANT EXECUTE ON FUNCTION {signature}" in SQL
     assert "TO service_role" in SQL
     assert (
-        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_finalize_provision_smoke_v2",
     ) in REQUIRED_SUPABASE_V2_RPCS
 

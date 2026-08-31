@@ -15,9 +15,9 @@ from tests.test_source_add_end_to_end_postgres import (
 )
 
 
-MIGRATION = SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql"
+MIGRATION = SCRIPTS / "169-research-lab-source-add-post-accept-leg1.sql"
 ORIGIN_MIGRATION = (
-    SCRIPTS / "169-research-lab-source-add-provider-origin-uniqueness.sql"
+    SCRIPTS / "170-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 PRE_MIGRATIONS = PRE_ORIGIN_MIGRATIONS[:-1]
 

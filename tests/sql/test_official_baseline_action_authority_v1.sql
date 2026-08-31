@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run after migrations 157, 163, 164, 166, and 167 against disposable PostgreSQL only.
+-- Run after migrations 157, 163, 164, 166, 167, and 168 against disposable PostgreSQL only.
 BEGIN;
 
 DO $official_baseline_happy_path$
@@ -395,11 +395,45 @@ BEGIN
         'provider_receipt_sha256', 'sha256:' || repeat('a', 64),
         'model_provider_response_sha256', 'sha256:' || repeat('b', 64)
     );
+    result := public.research_lab_official_baseline_record_terminal_known_v1(
+        terminal
+    );
+    IF result->>'state' IS DISTINCT FROM 'terminal_known'
+       OR (result->>'idempotent')::BOOLEAN IS NOT FALSE
+    THEN
+        RAISE EXCEPTION
+            'independent legacy provider terminal was not accepted: %', result;
+    END IF;
+
+    unit_value := 'baseline_icp:' || repeat('5', 64);
+    frontier_hash := public.research_lab_official_baseline_hash_v1(
+        public.research_lab_official_baseline_provider_frontier_doc_v1(
+            run_hash, unit_value
+        )
+    );
+    action_auth := action_auth || pg_catalog.jsonb_build_object(
+        'attempt_key', 'sha256:' || repeat('6', 63) || '0',
+        'unit_ref', unit_value,
+        'protected_job_ref', 'protected_job:reused-custody',
+        'protected_request_sha256', 'sha256:' || repeat('3', 63) || '0',
+        'expected_frontier_sha256', frontier_hash
+    );
+    PERFORM public.research_lab_official_baseline_reserve_action_v1(action_auth);
+    terminal := terminal || pg_catalog.jsonb_build_object(
+        'attempt_key', action_auth->>'attempt_key',
+        'reservation_ref', 'baseline_reservation:' || repeat('6', 63) || '0',
+        'protected_job_ref', action_auth->>'protected_job_ref',
+        'protected_request_sha256', action_auth->>'protected_request_sha256',
+        'protected_result_sha256', 'sha256:' || repeat('b', 64),
+        'protected_terminal_receipt_ref', 'baseline_terminal:reused-custody',
+        'protected_terminal_receipt_sha256', 'sha256:' || repeat('c', 64),
+        'model_provider_response_sha256', 'sha256:' || repeat('d', 64)
+    );
     BEGIN
         PERFORM public.research_lab_official_baseline_record_terminal_known_v1(
             terminal
         );
-        RAISE EXCEPTION 'conflicting legacy provider replay unexpectedly succeeded';
+        RAISE EXCEPTION 'reused legacy provider custody unexpectedly succeeded';
     EXCEPTION
         WHEN SQLSTATE '23505' THEN NULL;
     END;

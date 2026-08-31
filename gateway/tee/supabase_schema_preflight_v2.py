@@ -1168,8 +1168,8 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_official_baseline_reserve_action_v1",
     ),
     (
-        "scripts/167-research-lab-provider-request-attempt-scope.sql",
-        "research_lab_official_baseline_request_scope_v2",
+        "scripts/168-research-lab-legacy-provider-terminal-custody.sql",
+        "research_lab_official_baseline_request_scope_v3",
     ),
     (
         "scripts/164-research-lab-official-baseline-action-authority.sql",

@@ -18,6 +18,9 @@ TIMEOUT_MIGRATION = (
 REQUEST_SCOPE_MIGRATION = (
     ROOT / "scripts" / "167-research-lab-provider-request-attempt-scope.sql"
 )
+LEGACY_TERMINAL_MIGRATION = (
+    ROOT / "scripts" / "168-research-lab-legacy-provider-terminal-custody.sql"
+)
 BEHAVIOR = (
     ROOT / "tests" / "sql" / "test_official_baseline_action_authority_v1.sql"
 )
@@ -96,7 +99,22 @@ def test_provider_request_scope_patch_is_retry_safe_and_conflict_closed():
 
     behavior = BEHAVIOR.read_text(encoding="utf-8")
     assert "legacy provider retry replay was not accepted" in behavior
-    assert "conflicting legacy provider replay unexpectedly succeeded" in behavior
+
+
+def test_legacy_provider_terminal_patch_requires_independent_protected_custody():
+    sql = LEGACY_TERMINAL_MIGRATION.read_text(encoding="utf-8")
+    assert "research_lab_official_baseline_request_replay_guard_v3" in sql
+    assert "prior_attempt.run_sha256 = current_attempt.run_sha256" in sql
+    assert "prior_attempt.action_sha256 = current_attempt.action_sha256" in sql
+    assert "prior.model_provider_response_sha256" not in sql
+    assert "prior.provider_receipt_sha256 IS DISTINCT FROM" in sql
+    assert "prior.protected_result_sha256 IS DISTINCT FROM" in sql
+    assert "prior.protected_terminal_receipt_sha256 IS DISTINCT FROM" in sql
+    assert "research_lab_official_baseline_request_scope_v3" in sql
+
+    behavior = BEHAVIOR.read_text(encoding="utf-8")
+    assert "independent legacy provider terminal was not accepted" in behavior
+    assert "reused legacy provider custody unexpectedly succeeded" in behavior
 
 
 @pytest.mark.skipif(
@@ -120,8 +138,10 @@ def test_official_baseline_disposable_postgres_behavior():
         MIGRATION,
         TIMEOUT_MIGRATION,
         REQUEST_SCOPE_MIGRATION,
+        LEGACY_TERMINAL_MIGRATION,
         TIMEOUT_MIGRATION,
         REQUEST_SCOPE_MIGRATION,
+        LEGACY_TERMINAL_MIGRATION,
     ):
         migration = subprocess.run(
             [psql, dsn, "-v", "ON_ERROR_STOP=1", "-f", str(path)],

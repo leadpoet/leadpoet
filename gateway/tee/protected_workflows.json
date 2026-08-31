@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "6a769b0026e1eb3bc364a49f336023974adefc2e",
+  "baseline_commit": "341b01c0190c42f14148d2baaaa11d6acb872234",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -5607,7 +5607,7 @@
       "symbol": "_source_add_leg1_release_environment_policy_v1"
     },
     {
-      "ast_sha256": "sha256:d69ae91eee4a616a11ef044406a7c500984716e0dbd538654a32e5f69d25ad8d",
+      "ast_sha256": "sha256:5aea0e70420d46a5a053b724983450b1ce4e42d26169aa4ef71697afadf25c1f",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_verify_source_add_post_accept_leg1_contract_v1"
     },
@@ -8257,7 +8257,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:cc7d562d843624a16de12ca32741157ec0910d6508fc64cb173dadb3963e36d9",
-  "protected_source_commit": "6a769b0026e1eb3bc364a49f336023974adefc2e",
+  "manifest_hash": "sha256:0c568fc8f5f507db26cf131aacce25836fb94cb3455bd02ccac7d7ff188983dc",
+  "protected_source_commit": "341b01c0190c42f14148d2baaaa11d6acb872234",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

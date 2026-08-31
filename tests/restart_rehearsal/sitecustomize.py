@@ -2848,7 +2848,7 @@ class _LocalVsock:
         self._closed = False
 
     def settimeout(self, timeout: float) -> None:
-        if float(timeout) not in {30.0, 120.0}:
+        if float(timeout) not in {30.0, 120.0, 180.0}:
             raise ValueError("local enclave RPC timeout differs")
 
     def connect(self, address: tuple[int, int]) -> None:

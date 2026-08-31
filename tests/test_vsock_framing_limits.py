@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import inspect
 import json
 import os
 import socket
@@ -8,6 +9,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
+import textwrap
 
 import pytest
 
@@ -133,6 +135,41 @@ def test_restart_rehearsal_validator_relay_uses_candidate_frame_limits():
         if isinstance(node, ast.ClassDef) and node.name == "_LocalVsock"
     ]
     assert len(classes) == 1
+    timeout_methods = [
+        node
+        for node in classes[0].body
+        if isinstance(node, ast.FunctionDef) and node.name == "settimeout"
+    ]
+    assert len(timeout_methods) == 1
+    timeout_sets = [
+        node
+        for node in ast.walk(timeout_methods[0])
+        if isinstance(node, ast.Set)
+    ]
+    assert len(timeout_sets) == 1
+    allowed_timeouts = {
+        float(element.value)
+        for element in timeout_sets[0].elts
+        if isinstance(element, ast.Constant)
+    }
+    assert allowed_timeouts == {30.0, 120.0, 180.0}
+    compute_source = ast.parse(
+        textwrap.dedent(
+            inspect.getsource(
+                validator_client.ValidatorEnclaveClient.compute_authoritative_weights_v2
+            )
+        )
+    )
+    requested_timeouts = {
+        float(keyword.value.value)
+        for node in ast.walk(compute_source)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "timeout_seconds"
+        and isinstance(keyword.value, ast.Constant)
+    }
+    assert requested_timeouts == {180.0}
+    assert requested_timeouts <= allowed_timeouts
     sendall = [
         node
         for node in classes[0].body

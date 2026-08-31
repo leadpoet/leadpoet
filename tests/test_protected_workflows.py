@@ -429,6 +429,8 @@ def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
         "_ancestry_checkpoint_unknown_commit_sleep",
+        "_rehydrate_compact_execution_graph_v2",
+        "load_execution_result_v2",
         "persist_ancestry_checkpoint_v2",
     } <= set(
         PROTECTED_SYMBOLS["gateway/research_lab/attested_v2_store.py"]

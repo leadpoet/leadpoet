@@ -287,6 +287,11 @@
       "symbol": "_read_exact_batch_rows"
     },
     {
+      "ast_sha256": "sha256:c474adb73e8db49b27e4db47a329d05b594d265ac765b6b3c4c362e1de250e96",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_rehydrate_compact_execution_graph_v2"
+    },
+    {
       "ast_sha256": "sha256:36785139d1e37d2e20f1be8f1e21ab0e14c96067d81efda4d8b9c1518cf22a67",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_select_by_values"
@@ -365,6 +370,11 @@
       "ast_sha256": "sha256:0ee14e4610a55655883f35764594bc64ccee9be9c06e731081c27e7c018b0dc8",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_execution_result_by_receipt_v2"
+    },
+    {
+      "ast_sha256": "sha256:3f1ade0b68d2b82209d48d2afcc2527cbc502f4303aa7510f30db6879c76841a",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_execution_result_v2"
     },
     {
       "ast_sha256": "sha256:d4b4b002a46dc745dd3271f3a1d9ab4bf7efe423ce86d1add7a80a81c84dcdc1",
@@ -8247,7 +8257,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:887c14d078b580f77413ab78730ad7fb4714f5a24abcdb42fb92a6741a2e2013",
-  "protected_source_commit": "30fa752dd15ccf06d84d27b95655279f77b12726",
+  "manifest_hash": "sha256:b507d6a5f6bb4f025e122be59472b051ede3b7ad2de401482cedd6b1e33b6098",
+  "protected_source_commit": "5121e4f4967d3f3958ee2e255215766537af587a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

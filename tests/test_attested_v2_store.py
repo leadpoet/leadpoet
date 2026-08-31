@@ -2653,11 +2653,25 @@ async def test_replayable_result_requires_durable_receipt_and_exact_readback(
         assert root_hash == receipt["receipt_hash"]
         return dict(graph)
 
+    rehydrated = []
+    expected_receipt = receipt
+
+    async def rehydrate_graph(value, *, receipt):
+        assert value == graph
+        assert receipt == expected_receipt
+        rehydrated.append(receipt["receipt_hash"])
+        return dict(value)
+
     monkeypatch.setattr(attested_v2_store, "select_one", load_row)
     monkeypatch.setattr(
         attested_v2_store,
         "load_receipt_graph_v2",
         load_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_rehydrate_compact_execution_graph_v2",
+        rehydrate_graph,
     )
     loaded = await attested_v2_store.load_execution_result_v2(
         role="gateway_coordinator",
@@ -2668,6 +2682,7 @@ async def test_replayable_result_requires_durable_receipt_and_exact_readback(
     assert loaded["result"] == result
     assert loaded["receipt"] == receipt
     assert loaded["receipt_graph"] == graph
+    assert rehydrated == [receipt["receipt_hash"]]
 
 
 @pytest.mark.asyncio

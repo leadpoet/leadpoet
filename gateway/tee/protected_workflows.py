@@ -742,6 +742,8 @@ PROTECTED_SYMBOLS = {
         "load_compact_weight_authority_v2",
         "load_compact_weight_authority_for_identity_v2",
         "_load_receipt_graph_batch_v2",
+        "_rehydrate_compact_execution_graph_v2",
+        "load_execution_result_v2",
         "load_receipt_graph_v2",
         "load_receipt_graphs_v2",
         "load_business_artifact_graph_v2",

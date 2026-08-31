@@ -1,6 +1,6 @@
 -- Classify durable SOURCE_ADD duplicates before the per-hotkey route cooldown.
 --
--- Migration 169 owns exact-host uniqueness and remains unchanged.  This
+-- Migration 170 owns exact-host uniqueness and remains unchanged.  This
 -- wrapper adds one admission ordering guarantee: requests sharing a durable
 -- submission, work, source-identity, documentation-identity, legacy-identity,
 -- catalog identity, or exact provider host are classified as duplicates before
@@ -13,8 +13,8 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 -- Replacing v2 with the rolling-release compatibility wrapper is safe only at
--- the same paused, drained SOURCE_ADD handoff required by migrations 168 and
--- 169.  NOWAIT makes a request which is still writing any affected durable
+-- the same paused, drained SOURCE_ADD handoff required by migrations 169 and
+-- 170.  NOWAIT makes a request which is still writing any affected durable
 -- state abort this migration for a clean retry instead of straddling the
 -- function-authority change.
 DO $quiet_pause$

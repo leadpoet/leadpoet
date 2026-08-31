@@ -409,7 +409,7 @@ SELECT
     identity.miner_hotkey,
     'released',
     identity.seq + 1,
-    'provider_origin_duplicate_migration_169'
+    'provider_origin_duplicate_migration_170'
 FROM public.research_lab_source_add_identity_current identity
 JOIN source_add_provider_origin_losers loser
   ON loser.submission_id = identity.submission_id
@@ -442,7 +442,7 @@ SELECT
     current.submission_doc || jsonb_build_object(
         'stage', 'rejected_precheck',
         'provider_origin_migration', jsonb_build_object(
-            'migration', '169',
+            'migration', '170',
             'reason_code', 'duplicate_provider_origin_existing_owner',
             'status', 'rejected_duplicate'
         )
@@ -453,7 +453,7 @@ SELECT
         'reason_codes', jsonb_build_array(
             'duplicate_provider_origin_existing_owner'
         ),
-        'migration', '169'
+        'migration', '170'
     ),
     current.source_identity_hash,
     current.source_identity_version
@@ -523,7 +523,7 @@ INSERT INTO public.research_lab_source_add_provider_origin_events (
 SELECT
     'v1', backfill.provider_origin_hash, backfill.submission_id,
     backfill.adapter_id, backfill.miner_hotkey, 'reserved', 0,
-    'migration_169_live_or_permanent_owner'
+    'migration_170_live_or_permanent_owner'
 FROM source_add_provider_origin_backfill backfill
 WHERE NOT EXISTS (
     SELECT 1

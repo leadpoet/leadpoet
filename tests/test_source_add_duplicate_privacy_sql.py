@@ -17,8 +17,12 @@ def _admission_function() -> str:
     )[0]
 
 
-def test_migration_is_append_only_and_keeps_169_unchanged():
+def test_migration_is_append_only_and_keeps_170_unchanged():
     assert SQL.startswith("-- Classify durable SOURCE_ADD duplicates")
+    assert "Migration 170 owns exact-host uniqueness and remains unchanged" in SQL
+    assert "handoff required by migrations 169 and\n-- 170" in SQL
+    assert "Migration 169 owns exact-host uniqueness" not in SQL
+    assert "handoff required by migrations 168 and\n-- 169" not in SQL
     assert "BEGIN;" in SQL
     assert SQL.rstrip().endswith("COMMIT;")
     assert "CREATE OR REPLACE FUNCTION public.research_lab_source_add_admit_v3" in SQL

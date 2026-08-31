@@ -123,6 +123,15 @@ def test_backfill_reconciles_collisions_and_aborts_unsafe_owners():
     assert "IN SHARE ROW EXCLUSIVE MODE" in SQL
 
 
+def test_backfill_audit_provenance_names_migration_170():
+    assert "'provider_origin_duplicate_migration_170'" in SQL
+    assert "'migration_170_live_or_permanent_owner'" in SQL
+    assert SQL.count("'migration', '170'") == 2
+    assert "provider_origin_duplicate_migration_169" not in SQL
+    assert "migration_169_live_or_permanent_owner" not in SQL
+    assert "'migration', '169'" not in SQL
+
+
 def test_v2_admission_and_recheck_lock_and_reserve_origin_atomically():
     admission = _function(
         "research_lab_source_add_admit_v2",

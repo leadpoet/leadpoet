@@ -1,4 +1,4 @@
-"""Execute migration-167 upgrade preflights against nonempty N-1 state."""
+"""Execute migration-168 upgrade preflights against nonempty N-1 state."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from tests.test_source_add_end_to_end_postgres import (
 )
 
 
-MIGRATION = SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql"
+MIGRATION = SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql"
 ORIGIN_MIGRATION = (
-    SCRIPTS / "168-research-lab-source-add-provider-origin-uniqueness.sql"
+    SCRIPTS / "169-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 PRE_MIGRATIONS = PRE_ORIGIN_MIGRATIONS[:-1]
 
@@ -772,7 +772,7 @@ def test_migration_rejects_claim_that_already_read_unpaused_state(base_database)
         with setup.cursor() as cursor:
             cursor.execute(
                 "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
-                ("apply migration 167", "operator:migration-167-race"),
+                ("apply migration 168", "operator:migration-167-race"),
             )
             with pytest.raises(psycopg2.errors.LockNotAvailable):
                 cursor.execute(MIGRATION.read_text(encoding="utf-8"))

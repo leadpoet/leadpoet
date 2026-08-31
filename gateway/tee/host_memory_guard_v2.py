@@ -107,6 +107,64 @@ def is_disposable_test_process(
     return direct_pytest or module_pytest
 
 
+_STALE_OFFICIAL_BASELINE_TRACE_MARKERS = (
+    "research-lab/incontainer-traces/official-baseline-v1/protected-action/",
+    "candidate.company_evidence_judge",
+    "list_objects_v2",
+    "while True",
+    "token=None",
+    "ContinuationToken",
+)
+_STALE_OFFICIAL_BASELINE_TRACE_FORBIDDEN_MARKERS = (
+    "NextContinuationToken",
+    "IsTruncated",
+    "break",
+)
+
+
+def stale_official_baseline_trace_diagnostic_label(
+    process: ProcessSnapshot,
+    parent: ProcessSnapshot | None,
+    *,
+    expected_uid: int,
+    uptime_seconds: float,
+    clock_ticks_per_second: int,
+    minimum_age_seconds: float = 21_600.0,
+    minimum_rss_kib: int = 4 * 1024 * 1024,
+) -> str | None:
+    """Identify the historical unbounded, read-only S3 trace diagnostic."""
+
+    if (
+        process.uid != expected_uid
+        or parent is None
+        or parent.uid != expected_uid
+        or process.ppid != parent.pid
+        or process.cwd != parent.cwd
+        or len(process.argv) != 2
+        or not Path(process.argv[0]).name.startswith("python3")
+        or process.argv[1] != "-"
+        or not parent.argv
+        or Path(parent.argv[0]).name not in {"bash", "sh"}
+        or process.rss_kib < minimum_rss_kib
+        or clock_ticks_per_second <= 0
+    ):
+        return None
+    command = " ".join(parent.argv[1:])
+    if not all(
+        marker in command for marker in _STALE_OFFICIAL_BASELINE_TRACE_MARKERS
+    ) or any(
+        marker in command
+        for marker in _STALE_OFFICIAL_BASELINE_TRACE_FORBIDDEN_MARKERS
+    ):
+        return None
+    age_seconds = uptime_seconds - (
+        process.start_ticks / clock_ticks_per_second
+    )
+    if age_seconds < minimum_age_seconds:
+        return None
+    return "official_baseline_trace_unbounded_pagination"
+
+
 _STALE_VSOCK_PROBE_METHOD_SETS = (
     frozenset({"scoring_v2_get_status"}),
     frozenset({"v2_provider_broker_health", "v2_provider_semantics_health"}),
@@ -190,16 +248,38 @@ def cleanup_disposable_tests(
     proc_root: Path = Path("/proc"),
     expected_uid: int | None = None,
     terminate_timeout_seconds: float = 10.0,
+    uptime_seconds: float | None = None,
+    clock_ticks_per_second: int | None = None,
 ) -> list[dict[str, object]]:
     uid = os.getuid() if expected_uid is None else expected_uid
-    candidates = [
-        process
-        for process in _processes(proc_root)
-        if is_disposable_test_process(process, expected_uid=uid)
-    ]
+    uptime = time.monotonic() if uptime_seconds is None else uptime_seconds
+    clock_ticks = (
+        int(os.sysconf("SC_CLK_TCK"))
+        if clock_ticks_per_second is None
+        else clock_ticks_per_second
+    )
+    processes = {process.pid: process for process in _processes(proc_root)}
+    candidates = []
+    for process in processes.values():
+        parent = processes.get(process.ppid)
+        label = stale_official_baseline_trace_diagnostic_label(
+            process,
+            parent,
+            expected_uid=uid,
+            uptime_seconds=uptime,
+            clock_ticks_per_second=clock_ticks,
+        )
+        if is_disposable_test_process(process, expected_uid=uid):
+            candidates.append((process, None, None))
+        elif label is not None:
+            candidates.append((process, parent, label))
     cleaned = []
-    for process in candidates:
-        if not _same_process(proc_root, process):
+    for process, parent, label in sorted(
+        candidates, key=lambda candidate: candidate[0].pid
+    ):
+        if not _same_process(proc_root, process) or (
+            parent is not None and not _same_process(proc_root, parent)
+        ):
             continue
         os.kill(process.pid, signal.SIGTERM)
         deadline = time.monotonic() + terminate_timeout_seconds
@@ -208,15 +288,16 @@ def cleanup_disposable_tests(
         forced = _same_process(proc_root, process)
         if forced:
             os.kill(process.pid, signal.SIGKILL)
-        cleaned.append(
-            {
-                "pid": process.pid,
-                "rss_mib": round(process.rss_kib / 1024, 1),
-                "cwd": str(process.cwd),
-                "command": Path(process.argv[0]).name,
-                "forced": forced,
-            }
-        )
+        record: dict[str, object] = {
+            "pid": process.pid,
+            "rss_mib": round(process.rss_kib / 1024, 1),
+            "cwd": str(process.cwd),
+            "command": Path(process.argv[0]).name,
+            "forced": forced,
+        }
+        if label is not None:
+            record["label"] = label
+        cleaned.append(record)
     return cleaned
 
 

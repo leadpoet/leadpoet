@@ -1318,10 +1318,32 @@ class ArtifactPreparedActionExecutor:
         return expected, dispatch
 
     @staticmethod
-    def _request_ref(dispatch: Mapping[str, Any]) -> str:
-        return "provider_request:" + _bare_hash(
-            dispatch.get("dispatch_sha256"),
-            "official baseline dispatch hash",
+    def _request_ref(
+        preparation: OfficialBaselineProtectedPreparation,
+        dispatch: Mapping[str, Any],
+    ) -> str:
+        """Bind one logical provider request to its protected attempt.
+
+        The artifact dispatch hash is intentionally stable for identical model
+        actions.  It therefore cannot be the database request identity by
+        itself: a later benchmark retry executes under a distinct protected
+        reservation even when it deterministically emits the same action.
+        Keep the model-owned dispatch unchanged and scope only the host-owned
+        custody reference to the immutable preparation.
+        """
+
+        identity = {
+            "schema_version": (
+                "leadpoet.research_lab.official_baseline_provider_request.v2"
+            ),
+            "preparation_sha256": preparation.preparation_sha256,
+            "dispatch_sha256": _prefixed_hash(
+                dispatch.get("dispatch_sha256"),
+                "official baseline dispatch hash",
+            ),
+        }
+        return "provider_request_v2:" + sha256_json(identity).removeprefix(
+            "sha256:"
         )
 
     @staticmethod
@@ -1701,7 +1723,7 @@ class ArtifactPreparedActionExecutor:
     ) -> OfficialBaselineProtectedTerminal:
         request = dispatch["request"]
         provider = str(dispatch.get("provider") or "")
-        request_ref = self._request_ref(dispatch)
+        request_ref = self._request_ref(preparation, dispatch)
         started = self._clock()
         calls = 1
         terminal: tuple[int, Mapping[str, Any]] | None
@@ -1965,7 +1987,7 @@ class ArtifactPreparedActionExecutor:
             calls=calls,
             cost_credits=cost_credits,
             latency_ms=float(elapsed_ms),
-            provider_request_id=self._request_ref(dispatch),
+            provider_request_id=self._request_ref(preparation, dispatch),
             provider_receipt_ref=receipt.receipt_ref,
             provider_identity_sha256=provider_identity,
         )
@@ -2015,7 +2037,7 @@ class ArtifactPreparedActionExecutor:
                     dispatch.get("dispatch_sha256"),
                     "official baseline dispatch hash",
                 ),
-                "provider_request_ref": self._request_ref(dispatch),
+                "provider_request_ref": self._request_ref(preparation, dispatch),
                 "provider_receipt_ref": bound_host.provider_receipt_ref,
                 "provider_receipt_sha256": bound_host.provider_receipt_sha256,
             },
@@ -2024,7 +2046,7 @@ class ArtifactPreparedActionExecutor:
         return self._known_terminal(
             preparation=preparation,
             protected=protected,
-            provider_request_ref=self._request_ref(dispatch),
+            provider_request_ref=self._request_ref(preparation, dispatch),
         )
 
     def _verifier_terminal(

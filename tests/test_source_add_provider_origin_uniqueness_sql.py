@@ -15,7 +15,7 @@ from research_lab.source_add_identity import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql"
+MIGRATION = "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql"
 SQL = (ROOT / MIGRATION).read_text(encoding="utf-8")
 
 

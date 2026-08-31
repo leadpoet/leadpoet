@@ -108,7 +108,7 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         function
         for declared_migration, function in REQUIRED_SUPABASE_V2_RPCS
         if declared_migration
-        == "scripts/167-research-lab-source-add-post-accept-leg1.sql"
+        == "scripts/168-research-lab-source-add-post-accept-leg1.sql"
     } == {
         "research_lab_source_add_configure_probe_v2",
         "research_lab_source_add_finalize_provision_v2",

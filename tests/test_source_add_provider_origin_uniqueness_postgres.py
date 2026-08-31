@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (
     ROOT
     / "scripts"
-    / "168-research-lab-source-add-provider-origin-uniqueness.sql"
+    / "169-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 BACKFILL_SUFFIX = "0000000000000168"
 BACKFILL_IDENTITY_HASH = "sha256:" + "e" * 64
@@ -108,7 +108,7 @@ def origin_database(base_database):
         assert cursor.fetchone()[0]["status"] == "admitted"
         cursor.execute(
             "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
-            ("apply migration 168", "operator:pre-168-backfill"),
+            ("apply migration 169", "operator:pre-168-backfill"),
         )
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
     connection.close()
@@ -400,7 +400,7 @@ def test_same_host_alias_is_duplicate_and_terminal_release_is_pre_reward_only(
         assert contract_doc["service_role_policy_enabled"] is True
         cursor.execute(
             "SELECT public.research_lab_source_add_set_paused(TRUE, %s, %s)",
-            ("reapply migration 168", "operator:provider-origin-postgres"),
+            ("reapply migration 169", "operator:provider-origin-postgres"),
         )
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
         cursor.execute(
@@ -731,7 +731,7 @@ def test_legacy_same_host_backfill_preserves_permanent_owner(origin_database):
                 ("permanent migration", "operator:permanent-fixture"),
             )
             cursor.execute(
-                (SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql")
+                (SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql")
                 .read_text(encoding="utf-8")
             )
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))
@@ -904,7 +904,7 @@ def test_legacy_backfill_reconciles_live_three_group_shape(origin_database):
                 ("live-shape migration", "operator:live-shape-fixture"),
             )
             cursor.execute(
-                (SCRIPTS / "167-research-lab-source-add-post-accept-leg1.sql")
+                (SCRIPTS / "168-research-lab-source-add-post-accept-leg1.sql")
                 .read_text(encoding="utf-8")
             )
             cursor.execute(MIGRATION.read_text(encoding="utf-8"))

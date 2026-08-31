@@ -276,14 +276,17 @@ CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION = (
 ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION = (
     "166-research-lab-zero-call-verifier-timeout.sql"
 )
+PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION = (
+    "167-research-lab-provider-request-attempt-scope.sql"
+)
 SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION = (
-    "167-research-lab-source-add-post-accept-leg1.sql"
+    "168-research-lab-source-add-post-accept-leg1.sql"
 )
 SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION = (
-    "168-research-lab-source-add-provider-origin-uniqueness.sql"
+    "169-research-lab-source-add-provider-origin-uniqueness.sql"
 )
 SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION = (
-    "169-research-lab-source-add-duplicate-privacy.sql"
+    "170-research-lab-source-add-duplicate-privacy.sql"
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -352,6 +355,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION,
     CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION,
     ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION,
+    PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION,
     SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
     SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
     SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
@@ -394,9 +398,10 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_164_official_baseline_action_authority_valid",
     "post_165_candidate_derived_artifact_event_valid",
     "post_166_zero_call_verifier_timeout_valid",
-    "post_167_source_add_post_accept_leg1_valid",
-    "post_168_source_add_provider_origin_contract_valid",
-    "post_169_source_add_duplicate_privacy_valid",
+    "post_167_provider_request_attempt_scope_valid",
+    "post_168_source_add_post_accept_leg1_valid",
+    "post_169_source_add_provider_origin_contract_valid",
+    "post_170_source_add_duplicate_privacy_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -5940,6 +5945,30 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-166 zero-call verifier timeout contract differs"
+            )
+        database.apply_migration(
+            scripts / PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION
+        )
+        applied.append(PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION)
+        provider_request_scope_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_official_baseline_request_scope_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if provider_request_scope_contract != {
+            "schema_version": (
+                "leadpoet.research_lab.official_baseline_provider_request.v2"
+            ),
+            "identity_scope": "protected_preparation_and_dispatch",
+            "legacy_replay": "same_run_exact_provider_response_only",
+            "new_identity_unique": True,
+        }:
+            raise PostgresContractProbeError(
+                "post-167 provider request attempt scope differs"
             )
         database.apply_migration(
             scripts / SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION

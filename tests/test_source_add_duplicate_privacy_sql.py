@@ -6,7 +6,7 @@ from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION = "scripts/169-research-lab-source-add-duplicate-privacy.sql"
+MIGRATION = "scripts/170-research-lab-source-add-duplicate-privacy.sql"
 SQL = (ROOT / MIGRATION).read_text(encoding="utf-8")
 
 
@@ -17,7 +17,7 @@ def _admission_function() -> str:
     )[0]
 
 
-def test_migration_is_append_only_and_keeps_168_unchanged():
+def test_migration_is_append_only_and_keeps_169_unchanged():
     assert SQL.startswith("-- Classify durable SOURCE_ADD duplicates")
     assert "BEGIN;" in SQL
     assert SQL.rstrip().endswith("COMMIT;")

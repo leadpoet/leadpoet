@@ -527,7 +527,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql",
         "research_lab_source_add_provider_origin_current",
         (
             "origin_version",
@@ -1027,7 +1027,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_finish_work",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_configure_probe_v2",
     ),
     (
@@ -1039,11 +1039,11 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_set_paused",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_reserve_leg1_slot_v2",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_finalize_leg1_v2",
     ),
     (
@@ -1051,11 +1051,11 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_enqueue_provision_smoke",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_finalize_provision_v2",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_reject_current_builtin_v2",
     ),
     (
@@ -1063,31 +1063,31 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_admission_control_contract_v1",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_finalize_provision_smoke_v2",
     ),
     (
-        "scripts/167-research-lab-source-add-post-accept-leg1.sql",
+        "scripts/168-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_post_accept_leg1_contract_v1",
     ),
     (
-        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql",
         "research_lab_source_add_admit_v2",
     ),
     (
-        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql",
         "research_lab_source_add_requeue_provenance_v2",
     ),
     (
-        "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql",
+        "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql",
         "research_lab_source_add_provider_origin_contract_v1",
     ),
     (
-        "scripts/169-research-lab-source-add-duplicate-privacy.sql",
+        "scripts/170-research-lab-source-add-duplicate-privacy.sql",
         "research_lab_source_add_admit_v3",
     ),
     (
-        "scripts/169-research-lab-source-add-duplicate-privacy.sql",
+        "scripts/170-research-lab-source-add-duplicate-privacy.sql",
         "research_lab_source_add_duplicate_privacy_contract_v1",
     ),
     (
@@ -1208,6 +1208,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/166-research-lab-zero-call-verifier-timeout.sql",
         "research_lab_official_baseline_reserve_action_v1",
+    ),
+    (
+        "scripts/167-research-lab-provider-request-attempt-scope.sql",
+        "research_lab_official_baseline_request_scope_v2",
     ),
     (
         "scripts/164-research-lab-official-baseline-action-authority.sql",
@@ -1536,7 +1540,7 @@ def _verify_source_add_duplicate_privacy_contract_v1(
     except HTTPError as exc:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
-            "scripts/169-research-lab-source-add-duplicate-privacy.sql "
+            "scripts/170-research-lab-source-add-duplicate-privacy.sql "
             f"before restart (HTTP {exc.code})"
         ) from exc
     except Exception as exc:
@@ -1546,7 +1550,7 @@ def _verify_source_add_duplicate_privacy_contract_v1(
     if status < 200 or status >= 300:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
-            "scripts/169-research-lab-source-add-duplicate-privacy.sql "
+            "scripts/170-research-lab-source-add-duplicate-privacy.sql "
             f"before restart (HTTP {status})"
         )
     try:
@@ -1625,7 +1629,7 @@ def _verify_source_add_provider_origin_contract_v1(
     except HTTPError as exc:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD provider-origin contract is unavailable; apply "
-            "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql "
+            "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql "
             f"before restart (HTTP {exc.code})"
         ) from exc
     except Exception as exc:
@@ -1635,7 +1639,7 @@ def _verify_source_add_provider_origin_contract_v1(
     if status < 200 or status >= 300:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD provider-origin contract is unavailable; apply "
-            "scripts/168-research-lab-source-add-provider-origin-uniqueness.sql "
+            "scripts/169-research-lab-source-add-provider-origin-uniqueness.sql "
             f"before restart (HTTP {status})"
         )
     try:
@@ -1697,7 +1701,7 @@ def _verify_source_add_provider_origin_contract_v1(
         )
     # Keep the provider-origin verification as the one protected preflight
     # seam while binding the v3 route's exact implementation, compatibility
-    # wrapper, policy, signatures, and ACLs in migration 169.
+    # wrapper, policy, signatures, and ACLs in migration 170.
     _verify_source_add_duplicate_privacy_contract_v1(
         headers=headers,
         supabase_url=supabase_url,
@@ -1735,7 +1739,7 @@ def _verify_source_add_post_accept_leg1_contract_v1(
     except HTTPError as exc:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
-            "scripts/167-research-lab-source-add-post-accept-leg1.sql "
+            "scripts/168-research-lab-source-add-post-accept-leg1.sql "
             f"before restart (HTTP {exc.code})"
         ) from exc
     except Exception as exc:
@@ -1745,7 +1749,7 @@ def _verify_source_add_post_accept_leg1_contract_v1(
     if status < 200 or status >= 300:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
-            "scripts/167-research-lab-source-add-post-accept-leg1.sql "
+            "scripts/168-research-lab-source-add-post-accept-leg1.sql "
             f"before restart (HTTP {status})"
         )
     try:

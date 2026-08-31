@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "30fa752dd15ccf06d84d27b95655279f77b12726",
+  "baseline_commit": "ec70e715b3de8ba00e808edc3080d721f22df5e9",
   "entries": [
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
@@ -1332,7 +1332,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:adfe3efadccf7f1b441fed8fc140927d29c55b0990be5f5ad9eaa6d467d4e0ff",
+      "ast_sha256": "sha256:951c832a607574bc78afd0534de1ac371ce17c0415166bdb7c9939ef4c70a366",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -8257,7 +8257,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6e68b843f389b3284ee0b932f4a4c3d0a80ceac75c812a7f44129b8eab748f54",
-  "protected_source_commit": "1b65416f8bf6f3e64cac71569c6b386637922655",
+  "manifest_hash": "sha256:14ef04a767a8a896c137c79ec2fd748cc32e519cb01a97e4feaf16abc7ec7542",
+  "protected_source_commit": "ec70e715b3de8ba00e808edc3080d721f22df5e9",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

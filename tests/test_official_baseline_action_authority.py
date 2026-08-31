@@ -15,6 +15,9 @@ MIGRATION = (
 TIMEOUT_MIGRATION = (
     ROOT / "scripts" / "166-research-lab-zero-call-verifier-timeout.sql"
 )
+REQUEST_SCOPE_MIGRATION = (
+    ROOT / "scripts" / "167-research-lab-provider-request-attempt-scope.sql"
+)
 BEHAVIOR = (
     ROOT / "tests" / "sql" / "test_official_baseline_action_authority_v1.sql"
 )
@@ -80,6 +83,22 @@ def test_zero_call_verifier_timeout_patch_preserves_paid_provider_bounds():
     assert "research_lab_official_baseline_reserve_action_v1" in sql
 
 
+def test_provider_request_scope_patch_is_retry_safe_and_conflict_closed():
+    sql = REQUEST_SCOPE_MIGRATION.read_text(encoding="utf-8")
+    assert "pg_advisory_xact_lock" in sql
+    assert "^provider_request:[0-9a-f]{64}$" in sql
+    assert "prior_attempt.run_sha256 IS DISTINCT FROM current_attempt.run_sha256" in sql
+    assert "prior_attempt.unit_ref IS NOT DISTINCT FROM current_attempt.unit_ref" in sql
+    assert "model_provider_response_sha256 IS DISTINCT FROM" in sql
+    assert "research_lab_official_baseline_provider_request_replay_conflict" in sql
+    assert "idx_rl_official_baseline_provider_request_v2" in sql
+    assert "research_lab_official_baseline_request_scope_v2" in sql
+
+    behavior = BEHAVIOR.read_text(encoding="utf-8")
+    assert "legacy provider retry replay was not accepted" in behavior
+    assert "conflicting legacy provider replay unexpectedly succeeded" in behavior
+
+
 @pytest.mark.skipif(
     not os.getenv("OFFICIAL_BASELINE_TEST_PG_DSN"),
     reason="set OFFICIAL_BASELINE_TEST_PG_DSN for disposable PostgreSQL behavior test",
@@ -100,7 +119,9 @@ def test_official_baseline_disposable_postgres_behavior():
     for path in (
         MIGRATION,
         TIMEOUT_MIGRATION,
+        REQUEST_SCOPE_MIGRATION,
         TIMEOUT_MIGRATION,
+        REQUEST_SCOPE_MIGRATION,
     ):
         migration = subprocess.run(
             [psql, dsn, "-v", "ON_ERROR_STOP=1", "-f", str(path)],

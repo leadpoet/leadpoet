@@ -34,10 +34,10 @@ PRE_ORIGIN_MIGRATIONS = (
     "86-research-lab-attested-v2-authority.sql",
     "96-research-lab-source-add-functional-workflow.sql",
     "145-research-lab-source-add-admission-control.sql",
-    "167-research-lab-source-add-post-accept-leg1.sql",
+    "168-research-lab-source-add-post-accept-leg1.sql",
 )
 MIGRATIONS = PRE_ORIGIN_MIGRATIONS + (
-    "168-research-lab-source-add-provider-origin-uniqueness.sql",
+    "169-research-lab-source-add-provider-origin-uniqueness.sql",
 )
 DOCKER = shutil.which("docker")
 pytestmark = pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")

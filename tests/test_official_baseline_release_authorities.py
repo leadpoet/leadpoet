@@ -1509,3 +1509,33 @@ def test_official_proxy_pending_response_enters_protected_reconciliation():
     assert captured["headers"]["x-research-lab-request-timeout-ms"] == "115000"
     assert captured["timeout"] == 120
     assert captured["closed"] is True
+
+
+def test_provider_request_ref_is_scoped_to_the_protected_attempt():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+    )
+    run_identity = {"schema_version": "fixture-run:v1", "run": "retry"}
+    first = executor.prepare(
+        run_identity=run_identity,
+        unit_ref="baseline_icp:" + "a" * 64,
+        action=action,
+    )
+    retry = executor.prepare(
+        run_identity=run_identity,
+        unit_ref="baseline_icp:" + "b" * 64,
+        action=action,
+    )
+
+    first_ref = executor._request_ref(first, dispatch)
+    retry_ref = executor._request_ref(retry, dispatch)
+
+    assert first_ref.startswith("provider_request_v2:")
+    assert retry_ref.startswith("provider_request_v2:")
+    assert first_ref != retry_ref
+    assert executor._request_ref(first, dispatch) == first_ref

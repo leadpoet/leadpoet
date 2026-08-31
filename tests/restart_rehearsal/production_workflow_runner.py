@@ -14112,12 +14112,34 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         ),
         None,
     )
+    source_add_independent_assignment = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_SOURCE_ADD_INDEPENDENT_PATHS"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
     ready_definition = next(
         (
             node
             for node in main_tree.body
             if isinstance(node, ast.FunctionDef)
             and node.name == "_gateway_worker_startup_ready"
+        ),
+        None,
+    )
+    source_add_ready_definition = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_gateway_source_add_dispatcher_ready"
         ),
         None,
     )
@@ -14132,7 +14154,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
     )
     if (
         diagnostic_assignment is None
+        or source_add_independent_assignment is None
         or ready_definition is None
+        or source_add_ready_definition is None
         or gate_definition is None
     ):
         raise RuntimeError("candidate gateway worker authority gate is incomplete")
@@ -14142,7 +14166,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         ast.Module(
             body=[
                 copy.deepcopy(diagnostic_assignment),
+                copy.deepcopy(source_add_independent_assignment),
                 copy.deepcopy(ready_definition),
+                copy.deepcopy(source_add_ready_definition),
                 extracted_gate,
             ],
             type_ignores=[],
@@ -14158,6 +14184,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         gate_namespace,
     )
     candidate_startup_ready = gate_namespace["_gateway_worker_startup_ready"]
+    candidate_source_add_ready = gate_namespace[
+        "_gateway_source_add_dispatcher_ready"
+    ]
     candidate_authority_gate = gate_namespace[
         "require_worker_authority_after_liveness"
     ]
@@ -14195,6 +14224,11 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
 
         @asynccontextmanager
         async def probe_lifespan(application: FastAPI):
+            async def source_add_dispatcher() -> None:
+                await asyncio.Event().wait()
+
+            source_add_task = asyncio.create_task(source_add_dispatcher())
+            application.state.source_add_dispatcher_task = source_add_task
             startup_task = asyncio.create_task(
                 start_worker_supervisor_without_blocking_event_loop(
                     supervisor  # type: ignore[arg-type]
@@ -14205,7 +14239,12 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
                 yield
             finally:
                 startup_task.cancel()
-                await asyncio.gather(startup_task, return_exceptions=True)
+                source_add_task.cancel()
+                await asyncio.gather(
+                    startup_task,
+                    source_add_task,
+                    return_exceptions=True,
+                )
                 supervisor.stop()
 
         probe_app = FastAPI(lifespan=probe_lifespan)
@@ -14222,6 +14261,14 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
                 raise HTTPException(status_code=503)
             return {"ready": True}
 
+        @probe_app.get("/research-lab/status")
+        async def probe_source_add_status() -> dict[str, bool]:
+            return {"source_add": candidate_source_add_ready(probe_app)}
+
+        @probe_app.post("/research-lab/source-adapters")
+        async def probe_source_add() -> dict[str, bool]:
+            return {"accepted": candidate_source_add_ready(probe_app)}
+
         return probe_app, supervisor
 
     caller_thread = threading.get_ident()
@@ -14233,6 +14280,14 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
             raise RuntimeError("ASGI liveness was unavailable during worker startup")
         if client.get("/authority").status_code != 503:
             raise RuntimeError("ASGI authority did not fail closed during startup")
+        if client.get("/research-lab/status").status_code != 200:
+            raise RuntimeError("SOURCE_ADD status was coupled to worker startup")
+        source_add_response = client.post("/research-lab/source-adapters")
+        if (
+            source_add_response.status_code != 200
+            or source_add_response.json() != {"accepted": True}
+        ):
+            raise RuntimeError("SOURCE_ADD intake was coupled to worker startup")
         supervisor.release.set()
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
@@ -14267,6 +14322,16 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
             raise RuntimeError("ASGI liveness failed after worker startup error")
         if client.get("/authority").status_code != 503:
             raise RuntimeError("ASGI authority opened after worker startup error")
+        source_add_task = failed_app.state.source_add_dispatcher_task
+        source_add_response = client.post("/research-lab/source-adapters")
+        if (
+            source_add_task.done()
+            or source_add_response.status_code != 200
+            or source_add_response.json() != {"accepted": True}
+        ):
+            raise RuntimeError(
+                "SOURCE_ADD did not survive an independent worker startup error"
+            )
 
     cancel_app, cancel_supervisor = build_asgi_probe()
     release_timer: threading.Timer | None = None

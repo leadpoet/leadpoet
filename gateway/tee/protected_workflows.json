@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "e60a3fbfe5afd2bc5b495493f3b85f84f11d1389",
+  "baseline_commit": "469e286270c0419e98ba04efd9dddbc054793731",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2587,7 +2587,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._construct_official_baseline_exact_dependencies"
     },
     {
-      "ast_sha256": "sha256:f056ac4b3da93813f2ce18fefc89e5ae4da5cd42056c62d771c6027d7361e504",
+      "ast_sha256": "sha256:9f262d1a5a7a8fb52a3e13b3dc8329169bab033734cac0c2136e1c3ee3931164",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._enforce_baseline_wave_preflight_freshness"
     },
@@ -8547,7 +8547,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:5609d44ba3a01d45005fc1e6df91513dc0053b04fbe8dd0d7a74dcbf6672526a",
-  "protected_source_commit": "e60a3fbfe5afd2bc5b495493f3b85f84f11d1389",
+  "manifest_hash": "sha256:f0b2fcdb0a0cc17c5bb1b0074990e7e9ae63b01be94e83a23615d7df57355cd6",
+  "protected_source_commit": "469e286270c0419e98ba04efd9dddbc054793731",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

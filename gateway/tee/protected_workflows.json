@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "ef60f64cd04a35d12469639ce9954fe95763868c",
+  "baseline_commit": "e60a3fbfe5afd2bc5b495493f3b85f84f11d1389",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -57,9 +57,19 @@
       "symbol": "submit_weights_v2"
     },
     {
-      "ast_sha256": "sha256:142d4ac8ce500afa529ab00f05750ee2c703e688f2e059ee36049f43eef98c21",
+      "ast_sha256": "sha256:fe086a67098864cd10dd7e6e2c7f71a4bc71676e3f33d854f7bc784c3cdb0a94",
+      "path": "gateway/main.py",
+      "symbol": "_SOURCE_ADD_INDEPENDENT_PATHS"
+    },
+    {
+      "ast_sha256": "sha256:43810a07d7b9ad96a98d9c6ae593d37e5769d9b037cf3644885ff2ad0c6d3c2e",
       "path": "gateway/main.py",
       "symbol": "_WORKER_STARTUP_DIAGNOSTIC_PATHS"
+    },
+    {
+      "ast_sha256": "sha256:0964daae3478fb448f5ee131ecd70f8c7bc93f383e270b9452846bc84cb38696",
+      "path": "gateway/main.py",
+      "symbol": "_gateway_source_add_dispatcher_ready"
     },
     {
       "ast_sha256": "sha256:86ce62913ea6c372c6fff9667fc420f55aec41115559c4d64eb636a70344cbcf",
@@ -67,12 +77,22 @@
       "symbol": "_gateway_worker_startup_ready"
     },
     {
-      "ast_sha256": "sha256:7eca67606a39f0a3de1acd544b0ce56536de39d0683ce7ab6e6b81de5af9d75e",
+      "ast_sha256": "sha256:068a96b7469080cfc8a707c8d3538a5bc7729b2f29e316479346cb5b4ff48d6c",
+      "path": "gateway/main.py",
+      "symbol": "_observe_research_lab_worker_startup_task"
+    },
+    {
+      "ast_sha256": "sha256:0f9e6e7358049bb01baed8b9777f8d43d790ab86acff5476714754ddd20a1b99",
+      "path": "gateway/main.py",
+      "symbol": "_start_source_add_dispatcher_task"
+    },
+    {
+      "ast_sha256": "sha256:ef303eb207bbd47c618a82f5f16a0e411a66d54d2b87fa3bad6596bc6e79a6f0",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
     {
-      "ast_sha256": "sha256:13985d6c8884f95305cb7072fe18bddf88a33396cf09a2f46fe603565687ea9e",
+      "ast_sha256": "sha256:dafa22cf086eb6358ba74b175a3566371f4c9c02f82d6108efa5dbd797443560",
       "path": "gateway/main.py",
       "symbol": "require_worker_authority_after_liveness"
     },
@@ -3982,9 +4002,94 @@
       "symbol": "RUNTIME_BUILD_IDENTITY_NAMES"
     },
     {
-      "ast_sha256": "sha256:66737708e8e1726db9bbf7a3aed1a2cc0a8c0dfd8e0a888e155f2ddce38c527c",
+      "ast_sha256": "sha256:e9ec8ca29fc034f9629d9f07f14c06c7d70ddcef2cc6fd5e88742bf197117aaf",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:3e65b09f3ccb4ade44dec3d18cf265ecc6a724e084b8fe26de32ef6528d42340",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_ACQUIRE_RESTART_GUARD_RPC"
+    },
+    {
+      "ast_sha256": "sha256:8c90447214844951c56dc2775a3ad288d939caf9ebf119d5343ad2c9be0a8733",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_ADMISSION_CONTRACT_RPC"
+    },
+    {
+      "ast_sha256": "sha256:8b3f493a0852c6caabdfb7a16925465b36a7baf70c9841622e15425658d50749",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:9c11d62e17fd3d8cbbe6ffcce34a4e3169ceb418a9f3ba7c154821b7c5bd2395",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_CLAIM_CONTROL_CONTRACT_RPC"
+    },
+    {
+      "ast_sha256": "sha256:f7918bb7ac66e63a563ad4585b23478664c0f476c44ade22cda6412667fca667",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_CONTROL_MAX_BYTES"
+    },
+    {
+      "ast_sha256": "sha256:bfd293f501c84df8e6208332dc229bbf84c1932a2e1bd061852a5f363070a22e",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_CONTROL_TABLE"
+    },
+    {
+      "ast_sha256": "sha256:48b88461a5bfe838164da7cea4a7552efea50a90676f823267a2e4adc4c944fd",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_CONTROL_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:bf1357b5082885941a2b34614572b2fd0d11691151bf6484dc3b2ed1536106c1",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_PAUSE_REASON"
+    },
+    {
+      "ast_sha256": "sha256:e2f36a8404fa50ae052c572e2955bae7737945e2ae37660cbe221accaefde387",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_PAUSE_RPC"
+    },
+    {
+      "ast_sha256": "sha256:a150ac6c8f52242849325da48ae76a7450771a2727696aeb5ca94525a47a2f33",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_QUIESCENCE_POLL_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:988f273ccce33a8d65c34ffa5cc75b4938257f7ab437aa1118c95b779977c90d",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_QUIESCENCE_TIMEOUT_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:29100a8fbddb3a41c88259ea2d8be5d3e9525f5e8fd886008d67a0bc181044a5",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RELEASE_RESTART_GUARD_RPC"
+    },
+    {
+      "ast_sha256": "sha256:2f04b91c09a7593a46e38fb866c7b97ab76b810f28cd83c278e41cbfaaeba61e",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RESTART_GUARD_AUTHORITY"
+    },
+    {
+      "ast_sha256": "sha256:3efdc66748150331e676f7e9472392f827ad47299f31ae3005536106ccc9df02",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RESTART_GUARD_LEASE_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:8c139b793c7b9a682e2d53cd8f57ded43b5da6cc108673885a4caf068d98446b",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RESTART_GUARD_SAFETY_MARGIN_SECONDS"
+    },
+    {
+      "ast_sha256": "sha256:6a80e772ccc3154a50f99b2ec466c0e0f75df9ceaf8429a2d41c2f8c7f2733d3",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RESTART_GUARD_STATE_RPC"
+    },
+    {
+      "ast_sha256": "sha256:5c31b5cec3f10ce4238d50fc40b9fbed9f3f4141eacd050f891f87716e74c4da",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "SOURCE_ADD_RESTART_QUIESCENCE_RPC"
     },
     {
       "ast_sha256": "sha256:127ddaf7c410ab991a1e94969aee8521b712d4714828a3fb8bf10624dcf2011a",
@@ -3997,7 +4102,7 @@
       "symbol": "_COMMIT_RE"
     },
     {
-      "ast_sha256": "sha256:2e6826f15d2598c1ed24d5d8c379c7bb580ff053e83fc10b08f07ed4d14168ea",
+      "ast_sha256": "sha256:b3a943de06d5608b277efd09a85b2d76764695c0f73dbd2209969771d4932425",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_PROOF_FIELDS"
     },
@@ -4010,6 +4115,16 @@
       "ast_sha256": "sha256:271e09d362a29b5c03b3388ef67a65bfa67c348373ff64f0f1c4606d0d693788",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_SHA256_RE"
+    },
+    {
+      "ast_sha256": "sha256:162918f831e989293754306ce2dce34a063a5e4f1359183757e77938f7d72aee",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_SourceAddAuthorityRejected"
+    },
+    {
+      "ast_sha256": "sha256:64ba8407e696c0db6b70cf12231ec107224adc3de169e6856cb62cc0e8e42146",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_SourceAddClaimControlContractResponse"
     },
     {
       "ast_sha256": "sha256:b2dbde8bbbc976b7f3ac33ca075be15bd4f991fde690e057c06bf29f2a02e056",
@@ -4027,9 +4142,14 @@
       "symbol": "_VERSION_ID_RE"
     },
     {
-      "ast_sha256": "sha256:1519c871c5aef9b7e40e8243bea3c08b2f875691ea2af9c2dd34eb0cbe2b7943",
+      "ast_sha256": "sha256:198bbd5e281dc1d47c4183fa30b8fb264be9091adb8b9a62caf7ed2854c0e7e0",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "__module__"
+    },
+    {
+      "ast_sha256": "sha256:eafbc2d32e20018e4cab12761caf28937838b40c04d963aed00e2ade8f392771",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_acquire_source_add_restart_guard"
     },
     {
       "ast_sha256": "sha256:4735169b29450e3541e9621034bf70de857068c82a00db9f535287edffaed5fb",
@@ -4050,6 +4170,11 @@
       "ast_sha256": "sha256:14bf939988d77db65e5cfb498821831f7dea5746d2ddd5eb014882b300152a70",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_close_bootstrap_tree"
+    },
+    {
+      "ast_sha256": "sha256:ea5ffbbe139a72aead51863b022dbe0a83a6422abd61458bc2291c2ff33acfa0",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_decode_secret_environment_value"
     },
     {
       "ast_sha256": "sha256:83e9e37e8c87dc3b314161b262820771cce292076254eebfac13345f8a27fd62",
@@ -4107,6 +4232,31 @@
       "symbol": "_load_json_bytes"
     },
     {
+      "ast_sha256": "sha256:9584f9ced414b1793ec068842f15c75a657fc7f224f54036c434010a7aac200b",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_normalized_source_add_control"
+    },
+    {
+      "ast_sha256": "sha256:a37afc8a3bdec8cda570421a0c2bb75289a670aa06bd00b301d7d100f67003f6",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_normalized_source_add_quiescence"
+    },
+    {
+      "ast_sha256": "sha256:40bbef0c614293457d7be1c9cbb177054d91dbd181b1aec8328ecc34a4efcd0f",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_normalized_source_add_restart_guard"
+    },
+    {
+      "ast_sha256": "sha256:c7ba8b2e8c2f400f8fd064fa2b20529d0bab3977f45dc24701429c4c8994147e",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_normalized_source_add_restart_guard_release"
+    },
+    {
+      "ast_sha256": "sha256:72050ea15641811dadc922b1f837112d56452257f79dee80f766d6f93d0cfd67",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_normalized_source_add_restart_guard_state"
+    },
+    {
       "ast_sha256": "sha256:01bd1d08b6c49e3acb207c05e68d9332f5d1df3ef2e4d93e1132698cd1794220",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_object_metadata"
@@ -4117,12 +4267,17 @@
       "symbol": "_open_private_parent_fd"
     },
     {
+      "ast_sha256": "sha256:745bc0fb33c95cf881309c85ebb8459533ffb5ad4b26b4cc426bf2d7e65e352d",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_pause_source_add_for_restart"
+    },
+    {
       "ast_sha256": "sha256:62e8191b79867951da397e373ea7a6a67dffdb82bd9b580afed3f52af68e1b25",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_pre_hydration_live_process_commitment"
     },
     {
-      "ast_sha256": "sha256:df7c41ff84b9d0e31a5de5e8220241a4c0f412cc59f47b425737f0389b6382a4",
+      "ast_sha256": "sha256:05bbfd511b25dd526815f86089dcb2ba0e644a583cda72347aaec77e17e4c187",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_proof_body"
     },
@@ -4167,6 +4322,31 @@
       "symbol": "_read_sealed_payload_fd"
     },
     {
+      "ast_sha256": "sha256:999db4338d2e41c90d2159ebcdd04858e9c08c03624b1fb4dd599141bf98d14a",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_read_source_add_control"
+    },
+    {
+      "ast_sha256": "sha256:d0f9dadb35e217a60bfbec7d078a1ad6327bf387d2b836449446e4085fb3340a",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_read_source_add_restart_guard_state"
+    },
+    {
+      "ast_sha256": "sha256:6fef26a58c7674ea1b3e95331112d8addcc89e78922ce1ce063c309250723291",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_read_source_add_restart_quiescence"
+    },
+    {
+      "ast_sha256": "sha256:a1ce0d2765f60e5ca0cce7c81c656387d0a0cffcb850974093865b24bed4cfce",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_release_source_add_restart_guard"
+    },
+    {
+      "ast_sha256": "sha256:ef9eb1aa7bcd4fe035e9c9595928d65e7ffa41570bf18e114064af98c7a70f2d",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_renew_source_add_restart_guard"
+    },
+    {
       "ast_sha256": "sha256:ca1ee7198f625c0bd2ef9acba205e6819c4bc747472d66ca5ea3f006d1f35120",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_replace_private_regular_file"
@@ -4197,6 +4377,16 @@
       "symbol": "_require_hydrated_environment_commitment"
     },
     {
+      "ast_sha256": "sha256:9678fcc6aaff4d7715639ad4094bf208ac55e00302252f9d888e1014d8198eaa",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_owned_source_add_guard_state"
+    },
+    {
+      "ast_sha256": "sha256:5dbca123a8e2d564d89dd585d3df06ea97b0b5044488a9c54f29680bb3c2266a",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_pre_hydration_runtime_source_add_closed"
+    },
+    {
       "ast_sha256": "sha256:2adce5674ddbfb9dcd51ffb2c85a2ec2d339cdfd7ad407b91f91fae6e2cf4915",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_require_reserved_memfd_numbers_available"
@@ -4212,6 +4402,11 @@
       "symbol": "_require_runtime_miner_disabled"
     },
     {
+      "ast_sha256": "sha256:d56dc3c26407c9943cf2a4564963259eeeef9c0c658805e631035966df5d61f1",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_runtime_source_add_closed"
+    },
+    {
       "ast_sha256": "sha256:29aaefb9d376f5c4327698fbc4d1173a3605fd18859e6fc57518d18b2b73a9c9",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_require_same_object_identity"
@@ -4220,6 +4415,26 @@
       "ast_sha256": "sha256:5bab4ea7f0cf7344ec728d54277004a2df51443a4e768cbb5f9ad33e477a5bc8",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_require_six_release_identities"
+    },
+    {
+      "ast_sha256": "sha256:3242b6dfa22c9045edf7c60d37e548b71cb87bee7b9dc003f8e55a45323fdc9f",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_source_add_admission_control_contract"
+    },
+    {
+      "ast_sha256": "sha256:a64b2d758bd6a2d8a0eff80add0a729dd8747599655a65cf0535d69b71d53758",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_source_add_claim_control_contract"
+    },
+    {
+      "ast_sha256": "sha256:5d0968042720383eef25d7fbb3bba6c95d1ac0bb4112e6d196014a8f425804f9",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_source_add_paused"
+    },
+    {
+      "ast_sha256": "sha256:01771118085aac832bac1b63015bb56a1d7b8221d3fff1431ae88305a2198afc",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_require_source_add_quiescent"
     },
     {
       "ast_sha256": "sha256:6d6dcdcf41cdb479bc141a1fee56ba8d7c25e1e2d2e8ef2b6474a1d78e13a2e6",
@@ -4272,6 +4487,51 @@
       "symbol": "_serialized_proof"
     },
     {
+      "ast_sha256": "sha256:c748b29427a6c94691adaba4d9ac09c28a5297d0f83f31ad5d3c3c3e58e4c53e",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_control_commitment"
+    },
+    {
+      "ast_sha256": "sha256:c47e8ccf4ae68d2991a27a1d61283ef951a1668fe097c1c91d4f3f0ab7524060",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_control_request"
+    },
+    {
+      "ast_sha256": "sha256:5780f74fb222898c0b33dea779526b7d0c0441f4df3dbf5579866508edb0c8d9",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_expected_guard_generation"
+    },
+    {
+      "ast_sha256": "sha256:010f9b19f9c40a4fabb7d3eeef5a63783aab9345a2522eff2dc8cba67fa1cff4",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_guard_expiry"
+    },
+    {
+      "ast_sha256": "sha256:aa4410272c74d10bc064737f8b3536f7d1dd2362dc84265427293e4f0b809b18",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_guard_generation"
+    },
+    {
+      "ast_sha256": "sha256:8fbfef16e5e1e02a907c57dd93c0fe53f23bdb2c762671bfd3327e17604a7cfb",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_owner_generation_commitment"
+    },
+    {
+      "ast_sha256": "sha256:b1f2ccbd314a2bcafc5e72026af9b709b08ff995d0c050095b0a34bfc9ab9ef1",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_pause_credentials"
+    },
+    {
+      "ast_sha256": "sha256:5012b3df1eee0854ce1907d579f3276b93f685da8bf7a98be1f3ebe948dbfbc3",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_quiescence_commitment"
+    },
+    {
+      "ast_sha256": "sha256:31ab9c2f7c6fbbfb6429a3b661cbe9ecdbb19b9a53ac2215f23dbd7bc52ba351",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_source_add_restart_guard_identity"
+    },
+    {
       "ast_sha256": "sha256:fb029fa4c61faa73016d7dcab6f3fcc66c6743752f45e706a1afeccd984e1a4b",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_utc_now"
@@ -4282,7 +4542,7 @@
       "symbol": "_validate_candidate_identity"
     },
     {
-      "ast_sha256": "sha256:b3ce4d0d161cea3053157bb17de38b9c7ed080edcce10a2dca0d73a7121525cc",
+      "ast_sha256": "sha256:98ba5fd0cea289ab95710febb4d87b74c167860dd4ab8a1028085f3c898157c9",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_validate_proof_document"
     },
@@ -4307,7 +4567,7 @@
       "symbol": "_verify_locked_release_matches"
     },
     {
-      "ast_sha256": "sha256:f9e4e2b3c05b33b9a36b59e74c717ecd729414a1bf8015f17264a82a4498181e",
+      "ast_sha256": "sha256:60190215c4850d39507250b23818e920c655ab83c7daeb185e9ba792a5fd9299",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "_verify_proof_against_state"
     },
@@ -4322,27 +4582,37 @@
       "symbol": "_wait_for_handoff_marker"
     },
     {
-      "ast_sha256": "sha256:4cf4bab693c9d490c96d037dba78dc96932620436a8fc32a8554683cc92c26b4",
+      "ast_sha256": "sha256:5a2ce288a795919cd0b256476f5c40f65e8b879169c6244ba319d2966390a1b8",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "_wait_for_source_add_quiescence"
+    },
+    {
+      "ast_sha256": "sha256:940d858ab5329d5af3d4b2dc2af627ecae04d18fe0a91cadd5a35c3776ff8dfb",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "bootstrap_gateway_miner_maintenance_restart"
     },
     {
-      "ast_sha256": "sha256:49c6879c50cbb38485eac25cd1858bea05596a81adc5c241b734f1cb7f8829cc",
+      "ast_sha256": "sha256:62c5cdee65be3cb682581788c1afaba7386f249f1d6e6c7d1560cba2764f96d5",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "main"
     },
     {
-      "ast_sha256": "sha256:125c44fd3c57f74407b93782bc8eafe90c28f596d205489ddb4bb2d1187588f6",
+      "ast_sha256": "sha256:08e703faae3378ba7122965cf46fe91ac8ad111eef6e0017cfa62c8c4c23d752",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "prepare_gateway_miner_maintenance_restart"
     },
     {
-      "ast_sha256": "sha256:53185b43bfe0ca7863e942c969f4d3c45b87f4fd7cd7a925eafa282f9a832daa",
+      "ast_sha256": "sha256:282e3d5130fc16ea5057f0048cd6af7501b6177788a94651dc166340cc776cc8",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "verify_gateway_miner_maintenance_runtime_state"
     },
     {
-      "ast_sha256": "sha256:86672e07b2589ae307d04514b6f3a9b369bce07834cb380d08ff9e04ddbdcc10",
+      "ast_sha256": "sha256:c8c8b55daf938af259152a0cdb34aa8bc2b848d64db2a763f464eda845484610",
+      "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
+      "symbol": "verify_gateway_miner_maintenance_shutdown_quiescence"
+    },
+    {
+      "ast_sha256": "sha256:370c6f89c986856f73ae7af2e89bc4e35601f347ae5d12219e3b3ea5a5e183d0",
       "path": "gateway/tee/gateway_miner_maintenance_restart_v1.py",
       "symbol": "verify_gateway_miner_maintenance_state"
     },
@@ -5607,6 +5877,11 @@
       "symbol": "validate_source_add_sealed_job_envelope_v2"
     },
     {
+      "ast_sha256": "sha256:edb19d3314c53e33ee87e8a2640eb64ba08df7b064d9c478af74a84dfecd7443",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256"
+    },
+    {
       "ast_sha256": "sha256:4c707c30cf021898ff829b56418bdf12600f7f2e06970a2a6bffbad88d1a5dc1",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
@@ -5617,12 +5892,17 @@
       "symbol": "_source_add_leg1_release_environment_policy_v1"
     },
     {
+      "ast_sha256": "sha256:4aec84bf5dac408dce6363223cb85f330fc3a27c4291c810f1240165782859c8",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "_verify_source_add_claim_control_contract_v1"
+    },
+    {
       "ast_sha256": "sha256:5aea0e70420d46a5a053b724983450b1ce4e42d26169aa4ef71697afadf25c1f",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_verify_source_add_post_accept_leg1_contract_v1"
     },
     {
-      "ast_sha256": "sha256:6e5606ca3745b15f6a115b4b2123604e2635df51ca62d5c6659d692a8cd2eddf",
+      "ast_sha256": "sha256:322e7d54ceb139477e545b2028b8519f65a9e597b42ea0edc3c9e670123343ea",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -8267,7 +8547,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:871a62cbeaa64a0d4fdef761b060a13693d1277343d1708f3b2dfb71d85f03b5",
-  "protected_source_commit": "ef60f64cd04a35d12469639ce9954fe95763868c",
+  "manifest_hash": "sha256:5609d44ba3a01d45005fc1e6df91513dc0053b04fbe8dd0d7a74dcbf6672526a",
+  "protected_source_commit": "e60a3fbfe5afd2bc5b495493f3b85f84f11d1389",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -40,6 +40,19 @@ REAL_REQUIRE_HYDRATED_ENVIRONMENT_COMMITMENT = (
 REAL_LIVE_GATEWAY_RESTART_AUTHORITY_COMMITMENT = (
     maintenance._live_gateway_restart_authority_commitment
 )
+REAL_PAUSE_SOURCE_ADD_FOR_RESTART = maintenance._pause_source_add_for_restart
+REAL_REQUIRE_SOURCE_ADD_PAUSED = maintenance._require_source_add_paused
+SOURCE_ADD_CONTROL_COMMITMENT = "sha256:" + "6" * 64
+
+
+def _closed_source_add_runtime_status() -> dict[str, object]:
+    return {
+        "source_add": {
+            "control": {"paused": True, "unavailable": False},
+            "effective_dispatcher_enabled": False,
+            "intake_enabled": False,
+        }
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +68,14 @@ def _stable_live_gateway_identity(monkeypatch: pytest.MonkeyPatch):
         maintenance,
         "_require_hydrated_environment_commitment",
         lambda **kwargs: str(kwargs["expected_commitment"]),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_paused",
+        lambda **_kwargs: {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        },
     )
 
 
@@ -368,6 +389,84 @@ class FakeSecretsClient:
         self.stages[CONCURRENT_VERSION] = {"AWSCURRENT"}
 
 
+def _source_add_secret(service_role_key: str = "unit-test-service-role") -> str:
+    return (
+        f"SUPABASE_URL='{maintenance.PRODUCTION_SUPABASE_ORIGIN}'\n"
+        f"SUPABASE_SERVICE_ROLE_KEY='{service_role_key}'\n"
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+
+
+def _source_add_connection_factory(
+    responses: list[tuple[int, object]],
+    requests: list[dict[str, object]],
+):
+    class FakeResponse:
+        def __init__(self, status: int, payload: object):
+            self.status = status
+            self.payload = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+
+        def getheader(self, name: str):
+            if name == "Content-Length":
+                return str(len(self.payload))
+            return None
+
+        def read(self, limit: int):
+            return self.payload[:limit]
+
+    class FakeConnection:
+        def __init__(self, host: str, port: int, timeout: float):
+            if not responses:
+                raise AssertionError("unexpected SOURCE_ADD control connection")
+            self.response = FakeResponse(*responses.pop(0))
+            self.record: dict[str, object] = {
+                "host": host,
+                "port": port,
+                "timeout": timeout,
+            }
+            requests.append(self.record)
+
+        def request(self, method: str, path: str, body, headers):
+            self.record.update(
+                {
+                    "method": method,
+                    "path": path,
+                    "body": body,
+                    "headers": dict(headers),
+                }
+            )
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            self.record["closed"] = True
+
+    return FakeConnection
+
+
+def _paused_source_add_control(*, actor_ref: str) -> dict[str, object]:
+    return {
+        "singleton": True,
+        "paused": True,
+        "reason": maintenance.SOURCE_ADD_PAUSE_REASON,
+        "actor_ref": actor_ref,
+        "updated_at": "2026-08-31T18:20:00Z",
+    }
+
+
+def _source_add_admission_contract() -> dict[str, object]:
+    return {
+        "schema_version": "leadpoet.source_add_admission_control_contract.v1",
+        "control_row_present": True,
+        "trigger_enabled": True,
+        "pause_rpc": maintenance.SOURCE_ADD_PAUSE_RPC,
+        "admission_trigger": "trg_source_add_work_admission_control",
+    }
+
+
 def _controller_bundle(
     controller_commit: str = CONTROLLER_COMMIT,
 ) -> dict[str, object]:
@@ -410,6 +509,9 @@ def _prepare(
     candidate_commit: str = CANDIDATE_COMMIT,
     controller_commit: str = CONTROLLER_COMMIT,
     invocation_id: str = "gateway-test-invocation",
+    source_add_pause_hook=None,
+    source_add_readback_hook=None,
+    runtime_status_hook=None,
 ) -> dict[str, object]:
     monkeypatch.setattr(
         maintenance,
@@ -442,6 +544,33 @@ def _prepare(
         maintenance,
         "validate_release_manifest",
         lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_pause_source_add_for_restart",
+        source_add_pause_hook
+        or (
+            lambda **_kwargs: {
+                "status": "paused",
+                "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_paused",
+        source_add_readback_hook
+        or (
+            lambda **_kwargs: {
+                "status": "paused",
+                "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_fetch_runtime_status",
+        runtime_status_hook or _closed_source_add_runtime_status,
     )
     return maintenance.prepare_gateway_miner_maintenance_restart(
         repo_root=tmp_path / "repo",
@@ -488,6 +617,193 @@ def test_prepare_changes_only_target_and_returns_redacted_invocation_proof(
     assert "RESEARCH_LAB_AUTORESEARCH_WORKER_COUNT=0\n" in current_secret
     assert not (tmp_path / "private" / "transaction.json").exists()
     assert not any(path.name.endswith("receipt.json") for path in tmp_path.rglob("*"))
+
+
+def test_source_add_pause_uses_fixed_rpc_then_exact_durable_readback(
+    capsys: pytest.CaptureFixture[str],
+):
+    service_role_key = "unit-test-service-role-private"
+    client = FakeSecretsClient(_source_add_secret(service_role_key))
+    invocation_id = "gateway-source-add-pause-test"
+    actor_ref = "gateway-restart:" + hashlib.sha256(
+        invocation_id.encode("utf-8")
+    ).hexdigest()
+    row = _paused_source_add_control(actor_ref=actor_ref)
+    requests: list[dict[str, object]] = []
+    responses = [
+        (200, _source_add_admission_contract()),
+        (200, row),
+        (200, [row]),
+    ]
+
+    result = REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+        secrets_client=client,
+        restart_invocation_id=invocation_id,
+        connection_factory=_source_add_connection_factory(responses, requests),
+    )
+
+    assert result == {
+        "status": "paused",
+        "source_add_control_commitment": maintenance.sha256_json(row),
+    }
+    assert responses == []
+    assert [request["method"] for request in requests] == ["POST", "POST", "GET"]
+    assert [request["path"] for request in requests] == [
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ADMISSION_CONTRACT_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_PAUSE_RPC}",
+        (
+            f"/rest/v1/{maintenance.SOURCE_ADD_CONTROL_TABLE}"
+            "?select=singleton,paused,reason,actor_ref,updated_at"
+            "&singleton=eq.true&limit=2"
+        ),
+    ]
+    assert all(
+        request["host"]
+        == maintenance.PRODUCTION_SUPABASE_ORIGIN.removeprefix("https://")
+        and request["port"] == 443
+        and request["closed"] is True
+        for request in requests
+    )
+    assert json.loads(requests[0]["body"]) == {}
+    assert json.loads(requests[1]["body"]) == {
+        "p_actor_ref": actor_ref,
+        "p_paused": True,
+        "p_reason": maintenance.SOURCE_ADD_PAUSE_REASON,
+    }
+    assert requests[2]["body"] is None
+    assert all(service_role_key not in str(request["path"]) for request in requests)
+    assert service_role_key not in json.dumps(result)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_source_add_pause_fails_closed_when_migration_rpc_is_unavailable():
+    client = FakeSecretsClient(_source_add_secret())
+    before = dict(client.versions)
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="pause authority request was rejected",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id="gateway-source-add-missing-rpc",
+            connection_factory=_source_add_connection_factory(
+                [(404, {"code": "PGRST202"})], requests
+            ),
+        )
+
+    assert client.versions == before
+    assert len(requests) == 1
+    assert requests[0]["path"] == (
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ADMISSION_CONTRACT_RPC}"
+    )
+
+
+def test_source_add_pause_rejects_pre_145_or_disabled_admission_contract():
+    client = FakeSecretsClient(_source_add_secret())
+    contract = {**_source_add_admission_contract(), "trigger_enabled": False}
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="admission-control contract is unavailable",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id="gateway-source-add-old-contract",
+            connection_factory=_source_add_connection_factory(
+                [(200, contract)], requests
+            ),
+        )
+
+    assert len(requests) == 1
+
+
+def test_source_add_pause_rejects_invalid_or_changed_readback():
+    client = FakeSecretsClient(_source_add_secret())
+    invocation_id = "gateway-source-add-invalid-readback"
+    actor_ref = "gateway-restart:" + hashlib.sha256(
+        invocation_id.encode("utf-8")
+    ).hexdigest()
+    row = _paused_source_add_control(actor_ref=actor_ref)
+    resumed = {**row, "paused": False, "reason": "operator_resume"}
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="durable SOURCE_ADD pause readback is invalid",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=invocation_id,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (200, row),
+                    (200, [resumed]),
+                ],
+                requests,
+            ),
+        )
+
+    assert len(requests) == 3
+
+
+def test_prepare_pauses_source_before_global_secret_and_rechecks_without_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n")
+    calls: list[str] = []
+
+    def pause(**_kwargs):
+        calls.append("source_pause")
+        assert len(client.versions) == 1
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        }
+
+    def readback(**kwargs):
+        calls.append("source_readback")
+        assert kwargs["expected_control_commitment"] == (
+            SOURCE_ADD_CONTROL_COMMITMENT
+        )
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        }
+
+    def runtime_status():
+        calls.append("runtime_closed")
+        return _closed_source_add_runtime_status()
+
+    result = _prepare(
+        tmp_path,
+        monkeypatch,
+        client,
+        source_add_pause_hook=pause,
+        source_add_readback_hook=readback,
+        runtime_status_hook=runtime_status,
+    )
+
+    assert calls == [
+        "source_pause",
+        "runtime_closed",
+        "source_readback",
+        "runtime_closed",
+    ]
+    assert result["proof"]["source_add_control_commitment"] == (
+        SOURCE_ADD_CONTROL_COMMITMENT
+    )
+    assert all("resume" not in call for call in calls)
 
 
 @pytest.mark.parametrize(
@@ -1578,7 +1894,10 @@ def test_runtime_state_requires_live_boolean_exact_false(
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             },
-            runtime_status={"miner_submissions_enabled": runtime_value},
+            runtime_status={
+                "miner_submissions_enabled": runtime_value,
+                **_closed_source_add_runtime_status(),
+            },
             secrets_client=client,
             release_s3_client=object(),
         )
@@ -1600,12 +1919,46 @@ def test_runtime_state_rechecks_live_false_durable_state_and_channel(
         runtime_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         },
-        runtime_status={"miner_submissions_enabled": False},
+        runtime_status={
+            "miner_submissions_enabled": False,
+            **_closed_source_add_runtime_status(),
+        },
         secrets_client=client,
         release_s3_client=object(),
     )
     assert result["runtime_status"] == "disabled"
     assert result["status"] == "durable_false_verified"
+
+
+@pytest.mark.parametrize(
+    "source_add_override",
+    [
+        {"intake_enabled": True},
+        {"effective_dispatcher_enabled": True},
+        {"control": {"paused": False, "unavailable": False}},
+        {"control": {"paused": True, "unavailable": True}},
+    ],
+)
+def test_runtime_state_rejects_source_add_that_is_not_exactly_closed(
+    source_add_override: dict[str, object],
+):
+    status = _closed_source_add_runtime_status()
+    source_add = dict(status["source_add"])
+    source_add.update(source_add_override)
+    status["source_add"] = source_add
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance._require_runtime_source_add_closed(status)
+
+
+def test_runtime_source_add_check_accepts_legacy_status_projection_only_when_paused():
+    status = _closed_source_add_runtime_status()
+    del status["source_add"]["intake_enabled"]
+
+    maintenance._require_runtime_source_add_closed(status)
 
 
 def test_runtime_status_fetch_uses_exact_loopback_path_and_never_follows_redirects(

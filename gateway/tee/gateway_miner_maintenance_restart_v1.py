@@ -1,12 +1,13 @@
 """Bind a pre-hydration miner-maintenance change to one locked restart.
 
-The first release containing the fixed-purpose miner-submission secret helper
-cannot run that helper from the deployed N-1 checkout.  This module is instead
-executed from a fully verified archive of the exact attested candidate while
-the canonical gateway restart lock is held.  It updates only the existing
-fixed-purpose setting and carries the resulting non-secret commitments through
-that invocation in a sealed, unlinked memory file.  No cross-invocation local
-receipt or restart authority is persisted.
+The first release containing the fixed-purpose miner-submission maintenance
+helper cannot run that helper from the deployed N-1 checkout.  This module is
+instead executed from a fully verified archive of the exact attested candidate
+while the canonical gateway restart lock is held.  It durably pauses SOURCE_ADD
+through its admission-linearized production RPC, disables the existing global
+miner setting, and carries only non-secret commitments through that invocation
+in a sealed, unlinked memory file.  No cross-invocation local receipt or restart
+authority is persisted, and SOURCE_ADD is never resumed automatically.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -42,6 +44,8 @@ from gateway.tee.disable_gateway_miner_submissions_secret import (
     _instance_role_secrets_client,
     _instance_role_aws_clients,
     _open_recovery_journal_parent_fd,
+    _parse_environment,
+    _read_current_secret,
     _recover_orphan_transaction,
     _verify_protected_source,
     disable_gateway_miner_submissions_secret,
@@ -53,6 +57,9 @@ from gateway.tee.release_channel_v2 import (
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    PRODUCTION_SUPABASE_ORIGIN,
+)
 from scripts.gateway_git_deploy import (
     DEFAULT_BRANCH,
     DEFAULT_REPO_URL,
@@ -61,7 +68,7 @@ from scripts.gateway_git_deploy import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v1"
+SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v2"
 DEFAULT_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 DEFAULT_RELEASE_PREFIX = "attested-v2/releases"
 CANONICAL_GATEWAY_RESTART_LOCK_PATH = Path(
@@ -80,6 +87,14 @@ MAX_PROOF_BYTES = 32 * 1024
 MAX_RELEASE_CHANNEL_BYTES = 4 * 1024 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
 DEFAULT_RUNTIME_STATUS_URL = "http://127.0.0.1:8000/research-lab/status"
+SOURCE_ADD_PAUSE_RPC = "research_lab_source_add_set_paused"
+SOURCE_ADD_ADMISSION_CONTRACT_RPC = (
+    "research_lab_source_add_admission_control_contract_v1"
+)
+SOURCE_ADD_CONTROL_TABLE = "research_lab_source_add_control"
+SOURCE_ADD_PAUSE_REASON = "canonical_gateway_restart_quiescence"
+SOURCE_ADD_CONTROL_MAX_BYTES = 64 * 1024
+SOURCE_ADD_CONTROL_TIMEOUT_SECONDS = 15.0
 # These are minimum compatible ancestry floors, not an exhaustive release list.
 SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
@@ -142,6 +157,7 @@ _PROOF_FIELDS = frozenset(
         "current_document_commitment",
         "current_hydrated_environment_commitment",
         "current_stage_topology_commitment",
+        "source_add_control_commitment",
         "controller_wrapper_sha256",
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
@@ -156,6 +172,350 @@ _PROOF_FIELDS = frozenset(
 
 class GatewayMinerMaintenanceRestartError(RuntimeError):
     """The fixed maintenance state cannot be bound safely to this restart."""
+
+
+def _decode_secret_environment_value(
+    values: Mapping[str, Any],
+    *,
+    document_format: str,
+    name: str,
+) -> str:
+    raw_value = values.get(name)
+    if not isinstance(raw_value, str):
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret lacks SOURCE_ADD pause authority"
+        )
+    if document_format == "json":
+        value = raw_value
+    elif document_format == "shell":
+        try:
+            parts = shlex.split("VALUE=" + raw_value, posix=True)
+        except ValueError as exc:
+            raise GatewayMinerMaintenanceRestartError(
+                "gateway secret SOURCE_ADD pause authority is malformed"
+            ) from exc
+        if len(parts) != 1 or not parts[0].startswith("VALUE="):
+            raise GatewayMinerMaintenanceRestartError(
+                "gateway secret SOURCE_ADD pause authority is malformed"
+            )
+        value = parts[0].split("=", 1)[1]
+    else:
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret SOURCE_ADD pause authority is malformed"
+        )
+    if not value or len(value.encode("utf-8")) > 64 * 1024 or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret SOURCE_ADD pause authority is malformed"
+        )
+    return value
+
+
+def _source_add_pause_credentials(
+    *,
+    secrets_client: Any,
+    expected_current_version_id: Optional[str] = None,
+) -> tuple[str, str]:
+    try:
+        version_id, raw_secret, _stages = _read_current_secret(secrets_client)
+        values, document_format = _parse_environment(raw_secret)
+    except GatewayMinerSubmissionsDisableError:
+        raise
+    except Exception as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret SOURCE_ADD pause authority is unavailable"
+        ) from exc
+    if (
+        expected_current_version_id is not None
+        and version_id != str(expected_current_version_id)
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret changed during SOURCE_ADD pause verification"
+        )
+    supabase_url = _decode_secret_environment_value(
+        values,
+        document_format=document_format,
+        name="SUPABASE_URL",
+    ).rstrip("/")
+    service_role_key = _decode_secret_environment_value(
+        values,
+        document_format=document_format,
+        name="SUPABASE_SERVICE_ROLE_KEY",
+    )
+    if supabase_url != PRODUCTION_SUPABASE_ORIGIN:
+        raise GatewayMinerMaintenanceRestartError(
+            "gateway secret SOURCE_ADD pause origin differs from production"
+        )
+    return supabase_url, service_role_key
+
+
+def _source_add_control_request(
+    *,
+    method: str,
+    path: str,
+    service_role_key: str,
+    payload: Optional[Mapping[str, Any]] = None,
+    connection_factory: Any = http.client.HTTPSConnection,
+    timeout_seconds: float = SOURCE_ADD_CONTROL_TIMEOUT_SECONDS,
+) -> Any:
+    if (
+        method not in {"GET", "POST"}
+        or not path.startswith("/rest/v1/")
+        or "//" in path
+        or not service_role_key
+        or not 1.0 <= float(timeout_seconds) <= 30.0
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause request is invalid"
+        )
+    hostname = PRODUCTION_SUPABASE_ORIGIN.removeprefix("https://")
+    if not hostname or "/" in hostname:
+        raise GatewayMinerMaintenanceRestartError(
+            "production SOURCE_ADD pause origin is invalid"
+        )
+    encoded = None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": "Bearer " + service_role_key,
+        "apikey": service_role_key,
+        "Connection": "close",
+        "Host": hostname,
+    }
+    if payload is not None:
+        encoded = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = str(len(encoded))
+    connection = connection_factory(
+        hostname,
+        443,
+        timeout=float(timeout_seconds),
+    )
+    try:
+        connection.request(method, path, body=encoded, headers=headers)
+        response = connection.getresponse()
+        if not 200 <= int(response.status) < 300:
+            raise GatewayMinerMaintenanceRestartError(
+                "SOURCE_ADD pause authority request was rejected"
+            )
+        content_length = response.getheader("Content-Length")
+        if (
+            content_length is not None
+            and int(content_length) > SOURCE_ADD_CONTROL_MAX_BYTES
+        ):
+            raise GatewayMinerMaintenanceRestartError(
+                "SOURCE_ADD pause authority response is too large"
+            )
+        response_payload = response.read(SOURCE_ADD_CONTROL_MAX_BYTES + 1)
+    except GatewayMinerMaintenanceRestartError:
+        raise
+    except Exception as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause authority is unavailable"
+        ) from exc
+    finally:
+        connection.close()
+    if len(response_payload) > SOURCE_ADD_CONTROL_MAX_BYTES:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause authority response is too large"
+        )
+    try:
+        return json.loads(
+            response_payload.decode("utf-8"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause authority response is invalid"
+        ) from exc
+
+
+def _normalized_source_add_control(value: Any) -> dict[str, Any]:
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    fields = {"singleton", "paused", "reason", "actor_ref", "updated_at"}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != fields
+        or value.get("singleton") is not True
+        or value.get("paused") is not True
+        or not isinstance(value.get("reason"), str)
+        or not str(value.get("reason"))
+        or len(str(value.get("reason"))) > 500
+        or not isinstance(value.get("actor_ref"), str)
+        or not str(value.get("actor_ref"))
+        or len(str(value.get("actor_ref"))) > 200
+        or not isinstance(value.get("updated_at"), str)
+        or not str(value.get("updated_at"))
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "durable SOURCE_ADD pause readback is invalid"
+        )
+    try:
+        updated_at = datetime.fromisoformat(
+            str(value["updated_at"]).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise GatewayMinerMaintenanceRestartError(
+            "durable SOURCE_ADD pause readback is invalid"
+        ) from exc
+    if updated_at.tzinfo is None:
+        raise GatewayMinerMaintenanceRestartError(
+            "durable SOURCE_ADD pause readback is invalid"
+        )
+    return {name: value[name] for name in sorted(fields)}
+
+
+def _source_add_control_commitment(value: Any) -> str:
+    return sha256_json(_normalized_source_add_control(value))
+
+
+def _read_source_add_control(
+    *,
+    service_role_key: str,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> dict[str, Any]:
+    result = _source_add_control_request(
+        method="GET",
+        path=(
+            f"/rest/v1/{SOURCE_ADD_CONTROL_TABLE}"
+            "?select=singleton,paused,reason,actor_ref,updated_at"
+            "&singleton=eq.true&limit=2"
+        ),
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+    )
+    return _normalized_source_add_control(result)
+
+
+def _require_source_add_admission_control_contract(
+    *,
+    service_role_key: str,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> None:
+    result = _source_add_control_request(
+        method="POST",
+        path=f"/rest/v1/rpc/{SOURCE_ADD_ADMISSION_CONTRACT_RPC}",
+        service_role_key=service_role_key,
+        payload={},
+        connection_factory=connection_factory,
+    )
+    if result != {
+        "schema_version": "leadpoet.source_add_admission_control_contract.v1",
+        "control_row_present": True,
+        "trigger_enabled": True,
+        "pause_rpc": SOURCE_ADD_PAUSE_RPC,
+        "admission_trigger": "trg_source_add_work_admission_control",
+    }:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD admission-control contract is unavailable"
+        )
+
+
+def _pause_source_add_for_restart(
+    *,
+    secrets_client: Any,
+    restart_invocation_id: str,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> dict[str, str]:
+    _supabase_url, service_role_key = _source_add_pause_credentials(
+        secrets_client=secrets_client
+    )
+    _require_source_add_admission_control_contract(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+    )
+    actor_ref = "gateway-restart:" + hashlib.sha256(
+        str(restart_invocation_id).encode("utf-8")
+    ).hexdigest()
+    rpc_result = _normalized_source_add_control(
+        _source_add_control_request(
+            method="POST",
+            path=f"/rest/v1/rpc/{SOURCE_ADD_PAUSE_RPC}",
+            service_role_key=service_role_key,
+            payload={
+                "p_actor_ref": actor_ref,
+                "p_paused": True,
+                "p_reason": SOURCE_ADD_PAUSE_REASON,
+            },
+            connection_factory=connection_factory,
+        )
+    )
+    if (
+        rpc_result["reason"] != SOURCE_ADD_PAUSE_REASON
+        or rpc_result["actor_ref"] != actor_ref
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause RPC returned an unexpected control state"
+        )
+    readback = _read_source_add_control(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+    )
+    if readback != rpc_result:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD pause changed during exact readback"
+        )
+    return {
+        "status": "paused",
+        "source_add_control_commitment": _source_add_control_commitment(
+            readback
+        ),
+    }
+
+
+def _require_source_add_paused(
+    *,
+    secrets_client: Any,
+    expected_current_version_id: Optional[str] = None,
+    expected_control_commitment: Optional[str] = None,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> dict[str, str]:
+    _supabase_url, service_role_key = _source_add_pause_credentials(
+        secrets_client=secrets_client,
+        expected_current_version_id=expected_current_version_id,
+    )
+    _require_source_add_admission_control_contract(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+    )
+    commitment = _source_add_control_commitment(
+        _read_source_add_control(
+            service_role_key=service_role_key,
+            connection_factory=connection_factory,
+        )
+    )
+    if (
+        expected_control_commitment is not None
+        and commitment != str(expected_control_commitment)
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "durable SOURCE_ADD pause differs from the invocation proof"
+        )
+    return {
+        "status": "paused",
+        "source_add_control_commitment": commitment,
+    }
+
+
+def _require_runtime_source_add_closed(
+    runtime_status: Mapping[str, Any],
+) -> None:
+    source_add = runtime_status.get("source_add")
+    control = source_add.get("control") if isinstance(source_add, Mapping) else None
+    if (
+        not isinstance(source_add, Mapping)
+        or not isinstance(control, Mapping)
+        or control.get("paused") is not True
+        or control.get("unavailable") is not False
+        or source_add.get("intake_enabled", False) is not False
+        or source_add.get("effective_dispatcher_enabled") is not False
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "running gateway SOURCE_ADD intake is not durably paused"
+        )
 
 
 def _candidate_root() -> Path:
@@ -1750,6 +2110,7 @@ def _proof_body(
     tree_evidence: Mapping[str, Any],
     release_evidence: Mapping[str, Any],
     final_secret_result: Mapping[str, str],
+    source_add_pause_result: Mapping[str, str],
     restart_invocation_id: str,
     live_process_commitment: str,
 ) -> dict[str, str]:
@@ -1790,6 +2151,9 @@ def _proof_body(
         "current_stage_topology_commitment": str(
             final_secret_result["current_stage_topology_commitment"]
         ),
+        "source_add_control_commitment": str(
+            source_add_pause_result["source_add_control_commitment"]
+        ),
         "controller_wrapper_sha256": str(commitments["wrapper"]),
         "controller_git_helper_sha256": str(commitments["git_helper"]),
         "controller_exact_commit_helper_sha256": str(
@@ -1824,6 +2188,7 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
         "current_document_commitment",
         "current_hydrated_environment_commitment",
         "current_stage_topology_commitment",
+        "source_add_control_commitment",
         "controller_wrapper_sha256",
         "controller_git_helper_sha256",
         "controller_exact_commit_helper_sha256",
@@ -2181,6 +2546,13 @@ def _verify_proof_against_state(
         raise GatewayMinerMaintenanceRestartError(
             "durable miner-maintenance state differs from the invocation proof"
         )
+    _require_source_add_paused(
+        secrets_client=client,
+        expected_current_version_id=validated["current_secret_version_id"],
+        expected_control_commitment=validated[
+            "source_add_control_commitment"
+        ],
+    )
     if hydrated_environment_path is not None:
         _require_hydrated_environment_commitment(
             path=hydrated_environment_path,
@@ -2203,6 +2575,13 @@ def _verify_proof_against_state(
         raise GatewayMinerMaintenanceRestartError(
             "durable miner-maintenance state changed during hydration verification"
         )
+    _require_source_add_paused(
+        secrets_client=client,
+        expected_current_version_id=validated["current_secret_version_id"],
+        expected_control_commitment=validated[
+            "source_add_control_commitment"
+        ],
+    )
     if tree_evidence is not None:
         controller = tree_evidence["controller_bundle"]
         commitments = controller["commitments"]
@@ -2286,6 +2665,11 @@ def prepare_gateway_miner_maintenance_restart(
         raise GatewayMinerMaintenanceRestartError(
             "approved release channel is for another candidate"
         )
+    source_add_pause_result = _pause_source_add_for_restart(
+        secrets_client=secrets_client,
+        restart_invocation_id=restart_invocation_id,
+    )
+    _require_runtime_source_add_closed(_fetch_runtime_status())
     with _open_recovery_journal_parent_fd(
         recovery_journal_path
     ) as recovery_authority:
@@ -2320,11 +2704,20 @@ def prepare_gateway_miner_maintenance_restart(
             raise GatewayMinerMaintenanceRestartError(
                 "miner submissions were not disabled after exact readback"
             )
+    _require_source_add_paused(
+        secrets_client=secrets_client,
+        expected_current_version_id=str(final_result["current_version_id"]),
+        expected_control_commitment=source_add_pause_result[
+            "source_add_control_commitment"
+        ],
+    )
+    _require_runtime_source_add_closed(_fetch_runtime_status())
     proof = _proof_body(
         candidate_commit=expected_commit,
         tree_evidence=tree_evidence,
         release_evidence=release_evidence,
         final_secret_result=final_result,
+        source_add_pause_result=source_add_pause_result,
         restart_invocation_id=restart_invocation_id,
         live_process_commitment=live_process_commitment,
     )
@@ -2420,6 +2813,10 @@ def verify_gateway_miner_maintenance_state(
         raise GatewayMinerMaintenanceRestartError(
             "durable miner-maintenance state changed during hydration verification"
         )
+    source_add_pause = _require_source_add_paused(
+        secrets_client=secrets_client,
+        expected_current_version_id=str(current["current_version_id"]),
+    )
     release_evidence = _verify_locked_release_matches(
         deploy_commit=deploy_commit,
         gateway_release_hash=gateway_release_hash,
@@ -2428,6 +2825,9 @@ def verify_gateway_miner_maintenance_state(
     return {
         "status": "durable_false_verified",
         "current_secret_version_id": str(current["current_version_id"]),
+        "source_add_control_commitment": source_add_pause[
+            "source_add_control_commitment"
+        ],
         "release_channel_object_version_id": str(
             release_evidence["object_version_id"]
         ),
@@ -2753,6 +3153,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 _pre_hydration_live_process_commitment(final_tree)
             ),
         )
+        _require_runtime_source_add_closed(_fetch_runtime_status())
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
         controller_fds_open = True
         for descriptor in (
@@ -2904,6 +3305,7 @@ def verify_gateway_miner_maintenance_runtime_state(
     _require_fixed_bootstrap_authority(runtime_environment)
     _require_disabled_parent_environment(runtime_environment)
     _require_runtime_miner_disabled(runtime_status)
+    _require_runtime_source_add_closed(runtime_status)
     result = verify_gateway_miner_maintenance_state(
         deploy_commit=deploy_commit,
         candidate_tree_hash=candidate_tree_hash,

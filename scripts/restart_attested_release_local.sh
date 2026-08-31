@@ -90,8 +90,10 @@ Usage:
 The default "all" mode starts both exact-commit restarts in one invocation.
 A single-component restart is accepted only when the other component is
 already running the selected commit.
-The miner-submission option is paired-only. It prepares the exact candidate
-under the canonical gateway lock before the installed N-1 wrapper hydrates.
+The miner-submission option is paired-only. It durably pauses SOURCE_ADD,
+proves intake closed, and prepares the exact candidate under the canonical
+gateway lock before the installed N-1 wrapper hydrates. It never resumes
+SOURCE_ADD automatically.
 EOF
 }
 

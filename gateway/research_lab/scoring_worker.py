@@ -6695,14 +6695,15 @@ class ResearchLabGatewayScoringWorker:
         total_icps: int,
         start_delay_seconds: float = 0.0,
     ) -> None:
-        """Recycle before a wave whose bound proxy proof is missing or stale.
+        """Refresh before a wave whose bound proxy proof is missing or stale.
 
-        A new baseline-owner process must hold the maintenance lease and force
-        the existing bounded full-fleet preflight before it can enter this
-        scheduler.  Long model waves can outlive those measurements' TTL.  At
-        that settled checkpoint boundary, exit before spending another model
-        attempt; the fresh process repeats the same lease-owned full-fleet
-        measurement and restores only the still-pending attempt rounds.
+        Long model waves can outlive the full-fleet measurement TTL. At the
+        settled checkpoint boundary, first reacquire the maintenance lease and
+        force the same bounded full-fleet preflight used after checkpoint
+        restore. Continue only when that exact refresh proves every required
+        profile fresh. Lease contention, unhealthy providers, an incomplete
+        measurement, or any refresh exception retains the fail-closed process
+        recycle path and its durable checkpoint replay.
         """
 
         del run_start
@@ -6741,11 +6742,83 @@ class ResearchLabGatewayScoringWorker:
         ]
         if not stale_profiles:
             return
+        refresh_status = "not_attempted"
+        refresh_reason = ""
+        try:
+            refresh_state = await get_scoring_maintenance_state()
+            if _operator_scoring_pause_active(refresh_state):
+                raise BaselineMaintenancePause(
+                    completed_icps=completed_icps,
+                    total_icps=total_icps,
+                    maintenance_state=refresh_state,
+                )
+            refreshed = await self._run_lease_held_recovery_and_preflight(
+                refresh_state,
+                force_full_fleet_measurement=True,
+            )
+            refresh_status = (
+                "passed" if bool(refreshed.get("proceed")) else "blocked"
+            )
+            refresh_reason = str(refreshed.get("reason") or "")
+        except BaselineMaintenancePause:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A refresh failure cannot invalidate the settled checkpoint. Keep
+            # the existing process-recycle fallback and expose the exception.
+            refresh_status = "failed"
+            refresh_reason = "provider_preflight_refresh_exception"
+            logger.warning(
+                "research_lab_baseline_wave_preflight_refresh_failed "
+                "worker_ref=%s retry_round=%s profile_count=%s error=%s",
+                self.worker_ref,
+                retry_round,
+                len(stale_profiles),
+                _short_error(exc),
+            )
+
+        refreshed_now = _baseline_preflight_monotonic()
+        refreshed_measurements = dict(
+            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
+        )
+        remaining_stale_profiles = [
+            worker_index
+            for worker_index in profile_indexes
+            if worker_index not in refreshed_measurements
+            or refreshed_now
+            + max(0.0, float(start_delay_seconds))
+            - float(refreshed_measurements[worker_index])
+            >= ttl_seconds
+        ]
+        if refresh_status == "passed" and not remaining_stale_profiles:
+            baseline_context = getattr(self, "_active_baseline_context", None) or {}
+            benchmark_date = str(baseline_context.get("benchmark_date") or "")
+            if benchmark_date:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="wave_preflight_refresh",
+                    status="passed",
+                    benchmark_date=benchmark_date,
+                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                    epoch_id=baseline_context.get("evaluation_epoch"),
+                    window_hash=baseline_context.get("rolling_window_hash"),
+                    manifest_hash=baseline_context.get(
+                        "private_model_manifest_hash"
+                    ),
+                    retry_round=retry_round,
+                    row_count=worker_count,
+                    provider_preflight_profile_count=len(profile_indexes),
+                    completed_icp_count=completed_icps,
+                    selected_icp_count=total_icps,
+                )
+            return
+        stale_profiles = remaining_stale_profiles or stale_profiles
         raise BaselineCheckpointRecycle(
             pressure={
                 "reason": "provider_preflight_refresh_required",
                 "provider_preflight_ttl_seconds": round(ttl_seconds, 3),
                 "provider_preflight_profile_count": len(stale_profiles),
+                "provider_preflight_refresh_status": refresh_status,
+                "provider_preflight_refresh_reason": refresh_reason,
             },
             completed_icps=completed_icps,
             total_icps=total_icps,

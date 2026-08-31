@@ -9339,21 +9339,6 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         "retry resume bypassed its full-fleet lease owner"
                     )
                 phase["lease_available"] = True
-                refreshed = await (
-                    retry_worker._run_lease_held_recovery_and_preflight(
-                        {"paused": False}
-                    )
-                )
-                if (
-                    refreshed.get("proceed") is not True
-                    or set(
-                        retry_worker._baseline_profile_preflight_monotonic_at
-                    )
-                    != set(range(worker_count))
-                ):
-                    raise RuntimeError(
-                        "retry resume lacked forced full-fleet freshness"
-                    )
                 resumed_after_refresh = [
                     *restored_attempts,
                     *persisted_extension_attempts,
@@ -9371,6 +9356,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         retry_worker._enforce_baseline_wave_preflight_freshness
                     ),
                 )
+                if set(
+                    retry_worker._baseline_profile_preflight_monotonic_at
+                ) != set(range(worker_count)):
+                    raise RuntimeError(
+                        "retry wave did not refresh forced full-fleet freshness inline"
+                    )
             finally:
                 scoring_worker_module.get_scoring_maintenance_state = (
                     original_maintenance_reader
@@ -9405,7 +9396,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 or not all(full_fleet_phases)
             ):
                 raise RuntimeError(
-                    "stale-profile recycle did not bind forced fleet evidence"
+                    "stale-profile wave refresh did not bind forced fleet evidence"
                 )
             if len(rows) != retry_item_count or stats != {
                 "retried": retry_item_count * current_retry_rounds,

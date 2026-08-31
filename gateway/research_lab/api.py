@@ -63,7 +63,6 @@ from .v2_credential_envelopes import (
 )
 from .maintenance import (
     get_autoresearch_maintenance_state,
-    get_scoring_maintenance_state,
 )
 from .ticket_intake_validation import validate_ticket_direction
 from .ticket_lifecycle import (
@@ -494,9 +493,8 @@ async def _seal_openrouter_credential_v2(
 @router.get("/status")
 async def research_lab_status() -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
-    maintenance, scoring_maintenance, source_add_control = await asyncio.gather(
+    maintenance, source_add_control = await asyncio.gather(
         get_autoresearch_maintenance_state(),
-        get_scoring_maintenance_state(),
         source_add_control_state(),
     )
     maintenance_public = {
@@ -547,10 +545,7 @@ async def research_lab_status() -> dict[str, object]:
     source_add_public["intake_enabled"] = bool(
         config.api_enabled
         and config.production_writes_enabled
-        and config.miner_submissions_enabled
         and config.source_add_enabled
-        and not maintenance.get("paused", True)
-        and not scoring_maintenance.get("paused", True)
         and not source_add_control.get("paused", True)
     )
     return {
@@ -728,21 +723,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
-    _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
-    # SOURCE_ADD intake mints emission rewards, so a maintenance pause on
-    # scoring or autoresearch must also stop new source submissions: rewards
-    # granted while everything else is frozen only drain the burn share.
-    from gateway.research_lab.maintenance import (
-        is_autoresearch_maintenance_paused,
-        is_scoring_maintenance_paused,
-    )
-
-    if await is_scoring_maintenance_paused() or await is_autoresearch_maintenance_paused():
-        raise HTTPException(
-            status_code=503,
-            detail="Research Lab maintenance is active; source adapter intake is paused",
-        )
     source_add_control = await source_add_control_state()
     if source_add_control.get("paused", True):
         raise HTTPException(

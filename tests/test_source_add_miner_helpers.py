@@ -46,7 +46,10 @@ def test_miner_defaults_to_live_research_lab_gateway():
 
 def test_source_add_submission_readiness_uses_authoritative_gateway_gate():
     assert source_add_submission_ready(
-        {"source_add": {"enabled": True, "intake_enabled": True}}
+        {
+            "miner_submissions_enabled": False,
+            "source_add": {"enabled": True, "intake_enabled": True},
+        }
     )
 
     for status in (

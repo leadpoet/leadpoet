@@ -4262,7 +4262,14 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "production_chain_mutated": False,
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
                     "openrouter": {"admitted": True},
-                    "source_add": {"admitted": True},
+                    "source_add": {
+                        "admitted": True,
+                        "global_miner_submissions_enabled": False,
+                        "autoresearch_paused": True,
+                        "scoring_paused": True,
+                        "source_add_paused": False,
+                        "non_source_miner_route_rejected": True,
+                    },
                 }
             ),
             stderr="",
@@ -4289,6 +4296,8 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
     assert child_env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
     assert child_env["AWS_REGION"] == "us-east-1"
     assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
+    assert child_env["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] == "false"
+    assert child_env["RESEARCH_LAB_SOURCE_ADD_ENABLED"] == "true"
     for key in poisoned_clone:
         if key != "PATH":
             assert key not in child_env
@@ -4316,7 +4325,7 @@ def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
 
 
 @pytest.mark.asyncio
-async def test_miner_intake_restores_every_preexisting_clone_pause():
+async def test_miner_intake_restores_controls_changed_for_source_only_state():
     observed: list[tuple[str, object]] = []
 
     async def call_rpc(name, payload):
@@ -4331,8 +4340,8 @@ async def test_miner_intake_restores_every_preexisting_clone_pause():
     await full_host._restore_miner_intake_controls(
         {
             "source_add_paused": True,
-            "autoresearch_paused": True,
-            "scoring_paused": True,
+            "autoresearch_paused": False,
+            "scoring_paused": False,
         },
         call_rpc=call_rpc,
         set_autoresearch_maintenance_paused=set_autoresearch,
@@ -4345,12 +4354,45 @@ async def test_miner_intake_restores_every_preexisting_clone_pause():
         "scoring",
     ]
     assert all(payload["p_paused"] is True for name, payload in observed[:1])
-    assert all(payload["paused"] is True for name, payload in observed[1:])
+    assert all(payload["paused"] is False for name, payload in observed[1:])
     assert all(
         payload.get("p_reason", payload.get("reason"))
         == "production_parity_miner_intake_complete"
         for _name, payload in observed
     )
+
+
+@pytest.mark.asyncio
+async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
+    observed: list[tuple[str, object]] = []
+
+    async def call_rpc(name, payload):
+        observed.append((name, dict(payload)))
+
+    async def unexpected_setter(**_payload):
+        raise AssertionError("an already-paused independent lane was rewritten")
+
+    await full_host._restore_miner_intake_controls(
+        {
+            "source_add_paused": True,
+            "autoresearch_paused": True,
+            "scoring_paused": True,
+        },
+        call_rpc=call_rpc,
+        set_autoresearch_maintenance_paused=unexpected_setter,
+        set_scoring_maintenance_paused=unexpected_setter,
+    )
+
+    assert observed == [
+        (
+            "research_lab_source_add_set_paused",
+            {
+                "p_paused": True,
+                "p_reason": "production_parity_miner_intake_complete",
+                "p_actor_ref": "system:production-parity",
+            },
+        )
+    ]
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():

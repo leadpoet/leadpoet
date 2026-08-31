@@ -107,7 +107,7 @@ OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
 MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
     "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
     "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
-    "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
+    "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
     "RESEARCH_LAB_SOURCE_ADD_ENABLED": "true",
     "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
     "RESEARCH_LAB_PAID_LOOPS_ENABLED": "false",
@@ -1740,6 +1740,17 @@ def _run_miner_intake_path(
         != "strict-ephemeral-hotkey"
         or evidence.get("openrouter", {}).get("admitted") is not True
         or evidence.get("source_add", {}).get("admitted") is not True
+        or evidence.get("source_add", {}).get(
+            "global_miner_submissions_enabled"
+        )
+        is not False
+        or evidence.get("source_add", {}).get("autoresearch_paused") is not True
+        or evidence.get("source_add", {}).get("scoring_paused") is not True
+        or evidence.get("source_add", {}).get("source_add_paused") is not False
+        or evidence.get("source_add", {}).get(
+            "non_source_miner_route_rejected"
+        )
+        is not True
     ):
         raise FullParityError("miner-intake evidence is incomplete")
     return evidence
@@ -1894,7 +1905,13 @@ async def _run_miner_intake_child_validated(
     research_lab_api.chain_is_hotkey_registered = strict_chain_registration
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     source_controls: dict[str, Any] = {}
+    miner_submissions_env_name = "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
+    miner_submissions_before = os.environ.get(miner_submissions_env_name)
     try:
+        if research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled:
+            raise FullParityError(
+                "miner-intake child did not start with non-SOURCE_ADD intake closed"
+            )
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://production-parity.invalid",
@@ -1915,6 +1932,20 @@ async def _run_miner_intake_child_validated(
                     ),
                 },
             )
+            closed_recipient_response = await client.post(
+                "/research-lab/openrouter-keys/credential-recipient",
+                json=recipient_payload,
+            )
+            if (
+                closed_recipient_response.status_code != 403
+                or closed_recipient_response.json().get("detail")
+                != "Research Lab miner submissions are disabled"
+                or observed_chain_checks
+            ):
+                raise FullParityError(
+                    "non-SOURCE_ADD miner intake did not fail closed"
+                )
+            os.environ[miner_submissions_env_name] = "true"
             recipient_response = await client.post(
                 "/research-lab/openrouter-keys/credential-recipient",
                 json=recipient_payload,
@@ -1998,6 +2029,11 @@ async def _run_miner_intake_child_validated(
                     "OpenRouter registration persistence is incomplete"
                 )
 
+            os.environ[miner_submissions_env_name] = "false"
+            if research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled:
+                raise FullParityError(
+                    "global miner submissions remained enabled for SOURCE_ADD"
+                )
             builtwith_probe = _verify_builtwith_credential_live(
                 builtwith_credential
             )
@@ -2009,16 +2045,16 @@ async def _run_miner_intake_child_validated(
                 "scoring_paused": bool(scoring_state.get("paused")),
                 "source_add_paused": bool(source_state.get("paused", True)),
             }
-            if source_controls["autoresearch_paused"]:
+            if not source_controls["autoresearch_paused"]:
                 await set_autoresearch_maintenance_paused(
-                    paused=False,
+                    paused=True,
                     reason="production_parity_miner_intake",
                     actor_ref="system:production-parity",
                     event_doc={"production_parity": True},
                 )
-            if source_controls["scoring_paused"]:
+            if not source_controls["scoring_paused"]:
                 await set_scoring_maintenance_paused(
-                    paused=False,
+                    paused=True,
                     reason="production_parity_miner_intake",
                     actor_ref="system:production-parity",
                     event_doc={"production_parity": True},
@@ -2031,6 +2067,19 @@ async def _run_miner_intake_child_validated(
                         "p_reason": "production_parity_miner_intake",
                         "p_actor_ref": "system:production-parity",
                     },
+                )
+            source_only_autoresearch_state = (
+                await get_autoresearch_maintenance_state()
+            )
+            source_only_scoring_state = await get_scoring_maintenance_state()
+            source_only_source_state = await source_add_control_state()
+            if (
+                source_only_autoresearch_state.get("paused") is not True
+                or source_only_scoring_state.get("paused") is not True
+                or source_only_source_state.get("paused") is not False
+            ):
+                raise FullParityError(
+                    "SOURCE_ADD-only maintenance controls did not activate"
                 )
             manifest, source_brief, idempotency_key, source_metadata = (
                 build_source_add_submission_docs(
@@ -2126,6 +2175,16 @@ async def _run_miner_intake_child_validated(
                 or management_credential in source_persistence
             ):
                 raise FullParityError("SOURCE_ADD admission persistence is incomplete")
+            if (
+                (await get_autoresearch_maintenance_state()).get("paused")
+                is not True
+                or (await get_scoring_maintenance_state()).get("paused") is not True
+                or (await source_add_control_state()).get("paused") is not False
+                or research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled
+            ):
+                raise FullParityError(
+                    "SOURCE_ADD admission changed an independent maintenance control"
+                )
 
             retired_payload = _research_lab_signed_payload(
                 wallet,
@@ -2206,6 +2265,11 @@ async def _run_miner_intake_child_validated(
                 "credential_transport": "operator-managed-production-contract",
                 "public_credentials_forbidden": True,
                 "plaintext_absent": True,
+                "global_miner_submissions_enabled": False,
+                "autoresearch_paused": True,
+                "scoring_paused": True,
+                "source_add_paused": False,
+                "non_source_miner_route_rejected": True,
             },
         }
     finally:
@@ -2220,6 +2284,10 @@ async def _run_miner_intake_child_validated(
                 set_scoring_maintenance_paused=set_scoring_maintenance_paused,
             )
         finally:
+            if miner_submissions_before is None:
+                os.environ.pop(miner_submissions_env_name, None)
+            else:
+                os.environ[miner_submissions_env_name] = miner_submissions_before
             request = {}
             runtime_credential = management_credential = builtwith_credential = ""
 
@@ -2231,7 +2299,7 @@ async def _restore_miner_intake_controls(
     set_autoresearch_maintenance_paused: Any,
     set_scoring_maintenance_paused: Any,
 ) -> None:
-    """Restore every clone-local maintenance state changed for miner intake."""
+    """Restore clone-local controls changed to prove SOURCE_ADD-only intake."""
 
     if source_controls.get("source_add_paused"):
         await call_rpc(
@@ -2242,16 +2310,16 @@ async def _restore_miner_intake_controls(
                 "p_actor_ref": "system:production-parity",
             },
         )
-    if source_controls.get("autoresearch_paused"):
+    if source_controls.get("autoresearch_paused") is False:
         await set_autoresearch_maintenance_paused(
-            paused=True,
+            paused=False,
             reason="production_parity_miner_intake_complete",
             actor_ref="system:production-parity",
             event_doc={"production_parity": True},
         )
-    if source_controls.get("scoring_paused"):
+    if source_controls.get("scoring_paused") is False:
         await set_scoring_maintenance_paused(
-            paused=True,
+            paused=False,
             reason="production_parity_miner_intake_complete",
             actor_ref="system:production-parity",
             event_doc={"production_parity": True},

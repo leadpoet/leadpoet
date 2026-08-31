@@ -698,6 +698,116 @@ async def test_stateful_graph_readback_accepts_only_exact_canonical_compaction(
 
 
 @pytest.mark.asyncio
+async def test_compact_execution_replay_rehydrates_only_signed_local_sidecars(
+    ancestry_fixture,
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    job_id = "replay-weight-input"
+    purpose = "research_lab.candidate_score.v2"
+    attempt = _attempt(job_id=job_id, purpose=purpose)
+    receipt = _receipt(
+        private_key=ancestry_fixture["current_key"],
+        public_key=ancestry_fixture["current_pub"],
+        boot=ancestry_fixture["current_boot"],
+        purpose=purpose,
+        job_id=job_id,
+        parents=(ancestry_fixture["legacy"]["receipt_hash"],),
+        attempt_root=transport_root([attempt]),
+    )
+    delta = _delta(
+        root=receipt,
+        receipts=[receipt],
+        boots=[ancestry_fixture["current_boot"]],
+        attempts=[attempt],
+    )
+    certificate = issue_ancestry_certificate_v2(
+        local_delta=delta,
+        lineage_id=LINEAGE_ID,
+        certificate_sequence=0,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=NOW,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+        parent_full_graphs=(ancestry_fixture["parent"],),
+        required_purposes=(purpose,),
+    )
+    proof = build_compact_ancestry_proof_from_delta_v2(
+        delta,
+        certificate,
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    full = build_checkpointed_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=delta["boot_identities"],
+        receipts=delta["receipts"],
+        transport_attempts=delta["transport_attempts"],
+        host_operations=[],
+        ancestry_lineage_id=LINEAGE_ID,
+        ancestry_proof=proof,
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    compact = compact_checkpointed_receipt_graph(
+        full,
+        boot_attestation_verifier=_boot_verifier,
+        require_boot_attestation_verification=True,
+    )
+    assert compact["transport_attempts"] == []
+
+    async def load_exact(table, *, field, values, key_fields, **_kwargs):
+        assert tuple(values) in {
+            (receipt["receipt_hash"],),
+            (attempt["attempt_hash"],),
+        }
+        if table == attested_v2_store.RECEIPT_TRANSPORT_TABLE:
+            return [
+                {
+                    "receipt_hash": receipt["receipt_hash"],
+                    "attempt_hash": attempt["attempt_hash"],
+                }
+            ]
+        if table == attested_v2_store.TRANSPORT_TABLE:
+            return [attested_v2_store.transport_storage_row(attempt)]
+        if table == attested_v2_store.HOST_OPERATION_TABLE:
+            return []
+        raise AssertionError("unexpected compact replay sidecar table")
+
+    monkeypatch.setattr(attested_v2_store, "_select_by_values", load_exact)
+    hydrated = await attested_v2_store._rehydrate_compact_execution_graph_v2(
+        compact,
+        receipt=receipt,
+    )
+    assert hydrated["schema_version"] == full["schema_version"]
+    assert hydrated["transport_attempts"] == [attempt]
+    assert hydrated["host_operations"] == []
+    assert hydrated == full
+
+    async def load_missing(table, **_kwargs):
+        if table in {
+            attested_v2_store.RECEIPT_TRANSPORT_TABLE,
+            attested_v2_store.TRANSPORT_TABLE,
+            attested_v2_store.HOST_OPERATION_TABLE,
+        }:
+            return []
+        raise AssertionError("unexpected compact replay sidecar table")
+
+    monkeypatch.setattr(attested_v2_store, "_select_by_values", load_missing)
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="local evidence differs",
+    ):
+        await attested_v2_store._rehydrate_compact_execution_graph_v2(
+            compact,
+            receipt=receipt,
+        )
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_persistence_compacts_after_full_graph_validation(
     ancestry_fixture, monkeypatch
 ):

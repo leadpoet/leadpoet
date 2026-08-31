@@ -26,6 +26,7 @@ from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
     COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     RECEIPT_GRAPH_SCHEMA_VERSION,
+    build_checkpointed_receipt_graph,
     build_receipt_graph,
     compact_checkpointed_receipt_graph,
     merkle_root,
@@ -2176,6 +2177,147 @@ async def load_receipt_graph_v2(
     return graphs[root_hash]
 
 
+async def _rehydrate_compact_execution_graph_v2(
+    graph: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore only one compact replay root's signed local sidecars.
+
+    Durable checkpoint documents intentionally omit transport and host-operation
+    sidecars. Exact execution-result replay still needs those direct records for
+    semantic source-evidence validation. Load only rows linked to this receipt,
+    then validate the reconstructed local delta against the existing signed
+    checkpoint certificate. Historical ancestry remains compact and is never
+    recursively expanded here.
+    """
+
+    if (
+        graph.get("schema_version")
+        != COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        return dict(graph)
+    receipt_hash = str(receipt.get("receipt_hash") or "").lower()
+    if (
+        not _HASH_RE.fullmatch(receipt_hash)
+        or graph.get("root_receipt_hash") != receipt_hash
+    ):
+        raise AttestedV2StoreError(
+            "compact execution replay root receipt differs"
+        )
+
+    link_rows = await _select_by_values(
+        RECEIPT_TRANSPORT_TABLE,
+        field="receipt_hash",
+        values=(receipt_hash,),
+        key_fields=("receipt_hash", "attempt_hash"),
+    )
+    attempt_hashes: set[str] = set()
+    for row in link_rows:
+        attempt_hash = str(row.get("attempt_hash") or "").lower()
+        expected = {
+            "receipt_hash": receipt_hash,
+            "attempt_hash": attempt_hash,
+        }
+        if (
+            row.get("receipt_hash") != receipt_hash
+            or not _HASH_RE.fullmatch(attempt_hash)
+            or attempt_hash in attempt_hashes
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay transport link is invalid"
+            )
+        _assert_stored_row(RECEIPT_TRANSPORT_TABLE, row, expected)
+        attempt_hashes.add(attempt_hash)
+
+    attempt_rows = await _select_by_values(
+        TRANSPORT_TABLE,
+        field="attempt_hash",
+        values=attempt_hashes,
+        key_fields=("attempt_hash",),
+    )
+    attempts: dict[str, dict[str, Any]] = {}
+    for row in attempt_rows:
+        document = row.get("attempt_doc")
+        if not isinstance(document, Mapping):
+            raise AttestedV2StoreError(
+                "compact execution replay transport document is missing"
+            )
+        attempt = dict(document)
+        attempt_hash = str(attempt.get("attempt_hash") or "").lower()
+        if (
+            attempt_hash not in attempt_hashes
+            or attempt_hash in attempts
+            or attempt.get("job_id") != receipt.get("job_id")
+            or attempt.get("purpose") != receipt.get("purpose")
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay transport scope differs"
+            )
+        validate_transport_attempt(attempt)
+        _assert_stored_row(
+            TRANSPORT_TABLE,
+            row,
+            transport_storage_row(attempt),
+        )
+        attempts[attempt_hash] = attempt
+    if set(attempts) != attempt_hashes:
+        raise AttestedV2StoreError(
+            "compact execution replay is missing a transport attempt"
+        )
+
+    host_rows = await _select_by_values(
+        HOST_OPERATION_TABLE,
+        field="receipt_hash",
+        values=(receipt_hash,),
+        key_fields=("request_hash",),
+    )
+    host_operations: dict[str, dict[str, Any]] = {}
+    for row in host_rows:
+        request = row.get("request_doc")
+        terminal = row.get("terminal_doc")
+        if not isinstance(request, Mapping) or not isinstance(terminal, Mapping):
+            raise AttestedV2StoreError(
+                "compact execution replay host operation is missing"
+            )
+        record = {"request": dict(request), "terminal": dict(terminal)}
+        request_hash = str(request.get("request_hash") or "").lower()
+        if (
+            not _HASH_RE.fullmatch(request_hash)
+            or request_hash in host_operations
+            or request.get("job_id") != receipt.get("job_id")
+            or request.get("purpose") != receipt.get("purpose")
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay host-operation scope differs"
+            )
+        validate_host_operation_record(record)
+        _assert_stored_row(
+            HOST_OPERATION_TABLE,
+            row,
+            host_operation_storage_row(record, receipt_hash=receipt_hash),
+        )
+        host_operations[request_hash] = record
+
+    try:
+        hydrated = build_checkpointed_receipt_graph(
+            root_receipt_hash=receipt_hash,
+            boot_identities=graph["boot_identities"],
+            receipts=graph["receipts"],
+            transport_attempts=[attempts[key] for key in sorted(attempts)],
+            host_operations=[
+                host_operations[key] for key in sorted(host_operations)
+            ],
+            ancestry_lineage_id=str(graph["ancestry_lineage_id"]),
+            ancestry_proof=graph["ancestry_proof"],
+        )
+    except Exception as exc:
+        raise AttestedV2StoreError(
+            "compact execution replay local evidence differs"
+        ) from exc
+    return dict(hydrated)
+
+
 def _execution_result_projection_v2(
     *,
     operation: str,
@@ -2525,6 +2667,10 @@ async def load_execution_result_v2(
         raise AttestedV2StoreError(
             "replayable execution result is incomplete"
         )
+    graph = await _rehydrate_compact_execution_graph_v2(
+        graph,
+        receipt=receipt,
+    )
     expected = _execution_result_storage_row_v2(
         operation=normalized_operation,
         result=result,

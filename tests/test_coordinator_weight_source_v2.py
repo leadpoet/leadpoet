@@ -358,12 +358,7 @@ def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
     )
     source = CoordinatorWeightSourceV2(reader)
     document = source.resolve(
-        payload=_payload(
-            "leaderboard",
-            snapshot=snapshot,
-            leaderboard_window_start=DISABLED_LEADERBOARD_WINDOW_V1,
-            leaderboard_window_end=DISABLED_LEADERBOARD_WINDOW_V1,
-        ),
+        payload=_payload("leaderboard", snapshot=snapshot),
         context=_context("research_lab.leaderboard_input.v2"),
     )
     assert document["value"]["leaderboard_entries"] == []
@@ -376,24 +371,6 @@ def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
             },
         )
     ]
-
-
-def test_disabled_fulfillment_requires_disabled_leaderboard_window():
-    source = CoordinatorWeightSourceV2(FakeReader({}))
-    snapshot = _snapshot(
-        ff_enabled=False,
-        fulfillment_share=0.0,
-        fulfillment_rows=[],
-        leaderboard_entries=[],
-    )
-    with pytest.raises(
-        CoordinatorWeightSourceV2Error,
-        match="disabled fulfillment requires disabled leaderboard window",
-    ):
-        source.resolve(
-            payload=_payload("leaderboard", snapshot=snapshot),
-            context=_context("research_lab.leaderboard_input.v2"),
-        )
 
 
 def test_sourcing_history_is_rebuilt_only_from_signed_epoch_receipts():

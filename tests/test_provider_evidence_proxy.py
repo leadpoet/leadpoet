@@ -17,6 +17,7 @@ from gateway.research_lab.provider_evidence_proxy import (
     ProviderUsageLedger,
     load_provider_registry,
     provider_registry_hash,
+    reserved_builtin_provider_domains_sync,
     resolve_provider_credential,
     seed_provider_registry,
     serve_evidence_proxy,
@@ -55,6 +56,54 @@ class TestRegistryValidation:
         assert by_id["or"].auth_kind == "bearer"
         assert by_id["deepline"].base_url == "https://code.deepline.com"
         assert by_id["deepline"].auth_kind == "bearer"
+
+    def test_reserved_builtin_domains_cover_exact_seed_hosts(self, monkeypatch):
+        calls = []
+
+        def load_capabilities(_path="", *, strict_remote=False):
+            calls.append(strict_remote)
+            return [], type(
+                "Capabilities",
+                (),
+                {
+                    "providers": (
+                        {
+                            "origin": "builtin",
+                            "base_url": "https://private-provider.example/api",
+                        },
+                    )
+                },
+            )()
+
+        monkeypatch.setattr(
+            proxy_module,
+            "load_provider_registry_with_capabilities",
+            load_capabilities,
+        )
+
+        assert reserved_builtin_provider_domains_sync() == {
+            "api.exa.ai",
+            "api.scrapingdog.com",
+            "code.deepline.com",
+            "openrouter.ai",
+            "private-provider.example",
+        }
+        assert calls == [True]
+
+    def test_reserved_builtin_domains_fail_closed_when_catalog_is_unavailable(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            proxy_module,
+            "load_provider_registry_with_capabilities",
+            lambda _path="", **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("unavailable")
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="unavailable"):
+            reserved_builtin_provider_domains_sync()
 
     def test_duplicate_ids_rejected(self):
         entries = seed_provider_registry() + [seed_provider_registry()[0]]

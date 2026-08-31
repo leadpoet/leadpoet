@@ -236,6 +236,15 @@ def _workflow_config() -> SimpleNamespace:
 async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypatch):
     work = _smoke_work()
     result = _smoke_result("passed")
+    functional_result = {
+        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
+        "submission_id": work["submission_id"],
+        "adapter_id": work["adapter_id"],
+        "config_ref": work["job_doc"]["config_ref"],
+        "evaluation_mode": "functional_probe",
+        "result_status": "passed",
+        "route_hash": "sha256:" + "6" * 64,
+    }
 
     async def fake_load(_submission_id):
         return {
@@ -261,6 +270,17 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
             },
         }
 
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_functional_probe_current"
+        return {
+            "attempt_ref": "source_add_probe_attempt:" + "c" * 16,
+            "adapter_id": work["adapter_id"],
+            "result_status": "passed",
+            "receipt_hash": "sha256:" + "7" * 64,
+            "business_artifact_hash": sha256_json(functional_result),
+            "result_doc": functional_result,
+        }
+
     observed = {}
 
     async def fake_rpc(name, params):
@@ -269,6 +289,7 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
         return {"status": "provisioned", "catalog_id": "source_catalog:" + "c" * 16}
 
     monkeypatch.setattr(source_add_workflow, "_load_submission", fake_load)
+    monkeypatch.setattr(source_add_workflow, "select_one", fake_select_one)
     monkeypatch.setattr(
         source_add_workflow,
         "_begin_provider_execution",
@@ -284,7 +305,7 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     )
 
     assert response["status"] == "provisioned"
-    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke"
+    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke_v2"
     assert observed["params"]["p_work_id"] == work["work_id"]
     assert observed["params"]["p_lease_token"] == work["lease_token"]
     smoke = observed["params"]["p_smoke_attempt"]
@@ -293,6 +314,18 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     assert smoke["evaluation_mode"] == "provisioning_smoke"
     assert smoke["receipt_hash"] == "sha256:" + "4" * 64
     assert smoke["business_artifact_hash"] == sha256_json(result)
+    assert observed["params"]["p_reward_intent"] == {
+        "intent_id": source_add_workflow.source_add_reward_intent_id(
+            work["submission_id"], work["adapter_id"]
+        ),
+        "miner_hotkey": "hk-owner",
+        "functional_receipt_hash": "sha256:" + "7" * 64,
+        "business_artifact_hash": sha256_json(functional_result),
+    }
+    assert observed["params"]["p_next_work"]["work_kind"] == "leg1_reward"
+    assert observed["params"]["p_next_work"]["job_doc"]["attempt_ref"] == (
+        "source_add_probe_attempt:" + "c" * 16
+    )
 
 
 @pytest.mark.asyncio

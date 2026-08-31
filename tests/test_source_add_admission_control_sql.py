@@ -67,6 +67,7 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         if declared_migration == migration
     }
     assert relations == {
+        "research_lab_source_add_submissions",
         "research_lab_source_add_submission_current",
         "research_lab_source_add_control",
         "research_lab_source_add_work_items",

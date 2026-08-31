@@ -698,8 +698,14 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         "reason_codes": ["bounded_json_data_response"],
         "probe_summaries": [],
     }
+    smoke = {
+        **functional,
+        "evaluation_mode": "provisioning_smoke",
+        "route_hash": "sha256:" + "c" * 64,
+    }
     root_hash = HASH_A
-    graph = {
+    smoke_root_hash = "sha256:" + "d" * 64
+    functional_graph = {
         "root_receipt_hash": root_hash,
         "receipts": [
             {
@@ -709,12 +715,22 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             }
         ],
     }
+    smoke_graph = {
+        "root_receipt_hash": smoke_root_hash,
+        "receipts": [
+            {
+                "receipt_hash": smoke_root_hash,
+                "purpose": "research_lab.source_add_functional_probe.v2",
+                "output_root": sha256_json(smoke),
+            }
+        ],
+    }
     context = ExecutionContextV2(
         job_id="reward-job",
         purpose="research_lab.reward_decision.v2",
         epoch_id=10,
-        parent_receipt_hashes=(root_hash,),
-        external_receipt_graphs=[graph],
+        parent_receipt_hashes=(root_hash, smoke_root_hash),
+        external_receipt_graphs=[functional_graph, smoke_graph],
     )
     payload = {
         "decision_kind": "source_add_leg1",
@@ -726,9 +742,40 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "alpha_percent": 1.0,
             "reward_epochs": 20,
             "functional_probe_result": functional,
+            "provisioning_smoke_result": smoke,
+            "accepted_submission": {
+                "submission_id": functional["submission_id"],
+                "adapter_id": functional["adapter_id"],
+                "miner_hotkey": "miner-hotkey",
+                "stage": "accepted",
+                "precheck_status": "provenance_precheck_passed",
+            },
+            "provision": {
+                "provision_ref": "source_add_provision:1234567890abcdef",
+                "catalog_id": "source_catalog:1234567890abcdef",
+                "submission_id": functional["submission_id"],
+                "adapter_id": functional["adapter_id"],
+                "miner_hotkey": "miner-hotkey",
+                "registry_provider_id": "provider:example",
+                "provision_status": "provisioned_autoresearch_eligible",
+            },
+            "catalog": {
+                "catalog_id": "source_catalog:1234567890abcdef",
+                "adapter_id": functional["adapter_id"],
+                "miner_ref": "miner-hotkey",
+                "registry_provider_id": "provider:example",
+            },
             "trigger_evidence": {
                 "functional_probe_passed": True,
                 "functional_probe_result_hash": sha256_json(functional),
+                "provisioning_smoke_passed": True,
+                "provisioning_smoke_result_hash": sha256_json(smoke),
+                "submission_id": functional["submission_id"],
+                "final_acceptance_stage": "accepted",
+                "provision_ref": "source_add_provision:1234567890abcdef",
+                "catalog_id": "source_catalog:1234567890abcdef",
+                "registry_provider_id": "provider:example",
+                "provision_status": "provisioned_autoresearch_eligible",
             },
         },
     }
@@ -744,7 +791,7 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
     assert outcome.output["reward"]["leg"] == 1
 
     context.external_receipt_graphs[0]["receipts"][0]["output_root"] = HASH_B
-    with pytest.raises(ValueError, match="parent output"):
+    with pytest.raises(ValueError, match="exact functional and smoke parents"):
         await executor(OP_RESEARCH_LAB_REWARD_DECISION, payload, context)
 
 

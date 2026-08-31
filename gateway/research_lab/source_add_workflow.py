@@ -470,8 +470,6 @@ async def _process_functional_probe(
         result=result,
         outcome=outcome,
     )
-    receipt_hash = str(functional_attempt["receipt_hash"])
-    business_hash = str(functional_attempt["business_artifact_hash"])
     status = str(result["result_status"])
     workflow_result = dict(result)
     if status == "retryable" and _retry_allowed(
@@ -492,8 +490,6 @@ async def _process_functional_probe(
             ),
         )
 
-    reward_intent = {}
-    next_work = {}
     release_identity = False
     stage = {
         "passed": "functional_probe_passed",
@@ -504,26 +500,6 @@ async def _process_functional_probe(
     }[status]
     if status == "failed":
         release_identity = True
-    if status == "passed":
-        intent_id = source_add_reward_intent_id(
-            str(current["submission_id"]), str(current["adapter_id"])
-        )
-        reward_work_id = source_add_work_id(
-            str(current["submission_id"]), "leg1_reward", intent_id
-        )
-        reward_intent = {
-            "intent_id": intent_id,
-            "miner_hotkey": str(current["miner_hotkey"]),
-            "functional_receipt_hash": receipt_hash,
-            "business_artifact_hash": business_hash,
-        }
-        next_work = {
-            "work_id": reward_work_id,
-            "work_kind": "leg1_reward",
-            "priority": 30,
-            "job_doc": {"intent_id": intent_id, "attempt_ref": attempt_ref},
-        }
-        stage = "leg1_queued"
     response = await _finish_work(
         work,
         disposition="complete",
@@ -533,8 +509,6 @@ async def _process_functional_probe(
         precheck_doc=dict(current.get("precheck_doc") or {}),
         result_doc=workflow_result,
         functional_attempt=functional_attempt,
-        next_work=next_work,
-        reward_intent=reward_intent,
         release_identity=release_identity,
     )
     logger.info(
@@ -597,8 +571,56 @@ async def _process_provisioning_smoke(
     smoke_attempt["attempt_number"] = attempt_number
     status = str(result.get("result_status") or "")
     if status == "passed":
+        functional = await select_one(
+            "research_lab_source_add_functional_probe_current",
+            filters=(("submission_id", str(current["submission_id"])),),
+        )
+        if (
+            not isinstance(functional, Mapping)
+            or str(functional.get("result_status") or "") != "passed"
+            or str(functional.get("adapter_id") or "")
+            != str(current["adapter_id"])
+        ):
+            raise SourceAddWorkflowError(
+                "SOURCE_ADD provisioning functional proof is missing"
+            )
+        functional_result = functional.get("result_doc")
+        functional_receipt_hash = str(functional.get("receipt_hash") or "")
+        functional_artifact_hash = str(
+            functional.get("business_artifact_hash") or ""
+        )
+        if (
+            not isinstance(functional_result, Mapping)
+            or not _HASH_RE.fullmatch(functional_receipt_hash)
+            or functional_artifact_hash
+            != sha256_json(dict(functional_result))
+        ):
+            raise SourceAddWorkflowError(
+                "SOURCE_ADD provisioning functional proof differs"
+            )
+        intent_id = source_add_reward_intent_id(
+            str(current["submission_id"]), str(current["adapter_id"])
+        )
+        reward_work_id = source_add_work_id(
+            str(current["submission_id"]), "leg1_reward", intent_id
+        )
+        reward_intent = {
+            "intent_id": intent_id,
+            "miner_hotkey": str(current["miner_hotkey"]),
+            "functional_receipt_hash": functional_receipt_hash,
+            "business_artifact_hash": functional_artifact_hash,
+        }
+        next_work = {
+            "work_id": reward_work_id,
+            "work_kind": "leg1_reward",
+            "priority": 30,
+            "job_doc": {
+                "intent_id": intent_id,
+                "attempt_ref": str(functional.get("attempt_ref") or ""),
+            },
+        }
         finalized = await _rpc(
-            "research_lab_source_add_finalize_provision_smoke",
+            "research_lab_source_add_finalize_provision_smoke_v2",
             {
                 "p_work_id": str(work["work_id"]),
                 "p_lease_token": str(work["lease_token"]),
@@ -606,6 +628,8 @@ async def _process_provisioning_smoke(
                 "p_catalog_row": dict(catalog_row),
                 "p_provision_row": dict(provision_row),
                 "p_smoke_attempt": smoke_attempt,
+                "p_reward_intent": reward_intent,
+                "p_next_work": next_work,
             },
         )
         final_status = str(finalized.get("status") or "")
@@ -682,6 +706,86 @@ def _functional_attempt_doc(
     }
 
 
+async def _load_leg1_approval_evidence(
+    *,
+    current: Mapping[str, Any],
+    functional: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    submission_id = str(current.get("submission_id") or "")
+    adapter_id = str(current.get("adapter_id") or "")
+    miner_hotkey = str(current.get("miner_hotkey") or "")
+    accepted_rows = await select_many(
+        "research_lab_source_add_submissions",
+        filters=(("submission_id", submission_id), ("stage", "accepted")),
+        order_by=(("seq", True),),
+        limit=2,
+    )
+    provision = await select_one(
+        "research_lab_source_add_provisioning_current",
+        filters=(("adapter_id", adapter_id),),
+    )
+    smoke = await select_one(
+        "research_lab_source_add_provisioning_smoke_current",
+        filters=(("submission_id", submission_id),),
+    )
+    catalog = await select_one(
+        "research_lab_source_catalog",
+        filters=(("adapter_id", adapter_id),),
+    )
+    if (
+        len(accepted_rows) != 1
+        or not isinstance(provision, Mapping)
+        or not isinstance(smoke, Mapping)
+        or not isinstance(catalog, Mapping)
+    ):
+        raise SourceAddWorkflowError(
+            "SOURCE_ADD Leg 1 final approval evidence is missing"
+        )
+    accepted = accepted_rows[0]
+    if (
+        str(accepted.get("adapter_id") or "") != adapter_id
+        or str(accepted.get("miner_hotkey") or "") != miner_hotkey
+        or str(accepted.get("precheck_status") or "")
+        != "provenance_precheck_passed"
+        or str(provision.get("submission_id") or "") != submission_id
+        or str(provision.get("adapter_id") or "") != adapter_id
+        or str(provision.get("miner_hotkey") or "") != miner_hotkey
+        or str(provision.get("provision_status") or "")
+        != "provisioned_autoresearch_eligible"
+        or str(smoke.get("submission_id") or "") != submission_id
+        or str(smoke.get("adapter_id") or "") != adapter_id
+        or str(smoke.get("evaluation_mode") or "") != "provisioning_smoke"
+        or str(smoke.get("result_status") or "") != "passed"
+        or str(smoke.get("config_ref") or "")
+        != str(functional.get("config_ref") or "")
+        or str(catalog.get("catalog_id") or "")
+        != str(provision.get("catalog_id") or "")
+        or str(catalog.get("miner_ref") or "") != miner_hotkey
+        or str(catalog.get("registry_provider_id") or "")
+        != str(provision.get("registry_provider_id") or "")
+    ):
+        raise SourceAddWorkflowError(
+            "SOURCE_ADD Leg 1 final approval evidence differs"
+        )
+    smoke_result = smoke.get("result_doc")
+    smoke_receipt_hash = str(smoke.get("receipt_hash") or "")
+    smoke_artifact_hash = str(smoke.get("business_artifact_hash") or "")
+    if (
+        not isinstance(smoke_result, Mapping)
+        or not _HASH_RE.fullmatch(smoke_receipt_hash)
+        or smoke_artifact_hash != sha256_json(dict(smoke_result))
+    ):
+        raise SourceAddWorkflowError(
+            "SOURCE_ADD Leg 1 provisioning smoke proof differs"
+        )
+    return {
+        "accepted": dict(accepted),
+        "catalog": dict(catalog),
+        "provision": dict(provision),
+        "smoke": dict(smoke),
+    }
+
+
 async def _process_leg1_reward(
     work: Mapping[str, Any], *, config: ResearchLabGatewayConfig
 ) -> dict[str, Any]:
@@ -743,11 +847,25 @@ async def _process_leg1_reward(
         raise SourceAddWorkflowError("SOURCE_ADD reward intent proof differs")
     from gateway.research_lab.attested_v2_store import load_business_artifact_graph_v2
 
-    graph = await load_business_artifact_graph_v2(
+    functional_graph = await load_business_artifact_graph_v2(
         artifact_kind="source_add_functional_probe",
         artifact_ref=str(functional.get("attempt_ref") or ""),
         artifact_hash=business_hash,
     )
+    approval = await _load_leg1_approval_evidence(
+        current=current,
+        functional=functional,
+    )
+    smoke = approval["smoke"]
+    smoke_result = dict(smoke["result_doc"])
+    smoke_receipt_hash = str(smoke["receipt_hash"])
+    smoke_business_hash = str(smoke["business_artifact_hash"])
+    smoke_graph = await load_business_artifact_graph_v2(
+        artifact_kind="source_add_provisioning_smoke",
+        artifact_ref=str(smoke.get("attempt_ref") or ""),
+        artifact_hash=smoke_business_hash,
+    )
+    provision = approval["provision"]
     current_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(
         getattr(config, "evaluation_epoch", 0)
     )
@@ -760,6 +878,19 @@ async def _process_leg1_reward(
         "functional_probe_result_hash": sha256_json(dict(functional_result)),
         "evaluator_version": str(functional_result.get("evaluator_version") or ""),
         "route_hash": str(functional_result.get("route_hash") or ""),
+        "provisioning_smoke_passed": True,
+        "provisioning_smoke_attempt_ref": str(smoke.get("attempt_ref") or ""),
+        "provisioning_smoke_receipt_hash": smoke_receipt_hash,
+        "provisioning_smoke_business_artifact_hash": smoke_business_hash,
+        "provisioning_smoke_result_hash": sha256_json(smoke_result),
+        "submission_id": str(current["submission_id"]),
+        "final_acceptance_stage": "accepted",
+        "provision_ref": str(provision.get("provision_ref") or ""),
+        "catalog_id": str(provision.get("catalog_id") or ""),
+        "registry_provider_id": str(
+            provision.get("registry_provider_id") or ""
+        ),
+        "provision_status": "provisioned_autoresearch_eligible",
     }
     existing_rewards = []
     existing = await select_one(
@@ -790,12 +921,16 @@ async def _process_leg1_reward(
             "alpha_percent": float(config.source_add_leg1_alpha_percent),
             "reward_epochs": int(config.lab_reward_epochs),
             "functional_probe_result": dict(functional_result),
+            "provisioning_smoke_result": smoke_result,
+            "accepted_submission": approval["accepted"],
+            "provision": provision,
+            "catalog": approval["catalog"],
             "trigger_evidence": trigger,
         },
         expected_result={"decision_kind": "source_add_leg1", "reward": leg1.to_dict()},
         artifact_kind="source_add_reward_decision",
         artifact_ref=leg1.reward_ref,
-        parent_graphs=(graph,),
+        parent_graphs=(functional_graph, smoke_graph),
     )
     decision_receipt = authority.get("execution_receipt") or authority.get("receipt")
     if not isinstance(decision_receipt, Mapping):

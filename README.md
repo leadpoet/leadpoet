@@ -95,6 +95,8 @@ Choose **Submit API Source** in the miner menu and enter:
 
 Do not submit API keys or other secrets. The gateway reviews the source and tests the API; an operator adds any required credential after submission.
 
+#### Auto Research
+
 How it works:
 
 1. The miner securely provides an OpenRouter API key and management key.

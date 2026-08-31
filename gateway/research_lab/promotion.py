@@ -4027,6 +4027,11 @@ class ResearchLabPromotionController:
     ) -> dict[str, Any]:
         if not getattr(self.config, "source_add_rewards_enabled", False):
             return {"source_add_reward_status": "disabled"}
+        leg2_alpha_percent = float(
+            getattr(self.config, "source_add_leg2_alpha_percent", 0.0)
+        )
+        if leg2_alpha_percent <= 0.0:
+            return {"source_add_reward_status": "disabled"}
         status = str(champion_reward_status.get("champion_reward_status") or "")
         if status not in {"created", "already_created"}:
             return {
@@ -4174,7 +4179,7 @@ class ResearchLabPromotionController:
                     "provision_ref": str(matched_row.get("provision_ref") or ""),
                 },
                 existing_rewards=reward_rows,
-                alpha_percent=float(getattr(self.config, "source_add_leg2_alpha_percent", 5.0) or 5.0),
+                alpha_percent=leg2_alpha_percent,
                 reward_epochs=int(getattr(self.config, "lab_reward_epochs", 20) or 20),
             )
             blockers: list[str] = []
@@ -4207,10 +4212,7 @@ class ResearchLabPromotionController:
                             "trigger_evidence": dict(leg2.trigger_evidence or {}),
                             "judge_result": dict(judge_result),
                             "existing_rewards": list(reward_rows),
-                            "alpha_percent": float(
-                                getattr(self.config, "source_add_leg2_alpha_percent", 5.0)
-                                or 5.0
-                            ),
+                            "alpha_percent": leg2_alpha_percent,
                             "reward_epochs": int(
                                 getattr(self.config, "lab_reward_epochs", 20) or 20
                             ),

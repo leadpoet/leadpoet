@@ -69,6 +69,7 @@ from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
     load_evidence_cache,
 )
+from research_lab.source_add_identity import normalize_source_add_domain
 from gateway.research_lab.provider_capabilities import (
     EffectiveProviderCapabilities,
     LiveTextModelCatalog,
@@ -551,6 +552,31 @@ def reserved_builtin_provider_ids_sync(path: str = "") -> set[str]:
         for item in capabilities.providers
         if str(item.get("origin") or "") == "builtin"
     }
+
+
+def reserved_builtin_provider_domains_sync(path: str = "") -> set[str]:
+    """API hosts already supplied by the exact built-in provider catalog."""
+
+    static_entries = _load_static_provider_registry(path)
+    domains = {
+        normalize_source_add_domain(entry.base_url)
+        for entry in static_entries
+        if normalize_source_add_domain(entry.base_url)
+    }
+    _entries, capabilities = load_provider_registry_with_capabilities(
+        path,
+        strict_remote=True,
+    )
+    domains.update(
+        domain
+        for item in capabilities.providers
+        if str(item.get("origin") or "") == "builtin"
+        for domain in (
+            normalize_source_add_domain(str(item.get("base_url") or "")),
+        )
+        if domain
+    )
+    return domains
 
 
 def _key_split_enabled(override: bool | None = None) -> bool:

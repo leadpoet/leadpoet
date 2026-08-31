@@ -851,6 +851,50 @@ class CoordinatorExecutorV2:
             graphs = list(context.external_receipt_authority_graphs())
         except ExecutionJobV2Error as exc:
             raise ValueError("reward decision parent authority is invalid") from exc
+        decision_payload = payload.get("decision_payload")
+        if not isinstance(decision_payload, Mapping):
+            raise ValueError("reward decision input is invalid")
+        if kind == "source_add_leg1":
+            functional = decision_payload.get("functional_probe_result")
+            smoke = decision_payload.get("provisioning_smoke_result")
+            roots = []
+            for graph in graphs:
+                root_hash = str(graph.get("root_receipt_hash") or "")
+                root = next(
+                    (
+                        receipt
+                        for receipt in graph.get("receipts") or ()
+                        if isinstance(receipt, Mapping)
+                        and receipt.get("receipt_hash") == root_hash
+                    ),
+                    None,
+                )
+                if not isinstance(root, Mapping):
+                    raise ValueError("reward decision parent purpose is invalid")
+                roots.append((root_hash, root))
+            if (
+                not isinstance(functional, Mapping)
+                or not isinstance(smoke, Mapping)
+                or len(graphs) != 2
+                or len(context.parent_receipt_hashes) != 2
+                or len(set(context.parent_receipt_hashes)) != 2
+                or {root_hash for root_hash, _root in roots}
+                != set(context.parent_receipt_hashes)
+                or any(
+                    root.get("purpose")
+                    != "research_lab.source_add_functional_probe.v2"
+                    for _root_hash, root in roots
+                )
+                or {str(root.get("output_root") or "") for _root_hash, root in roots}
+                != {
+                    sha256_json(dict(functional)),
+                    sha256_json(dict(smoke)),
+                }
+            ):
+                raise ValueError(
+                    "SOURCE_ADD Leg 1 requires exact functional and smoke parents"
+                )
+            return
         if len(graphs) != 1 or len(context.parent_receipt_hashes) != 1:
             raise ValueError("reward decision requires exactly one parent graph")
         graph = graphs[0]
@@ -867,16 +911,11 @@ class CoordinatorExecutorV2:
             or root_hash not in context.parent_receipt_hashes
         ):
             raise ValueError("reward decision parent purpose is invalid")
-        decision_payload = payload.get("decision_payload")
-        if not isinstance(decision_payload, Mapping):
-            raise ValueError("reward decision input is invalid")
         bound_result = None
         if kind == "champion":
             promotion_decision = decision_payload.get("promotion_decision")
             if isinstance(promotion_decision, Mapping):
                 bound_result = {"decision": dict(promotion_decision)}
-        elif kind == "source_add_leg1":
-            bound_result = decision_payload.get("functional_probe_result")
         elif kind == "source_add_leg2":
             bound_result = decision_payload.get("judge_result")
         elif kind == "reimbursement":

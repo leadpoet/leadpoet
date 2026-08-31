@@ -33,6 +33,78 @@ def test_leg2_reward_rejects_nonapproving_signed_judge():
         execute_reward_decision_v2(payload)
 
 
+def test_leg1_reward_requires_accepted_provisioned_smoke_evidence():
+    functional = {
+        "submission_id": "source_add_submission:1234567890abcdef",
+        "adapter_id": "adapter:test",
+        "config_ref": "source_add_probe_config:1234567890abcdef",
+        "evaluation_mode": "functional_probe",
+        "result_status": "passed",
+    }
+    smoke = {
+        **functional,
+        "evaluation_mode": "provisioning_smoke",
+    }
+    provision = {
+        "provision_ref": "source_add_provision:1234567890abcdef",
+        "catalog_id": "source_catalog:1234567890abcdef",
+        "submission_id": functional["submission_id"],
+        "adapter_id": "adapter:test",
+        "miner_hotkey": "miner",
+        "registry_provider_id": "provider:test",
+        "provision_status": "provisioned_autoresearch_eligible",
+    }
+    payload = {
+        "decision_kind": "source_add_leg1",
+        "decision_payload": {
+            "adapter_id": "adapter:test",
+            "miner_ref": "miner",
+            "start_epoch": 101,
+            "existing_rewards": [],
+            "alpha_percent": 1.0,
+            "reward_epochs": 20,
+            "functional_probe_result": functional,
+            "provisioning_smoke_result": smoke,
+            "accepted_submission": {
+                "submission_id": functional["submission_id"],
+                "adapter_id": "adapter:test",
+                "miner_hotkey": "miner",
+                "stage": "accepted",
+                "precheck_status": "provenance_precheck_passed",
+            },
+            "provision": provision,
+            "catalog": {
+                "catalog_id": provision["catalog_id"],
+                "adapter_id": "adapter:test",
+                "miner_ref": "miner",
+                "registry_provider_id": provision["registry_provider_id"],
+            },
+            "trigger_evidence": {
+                "functional_probe_passed": True,
+                "functional_probe_result_hash": sha256_json(functional),
+                "provisioning_smoke_passed": True,
+                "provisioning_smoke_result_hash": sha256_json(smoke),
+                "submission_id": functional["submission_id"],
+                "final_acceptance_stage": "accepted",
+                "provision_ref": provision["provision_ref"],
+                "catalog_id": provision["catalog_id"],
+                "registry_provider_id": provision["registry_provider_id"],
+                "provision_status": "provisioned_autoresearch_eligible",
+            },
+        },
+    }
+
+    result = execute_reward_decision_v2(payload)
+
+    assert result["decision_kind"] == "source_add_leg1"
+    assert result["reward"]["leg"] == 1
+    payload["decision_payload"]["accepted_submission"]["stage"] = (
+        "functional_probe_passed"
+    )
+    with pytest.raises(RewardExecutorV2Error, match="approval evidence is invalid"):
+        execute_reward_decision_v2(payload)
+
+
 def test_reward_row_projection_hashes_change_for_payout_field_mutation():
     champion = {
         "champion_reward_id": "champion:1",

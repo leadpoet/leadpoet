@@ -292,19 +292,22 @@ then make one deliberate SOURCE_ADD transition:
 
 ```bash
 /home/ec2-user/bin/research-lab-admin source-add status
-/home/ec2-user/bin/research-lab-admin source-add resume \
+/home/ec2-user/bin/research-lab-admin resume-source-add \
   --reason source_add_restart_validation_complete \
-  --actor-ref operator:gateway-restart \
-  --apply
+  --actor-ref operator:gateway-restart
+/home/ec2-user/bin/research-lab-admin source-add status
+curl -fsS http://127.0.0.1:8000/research-lab/status
 /home/ec2-user/bin/research-lab-admin status
 ```
 
 That command does not resume scoring or autoresearch and does not change the
 global miner-submission switch. Confirm the final status reports global miner
-submissions disabled while SOURCE_ADD control is active and SOURCE_ADD intake
-is enabled. Resume scoring or autoresearch only through their separate
-operator workflows when those workflows independently pass their own
-readiness checks.
+submissions disabled while the SOURCE_ADD control is active and SOURCE_ADD
+intake is enabled; the effective intake/dispatcher flags are reported by the
+HTTP status command above. Resume scoring or autoresearch only through their
+separate operator workflows when those workflows independently pass their own
+readiness checks. Pause SOURCE_ADD independently with
+`research-lab-admin pause-source-add --reason <reason> --actor-ref <actor>`.
 
 ## Rollback
 

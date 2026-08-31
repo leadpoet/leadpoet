@@ -66,7 +66,7 @@ import re
 import time
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import urlparse, urlunsplit
+from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -172,6 +172,16 @@ JOB_BODY_ANCHORS = (
     "job_position:", "job_description",
 )
 
+_WORKDAY_EXACT_POSTING_HOST_RE = re.compile(
+    r"^(?P<tenant>[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?)\."
+    r"(?:[a-z0-9-]+\.)?myworkdayjobs\.com$"
+)
+_WORKDAY_LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}(?:[-_][A-Za-z]{2})?$")
+_WORKDAY_CXS_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+_WORKDAY_REQUISITION_RE = re.compile(
+    r"^(?=[A-Za-z0-9-]{3,80}$)(?=.*\d)[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$"
+)
+
 
 def _looks_like_job_body(text: str) -> bool:
     if not text:
@@ -183,6 +193,198 @@ def _looks_like_job_body(text: str) -> bool:
 def _is_job_board_url(url: str) -> bool:
     host = _host(url)
     return any(h in host for h in JOB_BOARD_HOSTS)
+
+
+def _workday_cxs_url(source_url: str) -> str:
+    """Return the exact public CXS representation of one Workday posting.
+
+    Workday's human-facing posting is a JavaScript shell. Its public CXS URL
+    is bound to the same tenant, career site, path, and requisition. Returning
+    an empty string keeps every unrecognized shape on the existing generic
+    ScrapingDog/Exa path.
+    """
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "intent_signal.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return ""
+    host = (parsed.hostname or "").casefold()
+    host_match = _WORKDAY_EXACT_POSTING_HOST_RE.fullmatch(host)
+    if host_match is None or parsed.query or parsed.fragment:
+        return ""
+    segments = [
+        unquote(segment)
+        for segment in parsed.path.split("/")
+        if segment
+    ]
+    if segments and _WORKDAY_LOCALE_SEGMENT_RE.fullmatch(segments[0]):
+        segments = segments[1:]
+    if (
+        len(segments) < 3
+        or segments[1].casefold() != "job"
+        or _WORKDAY_CXS_SEGMENT_RE.fullmatch(segments[0]) is None
+    ):
+        return ""
+    posting_segments = segments[2:]
+    if any(
+        _WORKDAY_CXS_SEGMENT_RE.fullmatch(segment) is None
+        for segment in posting_segments
+    ):
+        return ""
+    posting_segment = posting_segments[-1]
+    requisition = next(
+        (
+            candidate
+            for candidate in (
+                posting_segment.rsplit("_", 1)[-1],
+                posting_segment,
+            )
+            if _WORKDAY_REQUISITION_RE.fullmatch(candidate)
+        ),
+        "",
+    )
+    if not requisition:
+        return ""
+    return urlunsplit((
+        "https",
+        host,
+        (
+            "/wday/cxs/"
+            + quote(host_match.group("tenant"), safe="-._~")
+            + "/"
+            + quote(segments[0], safe="-._~")
+            + "/job/"
+            + "/".join(
+                quote(segment, safe="-._~")
+                for segment in posting_segments
+            )
+        ),
+        "",
+        "",
+    ))
+
+
+async def _scrape_workday_cxs(source_url: str) -> Dict[str, Any]:
+    """Fetch one exact Workday posting through its public CXS transport.
+
+    This supplies evidence text only. The existing source-grounded Stage 3
+    judge remains the sole qualification authority. A failed CXS read falls
+    through to the pre-existing generic ScrapingDog/Exa route.
+    """
+
+    transport_url = _workday_cxs_url(source_url)
+    if not transport_url:
+        return {
+            "routed": False,
+            "ok": False,
+            "stage": "workday_not_applicable",
+            "content": "",
+            "error": "",
+        }
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {
+            "routed": True,
+            "ok": False,
+            "stage": "workday_no_sd_key",
+            "content": "",
+            "error": "missing key",
+        }
+    history: List[tuple[str, str]] = []
+    async with httpx.AsyncClient(timeout=SCRAPINGDOG_TERMINAL_TIMEOUT_S) as cli:
+        for attempt, extra in enumerate(({}, {"premium": "true"}), start=1):
+            try:
+                response = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    headers={"Accept": "application/json"},
+                    params={
+                        "api_key": api_key,
+                        "url": transport_url,
+                        "dynamic": "false",
+                        "custom_headers": "true",
+                        **extra,
+                    },
+                )
+            except httpx.TimeoutException:
+                history.append((f"attempt_{attempt}", "client_deadline"))
+                continue
+            except httpx.TransportError as exc:
+                history.append((
+                    f"attempt_{attempt}",
+                    "transport_error:" + type(exc).__name__,
+                ))
+                continue
+            status = int(response.status_code)
+            history.append((f"attempt_{attempt}", f"http_{status}"))
+            if status != 200:
+                if status in {400, 401, 402, 403, 404, 410, 422}:
+                    break
+                continue
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                history[-1] = (f"attempt_{attempt}", "invalid_json")
+                continue
+            posting = payload.get("jobPostingInfo") if isinstance(
+                payload, Mapping
+            ) else None
+            if not isinstance(posting, Mapping):
+                history[-1] = (f"attempt_{attempt}", "posting_missing")
+                continue
+            title = posting.get("title")
+            description = posting.get("jobDescription")
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or "\x00" in title
+                or not isinstance(description, str)
+                or not description.strip()
+                or "\x00" in description
+            ):
+                history[-1] = (f"attempt_{attempt}", "posting_invalid")
+                continue
+            exact_fields = []
+            for field_name in (
+                "title",
+                "jobReqId",
+                "postedOn",
+                "startDate",
+                "location",
+                "locationsText",
+                "timeType",
+                "workerSubType",
+                "jobDescription",
+            ):
+                value = posting.get(field_name)
+                if isinstance(value, str) and value.strip() and "\x00" not in value:
+                    exact_fields.append(value)
+            content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
+            if len(content) < 20:
+                history[-1] = (f"attempt_{attempt}", "posting_too_short")
+                continue
+            history[-1] = (f"attempt_{attempt}", "ok")
+            return {
+                "routed": True,
+                "ok": True,
+                "stage": f"sd:workday_cxs:{attempt}",
+                "content": content,
+                "error": "",
+                "stage_history": history,
+            }
+    return {
+        "routed": True,
+        "ok": False,
+        "stage": "workday_cxs_exhausted",
+        "content": "",
+        "error": history[-1][1] if history else "not_attempted",
+        "stage_history": history,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1225,6 +1427,33 @@ async def _fetch_sd_then_exa(
             statuses.append({
                 "url": url, "source": "scrapingdog_linkedin_post_failed",
                 "linkedin_post_stage": lp.get("stage"), "linkedin_post_error": lp.get("error"),
+            })
+
+        # Workday's human-facing posting URL is a JavaScript shell. Fetch its
+        # exact tenant/site/requisition-bound public CXS representation first,
+        # while preserving the original URL as the evidence identity seen by
+        # the source-grounded verifier. If the CXS route is unavailable, the
+        # existing generic ScrapingDog/Exa cascade below remains unchanged.
+        workday = await _scrape_workday_cxs(url)
+        if workday.get("routed"):
+            if workday.get("ok") and workday.get("content"):
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "text": str(workday["content"])[:max_chars],
+                    "meta": {"kind": "workday_job"},
+                })
+                statuses.append({
+                    "url": url,
+                    "source": "scrapingdog_workday_cxs",
+                    "stage": workday.get("stage"),
+                })
+                continue
+            statuses.append({
+                "url": url,
+                "source": "scrapingdog_workday_cxs_fallback",
+                "workday_stage": workday.get("stage"),
+                "workday_error": workday.get("error"),
             })
 
         # Facebook post → skip SD generic (returns the JS shell that fools the

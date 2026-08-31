@@ -2927,11 +2927,14 @@ class _LocalVsock:
                 raise ValueError(
                     "persistent validator enclave service is unavailable"
                 )
+            tee_service = __import__(
+                "validator_tee.enclave.tee_service",
+                fromlist=["x"],
+            )
             request = json.loads(
-                __import__("validator_tee.enclave.tee_service", fromlist=["x"])
-                ._decode_rpc_payload(
+                tee_service._decode_rpc_payload(
                     body,
-                    logical_limit=64 * 1024 * 1024,
+                    logical_limit=tee_service.MAX_RPC_REQUEST_BYTES,
                 )
             )
             method = str(request.get("command") or "")
@@ -2953,7 +2956,11 @@ class _LocalVsock:
                         "persistent validator enclave response is incomplete"
                     )
                 response_size = int.from_bytes(prefix, "big")
-                if response_size < 2 or response_size > 16 * 1024 * 1024:
+                if (
+                    response_size < 2
+                    or response_size
+                    > tee_service.MAX_RPC_RESPONSE_FRAME_BYTES
+                ):
                     raise ValueError(
                         "persistent validator enclave response size differs"
                     )

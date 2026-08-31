@@ -1,4 +1,5 @@
 import asyncio
+import ast
 import json
 import os
 import socket
@@ -117,6 +118,44 @@ def test_validator_receives_production_sized_receipt_graph_request():
 
     assert observed == request
     assert framed is True
+
+
+def test_restart_rehearsal_validator_relay_uses_candidate_frame_limits():
+    source_path = (
+        Path(__file__).resolve().parent
+        / "restart_rehearsal"
+        / "sitecustomize.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    classes = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "_LocalVsock"
+    ]
+    assert len(classes) == 1
+    sendall = [
+        node
+        for node in classes[0].body
+        if isinstance(node, ast.FunctionDef) and node.name == "sendall"
+    ]
+    assert len(sendall) == 1
+    decode_calls = [
+        node
+        for node in ast.walk(sendall[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_decode_rpc_payload"
+    ]
+    assert len(decode_calls) == 1
+    decode_keywords = {
+        keyword.arg: keyword.value for keyword in decode_calls[0].keywords
+    }
+    logical_limit = decode_keywords.get("logical_limit")
+    assert isinstance(logical_limit, ast.Attribute)
+    assert isinstance(logical_limit.value, ast.Name)
+    assert logical_limit.value.id == "tee_service"
+    assert logical_limit.attr == "MAX_RPC_REQUEST_BYTES"
+    assert "tee_service.MAX_RPC_RESPONSE_FRAME_BYTES" in ast.unparse(sendall[0])
 
 
 def test_validator_large_response_uses_same_bounded_compressed_frame():

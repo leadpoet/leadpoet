@@ -181,6 +181,10 @@ _WORKDAY_CXS_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 _WORKDAY_REQUISITION_RE = re.compile(
     r"^(?=[A-Za-z0-9-]{3,80}$)(?=.*\d)[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$"
 )
+_WORKABLE_EXACT_POSTING_PATH_RE = re.compile(
+    r"^/(?P<account>[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?)/j/"
+    r"(?P<posting>[A-Za-z0-9]{6,64})/?$"
+)
 
 
 def _looks_like_job_body(text: str) -> bool:
@@ -262,6 +266,38 @@ def _workday_cxs_url(source_url: str) -> str:
                 quote(segment, safe="-._~")
                 for segment in posting_segments
             )
+        ),
+        "",
+        "",
+    ))
+
+
+def _workable_markdown_url(source_url: str) -> str:
+    """Return Workable's exact account/posting-bound Markdown URL."""
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "intent_signal.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return ""
+    if (
+        (parsed.hostname or "").casefold() != "apply.workable.com"
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    match = _WORKABLE_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return ""
+    return urlunsplit((
+        "https",
+        "apply.workable.com",
+        (
+            f"/{match.group('account')}/jobs/view/"
+            f"{match.group('posting')}.md"
         ),
         "",
         "",
@@ -1427,6 +1463,33 @@ async def _fetch_sd_then_exa(
             statuses.append({
                 "url": url, "source": "scrapingdog_linkedin_post_failed",
                 "linkedin_post_stage": lp.get("stage"), "linkedin_post_error": lp.get("error"),
+            })
+
+        # Workable exposes a deterministic account/posting-bound Markdown
+        # representation for its JavaScript posting shell. Use the same exact
+        # representation as the model and retain the human URL as evidence
+        # identity. Failure falls through to the existing generic cascade.
+        workable_transport = _workable_markdown_url(url)
+        if workable_transport:
+            workable = await _scrape_exa(workable_transport)
+            if workable.get("ok") and workable.get("content"):
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "text": str(workable["content"])[:max_chars],
+                    "meta": {"kind": "workable_job"},
+                })
+                statuses.append({
+                    "url": url,
+                    "source": "exa_workable_markdown",
+                    "stage": workable.get("stage"),
+                })
+                continue
+            statuses.append({
+                "url": url,
+                "source": "exa_workable_markdown_fallback",
+                "workable_stage": workable.get("stage"),
+                "workable_error": workable.get("error"),
             })
 
         # Workday's human-facing posting URL is a JavaScript shell. Fetch its

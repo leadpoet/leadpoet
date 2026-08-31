@@ -130,6 +130,7 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         "research_lab_source_add_claim_work",
         "research_lab_source_add_set_paused",
         "research_lab_source_add_acquire_restart_guard_v1",
+        "research_lab_source_add_restart_guard_state_v1",
         "research_lab_source_add_restart_quiescence_v1",
         "research_lab_source_add_release_restart_guard_v1",
         "research_lab_source_add_claim_control_contract_v1",

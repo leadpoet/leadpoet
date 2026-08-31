@@ -587,16 +587,57 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
         "acquire_guard_rpc": (
             "research_lab_source_add_acquire_restart_guard_v1"
         ),
-        "acquire_guard_signature": "text,integer,text",
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v1"
+        ),
+        "guard_state_signature": "",
         "release_guard_rpc": (
             "research_lab_source_add_release_restart_guard_v1"
         ),
-        "release_guard_signature": "text,text",
+        "release_guard_signature": "text,text,bigint,text",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+        ],
         "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
         "guard_commitment": "sha256_utf8_guard_id",
+        "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
+        "owner_commitment": "sha256_utf8_owner_id",
+        "owner_generation_commitment": (
+            "sha256_utf8_owner_commitment_colon_decimal_generation"
+        ),
         "guard_lease_min_seconds": 60,
-        "guard_lease_max_seconds": 3600,
-        "active_guard_replay_extends_lease": False,
+        "guard_lease_max_seconds": 14400,
+        "active_guard_replay_extends_lease": True,
+        "acquire_compare_and_swap": "expected_generation",
+        "different_owner_takeover_increments_generation": True,
+        "expired_reacquire_increments_generation": True,
+        "generation_retained_after_release": True,
         "resume_requires_guard_clear": True,
         "expired_guard_recovery": (
             "explicit_reacquire_then_exact_release"
@@ -605,7 +646,7 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
         "restart_quiescence_rpc": (
             "research_lab_source_add_restart_quiescence_v1"
         ),
-        "restart_quiescence_signature": "text",
+        "restart_quiescence_signature": "text,text,bigint",
         "restart_quiescence_schema_version": (
             "leadpoet.source_add_restart_quiescence.v1"
         ),
@@ -614,7 +655,12 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
             "paused",
             "guard_active",
             "guard_matches",
+            "owner_matches",
+            "generation_matches",
             "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
             "guard_expires_at",
             "leased_work_count",
             "quiescent",
@@ -632,6 +678,7 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
             "claim_work": True,
             "pause": True,
             "release_restart_guard_v1": True,
+            "restart_guard_state_v1": True,
             "restart_quiescence_v1": True,
         },
         "permissions": {
@@ -641,6 +688,7 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
             "pause_service_role_callable": True,
             "quiescence_service_role_callable": True,
             "release_guard_service_role_callable": True,
+            "guard_state_service_role_callable": True,
             "contract_service_role_callable": True,
             "anon_callable": False,
             "authenticated_callable": False,

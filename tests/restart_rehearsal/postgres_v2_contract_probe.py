@@ -6144,16 +6144,57 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "acquire_guard_rpc": (
                 "research_lab_source_add_acquire_restart_guard_v1"
             ),
-            "acquire_guard_signature": "text,integer,text",
+            "acquire_guard_signature": "text,text,bigint,integer,text",
+            "guard_state_rpc": (
+                "research_lab_source_add_restart_guard_state_v1"
+            ),
+            "guard_state_signature": "",
             "release_guard_rpc": (
                 "research_lab_source_add_release_restart_guard_v1"
             ),
-            "release_guard_signature": "text,text",
+            "release_guard_signature": "text,text,bigint,text",
+            "guard_state_result_fields": [
+                "schema_version",
+                "paused",
+                "guard_active",
+                "guard_commitment",
+                "owner_commitment",
+                "guard_generation",
+                "owner_generation_commitment",
+                "guard_expires_at",
+            ],
+            "acquire_guard_result_fields": [
+                "schema_version",
+                "paused",
+                "guard_active",
+                "guard_commitment",
+                "owner_commitment",
+                "guard_generation",
+                "owner_generation_commitment",
+                "guard_expires_at",
+            ],
+            "release_guard_result_fields": [
+                "schema_version",
+                "released",
+                "paused",
+                "guard_active",
+                "guard_generation",
+                "owner_generation_commitment",
+            ],
             "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
             "guard_commitment": "sha256_utf8_guard_id",
+            "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
+            "owner_commitment": "sha256_utf8_owner_id",
+            "owner_generation_commitment": (
+                "sha256_utf8_owner_commitment_colon_decimal_generation"
+            ),
             "guard_lease_min_seconds": 60,
-            "guard_lease_max_seconds": 3600,
-            "active_guard_replay_extends_lease": False,
+            "guard_lease_max_seconds": 14400,
+            "active_guard_replay_extends_lease": True,
+            "acquire_compare_and_swap": "expected_generation",
+            "different_owner_takeover_increments_generation": True,
+            "expired_reacquire_increments_generation": True,
+            "generation_retained_after_release": True,
             "resume_requires_guard_clear": True,
             "expired_guard_recovery": (
                 "explicit_reacquire_then_exact_release"
@@ -6162,7 +6203,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "restart_quiescence_rpc": (
                 "research_lab_source_add_restart_quiescence_v1"
             ),
-            "restart_quiescence_signature": "text",
+            "restart_quiescence_signature": "text,text,bigint",
             "restart_quiescence_schema_version": (
                 "leadpoet.source_add_restart_quiescence.v1"
             ),
@@ -6171,7 +6212,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "paused",
                 "guard_active",
                 "guard_matches",
+                "owner_matches",
+                "generation_matches",
                 "guard_commitment",
+                "owner_commitment",
+                "guard_generation",
+                "owner_generation_commitment",
                 "guard_expires_at",
                 "leased_work_count",
                 "quiescent",
@@ -6181,8 +6227,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "migration_requires_paused": True,
             "migration_requires_zero_leased": True,
             "function_authority_sha256": (
-                "sha256:19fccedcf8fd926deca4e1af2d067c258"
-                "66a70d800f3991a24e1501eacb74731"
+                "sha256:890a1e42b6dd28eb1c8515c3b8c33d31"
+                "a9974058fbd2c43393bb0880c0ca21e6"
             ),
             "functions": {
                 "admission_guard": True,
@@ -6190,6 +6236,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "claim_work": True,
                 "pause": True,
                 "release_restart_guard_v1": True,
+                "restart_guard_state_v1": True,
                 "restart_quiescence_v1": True,
             },
             "permissions": {
@@ -6199,6 +6246,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "pause_service_role_callable": True,
                 "quiescence_service_role_callable": True,
                 "release_guard_service_role_callable": True,
+                "guard_state_service_role_callable": True,
                 "contract_service_role_callable": True,
                 "anon_callable": False,
                 "authenticated_callable": False,
@@ -6211,13 +6259,48 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         rehearsal_guard_commitment = "sha256:" + hashlib.sha256(
             rehearsal_guard_id.encode("utf-8")
         ).hexdigest()
+        rehearsal_owner_id = "source_add_restart_owner:" + "e" * 64
+        rehearsal_owner_commitment = "sha256:" + hashlib.sha256(
+            rehearsal_owner_id.encode("utf-8")
+        ).hexdigest()
+        rehearsal_owner_generation_commitment = (
+            "sha256:"
+            + hashlib.sha256(
+                f"{rehearsal_owner_commitment}:1".encode("utf-8")
+            ).hexdigest()
+        )
+        source_add_restart_guard_state = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_restart_guard_state_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_restart_guard_state != {
+            "schema_version": "leadpoet.source_add_restart_guard_state.v1",
+            "paused": True,
+            "guard_active": False,
+            "guard_commitment": "",
+            "owner_commitment": "",
+            "guard_generation": 0,
+            "owner_generation_commitment": "",
+            "guard_expires_at": None,
+        }:
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD restart guard initial state differs"
+            )
         source_add_restart_guard = json.loads(
             database.psql(
                 """
                 SELECT public.research_lab_source_add_acquire_restart_guard_v1(
-                    :'guard_id', 300, 'operator:restart-rehearsal'
+                    :'guard_id', :'owner_id', 0, 14400,
+                    'operator:restart-rehearsal'
                 )::text;
-                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
                 tuples_only=True,
             ).stdout.strip()
         )
@@ -6228,6 +6311,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             or source_add_restart_guard.get("guard_active") is not True
             or source_add_restart_guard.get("guard_commitment")
             != rehearsal_guard_commitment
+            or source_add_restart_guard.get("owner_commitment")
+            != rehearsal_owner_commitment
+            or source_add_restart_guard.get("guard_generation") != 1
+            or source_add_restart_guard.get(
+                "owner_generation_commitment"
+            )
+            != rehearsal_owner_generation_commitment
             or not isinstance(
                 source_add_restart_guard.get("guard_expires_at"), str
             )
@@ -6239,9 +6329,11 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             database.psql(
                 """
                 SELECT public.research_lab_source_add_restart_quiescence_v1(
-                    :'guard_id'
+                    :'guard_id', :'owner_id', 1
                 )::text;
-                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
                 tuples_only=True,
             ).stdout.strip()
         )
@@ -6251,8 +6343,18 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             or source_add_restart_quiescence.get("paused") is not True
             or source_add_restart_quiescence.get("guard_active") is not True
             or source_add_restart_quiescence.get("guard_matches") is not True
+            or source_add_restart_quiescence.get("owner_matches") is not True
+            or source_add_restart_quiescence.get("generation_matches")
+            is not True
             or source_add_restart_quiescence.get("guard_commitment")
             != rehearsal_guard_commitment
+            or source_add_restart_quiescence.get("owner_commitment")
+            != rehearsal_owner_commitment
+            or source_add_restart_quiescence.get("guard_generation") != 1
+            or source_add_restart_quiescence.get(
+                "owner_generation_commitment"
+            )
+            != rehearsal_owner_generation_commitment
             or source_add_restart_quiescence.get("leased_work_count") != 0
             or source_add_restart_quiescence.get("quiescent") is not True
         ):
@@ -6263,9 +6365,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             database.psql(
                 """
                 SELECT public.research_lab_source_add_release_restart_guard_v1(
-                    :'guard_id', 'operator:restart-rehearsal'
+                    :'guard_id', :'owner_id', 1,
+                    'operator:restart-rehearsal'
                 )::text;
-                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
                 tuples_only=True,
             ).stdout.strip()
         )
@@ -6274,9 +6379,38 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "released": True,
             "paused": True,
             "guard_active": False,
+            "guard_generation": 1,
+            "owner_generation_commitment": (
+                rehearsal_owner_generation_commitment
+            ),
         }:
             raise PostgresContractProbeError(
                 "post-172 SOURCE_ADD restart guard release differs"
+            )
+        source_add_restart_guard_state = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_restart_guard_state_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            source_add_restart_guard_state.get("paused") is not True
+            or source_add_restart_guard_state.get("guard_active") is not False
+            or source_add_restart_guard_state.get("guard_commitment") != ""
+            or source_add_restart_guard_state.get("owner_commitment") != ""
+            or source_add_restart_guard_state.get("guard_generation") != 1
+            or source_add_restart_guard_state.get(
+                "owner_generation_commitment"
+            )
+            != ""
+            or source_add_restart_guard_state.get("guard_expires_at")
+            is not None
+        ):
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD restart guard released state differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

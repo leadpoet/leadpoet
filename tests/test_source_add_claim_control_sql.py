@@ -43,7 +43,7 @@ def test_application_requires_paused_and_every_lease_drained() -> None:
 def test_claim_locks_control_before_reading_pause_or_work() -> None:
     claim = _function_body(
         "research_lab_source_add_claim_work",
-        "research_lab_source_add_restart_quiescence_v1",
+        "research_lab_source_add_restart_guard_state_v1",
     )
     control_lock = claim.index("hashtextextended('source-add-control', 0)")
     paused_read = claim.index(
@@ -82,7 +82,12 @@ def test_quiescence_uses_same_lock_and_counts_expired_leases() -> None:
         "'paused'",
         "'guard_active'",
         "'guard_matches'",
+        "'owner_matches'",
+        "'generation_matches'",
         "'guard_commitment'",
+        "'owner_commitment'",
+        "'guard_generation'",
+        "'owner_generation_commitment'",
         "'guard_expires_at'",
         "'leased_work_count'",
         "'quiescent'",
@@ -95,6 +100,7 @@ def test_exact_authority_and_private_rpc_surface_are_restart_required() -> None:
         "research_lab_source_add_claim_work",
         "research_lab_source_add_set_paused",
         "research_lab_source_add_acquire_restart_guard_v1",
+        "research_lab_source_add_restart_guard_state_v1",
         "research_lab_source_add_restart_quiescence_v1",
         "research_lab_source_add_release_restart_guard_v1",
         "research_lab_source_add_claim_control_contract_v1",
@@ -113,6 +119,7 @@ def test_exact_authority_and_private_rpc_surface_are_restart_required() -> None:
         "contract_v1",
         "pause",
         "release_restart_guard_v1",
+        "restart_guard_state_v1",
         "restart_quiescence_v1",
     ):
         assert f"'{authority}'" in SQL
@@ -120,20 +127,48 @@ def test_exact_authority_and_private_rpc_surface_are_restart_required() -> None:
 
 def test_restart_guard_is_bounded_exact_and_never_auto_resumes() -> None:
     assert "restart_guard_commitment TEXT NOT NULL DEFAULT ''" in SQL
+    assert "restart_guard_owner_commitment TEXT NOT NULL DEFAULT ''" in SQL
+    assert "restart_guard_generation BIGINT NOT NULL DEFAULT 0" in SQL
     assert "research_lab_source_add_control_restart_guard_check" in SQL
-    assert "NOT BETWEEN 60 AND 3600" in SQL
+    assert "NOT BETWEEN 60 AND 14400" in SQL
     assert "^source_add_restart_guard:[0-9a-f]{64}$" in SQL
+    assert "^source_add_restart_owner:[0-9a-f]{64}$" in SQL
     assert "sha256_utf8_guard_id" in SQL
-    assert "active_guard_replay_extends_lease', FALSE" in SQL
+    assert "sha256_utf8_owner_id" in SQL
+    assert (
+        "sha256_utf8_owner_commitment_colon_decimal_generation" in SQL
+    )
+    assert "active_guard_replay_extends_lease', TRUE" in SQL
+    assert "acquire_compare_and_swap', 'expected_generation'" in SQL
+    assert "different_owner_takeover_increments_generation', TRUE" in SQL
+    assert "expired_reacquire_increments_generation', TRUE" in SQL
+    assert "generation_retained_after_release', TRUE" in SQL
     assert "explicit_reacquire_then_exact_release" in SQL
     assert "release_keeps_paused', TRUE" in SQL
     assert (
         "IF p_paused IS NOT TRUE AND v_guard_commitment <> '' THEN" in SQL
     )
-    assert "restart guard identity does not match" in SQL
+    assert "restart guard owner or generation does not match" in SQL
+    acquire = _function_body(
+        "research_lab_source_add_acquire_restart_guard_v1",
+        "research_lab_source_add_set_paused",
+    )
+    assert "v_existing_generation <> p_expected_generation" in acquire
+    assert (
+        "v_existing_commitment <> v_guard_commitment THEN" in acquire
+    )
+    assert "v_next_generation := v_existing_generation + 1" in acquire
+    renewal = acquire.split(
+        "IF v_existing_commitment = v_guard_commitment", 1
+    )[1].split("ELSE", 1)[0]
+    assert "SET restart_guard_expires_at = v_expires_at" in renewal
+    assert "updated_at" not in renewal
+    assert "actor_ref" not in renewal
     release = _function_body(
         "research_lab_source_add_release_restart_guard_v1",
         "research_lab_source_add_restart_quiescence_v1",
     )
     assert "SET paused = TRUE" in release
     assert "restart_guard_commitment = ''" in release
+    assert "restart_guard_owner_commitment = ''" in release
+    assert "restart_guard_generation = 0" not in release

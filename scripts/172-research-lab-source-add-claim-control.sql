@@ -48,39 +48,37 @@ $preflight$;
 
 ALTER TABLE public.research_lab_source_add_control
     ADD COLUMN IF NOT EXISTS restart_guard_commitment TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS restart_guard_owner_commitment TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS restart_guard_generation BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS restart_guard_expires_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS restart_guard_acquired_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS restart_guard_actor_ref TEXT NOT NULL DEFAULT '';
 
-DO $guard_constraint$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_constraint constraint_meta
-        WHERE constraint_meta.conrelid =
-            'public.research_lab_source_add_control'::REGCLASS
-          AND constraint_meta.conname =
-            'research_lab_source_add_control_restart_guard_check'
-    ) THEN
-        ALTER TABLE public.research_lab_source_add_control
-            ADD CONSTRAINT research_lab_source_add_control_restart_guard_check
-            CHECK (
-                (
-                    restart_guard_commitment = ''
-                    AND restart_guard_expires_at IS NULL
-                    AND restart_guard_acquired_at IS NULL
-                    AND restart_guard_actor_ref = ''
-                ) OR (
-                    restart_guard_commitment
-                        ~ '^sha256:[0-9a-f]{64}$'
-                    AND restart_guard_expires_at IS NOT NULL
-                    AND restart_guard_acquired_at IS NOT NULL
-                    AND restart_guard_actor_ref <> ''
-                )
-            );
-    END IF;
-END;
-$guard_constraint$;
+ALTER TABLE public.research_lab_source_add_control
+    DROP CONSTRAINT IF EXISTS
+        research_lab_source_add_control_restart_guard_check;
+ALTER TABLE public.research_lab_source_add_control
+    ADD CONSTRAINT research_lab_source_add_control_restart_guard_check
+    CHECK (
+        restart_guard_generation >= 0
+        AND (
+            (
+                restart_guard_commitment = ''
+                AND restart_guard_owner_commitment = ''
+                AND restart_guard_expires_at IS NULL
+                AND restart_guard_acquired_at IS NULL
+                AND restart_guard_actor_ref = ''
+            ) OR (
+                restart_guard_commitment ~ '^sha256:[0-9a-f]{64}$'
+                AND restart_guard_owner_commitment
+                    ~ '^sha256:[0-9a-f]{64}$'
+                AND restart_guard_generation > 0
+                AND restart_guard_expires_at IS NOT NULL
+                AND restart_guard_acquired_at IS NOT NULL
+                AND restart_guard_actor_ref <> ''
+            )
+        )
+    );
 
 CREATE OR REPLACE FUNCTION public.research_lab_source_add_claim_work(
     p_worker_id TEXT,
@@ -179,8 +177,72 @@ BEGIN
 END;
 $function$;
 
+CREATE OR REPLACE FUNCTION public.research_lab_source_add_restart_guard_state_v1()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+    v_paused BOOLEAN;
+    v_guard_commitment TEXT;
+    v_owner_commitment TEXT;
+    v_guard_generation BIGINT;
+    v_guard_expires_at TIMESTAMPTZ;
+    v_guard_active BOOLEAN;
+    v_owner_generation_commitment TEXT := '';
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('source-add-control', 0)
+    );
+    SELECT
+        control.paused,
+        control.restart_guard_commitment,
+        control.restart_guard_owner_commitment,
+        control.restart_guard_generation,
+        control.restart_guard_expires_at
+    INTO
+        v_paused,
+        v_guard_commitment,
+        v_owner_commitment,
+        v_guard_generation,
+        v_guard_expires_at
+    FROM public.research_lab_source_add_control control
+    WHERE control.singleton;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'SOURCE_ADD control row is unavailable';
+    END IF;
+    v_guard_active := v_guard_commitment <> ''
+        AND v_guard_expires_at > pg_catalog.clock_timestamp();
+    IF v_owner_commitment <> '' THEN
+        v_owner_generation_commitment := 'sha256:' || pg_catalog.encode(
+            extensions.digest(
+                pg_catalog.convert_to(
+                    v_owner_commitment || ':' || v_guard_generation::TEXT,
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        );
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+        'schema_version', 'leadpoet.source_add_restart_guard_state.v1',
+        'paused', v_paused,
+        'guard_active', v_guard_active,
+        'guard_commitment', v_guard_commitment,
+        'owner_commitment', v_owner_commitment,
+        'guard_generation', v_guard_generation,
+        'owner_generation_commitment', v_owner_generation_commitment,
+        'guard_expires_at', v_guard_expires_at
+    );
+END;
+$function$;
+
 CREATE OR REPLACE FUNCTION public.research_lab_source_add_acquire_restart_guard_v1(
     p_guard_id TEXT,
+    p_owner_id TEXT,
+    p_expected_generation BIGINT,
     p_lease_seconds INTEGER,
     p_actor_ref TEXT
 )
@@ -191,14 +253,22 @@ SET search_path = pg_catalog, public
 AS $function$
 DECLARE
     v_guard_commitment TEXT;
+    v_owner_commitment TEXT;
     v_existing_commitment TEXT;
+    v_existing_owner_commitment TEXT;
+    v_existing_generation BIGINT;
     v_existing_expires_at TIMESTAMPTZ;
+    v_next_generation BIGINT;
+    v_owner_generation_commitment TEXT;
     v_now TIMESTAMPTZ;
     v_expires_at TIMESTAMPTZ;
 BEGIN
     IF COALESCE(p_guard_id, '')
           !~ '^source_add_restart_guard:[0-9a-f]{64}$'
-       OR COALESCE(p_lease_seconds, 0) NOT BETWEEN 60 AND 3600
+       OR COALESCE(p_owner_id, '')
+          !~ '^source_add_restart_owner:[0-9a-f]{64}$'
+       OR COALESCE(p_expected_generation, -1) < 0
+       OR COALESCE(p_lease_seconds, 0) NOT BETWEEN 60 AND 14400
        OR COALESCE(btrim(p_actor_ref), '') = '' THEN
         RAISE EXCEPTION 'SOURCE_ADD restart guard input is invalid';
     END IF;
@@ -209,18 +279,34 @@ BEGIN
         ),
         'hex'
     );
+    v_owner_commitment := 'sha256:' || pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(p_owner_id, 'UTF8'),
+            'sha256'
+        ),
+        'hex'
+    );
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('source-add-control', 0)
     );
     v_now := pg_catalog.clock_timestamp();
     SELECT
         control.restart_guard_commitment,
+        control.restart_guard_owner_commitment,
+        control.restart_guard_generation,
         control.restart_guard_expires_at
-    INTO v_existing_commitment, v_existing_expires_at
+    INTO
+        v_existing_commitment,
+        v_existing_owner_commitment,
+        v_existing_generation,
+        v_existing_expires_at
     FROM public.research_lab_source_add_control control
     WHERE control.singleton;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'SOURCE_ADD control row is unavailable';
+    END IF;
+    IF v_existing_generation <> p_expected_generation THEN
+        RAISE EXCEPTION 'SOURCE_ADD restart guard generation differs';
     END IF;
     IF v_existing_commitment <> ''
        AND v_existing_expires_at > v_now
@@ -229,18 +315,24 @@ BEGIN
     END IF;
 
     IF v_existing_commitment = v_guard_commitment
+       AND v_existing_owner_commitment = v_owner_commitment
        AND v_existing_expires_at > v_now THEN
-        -- Exact active replay is idempotent and deliberately does not extend
-        -- the bounded lease. A boundary which needs more time must wait for
-        -- expiry and explicitly reacquire before proving quiescence again.
+        -- An exact active owner/generation replay is a bounded renewal. It
+        -- changes only the lease expiry, preserving the legacy five-field
+        -- control commitment already bound into the restart proof.
+        v_next_generation := v_existing_generation;
+        v_expires_at := GREATEST(
+            v_existing_expires_at,
+            v_now + pg_catalog.make_interval(secs => p_lease_seconds)
+        );
         UPDATE public.research_lab_source_add_control
-        SET paused = TRUE,
-            reason = 'canonical_restart_guard',
-            actor_ref = left(p_actor_ref, 200),
-            updated_at = NOW()
-        WHERE singleton
-        RETURNING restart_guard_expires_at INTO v_expires_at;
+        SET restart_guard_expires_at = v_expires_at
+        WHERE singleton;
     ELSE
+        IF v_existing_generation = 9223372036854775807 THEN
+            RAISE EXCEPTION 'SOURCE_ADD restart guard generation is exhausted';
+        END IF;
+        v_next_generation := v_existing_generation + 1;
         v_expires_at := v_now
             + pg_catalog.make_interval(secs => p_lease_seconds);
         UPDATE public.research_lab_source_add_control
@@ -249,16 +341,31 @@ BEGIN
             actor_ref = left(p_actor_ref, 200),
             updated_at = NOW(),
             restart_guard_commitment = v_guard_commitment,
+            restart_guard_owner_commitment = v_owner_commitment,
+            restart_guard_generation = v_next_generation,
             restart_guard_expires_at = v_expires_at,
             restart_guard_acquired_at = v_now,
             restart_guard_actor_ref = left(p_actor_ref, 200)
         WHERE singleton;
     END IF;
+    v_owner_generation_commitment := 'sha256:' || pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(
+                v_owner_commitment || ':' || v_next_generation::TEXT,
+                'UTF8'
+            ),
+            'sha256'
+        ),
+        'hex'
+    );
     RETURN pg_catalog.jsonb_build_object(
         'schema_version', 'leadpoet.source_add_restart_guard.v1',
         'paused', TRUE,
         'guard_active', TRUE,
         'guard_commitment', v_guard_commitment,
+        'owner_commitment', v_owner_commitment,
+        'guard_generation', v_next_generation,
+        'owner_generation_commitment', v_owner_generation_commitment,
         'guard_expires_at', v_expires_at
     );
 END;
@@ -314,6 +421,8 @@ $function$;
 
 CREATE OR REPLACE FUNCTION public.research_lab_source_add_release_restart_guard_v1(
     p_guard_id TEXT,
+    p_owner_id TEXT,
+    p_guard_generation BIGINT,
     p_actor_ref TEXT
 )
 RETURNS JSONB
@@ -323,10 +432,17 @@ SET search_path = pg_catalog, public
 AS $function$
 DECLARE
     v_guard_commitment TEXT;
+    v_owner_commitment TEXT;
+    v_owner_generation_commitment TEXT;
     v_existing_commitment TEXT;
+    v_existing_owner_commitment TEXT;
+    v_existing_generation BIGINT;
 BEGIN
     IF COALESCE(p_guard_id, '')
           !~ '^source_add_restart_guard:[0-9a-f]{64}$'
+       OR COALESCE(p_owner_id, '')
+          !~ '^source_add_restart_owner:[0-9a-f]{64}$'
+       OR COALESCE(p_guard_generation, 0) <= 0
        OR COALESCE(btrim(p_actor_ref), '') = '' THEN
         RAISE EXCEPTION 'SOURCE_ADD restart guard release input is invalid';
     END IF;
@@ -337,19 +453,44 @@ BEGIN
         ),
         'hex'
     );
+    v_owner_commitment := 'sha256:' || pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(p_owner_id, 'UTF8'),
+            'sha256'
+        ),
+        'hex'
+    );
+    v_owner_generation_commitment := 'sha256:' || pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(
+                v_owner_commitment || ':' || p_guard_generation::TEXT,
+                'UTF8'
+            ),
+            'sha256'
+        ),
+        'hex'
+    );
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended('source-add-control', 0)
     );
-    SELECT control.restart_guard_commitment
-    INTO v_existing_commitment
+    SELECT
+        control.restart_guard_commitment,
+        control.restart_guard_owner_commitment,
+        control.restart_guard_generation
+    INTO
+        v_existing_commitment,
+        v_existing_owner_commitment,
+        v_existing_generation
     FROM public.research_lab_source_add_control control
     WHERE control.singleton;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'SOURCE_ADD control row is unavailable';
     END IF;
     IF v_existing_commitment = ''
-       OR v_existing_commitment <> v_guard_commitment THEN
-        RAISE EXCEPTION 'SOURCE_ADD restart guard identity does not match';
+       OR v_existing_commitment <> v_guard_commitment
+       OR v_existing_owner_commitment <> v_owner_commitment
+       OR v_existing_generation <> p_guard_generation THEN
+        RAISE EXCEPTION 'SOURCE_ADD restart guard owner or generation does not match';
     END IF;
     UPDATE public.research_lab_source_add_control
     SET paused = TRUE,
@@ -357,6 +498,7 @@ BEGIN
         actor_ref = left(p_actor_ref, 200),
         updated_at = NOW(),
         restart_guard_commitment = '',
+        restart_guard_owner_commitment = '',
         restart_guard_expires_at = NULL,
         restart_guard_acquired_at = NULL,
         restart_guard_actor_ref = ''
@@ -365,13 +507,17 @@ BEGIN
         'schema_version', 'leadpoet.source_add_restart_guard_release.v1',
         'released', TRUE,
         'paused', TRUE,
-        'guard_active', FALSE
+        'guard_active', FALSE,
+        'guard_generation', p_guard_generation,
+        'owner_generation_commitment', v_owner_generation_commitment
     );
 END;
 $function$;
 
 CREATE OR REPLACE FUNCTION public.research_lab_source_add_restart_quiescence_v1(
-    p_guard_id TEXT
+    p_guard_id TEXT,
+    p_owner_id TEXT,
+    p_guard_generation BIGINT
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -382,19 +528,35 @@ DECLARE
     v_control_present BOOLEAN := FALSE;
     v_paused BOOLEAN := FALSE;
     v_expected_guard_commitment TEXT := '';
+    v_expected_owner_commitment TEXT := '';
     v_guard_commitment TEXT := '';
+    v_owner_commitment TEXT := '';
+    v_guard_generation BIGINT := 0;
+    v_owner_generation_commitment TEXT := '';
     v_guard_expires_at TIMESTAMPTZ;
     v_guard_active BOOLEAN := FALSE;
     v_guard_matches BOOLEAN := FALSE;
+    v_owner_matches BOOLEAN := FALSE;
+    v_generation_matches BOOLEAN := FALSE;
     v_leased_work_count INTEGER := 0;
 BEGIN
     IF COALESCE(p_guard_id, '')
-          !~ '^source_add_restart_guard:[0-9a-f]{64}$' THEN
+          !~ '^source_add_restart_guard:[0-9a-f]{64}$'
+       OR COALESCE(p_owner_id, '')
+          !~ '^source_add_restart_owner:[0-9a-f]{64}$'
+       OR COALESCE(p_guard_generation, 0) <= 0 THEN
         RAISE EXCEPTION 'SOURCE_ADD restart quiescence guard input is invalid';
     END IF;
     v_expected_guard_commitment := 'sha256:' || pg_catalog.encode(
         extensions.digest(
             pg_catalog.convert_to(p_guard_id, 'UTF8'),
+            'sha256'
+        ),
+        'hex'
+    );
+    v_expected_owner_commitment := 'sha256:' || pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(p_owner_id, 'UTF8'),
             'sha256'
         ),
         'hex'
@@ -409,8 +571,15 @@ BEGIN
     SELECT
         control.paused,
         control.restart_guard_commitment,
+        control.restart_guard_owner_commitment,
+        control.restart_guard_generation,
         control.restart_guard_expires_at
-    INTO v_paused, v_guard_commitment, v_guard_expires_at
+    INTO
+        v_paused,
+        v_guard_commitment,
+        v_owner_commitment,
+        v_guard_generation,
+        v_guard_expires_at
     FROM public.research_lab_source_add_control control
     WHERE control.singleton;
     v_control_present := FOUND;
@@ -419,6 +588,22 @@ BEGIN
         AND v_guard_expires_at > pg_catalog.clock_timestamp();
     v_guard_matches := v_control_present
         AND v_guard_commitment = v_expected_guard_commitment;
+    v_owner_matches := v_control_present
+        AND v_owner_commitment = v_expected_owner_commitment;
+    v_generation_matches := v_control_present
+        AND v_guard_generation = p_guard_generation;
+    IF v_owner_commitment <> '' THEN
+        v_owner_generation_commitment := 'sha256:' || pg_catalog.encode(
+            extensions.digest(
+                pg_catalog.convert_to(
+                    v_owner_commitment || ':' || v_guard_generation::TEXT,
+                    'UTF8'
+                ),
+                'sha256'
+            ),
+            'hex'
+        );
+    END IF;
 
     SELECT COUNT(*)::INTEGER
     INTO v_leased_work_count
@@ -430,9 +615,18 @@ BEGIN
         'paused', v_control_present AND v_paused,
         'guard_active', v_guard_active,
         'guard_matches', v_guard_matches,
+        'owner_matches', v_owner_matches,
+        'generation_matches', v_generation_matches,
         'guard_commitment', CASE
             WHEN v_control_present THEN v_guard_commitment ELSE ''
         END,
+        'owner_commitment', CASE
+            WHEN v_control_present THEN v_owner_commitment ELSE ''
+        END,
+        'guard_generation', CASE
+            WHEN v_control_present THEN v_guard_generation ELSE 0
+        END,
+        'owner_generation_commitment', v_owner_generation_commitment,
         'guard_expires_at', v_guard_expires_at,
         'leased_work_count', v_leased_work_count,
         'quiescent', (
@@ -440,6 +634,8 @@ BEGIN
             AND v_paused
             AND v_guard_active
             AND v_guard_matches
+            AND v_owner_matches
+            AND v_generation_matches
             AND v_leased_work_count = 0
         )
     );
@@ -468,28 +664,56 @@ BEGIN
         'claim_signature', 'text,integer',
         'acquire_guard_rpc',
             'research_lab_source_add_acquire_restart_guard_v1',
-        'acquire_guard_signature', 'text,integer,text',
+        'acquire_guard_signature', 'text,text,bigint,integer,text',
+        'guard_state_rpc',
+            'research_lab_source_add_restart_guard_state_v1',
+        'guard_state_signature', '',
         'release_guard_rpc',
             'research_lab_source_add_release_restart_guard_v1',
-        'release_guard_signature', 'text,text',
+        'release_guard_signature', 'text,text,bigint,text',
+        'guard_state_result_fields', pg_catalog.jsonb_build_array(
+            'schema_version', 'paused', 'guard_active',
+            'guard_commitment', 'owner_commitment', 'guard_generation',
+            'owner_generation_commitment', 'guard_expires_at'
+        ),
+        'acquire_guard_result_fields', pg_catalog.jsonb_build_array(
+            'schema_version', 'paused', 'guard_active',
+            'guard_commitment', 'owner_commitment', 'guard_generation',
+            'owner_generation_commitment', 'guard_expires_at'
+        ),
+        'release_guard_result_fields', pg_catalog.jsonb_build_array(
+            'schema_version', 'released', 'paused', 'guard_active',
+            'guard_generation', 'owner_generation_commitment'
+        ),
         'guard_id_format',
             '^source_add_restart_guard:[0-9a-f]{64}$',
         'guard_commitment', 'sha256_utf8_guard_id',
+        'owner_id_format',
+            '^source_add_restart_owner:[0-9a-f]{64}$',
+        'owner_commitment', 'sha256_utf8_owner_id',
+        'owner_generation_commitment',
+            'sha256_utf8_owner_commitment_colon_decimal_generation',
         'guard_lease_min_seconds', 60,
-        'guard_lease_max_seconds', 3600,
-        'active_guard_replay_extends_lease', FALSE,
+        'guard_lease_max_seconds', 14400,
+        'active_guard_replay_extends_lease', TRUE,
+        'acquire_compare_and_swap', 'expected_generation',
+        'different_owner_takeover_increments_generation', TRUE,
+        'expired_reacquire_increments_generation', TRUE,
+        'generation_retained_after_release', TRUE,
         'resume_requires_guard_clear', TRUE,
         'expired_guard_recovery',
             'explicit_reacquire_then_exact_release',
         'release_keeps_paused', TRUE,
         'restart_quiescence_rpc',
             'research_lab_source_add_restart_quiescence_v1',
-        'restart_quiescence_signature', 'text',
+        'restart_quiescence_signature', 'text,text,bigint',
         'restart_quiescence_schema_version',
             'leadpoet.source_add_restart_quiescence.v1',
         'restart_quiescence_result_fields', pg_catalog.jsonb_build_array(
             'schema_version', 'paused', 'guard_active', 'guard_matches',
-            'guard_commitment', 'guard_expires_at',
+            'owner_matches', 'generation_matches',
+            'guard_commitment', 'owner_commitment', 'guard_generation',
+            'owner_generation_commitment', 'guard_expires_at',
             'leased_work_count', 'quiescent'
         ),
         'lock_before_paused_read', TRUE,
@@ -539,7 +763,7 @@ BEGIN
                     ),
                     (
                         'acquire_restart_guard_v1',
-                        'public.research_lab_source_add_acquire_restart_guard_v1(text,integer,text)'
+                        'public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)'
                     ),
                     (
                         'claim_work',
@@ -555,11 +779,15 @@ BEGIN
                     ),
                     (
                         'release_restart_guard_v1',
-                        'public.research_lab_source_add_release_restart_guard_v1(text,text)'
+                        'public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)'
+                    ),
+                    (
+                        'restart_guard_state_v1',
+                        'public.research_lab_source_add_restart_guard_state_v1()'
                     ),
                     (
                         'restart_quiescence_v1',
-                        'public.research_lab_source_add_restart_quiescence_v1(text)'
+                        'public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)'
                     )
             ) AS authority(name, signature)
             LEFT JOIN pg_catalog.pg_proc proc
@@ -572,7 +800,7 @@ BEGIN
                 'public.enforce_research_lab_source_add_admission_control()'
             ) IS NOT NULL,
             'acquire_restart_guard_v1', pg_catalog.to_regprocedure(
-                'public.research_lab_source_add_acquire_restart_guard_v1(text,integer,text)'
+                'public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)'
             ) IS NOT NULL,
             'claim_work', pg_catalog.to_regprocedure(
                 'public.research_lab_source_add_claim_work(text,integer)'
@@ -581,10 +809,13 @@ BEGIN
                 'public.research_lab_source_add_set_paused(boolean,text,text)'
             ) IS NOT NULL,
             'release_restart_guard_v1', pg_catalog.to_regprocedure(
-                'public.research_lab_source_add_release_restart_guard_v1(text,text)'
+                'public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)'
+            ) IS NOT NULL,
+            'restart_guard_state_v1', pg_catalog.to_regprocedure(
+                'public.research_lab_source_add_restart_guard_state_v1()'
             ) IS NOT NULL,
             'restart_quiescence_v1', pg_catalog.to_regprocedure(
-                'public.research_lab_source_add_restart_quiescence_v1(text)'
+                'public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)'
             ) IS NOT NULL
         ),
         'permissions', pg_catalog.jsonb_build_object(
@@ -592,7 +823,7 @@ BEGIN
             'acquire_guard_service_role_callable', CASE
                 WHEN v_service_role_exists THEN pg_catalog.has_function_privilege(
                     'service_role',
-                    'public.research_lab_source_add_acquire_restart_guard_v1(text,integer,text)',
+                    'public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)',
                     'EXECUTE'
                 ) ELSE FALSE END,
             'claim_service_role_callable', CASE
@@ -610,13 +841,19 @@ BEGIN
             'quiescence_service_role_callable', CASE
                 WHEN v_service_role_exists THEN pg_catalog.has_function_privilege(
                     'service_role',
-                    'public.research_lab_source_add_restart_quiescence_v1(text)',
+                    'public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)',
                     'EXECUTE'
                 ) ELSE FALSE END,
             'release_guard_service_role_callable', CASE
                 WHEN v_service_role_exists THEN pg_catalog.has_function_privilege(
                     'service_role',
-                    'public.research_lab_source_add_release_restart_guard_v1(text,text)',
+                    'public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)',
+                    'EXECUTE'
+                ) ELSE FALSE END,
+            'guard_state_service_role_callable', CASE
+                WHEN v_service_role_exists THEN pg_catalog.has_function_privilege(
+                    'service_role',
+                    'public.research_lab_source_add_restart_guard_state_v1()',
                     'EXECUTE'
                 ) ELSE FALSE END,
             'contract_service_role_callable', CASE
@@ -628,7 +865,7 @@ BEGIN
             'anon_callable',
                 pg_catalog.has_function_privilege(
                     'anon',
-                    'public.research_lab_source_add_acquire_restart_guard_v1(text,integer,text)',
+                    'public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'anon',
@@ -640,11 +877,15 @@ BEGIN
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'anon',
-                    'public.research_lab_source_add_restart_quiescence_v1(text)',
+                    'public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'anon',
-                    'public.research_lab_source_add_release_restart_guard_v1(text,text)',
+                    'public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)',
+                    'EXECUTE'
+                ) OR pg_catalog.has_function_privilege(
+                    'anon',
+                    'public.research_lab_source_add_restart_guard_state_v1()',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'anon',
@@ -654,7 +895,7 @@ BEGIN
             'authenticated_callable',
                 pg_catalog.has_function_privilege(
                     'authenticated',
-                    'public.research_lab_source_add_acquire_restart_guard_v1(text,integer,text)',
+                    'public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'authenticated',
@@ -666,11 +907,15 @@ BEGIN
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'authenticated',
-                    'public.research_lab_source_add_restart_quiescence_v1(text)',
+                    'public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'authenticated',
-                    'public.research_lab_source_add_release_restart_guard_v1(text,text)',
+                    'public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)',
+                    'EXECUTE'
+                ) OR pg_catalog.has_function_privilege(
+                    'authenticated',
+                    'public.research_lab_source_add_restart_guard_state_v1()',
                     'EXECUTE'
                 ) OR pg_catalog.has_function_privilege(
                     'authenticated',
@@ -685,30 +930,38 @@ $function$;
 REVOKE ALL ON FUNCTION public.research_lab_source_add_claim_work(TEXT, INTEGER)
     FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.research_lab_source_add_acquire_restart_guard_v1(
-    TEXT, INTEGER, TEXT
+    TEXT, TEXT, BIGINT, INTEGER, TEXT
 ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.research_lab_source_add_set_paused(
     BOOLEAN, TEXT, TEXT
 ) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.research_lab_source_add_release_restart_guard_v1(
-    TEXT, TEXT
+    TEXT, TEXT, BIGINT, TEXT
 ) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(TEXT)
+REVOKE ALL ON FUNCTION public.research_lab_source_add_restart_guard_state_v1()
+    FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(
+    TEXT, TEXT, BIGINT
+)
     FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.research_lab_source_add_claim_control_contract_v1()
     FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.research_lab_source_add_claim_work(TEXT, INTEGER)
     TO service_role;
 GRANT EXECUTE ON FUNCTION public.research_lab_source_add_acquire_restart_guard_v1(
-    TEXT, INTEGER, TEXT
+    TEXT, TEXT, BIGINT, INTEGER, TEXT
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.research_lab_source_add_set_paused(
     BOOLEAN, TEXT, TEXT
 ) TO service_role;
 GRANT EXECUTE ON FUNCTION public.research_lab_source_add_release_restart_guard_v1(
-    TEXT, TEXT
+    TEXT, TEXT, BIGINT, TEXT
 ) TO service_role;
-GRANT EXECUTE ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(TEXT)
+GRANT EXECUTE ON FUNCTION public.research_lab_source_add_restart_guard_state_v1()
+    TO service_role;
+GRANT EXECUTE ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(
+    TEXT, TEXT, BIGINT
+)
     TO service_role;
 GRANT EXECUTE ON FUNCTION public.research_lab_source_add_claim_control_contract_v1()
     TO service_role;
@@ -716,14 +969,18 @@ GRANT EXECUTE ON FUNCTION public.research_lab_source_add_claim_control_contract_
 COMMENT ON FUNCTION public.research_lab_source_add_claim_work(TEXT, INTEGER) IS
     'Claims one SOURCE_ADD work item only after serializing with the durable pause-control advisory lock.';
 COMMENT ON FUNCTION public.research_lab_source_add_acquire_restart_guard_v1(
-    TEXT, INTEGER, TEXT
+    TEXT, TEXT, BIGINT, INTEGER, TEXT
 ) IS
     'Acquires one bounded identity-bound canonical restart guard and atomically pauses SOURCE_ADD.';
 COMMENT ON FUNCTION public.research_lab_source_add_release_restart_guard_v1(
-    TEXT, TEXT
+    TEXT, TEXT, BIGINT, TEXT
 ) IS
     'Releases only an exact SOURCE_ADD restart guard identity and deliberately leaves SOURCE_ADD paused.';
-COMMENT ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(TEXT) IS
+COMMENT ON FUNCTION public.research_lab_source_add_restart_guard_state_v1() IS
+    'Returns the exact monotonic SOURCE_ADD restart guard generation for compare-and-swap acquisition.';
+COMMENT ON FUNCTION public.research_lab_source_add_restart_quiescence_v1(
+    TEXT, TEXT, BIGINT
+) IS
     'Returns a guard-bound pause-and-all-leased-work snapshot serialized against SOURCE_ADD claims and resume.';
 COMMENT ON FUNCTION public.research_lab_source_add_claim_control_contract_v1() IS
     'Read-only exact function-authority, lock-order, drain-scope, and ACL contract for SOURCE_ADD claims and restart quiescence.';

@@ -3991,6 +3991,10 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
     assert '"GATEWAY_V2_KMS_KEY_ID": ATTESTED_V2_KMS_KEY_ID' in full_source
     assert '"GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path' in full_source
     assert '"ARWEAVE_KEYFILE_PATH": arweave_keyfile_path' in full_source
+    assert (
+        '"GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity"'
+        in full_source
+    )
     assert '"GATEWAY_RESTART_GIT_SSH_COMMAND":' not in full_source
     assert "research_lab_private_model_deploy" not in full_source
 

@@ -1,10 +1,20 @@
 {
-  "baseline_commit": "341b01c0190c42f14148d2baaaa11d6acb872234",
+  "baseline_commit": "ef60f64cd04a35d12469639ce9954fe95763868c",
   "entries": [
+    {
+      "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
+      "path": "gateway/api/weights.py",
+      "symbol": "_build_weight_inputs_v2_singleflight"
+    },
     {
       "ast_sha256": "sha256:9366486b15b75d5a2a299caacc86b70e706f1c9bccf99721d18fedc375824e55",
       "path": "gateway/api/weights.py",
       "symbol": "_submit_weights_v2_impl"
+    },
+    {
+      "ast_sha256": "sha256:dddadcffaa7821baa3ab99a7937d9c214b526c2861a933227f01f6737bce47b2",
+      "path": "gateway/api/weights.py",
+      "symbol": "_weight_inputs_v2_has_authorized_work"
     },
     {
       "ast_sha256": "sha256:b03856edb2d60ae01439007225da14a3622c9d0af187d8486069ff115adb0c4b",
@@ -8257,7 +8267,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:0c568fc8f5f507db26cf131aacce25836fb94cb3455bd02ccac7d7ff188983dc",
-  "protected_source_commit": "341b01c0190c42f14148d2baaaa11d6acb872234",
+  "manifest_hash": "sha256:871a62cbeaa64a0d4fdef761b060a13693d1277343d1708f3b2dfb71d85f03b5",
+  "protected_source_commit": "ef60f64cd04a35d12469639ce9954fe95763868c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

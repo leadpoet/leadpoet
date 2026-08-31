@@ -54,6 +54,34 @@ only 4xx signal is the `http.response.status_code` attribute.
 over the trailing 7 days the gateway's spans are 439,148 `Unset` (11,692 of
 them 4xx), 2,003 `Error`, and 0 `Ok`.
 
+**A route label does not mean the gateway implements that method.** The span
+name is `<METHOD> <route template>`, and the template is resolved from the
+router *after* routing has run — which a method mismatch still reaches. A
+request to a path that exists but not for that verb gets Starlette's 405 and
+still emits a span carrying the real template, so `POST /some/route` in the
+span stream is not evidence that a POST handler exists. The fail-closed
+validator does not catch this either: its allowlist is built from
+`route.path` for every entry in `app.routes` and carries no methods at all.
+Over the trailing 7 days there are 22 such spans — `POST /` (19),
+`OPTIONS /` (2) and one `GET /research-lab/loop-diagnostics` — and because
+span status marks 5xx only, every one of them scores as a success in any
+status-based panel. Read the `http.response.status_code` attribute before
+concluding a route serves a method.
+
+**A missing span is not proof of a missing request.** Export goes through a
+fail-closed complete-envelope validator: a span that does not match the
+expected scope, kind, parentage, attribute set, name, resource, or route
+allowlist is dropped whole rather than mutated or partially exported. The
+drop is invisible from here in both directions — the wrapper returns
+`SpanExportResult.SUCCESS` to the SDK even when it accepted nothing, and the
+only record is a `print("gateway_otel_span_dropped …")` line on the gateway
+process's stdout, which is not itself instrumented and never reaches the
+collector. There is no evidence that drops have occurred, and by construction
+there could not be. The practical rule: "this route went dark" is a statement
+about the export path as much as about traffic, and a silence long enough to
+act on should be corroborated against a neighbouring route before it is
+treated as an outage.
+
 ## What is NOT instrumented
 
 `configure_gateway_otel` is imported in exactly one place (`gateway/main.py`),

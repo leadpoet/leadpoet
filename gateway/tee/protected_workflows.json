@@ -3377,7 +3377,7 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:5ffb30dda70d32c00a16c6b2d544a2dd08e372e4c7052fd09e9168d1f1c33202",
+      "ast_sha256": "sha256:27d16495fb5ad9e8d703571b694c75dd5e1e57e7b6ccc66b7e85b78583ce41a7",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -8257,7 +8257,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:203ed2c92dde0dd17e216a2b61dc0f741b101879ff9a8c907aecc661faed9a43",
-  "protected_source_commit": "bc8c7de2f6b93fd2de9cbf9f34e5a1effcd4fe2a",
+  "manifest_hash": "sha256:6e68b843f389b3284ee0b932f4a4c3d0a80ceac75c812a7f44129b8eab748f54",
+  "protected_source_commit": "1b65416f8bf6f3e64cac71569c6b386637922655",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

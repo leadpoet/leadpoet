@@ -291,7 +291,7 @@ def test_leaderboard_reconstructs_wins_tiebreak_and_ban_filter():
     ]
 
 
-def test_disabled_leaderboard_window_commits_empty_input_without_db_read():
+def test_disabled_leaderboard_window_commits_empty_input_with_source_probe():
     reader = FakeReader(
         {
             "fulfillment_leaderboard_winners": [
@@ -315,7 +315,15 @@ def test_disabled_leaderboard_window_commits_empty_input_without_db_read():
         "leaderboard_entries": [],
         "leaderboard_fetch_ok": True,
     }
-    assert reader.calls == []
+    assert reader.calls == [
+        (
+            "fulfillment_leaderboard_winners",
+            {
+                "window_start": DISABLED_LEADERBOARD_WINDOW_V1,
+                "window_end": DISABLED_LEADERBOARD_WINDOW_V1,
+            },
+        )
+    ]
 
 
 def test_disabled_leaderboard_window_must_be_complete():
@@ -350,11 +358,42 @@ def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
     )
     source = CoordinatorWeightSourceV2(reader)
     document = source.resolve(
-        payload=_payload("leaderboard", snapshot=snapshot),
+        payload=_payload(
+            "leaderboard",
+            snapshot=snapshot,
+            leaderboard_window_start=DISABLED_LEADERBOARD_WINDOW_V1,
+            leaderboard_window_end=DISABLED_LEADERBOARD_WINDOW_V1,
+        ),
         context=_context("research_lab.leaderboard_input.v2"),
     )
     assert document["value"]["leaderboard_entries"] == []
-    assert reader.calls == []
+    assert reader.calls == [
+        (
+            "fulfillment_leaderboard_winners",
+            {
+                "window_start": DISABLED_LEADERBOARD_WINDOW_V1,
+                "window_end": DISABLED_LEADERBOARD_WINDOW_V1,
+            },
+        )
+    ]
+
+
+def test_disabled_fulfillment_requires_disabled_leaderboard_window():
+    source = CoordinatorWeightSourceV2(FakeReader({}))
+    snapshot = _snapshot(
+        ff_enabled=False,
+        fulfillment_share=0.0,
+        fulfillment_rows=[],
+        leaderboard_entries=[],
+    )
+    with pytest.raises(
+        CoordinatorWeightSourceV2Error,
+        match="disabled fulfillment requires disabled leaderboard window",
+    ):
+        source.resolve(
+            payload=_payload("leaderboard", snapshot=snapshot),
+            context=_context("research_lab.leaderboard_input.v2"),
+        )
 
 
 def test_sourcing_history_is_rebuilt_only_from_signed_epoch_receipts():

@@ -442,7 +442,21 @@ class CoordinatorWeightSourceV2:
             raise CoordinatorWeightSourceV2Error(
                 "disabled leaderboard window is incomplete"
             )
-        if not bool(calculation["ff_enabled"]) or disabled_start:
+        if not bool(calculation["ff_enabled"]) and not disabled_start:
+            raise CoordinatorWeightSourceV2Error(
+                "disabled fulfillment requires disabled leaderboard window"
+            )
+        if disabled_start:
+            # Preserve authenticated source evidence even though disabled mode
+            # deliberately ignores every row and pays no leaderboard entries.
+            self._read(
+                "fulfillment_leaderboard_winners",
+                {
+                    "window_start": DISABLED_LEADERBOARD_WINDOW_V1,
+                    "window_end": DISABLED_LEADERBOARD_WINDOW_V1,
+                },
+                context,
+            )
             return {
                 **{key: proposed[key] for key in proposed if key != "value"},
                 "value": {

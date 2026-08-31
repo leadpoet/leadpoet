@@ -126,15 +126,37 @@ on descriptor 9. Under that uninterrupted lock it revalidates the isolated
 plan and candidate tree, the singleton actively COMPLIANCE-locked release
 channel, the protected source, the fixed EC2 instance-role authority, and the
 installed controller. It first invokes the fixed production
-`research_lab_source_add_set_paused` RPC and exact-reads the singleton control
-row. Migration 145 makes that transition share one transaction-scoped advisory
-lock with miner SOURCE_ADD admission, so a concurrent admission is either
-committed before the pause or rejected after it. A missing RPC, unavailable
-readback, resumed/changed row, unavailable control projection, enabled
-dispatcher, or explicitly enabled intake fails before shutdown. The legacy
-N-1 status predates the separate `intake_enabled` projection, but its exact
-protected route checks the same durable control; the candidate must expose and
-prove the explicit false projection after startup.
+`research_lab_source_add_acquire_restart_guard_v1` RPC and exact-reads the
+singleton control row. The guard identity is fixed to the canonical production
+gateway restart authority, while its owner and actor are invocation-specific.
+The acquire RPC compares the exact monotonic generation read under the same
+control lock. A fresh canonical retry transfers that same guard to its new
+owner and increments the generation immediately; the prior invocation can no
+longer renew, prove quiescence, or release it. The existing gateway restart
+lock serializes the host side of that transfer. Migration 145 makes the guarded pause
+share one transaction-scoped advisory lock with miner SOURCE_ADD admission, so
+a concurrent admission is either committed before the pause or rejected after
+it. A missing RPC, unavailable readback, resumed/changed row, unavailable
+control projection, enabled dispatcher, or explicitly enabled intake fails
+before shutdown. The legacy N-1 status predates the separate `intake_enabled`
+projection, but its exact protected route checks the same durable control; the
+candidate must expose and prove the explicit false projection after startup.
+
+Migration 172 also makes `research_lab_source_add_claim_work` acquire that
+same `source-add-control` lock before reading the pause or leasing work. The
+restart then polls the fixed
+`research_lab_source_add_restart_quiescence_v1` RPC under that lock until the
+durable control remains paused, the same guard is active and matches, and the
+count of every `work_status='leased'` row is exactly zero, including expired
+leases. This orders all pre-pause claims before the zero readback and prevents
+a later claim while paused. The poll is bounded; a live, expired, or hung lease
+at the deadline aborts the restart and leaves SOURCE_ADD paused and guarded for
+an exact retry or deliberate operator recovery. Resume is rejected while a
+guard commitment exists, even after its lease expires; recovery explicitly
+reacquires the canonical guard with a new owner/generation and exact-releases
+it. A missing/invalid
+migration-172 RPC also fails closed. Dispatcher status alone is not a
+quiescence proof.
 
 Only after SOURCE_ADD is durably paused does the helper change
 `RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED` to `false`. The version-stage
@@ -148,19 +170,23 @@ No persistent restart receipt is created. The candidate carries only a sealed,
 unlinked invocation proof through the exact installed N-1 wrapper. The proof
 binds the candidate/tree/release/controller identities, the final
 `AWSCURRENT` VersionId, strict raw-document hash, complete stage-topology hash,
-the exact durable SOURCE_ADD control-row commitment, and the exact
-deterministic gateway-env bytes that frozen controller `0dd` derives from that
-document. The N-1 wrapper itself remains byte-identical to Git; there is no
-AWS executable, PATH, or wrapper interposition.
+the exact durable SOURCE_ADD control-row commitment, the canonical restart-
+guard commitment, its invocation-owner/generation commitment, the exact
+active-guard/paused/zero-leased quiescence commitment, and the exact
+deterministic gateway-env bytes that frozen
+controller `0dd` derives from that document. The N-1 wrapper itself remains
+byte-identical to Git; there is no AWS executable, PATH, or wrapper
+interposition.
 
 Before shutdown and again after startup, the candidate descriptor-safely reads
 the installed env cache and requires its byte hash to equal that expected
 rendering. It also rechecks the current raw document and complete topology,
 requires the hydrated parent value to be exactly `false`, and requires the live
 Research Lab status boolean to be exactly false. It also exact-reads the
-proof-bound SOURCE_ADD pause before shutdown and after startup, then requires
-the running candidate to report a present, available, paused control plus
-`intake_enabled=false` and `effective_dispatcher_enabled=false`. A transient
+proof-bound SOURCE_ADD pause and paused/zero-leased quiescence before shutdown
+and after startup, then requires the running candidate to report a present,
+available, paused control plus `intake_enabled=false` and
+`effective_dispatcher_enabled=false`. A transient
 alternate Secrets Manager VersionId is equivalent only when its raw document
 and the resulting filtered env bytes are byte-identical and the proof-bound
 current VersionId/topology are restored at verification. A differing-document
@@ -169,13 +195,30 @@ write authority are trusted and non-adversarial during this canonical locked
 restart; this path does not claim to prevent an authorized writer from
 deliberately changing runtime configuration.
 
+The candidate renews the exact same owner/generation with the migration's
+14,400-second maximum lease, then repeats the same active-guard and zero-leased
+RPC after all ancestry, Docker, pairing, and active-release preparation,
+immediately before the first shutdown action. That lease covers the canonical
+9,300-second paired-coordination deadline plus bounded startup margin. There is
+no unbounded work between the final check and the first process stop. The
+durable guard prevents an operator resume from racing that boundary. After the
+candidate is live, the strict runtime status, durable pause, exact owner and
+generation, active guard, and zero leased count are checked once more. Only
+then does the candidate compare-and-release that owner/generation and
+exact-read the control again; release explicitly retains `paused=true` and
+never resumes SOURCE_ADD.
+
 The proof and all four controller snapshots are closed in every long-lived
 runtime child and closed by the restart parent after the post-start check.
 After preparation reports success and the false promotion is durable, any
 later failure leaves global miner submissions disabled and SOURCE_ADD paused,
 and retains no cross-run restart authority; the same exact paired command is
-safe to retry. An earlier failure may instead leave or restore the exact
-original secret topology, but it never automatically resumes SOURCE_ADD.
+safe to retry. If the prior gateway is no longer running, the retry skips its
+loopback status only after the protected `/proc` scan proves that exact absence;
+the durable pause, same canonical guard, fresh invocation owner/generation,
+and zero-leased RPC proofs remain mandatory. An earlier failure may instead
+leave or restore the exact original
+secret topology, but it never automatically resumes SOURCE_ADD.
 
 ## Normal Restart
 
@@ -188,9 +231,11 @@ ordinary exact-SHA restarts need no persistent proof. Candidate preflight still
 requires parent hydration to be exactly false, performs an instance-role-only
 Secrets Manager readback, verifies the current document and topology are
 stable while descriptor-checking the hydrated cache, requires an exact durable
-SOURCE_ADD paused readback, and revalidates the singleton locked release
-channel. A stale or direct launcher with a true value, or one with SOURCE_ADD
-active, fails before shutdown. Keep scoring and autoresearch in their
+SOURCE_ADD guarded-pause readback and a bounded exact zero-leased quiescence
+drain, and revalidates the singleton locked release channel. The same
+last-moment and post-start guard checks apply to receiptless restarts. A stale
+or direct launcher with a true value, or one with SOURCE_ADD active or leased
+work remaining, fails before shutdown. Keep scoring and autoresearch in their
 separately recorded invocation-time maintenance states.
 
 ```bash

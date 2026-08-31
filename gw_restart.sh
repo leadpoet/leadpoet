@@ -3445,8 +3445,17 @@ if ! prepare_gateway_active_release_lineage; then
   exit 1
 fi
 
-rm -rf "$GATEWAY_PREFLIGHT_TREE"
-GATEWAY_PREFLIGHT_TREE=""
+echo "Rechecking guarded SOURCE_ADD quiescence at the destructive boundary"
+GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"
+export GATEWAY_DEPLOY_STAGE
+if ! run_prepared_gateway_module \
+    gateway.tee.gateway_miner_maintenance_restart_v1 \
+    --verify-shutdown-quiescence \
+    --expected-commit "$PREPARED_GATEWAY_SHA"; then
+  echo "ERROR: guarded SOURCE_ADD quiescence changed before shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
 
 echo "Stopping existing gateway and Research Lab worker processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
@@ -3465,6 +3474,8 @@ pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
 stop_research_lab_private_model_containers
+rm -rf "$GATEWAY_PREFLIGHT_TREE"
+GATEWAY_PREFLIGHT_TREE=""
 
 echo "Stopping stuck private-model Docker builds or pip installs"
 stop_local_stale_build_processes TERM

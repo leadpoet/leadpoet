@@ -306,6 +306,8 @@ PROTECTED_SYMBOLS = {
         "execute",
     ),
     "gateway/api/weights.py": (
+        "_build_weight_inputs_v2_singleflight",
+        "_weight_inputs_v2_has_authorized_work",
         "get_weight_inputs_v2",
         "_submit_weights_v2_impl",
         "submit_weights_v2",

@@ -280,7 +280,7 @@ async def _build_weight_inputs_v2_singleflight(
         _WEIGHT_INPUT_RESULTS.pop(key, None)
 
     task = _WEIGHT_INPUT_LOADS_INFLIGHT.get(key)
-    if task is not None and (task.done() or task.get_loop() is not loop):
+    if task is not None and task.get_loop() is not loop:
         _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
         task = None
     if task is None:
@@ -409,7 +409,7 @@ def _weight_inputs_v2_has_authorized_work(request_hash: str) -> bool:
     task = _WEIGHT_INPUT_LOADS_INFLIGHT.get(key)
     if task is None:
         return False
-    if task.get_loop() is not loop or task.done():
+    if task.get_loop() is not loop:
         _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
         return False
     return True

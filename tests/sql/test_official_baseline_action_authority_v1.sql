@@ -1,6 +1,6 @@
 \set ON_ERROR_STOP on
 
--- Run after migrations 157, 163, 164, and 166 against disposable PostgreSQL only.
+-- Run after migrations 157, 163, 164, 166, and 167 against disposable PostgreSQL only.
 BEGIN;
 
 DO $official_baseline_happy_path$
@@ -125,7 +125,7 @@ BEGIN
         'protected_result_sha256', 'sha256:' || repeat('1', 64),
         'protected_terminal_receipt_ref', 'baseline_terminal:first',
         'protected_terminal_receipt_sha256', 'sha256:' || repeat('2', 64),
-        'provider_request_ref', 'provider_request:first',
+        'provider_request_ref', 'provider_request:' || repeat('0', 64),
         'provider_receipt_ref', 'provider_receipt:' || repeat('3', 16),
         'provider_receipt_sha256', 'sha256:' || repeat('4', 64),
         'provider_identity_sha256', 'sha256:' || repeat('5', 64),
@@ -298,6 +298,113 @@ BEGIN
     END;
 END;
 $official_baseline_happy_path$;
+
+DO $official_baseline_legacy_retry_replay$
+DECLARE
+    h TEXT := 'sha256:' || repeat('a', 64);
+    run_hash TEXT := 'sha256:' || repeat('1', 64);
+    legacy_request_ref TEXT := 'provider_request:' || repeat('0', 64);
+    unit_value TEXT;
+    frontier_hash TEXT;
+    action_auth JSONB;
+    terminal JSONB;
+    result JSONB;
+BEGIN
+    unit_value := 'baseline_icp:' || repeat('3', 64);
+    frontier_hash := public.research_lab_official_baseline_hash_v1(
+        public.research_lab_official_baseline_provider_frontier_doc_v1(
+            run_hash, unit_value
+        )
+    );
+    action_auth := pg_catalog.jsonb_build_object(
+        'schema_version',
+            'leadpoet.research_lab.official_baseline_action_authorization.v1',
+        'attempt_key', 'sha256:' || repeat('4', 63) || '0',
+        'run_sha256', run_hash,
+        'unit_ref', unit_value,
+        'action_idempotency_sha256', 'sha256:' || repeat('c', 64),
+        'action_sha256', 'sha256:' || repeat('d', 64),
+        'action_sequence', 0,
+        'action_type', 'execute_candidate_tool',
+        'tool_id', 'candidate.exa.search',
+        'binding_contract_sha256', h,
+        'request_fingerprint_sha256', 'sha256:' || repeat('e', 64),
+        'request_body_sha256', 'sha256:' || repeat('f', 64),
+        'call_cap', 2,
+        'credit_cap_microunits', 100,
+        'timeout_ms', 30000,
+        'protected_job_ref', 'protected_job:retry',
+        'protected_request_sha256', 'sha256:' || repeat('1', 63) || '0',
+        'lease_holder_sha256', h,
+        'expected_frontier_sha256', frontier_hash
+    );
+    PERFORM public.research_lab_official_baseline_reserve_action_v1(action_auth);
+    terminal := pg_catalog.jsonb_build_object(
+        'schema_version',
+            'leadpoet.research_lab.official_baseline_action_terminal_known.v1',
+        'attempt_key', action_auth->>'attempt_key',
+        'reservation_ref', 'baseline_reservation:' || repeat('4', 63) || '0',
+        'lease_generation', 1,
+        'protected_job_ref', action_auth->>'protected_job_ref',
+        'protected_request_sha256', action_auth->>'protected_request_sha256',
+        'protected_result_sha256', 'sha256:' || repeat('7', 64),
+        'protected_terminal_receipt_ref', 'baseline_terminal:retry',
+        'protected_terminal_receipt_sha256', 'sha256:' || repeat('8', 64),
+        'provider_request_ref', legacy_request_ref,
+        'provider_receipt_ref', 'provider_receipt:' || repeat('7', 16),
+        'provider_receipt_sha256', 'sha256:' || repeat('8', 64),
+        'provider_identity_sha256', 'sha256:' || repeat('5', 64),
+        'model_provider_response_sha256', 'sha256:' || repeat('6', 64),
+        'outcome', 'succeeded',
+        'call_count', 1,
+        'cost_microunits', 75,
+        'latency_ms', 900
+    );
+    result := public.research_lab_official_baseline_record_terminal_known_v1(
+        terminal
+    );
+    IF result->>'state' IS DISTINCT FROM 'terminal_known'
+       OR (result->>'idempotent')::BOOLEAN IS NOT FALSE
+    THEN
+        RAISE EXCEPTION 'legacy provider retry replay was not accepted: %', result;
+    END IF;
+
+    unit_value := 'baseline_icp:' || repeat('4', 64);
+    frontier_hash := public.research_lab_official_baseline_hash_v1(
+        public.research_lab_official_baseline_provider_frontier_doc_v1(
+            run_hash, unit_value
+        )
+    );
+    action_auth := action_auth || pg_catalog.jsonb_build_object(
+        'attempt_key', 'sha256:' || repeat('5', 63) || '0',
+        'unit_ref', unit_value,
+        'protected_job_ref', 'protected_job:conflict',
+        'protected_request_sha256', 'sha256:' || repeat('2', 63) || '0',
+        'expected_frontier_sha256', frontier_hash
+    );
+    PERFORM public.research_lab_official_baseline_reserve_action_v1(action_auth);
+    terminal := terminal || pg_catalog.jsonb_build_object(
+        'attempt_key', action_auth->>'attempt_key',
+        'reservation_ref', 'baseline_reservation:' || repeat('5', 63) || '0',
+        'protected_job_ref', action_auth->>'protected_job_ref',
+        'protected_request_sha256', action_auth->>'protected_request_sha256',
+        'protected_result_sha256', 'sha256:' || repeat('9', 64),
+        'protected_terminal_receipt_ref', 'baseline_terminal:conflict',
+        'protected_terminal_receipt_sha256', 'sha256:' || repeat('a', 64),
+        'provider_receipt_ref', 'provider_receipt:' || repeat('9', 16),
+        'provider_receipt_sha256', 'sha256:' || repeat('a', 64),
+        'model_provider_response_sha256', 'sha256:' || repeat('b', 64)
+    );
+    BEGIN
+        PERFORM public.research_lab_official_baseline_record_terminal_known_v1(
+            terminal
+        );
+        RAISE EXCEPTION 'conflicting legacy provider replay unexpectedly succeeded';
+    EXCEPTION
+        WHEN SQLSTATE '23505' THEN NULL;
+    END;
+END;
+$official_baseline_legacy_retry_replay$;
 
 DO $official_baseline_uncertain_path$
 DECLARE

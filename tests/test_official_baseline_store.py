@@ -615,7 +615,7 @@ def test_worker_factory_rejects_non_migration_store():
         )
 
 
-def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
+def test_official_baseline_tables_and_all_rpcs_are_restart_gated():
     relations = {
         (migration, relation)
         for migration, relation, _columns in REQUIRED_SUPABASE_V2_SCHEMA
@@ -630,6 +630,9 @@ def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
         (OFFICIAL_BASELINE_MIGRATION, relation) for relation in expected_relations
     } <= relations
     reserve_migration = "scripts/166-research-lab-zero-call-verifier-timeout.sql"
+    request_scope_migration = (
+        "scripts/167-research-lab-provider-request-attempt-scope.sql"
+    )
     assert {
         (OFFICIAL_BASELINE_MIGRATION, rpc)
         for rpc in OFFICIAL_BASELINE_RPCS
@@ -638,10 +641,15 @@ def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
     assert (reserve_migration, OFFICIAL_BASELINE_RPCS[1]) in set(
         REQUIRED_SUPABASE_V2_RPCS
     )
+    assert (
+        request_scope_migration,
+        "research_lab_official_baseline_request_scope_v2",
+    ) in set(REQUIRED_SUPABASE_V2_RPCS)
     assert {
         "gateway/research_lab/official_baseline_model_runner.py",
         "gateway/research_lab/official_baseline_store.py",
         OFFICIAL_BASELINE_MIGRATION,
         reserve_migration,
+        request_scope_migration,
     } <= set(EXACT_PRODUCTION_ENTRYPOINTS)
     OFFICIAL_BASELINE_EXECUTION_SCHEMA_VERSION,

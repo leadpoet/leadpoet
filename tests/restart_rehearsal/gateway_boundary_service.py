@@ -526,6 +526,7 @@ def _migration_schema_contract(
             "169-research-lab-source-add-post-accept-leg1.sql",
             "170-research-lab-source-add-provider-origin-uniqueness.sql",
             "171-research-lab-source-add-duplicate-privacy.sql",
+            "172-research-lab-source-add-claim-control.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (

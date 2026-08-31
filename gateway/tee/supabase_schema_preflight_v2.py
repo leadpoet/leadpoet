@@ -420,9 +420,19 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_control",
-        ("singleton", "paused", "reason", "actor_ref", "updated_at"),
+        (
+            "singleton",
+            "paused",
+            "reason",
+            "actor_ref",
+            "updated_at",
+            "restart_guard_commitment",
+            "restart_guard_expires_at",
+            "restart_guard_acquired_at",
+            "restart_guard_actor_ref",
+        ),
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
@@ -1019,7 +1029,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_begin_provider_execution",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_claim_work",
     ),
     (
@@ -1035,7 +1045,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_requeue_provenance",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_set_paused",
     ),
     (
@@ -1089,6 +1099,22 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/171-research-lab-source-add-duplicate-privacy.sql",
         "research_lab_source_add_duplicate_privacy_contract_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_acquire_restart_guard_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_restart_quiescence_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_release_restart_guard_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_claim_control_contract_v1",
     ),
     (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
@@ -1606,6 +1632,129 @@ def _verify_source_add_duplicate_privacy_contract_v1(
     return dict(contract)
 
 
+SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:19fccedcf8fd926deca4e1af2d067c25866a70d800f3991a24e1501eacb74731"
+)
+
+
+def _verify_source_add_claim_control_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_claim_control_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract is unavailable; apply "
+            "scripts/172-research-lab-source-add-claim-control.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract is unavailable; apply "
+            "scripts/172-research-lab-source-add-claim-control.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v1",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v1"
+        ),
+        "acquire_guard_signature": "text,integer,text",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v1"
+        ),
+        "release_guard_signature": "text,text",
+        "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
+        "guard_commitment": "sha256_utf8_guard_id",
+        "guard_lease_min_seconds": 60,
+        "guard_lease_max_seconds": 3600,
+        "active_guard_replay_extends_lease": False,
+        "resume_requires_guard_clear": True,
+        "expired_guard_recovery": (
+            "explicit_reacquire_then_exact_release"
+        ),
+        "release_keeps_paused": True,
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text",
+        "restart_quiescence_schema_version": (
+            "leadpoet.source_add_restart_quiescence.v1"
+        ),
+        "restart_quiescence_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_matches",
+            "guard_commitment",
+            "guard_expires_at",
+            "leased_work_count",
+            "quiescent",
+        ],
+        "lock_before_paused_read": True,
+        "leased_scope": "all_leased_regardless_of_expiry",
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "function_authority_sha256": (
+            SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "restart_quiescence_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "acquire_guard_service_role_callable": True,
+            "claim_service_role_callable": True,
+            "pause_service_role_callable": True,
+            "quiescence_service_role_callable": True,
+            "release_guard_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract differs"
+        )
+    return dict(contract)
+
+
 def _verify_source_add_provider_origin_contract_v1(
     *,
     headers: Mapping[str, str],
@@ -2054,17 +2203,25 @@ def verify_required_supabase_v2_schema(
             timeout_seconds=timeout_seconds,
         )
     )
+    source_add_claim_control_contract = (
+        _verify_source_add_claim_control_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(required_rpcs)
-        + 5,
+        + 6,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(required_rpcs),
         "routing_model_transition_v2_required": (
             routing_model_transition_v2_required
         ),
-        "data_probe_count": 5,
+        "data_probe_count": 6,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation_http_probe_count": (
             1 if activation_source == "postgrest" else 0
@@ -2082,6 +2239,9 @@ def verify_required_supabase_v2_schema(
         ),
         "source_add_post_accept_leg1_contract": (
             source_add_post_accept_leg1_contract
+        ),
+        "source_add_claim_control_contract": (
+            source_add_claim_control_contract
         ),
         "source_add_leg1_release_policy": source_add_leg1_release_policy,
         "migration_files": sorted(migrations),

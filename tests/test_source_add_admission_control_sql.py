@@ -68,7 +68,6 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
     }
     assert relations == {
         "research_lab_source_add_submission_current",
-        "research_lab_source_add_control",
         "research_lab_source_add_work_items",
         "research_lab_source_add_probe_config_current",
         "research_lab_source_add_functional_probe_current",
@@ -77,6 +76,12 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         "research_lab_source_add_reward_slots",
         "research_lab_source_add_identity_current",
     }
+    assert {
+        relation
+        for declared_migration, relation, _columns in REQUIRED_SUPABASE_V2_SCHEMA
+        if declared_migration
+        == "scripts/172-research-lab-source-add-claim-control.sql"
+    } == {"research_lab_source_add_control"}
     assert {
         relation
         for declared_migration, relation, _columns in REQUIRED_SUPABASE_V2_SCHEMA
@@ -98,10 +103,8 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
     assert functions == {
         "research_lab_source_add_admit",
         "research_lab_source_add_begin_provider_execution",
-        "research_lab_source_add_claim_work",
         "research_lab_source_add_finish_work",
         "research_lab_source_add_requeue_provenance",
-        "research_lab_source_add_set_paused",
         "research_lab_source_add_enqueue_provision_smoke",
     }
     assert {
@@ -117,6 +120,19 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         "research_lab_source_add_finalize_leg1_v2",
         "research_lab_source_add_finalize_provision_smoke_v2",
         "research_lab_source_add_post_accept_leg1_contract_v1",
+    }
+    assert {
+        function
+        for declared_migration, function in REQUIRED_SUPABASE_V2_RPCS
+        if declared_migration
+        == "scripts/172-research-lab-source-add-claim-control.sql"
+    } == {
+        "research_lab_source_add_claim_work",
+        "research_lab_source_add_set_paused",
+        "research_lab_source_add_acquire_restart_guard_v1",
+        "research_lab_source_add_restart_quiescence_v1",
+        "research_lab_source_add_release_restart_guard_v1",
+        "research_lab_source_add_claim_control_contract_v1",
     }
     assert (
         "scripts/145-research-lab-source-add-admission-control.sql",

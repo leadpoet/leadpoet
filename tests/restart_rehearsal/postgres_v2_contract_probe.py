@@ -288,6 +288,9 @@ SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION = (
 SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION = (
     "171-research-lab-source-add-duplicate-privacy.sql"
 )
+SOURCE_ADD_CLAIM_CONTROL_MIGRATION = (
+    "172-research-lab-source-add-claim-control.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -359,6 +362,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
     SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
     SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
+    SOURCE_ADD_CLAIM_CONTROL_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -402,6 +406,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_168_source_add_post_accept_leg1_valid",
     "post_169_source_add_provider_origin_contract_valid",
     "post_170_source_add_duplicate_privacy_valid",
+    "post_172_source_add_claim_control_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6113,6 +6118,165 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-169 SOURCE_ADD duplicate-privacy contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_CLAIM_CONTROL_MIGRATION
+        )
+        applied.append(SOURCE_ADD_CLAIM_CONTROL_MIGRATION)
+        source_add_claim_control_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_claim_control_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_claim_control_contract != {
+            "schema_version": (
+                "leadpoet.source_add_claim_control_contract.v1"
+            ),
+            "control_lock": "source-add-control",
+            "pause_rpc": "research_lab_source_add_set_paused",
+            "pause_signature": "boolean,text,text",
+            "claim_rpc": "research_lab_source_add_claim_work",
+            "claim_signature": "text,integer",
+            "acquire_guard_rpc": (
+                "research_lab_source_add_acquire_restart_guard_v1"
+            ),
+            "acquire_guard_signature": "text,integer,text",
+            "release_guard_rpc": (
+                "research_lab_source_add_release_restart_guard_v1"
+            ),
+            "release_guard_signature": "text,text",
+            "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
+            "guard_commitment": "sha256_utf8_guard_id",
+            "guard_lease_min_seconds": 60,
+            "guard_lease_max_seconds": 3600,
+            "active_guard_replay_extends_lease": False,
+            "resume_requires_guard_clear": True,
+            "expired_guard_recovery": (
+                "explicit_reacquire_then_exact_release"
+            ),
+            "release_keeps_paused": True,
+            "restart_quiescence_rpc": (
+                "research_lab_source_add_restart_quiescence_v1"
+            ),
+            "restart_quiescence_signature": "text",
+            "restart_quiescence_schema_version": (
+                "leadpoet.source_add_restart_quiescence.v1"
+            ),
+            "restart_quiescence_result_fields": [
+                "schema_version",
+                "paused",
+                "guard_active",
+                "guard_matches",
+                "guard_commitment",
+                "guard_expires_at",
+                "leased_work_count",
+                "quiescent",
+            ],
+            "lock_before_paused_read": True,
+            "leased_scope": "all_leased_regardless_of_expiry",
+            "migration_requires_paused": True,
+            "migration_requires_zero_leased": True,
+            "function_authority_sha256": (
+                "sha256:19fccedcf8fd926deca4e1af2d067c258"
+                "66a70d800f3991a24e1501eacb74731"
+            ),
+            "functions": {
+                "admission_guard": True,
+                "acquire_restart_guard_v1": True,
+                "claim_work": True,
+                "pause": True,
+                "release_restart_guard_v1": True,
+                "restart_quiescence_v1": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "acquire_guard_service_role_callable": True,
+                "claim_service_role_callable": True,
+                "pause_service_role_callable": True,
+                "quiescence_service_role_callable": True,
+                "release_guard_service_role_callable": True,
+                "contract_service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        }:
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD claim-control contract differs"
+            )
+        rehearsal_guard_id = "source_add_restart_guard:" + "d" * 64
+        rehearsal_guard_commitment = "sha256:" + hashlib.sha256(
+            rehearsal_guard_id.encode("utf-8")
+        ).hexdigest()
+        source_add_restart_guard = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_acquire_restart_guard_v1(
+                    :'guard_id', 300, 'operator:restart-rehearsal'
+                )::text;
+                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            source_add_restart_guard.get("schema_version")
+            != "leadpoet.source_add_restart_guard.v1"
+            or source_add_restart_guard.get("paused") is not True
+            or source_add_restart_guard.get("guard_active") is not True
+            or source_add_restart_guard.get("guard_commitment")
+            != rehearsal_guard_commitment
+            or not isinstance(
+                source_add_restart_guard.get("guard_expires_at"), str
+            )
+        ):
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD restart guard differs"
+            )
+        source_add_restart_quiescence = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_restart_quiescence_v1(
+                    :'guard_id'
+                )::text;
+                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            source_add_restart_quiescence.get("schema_version")
+            != "leadpoet.source_add_restart_quiescence.v1"
+            or source_add_restart_quiescence.get("paused") is not True
+            or source_add_restart_quiescence.get("guard_active") is not True
+            or source_add_restart_quiescence.get("guard_matches") is not True
+            or source_add_restart_quiescence.get("guard_commitment")
+            != rehearsal_guard_commitment
+            or source_add_restart_quiescence.get("leased_work_count") != 0
+            or source_add_restart_quiescence.get("quiescent") is not True
+        ):
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD restart quiescence differs"
+            )
+        source_add_restart_guard_release = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_release_restart_guard_v1(
+                    :'guard_id', 'operator:restart-rehearsal'
+                )::text;
+                """.replace(":'guard_id'", "'" + rehearsal_guard_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_restart_guard_release != {
+            "schema_version": "leadpoet.source_add_restart_guard_release.v1",
+            "released": True,
+            "paused": True,
+            "guard_active": False,
+        }:
+            raise PostgresContractProbeError(
+                "post-172 SOURCE_ADD restart guard release differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

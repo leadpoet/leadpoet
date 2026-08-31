@@ -71,6 +71,12 @@ VALIDATOR_RUNTIME_LOCK_PATH = Path(
 )
 _GATEWAY_RUNTIME_OBJECTS: dict[str, dict[str, Any]] = {}
 _GATEWAY_RUNTIME_OBJECTS_LOCK = threading.Lock()
+REHEARSAL_GATEWAY_BOOT_GENERATION_ENV = (
+    "REHEARSAL_GATEWAY_BOOT_GENERATION"
+)
+_DEFAULT_GATEWAY_BOOT_GENERATION = hashlib.sha256(
+    b"leadpoet-local-gateway-bootstrap-generation-v1"
+).hexdigest()[:32]
 _PRIVATE_MODEL_BUCKET = "leadpoet-private-model-artifacts-493765492819"
 _PRIVATE_MODEL_PREFIX = "research-lab/sourcing-model/"
 _PRIVATE_MODEL_POINTER_KEY = (
@@ -1213,6 +1219,18 @@ def _local_signing_public_key(role: str) -> str:
     ).hex()
 
 
+def _local_gateway_boot_generation() -> str:
+    """Return one validated token shared by every role in this local boot."""
+
+    value = os.environ.get(
+        REHEARSAL_GATEWAY_BOOT_GENERATION_ENV,
+        _DEFAULT_GATEWAY_BOOT_GENERATION,
+    )
+    if re.fullmatch(r"[0-9a-f]{32}", str(value)) is None:
+        raise ValueError("local gateway boot generation is invalid")
+    return str(value)
+
+
 def _local_boot_identity(role: str, config_hash: str) -> dict[str, Any]:
     from gateway.tee.topology import ROLE_SPECS
     from leadpoet_canonical.attested_v2 import (
@@ -1244,7 +1262,12 @@ def _local_boot_identity(role: str, config_hash: str) -> dict[str, Any]:
         ),
         "config_hash": config_hash,
         "boot_nonce": hashlib.sha256(
-            ("leadpoet-local-boot:" + role).encode()
+            (
+                "leadpoet-local-boot:"
+                + _local_gateway_boot_generation()
+                + ":"
+                + role
+            ).encode()
         ).hexdigest()[:32],
         "signing_pubkey": signing_pubkey,
         "transport_pubkey": transport_pubkey,

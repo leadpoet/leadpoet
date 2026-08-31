@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 import urllib.request
 import uuid
 
@@ -8263,6 +8263,64 @@ def test_rehearsal_coordinator_binds_artifact_calls_to_peer_boot_identity(
                 "channel_id": "not-a-channel",
             },
         )
+
+
+def test_rehearsal_gateway_boot_generation_separates_restarts(
+    monkeypatch,
+) -> None:
+    role = "gateway_coordinator"
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_release_input",
+        lambda: {
+            "gateway_roles": {
+                role: {
+                    "commit_sha": "a" * 40,
+                    "pcr0": "b" * 96,
+                    "execution_manifest_hash": "sha256:" + "c" * 64,
+                    "dependency_lock_hash": "sha256:" + "d" * 64,
+                }
+            }
+        },
+    )
+    environment_name = (
+        rehearsal_sitecustomize.REHEARSAL_GATEWAY_BOOT_GENERATION_ENV
+    )
+    first_config = "sha256:" + "1" * 64
+    second_config = "sha256:" + "2" * 64
+
+    monkeypatch.setenv(environment_name, "3" * 32)
+    first = rehearsal_sitecustomize._local_boot_identity(role, first_config)
+    first_replay = rehearsal_sitecustomize._local_boot_identity(
+        role, first_config
+    )
+    assert first_replay == first
+
+    monkeypatch.setenv(environment_name, "4" * 32)
+    same_config_restart = rehearsal_sitecustomize._local_boot_identity(
+        role, first_config
+    )
+    changed_config_restart = rehearsal_sitecustomize._local_boot_identity(
+        role, second_config
+    )
+
+    def durable_boot_key(value: Mapping[str, object]) -> tuple[object, ...]:
+        return (
+            value["physical_role"],
+            value["commit_sha"],
+            value["pcr0"],
+            value["boot_nonce"],
+        )
+
+    assert same_config_restart["boot_identity_hash"] != first[
+        "boot_identity_hash"
+    ]
+    assert durable_boot_key(same_config_restart) != durable_boot_key(first)
+    assert durable_boot_key(changed_config_restart) != durable_boot_key(first)
+
+    monkeypatch.setenv(environment_name, "not-a-generation")
+    with pytest.raises(ValueError, match="boot generation is invalid"):
+        rehearsal_sitecustomize._local_boot_identity(role, first_config)
 
 
 def test_rehearsal_routes_credential_ingress_to_candidate_runtime(

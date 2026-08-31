@@ -631,7 +631,7 @@ def test_official_baseline_tables_and_all_rpcs_are_restart_gated():
     } <= relations
     reserve_migration = "scripts/166-research-lab-zero-call-verifier-timeout.sql"
     request_scope_migration = (
-        "scripts/167-research-lab-provider-request-attempt-scope.sql"
+        "scripts/168-research-lab-legacy-provider-terminal-custody.sql"
     )
     assert {
         (OFFICIAL_BASELINE_MIGRATION, rpc)
@@ -643,7 +643,7 @@ def test_official_baseline_tables_and_all_rpcs_are_restart_gated():
     )
     assert (
         request_scope_migration,
-        "research_lab_official_baseline_request_scope_v2",
+        "research_lab_official_baseline_request_scope_v3",
     ) in set(REQUIRED_SUPABASE_V2_RPCS)
     assert {
         "gateway/research_lab/official_baseline_model_runner.py",

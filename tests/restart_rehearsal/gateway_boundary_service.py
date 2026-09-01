@@ -685,6 +685,125 @@ def _migration_provider_outcome_contract(
     return dict(contract)
 
 
+def _source_add_claim_control_contract() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v1",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v1"
+        ),
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v1"
+        ),
+        "guard_state_signature": "",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v1"
+        ),
+        "release_guard_signature": "text,text,bigint,text",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+        ],
+        "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
+        "guard_commitment": "sha256_utf8_guard_id",
+        "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
+        "owner_commitment": "sha256_utf8_owner_id",
+        "owner_generation_commitment": (
+            "sha256_utf8_owner_commitment_colon_decimal_generation"
+        ),
+        "guard_lease_min_seconds": 60,
+        "guard_lease_max_seconds": 14400,
+        "active_guard_replay_extends_lease": True,
+        "acquire_compare_and_swap": "expected_generation",
+        "different_owner_takeover_increments_generation": True,
+        "expired_reacquire_increments_generation": True,
+        "generation_retained_after_release": True,
+        "resume_requires_guard_clear": True,
+        "expired_guard_recovery": "explicit_reacquire_then_exact_release",
+        "release_keeps_paused": True,
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text,text,bigint",
+        "restart_quiescence_schema_version": (
+            "leadpoet.source_add_restart_quiescence.v1"
+        ),
+        "restart_quiescence_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_matches",
+            "owner_matches",
+            "generation_matches",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "leased_work_count",
+            "quiescent",
+        ],
+        "lock_before_paused_read": True,
+        "leased_scope": "all_leased_regardless_of_expiry",
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "function_authority_sha256": (
+            "sha256:890a1e42b6dd28eb1c8515c3b8c33d31"
+            "a9974058fbd2c43393bb0880c0ca21e6"
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "restart_guard_state_v1": True,
+            "restart_quiescence_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "acquire_guard_service_role_callable": True,
+            "claim_service_role_callable": True,
+            "pause_service_role_callable": True,
+            "quiescence_service_role_callable": True,
+            "release_guard_service_role_callable": True,
+            "guard_state_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+
+
 def _migration_seed_rows(
     path: Path,
     *,
@@ -3128,6 +3247,14 @@ class Handler(BaseHTTPRequestHandler):
                         "legacy_not_callable": True,
                     },
                 }
+            elif name == (
+                "research_lab_source_add_claim_control_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD claim-control contract body is invalid"
+                    )
+                response = _source_add_claim_control_contract()
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)
                 self.server.state.record(

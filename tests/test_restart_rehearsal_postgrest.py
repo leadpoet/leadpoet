@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -8,9 +9,14 @@ from pathlib import Path
 import pytest
 
 from tests.restart_rehearsal.gateway_boundary_service import (
+    Handler,
     LocalPostgRESTState,
     _candidate_hybrid_constraint_definition,
     _matches_filter,
+    _source_add_claim_control_contract,
+)
+from gateway.tee.supabase_schema_preflight_v2 import (
+    _verify_source_add_claim_control_contract_v1,
 )
 from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
@@ -37,6 +43,41 @@ def test_postgrest_boundary_imports_candidate_source_tree() -> None:
         'PYTHONPATH="/source:/harness" /usr/bin/python3.11 \\\n'
         "    /harness/gateway_boundary_service.py"
     ) in script
+
+
+def test_postgrest_boundary_implements_claim_control_contract() -> None:
+    contract = _source_add_claim_control_contract()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def getcode(self) -> int:
+            return 200
+
+        def read(self) -> bytes:
+            return json.dumps(contract).encode("utf-8")
+
+    def opener(request, *, timeout):
+        assert timeout == 1.0
+        assert request.full_url.endswith(
+            "/rpc/research_lab_source_add_claim_control_contract_v1"
+        )
+        assert request.data == b"{}"
+        return Response()
+
+    assert _verify_source_add_claim_control_contract_v1(
+        headers={},
+        supabase_url="http://127.0.0.1:1",
+        opener=opener,
+        timeout_seconds=1.0,
+    ) == contract
+    assert "response = _source_add_claim_control_contract()" in (
+        inspect.getsource(Handler._dispatch)
+    )
 
 
 def test_candidate_hybrid_contract_is_derived_from_candidate_roles() -> None:

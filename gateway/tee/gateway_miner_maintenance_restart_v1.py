@@ -1436,6 +1436,15 @@ def _require_runtime_source_add_closed(
         )
 
 
+def _require_pre_activation_runtime_source_add_closed() -> None:
+    """Verify the still-running N-1 gateway before candidate activation."""
+
+    _require_runtime_source_add_closed(
+        _fetch_runtime_status(),
+        allow_legacy_missing_intake=True,
+    )
+
+
 def _require_pre_hydration_runtime_source_add_closed(
     *,
     live_process_commitment: str,
@@ -4275,7 +4284,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 _pre_hydration_live_process_commitment(final_tree)
             ),
         )
-        _require_runtime_source_add_closed(_fetch_runtime_status())
+        _require_pre_activation_runtime_source_add_closed()
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
         controller_fds_open = True
         for descriptor in (

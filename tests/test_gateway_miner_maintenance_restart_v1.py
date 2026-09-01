@@ -3180,6 +3180,22 @@ def test_runtime_source_add_check_accepts_missing_intake_only_for_explicit_legac
     )
 
 
+def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    status = _closed_source_add_runtime_status()
+    del status["source_add"]["intake_enabled"]
+    monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
+
+    maintenance._require_pre_activation_runtime_source_add_closed()
+
+    bootstrap_names = (
+        maintenance.bootstrap_gateway_miner_maintenance_restart.__code__.co_names
+    )
+    assert "_require_pre_activation_runtime_source_add_closed" in bootstrap_names
+    assert "_require_runtime_source_add_closed" not in bootstrap_names
+
+
 def test_candidate_runtime_rejects_missing_source_add_intake_field(
     monkeypatch: pytest.MonkeyPatch,
 ):

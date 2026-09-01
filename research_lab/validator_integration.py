@@ -13,11 +13,12 @@ import http.client
 import json
 import os
 from pathlib import Path
+from contextvars import ContextVar
 import re
 import socket
 import sys
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -51,6 +52,61 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integra
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
 WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS = 90
+# Total budget for the PRE-submission allocation preparation only. The
+# preparation starts at ALLOCATION_PREPARATION_BLOCK (180) and has until
+# WEIGHT_SUBMISSION_BLOCK (240) to finish: 60 blocks at ~12s = ~720 seconds of
+# block margin that the 90-second window budget above simply throws away.
+#
+# Why the two need different numbers. The gateway's cold attested-allocation
+# build has cost 67-100 seconds every day since 2026-08-17. A 90-second total
+# budget on that build is not a timeout, it is a coin flip: measured on the
+# gateway's own server spans, 24 builds between 16 and 26 August 2026 ran past
+# 90s, so the preparation fetch was cut off mid-build and the epoch fell through
+# to a cold build INSIDE the submission window with no margin left at all. The
+# 90s is also the whole retry budget in _fetch_allocation_json, so a build that
+# consumes it leaves nothing for the second attempt the bounded retry exists to
+# make -- on this route that retry has never once been able to run.
+#
+# The sibling client already has this coverage. fetch_gateway_weight_inputs_v2
+# is sized against a 700-second worst-case build
+# (tests/test_weight_submission_window_regression.py, SLOWEST_OBSERVED_BUILD_SECONDS);
+# the attested-allocation client was left at a flat 90.
+#
+# 300 seconds is 3x the worst build ever measured on this route and 42% of the
+# 720-second block margin, so a slow build is absorbed about seven minutes
+# before the submission window opens rather than racing it. The
+# submission-window fetch keeps 90 seconds, because there the on-chain deadline
+# is real and waiting longer buys nothing.
+ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS = 300
+
+# Ambient fetch budget for the attested-allocation fetch, set by the validator's
+# per-epoch allocation preparation before it creates the guard task.
+#
+# It is a ContextVar rather than an argument because the fetch is issued deep
+# inside Validator._research_lab_pre_weight_submission_guard, which is a
+# protected weight-path workflow: its AST is pinned by
+# validator_tee/host/protected_workflows_v2.py so that edits to the weight path
+# are deliberate and reviewed. Choosing a deadline is not a reason to touch it.
+# asyncio.create_task copies the current context and asyncio.to_thread
+# propagates it, so a value set around task creation reaches the fetch and
+# nothing else.
+#
+# It raises the floor and never lowers it: an explicit timeout_seconds argument
+# is always honoured if it is larger. Unset (the default) means no preparation
+# is in flight and the caller's own budget stands unchanged.
+ALLOCATION_PREPARATION_FETCH_BUDGET: "ContextVar[Optional[int]]" = ContextVar(
+    "leadpoet_allocation_preparation_fetch_budget",
+    default=None,
+)
+
+
+def resolve_allocation_fetch_budget(timeout_seconds: float) -> float:
+    """Return the larger of the caller's budget and any ambient preparation budget."""
+
+    ambient = ALLOCATION_PREPARATION_FETCH_BUDGET.get()
+    if ambient is None:
+        return float(timeout_seconds)
+    return float(max(float(timeout_seconds), float(ambient)))
 # Bounded in-window retry for the weight-path allocation fetch. A single
 # transient gateway failure (connection refused, 5xx, a brief restart blip)
 # must not cost the validator the whole epoch's weight submission. The retry
@@ -603,7 +659,7 @@ def fetch_research_lab_attested_allocation_bundle(
     base = gateway_url.rstrip("/")
     return _fetch_allocation_json(
         f"{base}/research-lab/allocations/attested/{int(epoch)}",
-        deadline_seconds=timeout_seconds,
+        deadline_seconds=resolve_allocation_fetch_budget(timeout_seconds),
     )
 
 

@@ -812,7 +812,13 @@ async def require_worker_authority_after_liveness(
         and len(path_parts) == 6
         and path_parts[:4] == ["", "research-lab", "admin", "source-adapters"]
         and path_parts[4]
-        and path_parts[5] in {"credential-recipient", "configure-test", "provision"}
+        and path_parts[5]
+        in {
+            "recheck-provenance",
+            "credential-recipient",
+            "configure-test",
+            "provision",
+        }
     )
     source_add_request = bool(
         request.method == "POST"

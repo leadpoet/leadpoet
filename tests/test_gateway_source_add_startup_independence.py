@@ -266,6 +266,10 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
         ("POST", "/research-lab/source-adapters"),
         (
             "POST",
+            "/research-lab/admin/source-adapters/submission-1/recheck-provenance",
+        ),
+        (
+            "POST",
             "/research-lab/admin/source-adapters/submission-1/credential-recipient",
         ),
         (
@@ -292,10 +296,6 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
         ),
         (
             "POST",
-            "/research-lab/admin/source-adapters/submission-1/recheck-provenance",
-        ),
-        (
-            "POST",
             "/research-lab/admin/source-adapters/submission-1/future-action",
         ),
         (
@@ -315,16 +315,16 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
     assert calls == allowed
 
     dispatcher_task.set_result(None)
-    for method, path in allowed[:4]:
+    for method, path in allowed[:5]:
         response = await middleware(request(method, path), call_next)
         assert response.status_code == 503, (method, path)
 
     worker_authority["ready"] = True
-    for method, path in allowed[:4]:
+    for method, path in allowed[:5]:
         response = await middleware(request(method, path), call_next)
         assert response.status_code == 503, (method, path)
 
-    independent_reads = allowed[4:]
+    independent_reads = allowed[5:]
     for method, path in independent_reads:
         assert await middleware(request(method, path), call_next) == "allowed"
     assert calls == allowed + independent_reads

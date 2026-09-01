@@ -56,6 +56,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _migration_provider_outcome_contract,
     _migration_schema_contract,
     _schema_contract,
+    _source_add_claim_control_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_MIGRATION_PREREQUISITES_SQL,
@@ -399,6 +400,39 @@ def test_local_schema_adapter_returns_full_source_add_leg1_contract(
         contract = json.loads(response.read().decode("utf-8"))
 
     assert contract == _source_add_post_accept_leg1_contract_fixture()
+
+
+def test_local_schema_adapter_returns_source_add_claim_control_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
+            "research_lab_source_add_claim_control_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_claim_control_contract()
 
 
 def test_gateway_cli_secret_matches_initial_durable_secret(

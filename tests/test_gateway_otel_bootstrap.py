@@ -29,8 +29,49 @@ def _app(exporter=None):
     def _health():
         return {"ok": True}
 
+    @app.get("/health/live")
+    def _live():
+        return {"ok": True}
+
+    @app.get("/health/ready")
+    def _ready():
+        return {"ok": True}
+
     installed = configure_gateway_otel(app, span_exporter=exporter)
     return app, installed
+
+
+def _app_rejecting_before_routing(exporter, status=503):
+    """An app whose request is rejected by a middleware INNER to the telemetry
+    middleware and OUTER to the router — the shape of the gateway's
+    worker-authority gate, body-size limit, and priority load-shed."""
+    app = FastAPI()
+
+    @app.get("/research-lab/allocations/attested/{epoch}")
+    def _alloc(epoch: int):  # pragma: no cover - never reached
+        return {"epoch": epoch}
+
+    @app.get("/health")
+    def _health():  # pragma: no cover - never reached
+        return {"ok": True}
+
+    class _RejectBeforeRouting:
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            await send({
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-length", b"0")],
+            })
+            await send({"type": "http.response.body", "body": b""})
+
+    # Added first, so the telemetry middleware registered by the bootstrap
+    # wraps it — exactly the ordering in gateway/main.py.
+    app.add_middleware(_RejectBeforeRouting)
+    assert configure_gateway_otel(app, span_exporter=exporter) is True
+    return app
 
 
 def test_disabled_by_default(monkeypatch):
@@ -77,11 +118,25 @@ def test_emits_only_infra_metadata_no_id_or_query_leak():
     }
 
 
-def test_health_route_is_suppressed():
+def test_high_frequency_liveness_probes_are_suppressed():
     exp = InMemorySpanExporter()
     app, _ = _app(exp)
-    TestClient(app).get("/health")
-    assert exp.get_finished_spans() == ()  # no telemetry for health probes
+    TestClient(app).get("/health/live")
+    TestClient(app).get("/health/ready")
+    assert exp.get_finished_spans() == ()  # no telemetry for probe noise
+
+
+def test_health_is_not_suppressed():
+    """``/health`` keeps answering while the worker-authority gate rejects
+    everything else, so its spans are the only positive liveness evidence an
+    operator has during an outage. It must NOT be suppressed."""
+    exp = InMemorySpanExporter()
+    app, _ = _app(exp)
+    assert TestClient(app).get("/health").status_code == 200
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes["http.route"] == "/health"
 
 
 def test_uses_raw_asgi_middleware_not_base_http_middleware():
@@ -393,3 +448,90 @@ def test_resource_is_fixed_and_ignores_ambient_resource_env(monkeypatch):
     resource_attrs = dict(spans[0].resource.attributes)
     assert resource_attrs == {"service.name": "leadpoet-gateway"}
     assert "leak.key" not in resource_attrs
+
+
+def test_pre_routing_rejection_still_names_the_route_template():
+    """A rejection that happens before routing has no ``scope["route"]``.
+    Resolving the path against the app's own route table recovers the
+    parameterised template, so per-route error rates stay attributable — the
+    concrete epoch id still never leaves the process."""
+    exp = InMemorySpanExporter()
+    app = _app_rejecting_before_routing(exp)
+
+    resp = TestClient(app).get(
+        "/research-lab/allocations/attested/24124?secret=abc123"
+    )
+    assert resp.status_code == 503
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.attributes["http.route"] == (
+        "/research-lab/allocations/attested/{epoch}"
+    )
+    assert span.attributes["http.response.status_code"] == 503
+    assert span.name == "GET /research-lab/allocations/attested/{epoch}"
+
+    haystack = span.name + " " + " ".join(
+        "%s=%s" % (k, v) for k, v in span.attributes.items()
+    )
+    assert "24124" not in haystack
+    assert "secret" not in haystack
+    assert "abc123" not in haystack
+
+
+def test_pre_routing_rejection_of_an_unregistered_path_stays_unmatched():
+    """The fallback is preserved: a path matching no registered route is
+    labelled with the fixed literal, never a client-controlled segment."""
+    exp = InMemorySpanExporter()
+    app = _app_rejecting_before_routing(exp)
+
+    assert TestClient(app).get(
+        "/attacker-controlled/EMAIL@EXAMPLE.COM"
+    ).status_code == 503
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].attributes["http.route"] == "/_unmatched"
+    haystack = spans[0].name + " " + " ".join(
+        "%s=%s" % (k, v) for k, v in spans[0].attributes.items()
+    )
+    assert "attacker-controlled" not in haystack
+    assert "EXAMPLE.COM" not in haystack
+
+
+def test_pre_routing_resolution_matches_the_routers_own_semantics():
+    """Resolution replays the router, so it inherits the router's semantics:
+    a method the route does not serve still resolves (Starlette's 405 partial
+    match), while a trailing slash does NOT — the gateway router runs with
+    ``redirect_slashes=False`` and has no such equivalence itself."""
+    exp = InMemorySpanExporter()
+    app = _app_rejecting_before_routing(exp)
+    client = TestClient(app)
+
+    client.post("/health")
+    client.get("/health/")
+
+    routes = [span.attributes["http.route"] for span in exp.get_finished_spans()]
+    assert routes == ["/health", "/_unmatched"]
+
+
+def test_resolution_only_ever_returns_registered_templates():
+    """The label set is bounded by the app's own route table — the property the
+    fail-closed exporter validator relies on."""
+    from gateway.observability.otel_bootstrap import _resolve_route_template
+
+    app, _ = _app(InMemorySpanExporter())
+    registered = {getattr(route, "path", None) for route in app.router.routes}
+
+    for path in (
+        "/research-lab/allocations/attested/24124",
+        "/health",
+        "/../../etc/passwd",
+        "/health/live/../../x",
+        "/does-not-exist",
+    ):
+        resolved = _resolve_route_template(
+            app, {"type": "http", "path": path, "method": "GET", "headers": []}
+        )
+        assert resolved is None or resolved in registered

@@ -59,8 +59,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
-# Route templates whose spans are suppressed entirely — health/liveness noise.
-_SUPPRESSED_ROUTES = {"/health", "/health/live", "/health/ready"}
+# Route templates whose spans are suppressed entirely — high-frequency
+# liveness/readiness probe noise. ``/health`` is deliberately NOT suppressed:
+# it is the one route that still answers while the worker-authority gate is
+# rejecting everything else, so its spans are the only positive liveness
+# evidence available exactly when an operator needs it most.
+_SUPPRESSED_ROUTES = {"/health/live", "/health/ready"}
 
 # Route label used whenever the request did not resolve to a registered route
 # template. A client-controlled path segment must NEVER be exported.
@@ -114,13 +118,56 @@ def _ambient_exporter_env_names() -> List[str]:
     return sorted(k for k in os.environ if k.startswith(_AMBIENT_EXPORTER_PREFIX))
 
 
-def _safe_route_label(scope_or_request: Any) -> str:
+def _resolve_route_template(app: Any, scope: Any) -> Optional[str]:
+    """Resolve an as-yet-unrouted scope against the app's OWN route table.
+
+    Starlette only populates ``scope["route"]`` once routing has resolved, so a
+    request rejected by a middleware that runs *before* the router — the
+    worker-authority gate (503), the body-size limit (413), the priority
+    load-shed (503) — reaches the telemetry middleware with no route at all.
+    Replaying the router's own matching recovers the parameterised template for
+    those requests instead of collapsing them all into one opaque label.
+
+    Only templates registered on this app are ever returned, so the label set
+    stays bounded and is NEVER derived from client-controlled input. The
+    router's real semantics are mirrored exactly: a FULL match wins, otherwise
+    the first PARTIAL match (Starlette's 405 path). No trailing-slash
+    equivalence is applied, because the gateway router sets
+    ``redirect_slashes=False`` and therefore has none itself.
+
+    Returns ``None`` when the path matches no registered route.
+    """
+    try:
+        from starlette.routing import Match
+
+        routes = getattr(getattr(app, "router", None), "routes", None) or ()
+        partial: Optional[str] = None
+        for route in routes:
+            try:
+                match, _child_scope = route.matches(scope)
+            except Exception:
+                continue
+            template = getattr(route, "path", None)
+            if not isinstance(template, str) or not template:
+                continue
+            if match == Match.FULL:
+                return template
+            if match == Match.PARTIAL and partial is None:
+                partial = template
+        return partial
+    except Exception:
+        return None
+
+
+def _safe_route_label(scope_or_request: Any, app: Any = None) -> str:
     """Return the low-cardinality route template, never the concrete path.
 
     Using the matched route template (e.g. ``/research-lab/allocations/attested/
     {epoch}``) keeps ids, hotkeys, and epoch numbers out of telemetry. When the
-    template cannot be resolved the label is the fixed ``/_unmatched`` literal —
-    a client-controlled path segment is never exported.
+    router has not run yet the template is recovered from the app's own route
+    table (see ``_resolve_route_template``). When the path matches no registered
+    route the label is the fixed ``/_unmatched`` literal — a client-controlled
+    path segment is never exported.
     """
     try:
         scope = getattr(scope_or_request, "scope", scope_or_request)
@@ -128,6 +175,10 @@ def _safe_route_label(scope_or_request: Any) -> str:
         template = getattr(route, "path", None)
         if isinstance(template, str) and template:
             return template
+        if app is not None:
+            template = _resolve_route_template(app, scope)
+            if isinstance(template, str) and template:
+                return template
     except Exception:
         pass
     return UNMATCHED_ROUTE_LABEL
@@ -407,9 +458,11 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
         tracer = provider.get_tracer(INSTRUMENTATION_SCOPE)
 
         def _emit(scope, status_code, start_ns, start_mono):
-            # Resolve the route template only after routing has run, so ids stay
-            # out of the label. Suppression already handled static health paths.
-            route = _safe_route_label(scope)
+            # Resolve the route template from the router when it has run, and
+            # otherwise from the app's own route table, so a pre-routing
+            # rejection still names the endpoint it was aimed at. Either way the
+            # label is a registered template — ids stay out of it.
+            route = _safe_route_label(scope, app)
             method = str(scope.get("method") or "")
             span = tracer.start_span(
                 "%s %s" % (method, route),

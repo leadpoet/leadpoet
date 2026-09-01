@@ -106,24 +106,51 @@ jobs:
             test "${{ github.event.workflow_run.conclusion }}" = "success"
             test "${{ github.event.workflow_run.head_sha }}" = "$CANDIDATE_SHA"
           else
-            GH_TOKEN="${{ github.token }}" gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow attested-v2-release.yml \
-              --commit "$CANDIDATE_SHA" --limit 20 \
-              --json conclusion,headSha > "$PARITY_TEMP/attested-runs.json"
-            python3 - "$PARITY_TEMP/attested-runs.json" "$CANDIDATE_SHA" <<'PY'
+            GH_TOKEN="${{ github.token }}" python3 - \
+              "$GITHUB_REPOSITORY" "$CANDIDATE_SHA" <<'PY'
           import json
-          from pathlib import Path
+          import os
+          import re
           import sys
-          runs = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          from urllib import parse, request
+
+          repository, candidate_sha = sys.argv[1:]
+          if (
+              re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+              is None
+              or re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None
+          ):
+              raise SystemExit("attested release lookup identity is invalid")
+          token = os.environ.get("GH_TOKEN", "")
+          if not token:
+              raise SystemExit("attested release lookup token is unavailable")
+          query = parse.urlencode({"branch": "main", "per_page": 100})
+          api_request = request.Request(
+              "https://api.github.com/repos/"
+              f"{repository}/actions/workflows/attested-v2-release.yml/runs?{query}",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with request.urlopen(api_request, timeout=30) as response:
+              payload = response.read(2_000_001)
+          if len(payload) > 2_000_000:
+              raise SystemExit("attested release lookup response is oversized")
+          value = json.loads(payload.decode("utf-8"))
+          runs = value.get("workflow_runs")
+          if not isinstance(runs, list):
+              raise SystemExit("attested release lookup response is invalid")
           if not any(
-              run.get("headSha") == sys.argv[2]
+              isinstance(run, dict)
+              and run.get("head_sha") == candidate_sha
+              and run.get("head_branch") == "main"
               and run.get("conclusion") == "success"
               for run in runs
           ):
               raise SystemExit("exact candidate has no successful attested release")
           PY
-            rm -f "$PARITY_TEMP/attested-runs.json"
           fi
           echo 'verified=true' >> "$GITHUB_OUTPUT"
 
@@ -227,12 +254,108 @@ jobs:
             *[!0-9a-f]*|'') exit 1 ;;
           esac
           test "${#bundle_sha256}" -eq 64
+          bundle_binding="$PARITY_TEMP/candidate-bundle-binding.json"
+          python3 - "$bundle_binding" "$CANDIDATE_SHA" \
+            "$bundle_sha256" "$bundle_size_bytes" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          output = Path(sys.argv[1])
+          descriptor = os.open(
+              output,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+              0o600,
+          )
+          try:
+              with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                  json.dump(
+                      {
+                          "candidate-sha": sys.argv[2],
+                          "bundle-sha256": sys.argv[3],
+                          "bundle-size-bytes": sys.argv[4],
+                      },
+                      handle,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  handle.write("\n")
+          except BaseException:
+              try:
+                  os.close(descriptor)
+              except OSError:
+                  pass
+              raise
+          PY
+          test -f "$bundle_binding"
+          test ! -L "$bundle_binding"
+          binding_size_bytes="$(stat -c '%s' -- "$bundle_binding")"
+          binding_sha256="$(sha256sum -- "$bundle_binding" | awk '{print $1}')"
+          test "$binding_size_bytes" -gt 0
+          test "$binding_size_bytes" -le 4096
+          case "$binding_sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#binding_sha256}" -eq 64
           aws s3 cp "$PARITY_TEMP/candidate.bundle" \
             "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate.bundle" \
-            --metadata "candidate-sha=$CANDIDATE_SHA,bundle-sha256=$bundle_sha256,bundle-size-bytes=$bundle_size_bytes" \
             --only-show-errors
-          printf 'sha256=%s\nsize_bytes=%s\n' \
-            "$bundle_sha256" "$bundle_size_bytes" >> "$GITHUB_OUTPUT"
+          aws s3 cp "$bundle_binding" \
+            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/candidate-bundle-binding.json" \
+            --only-show-errors
+          rm -f "$bundle_binding"
+          printf 'sha256=%s\nsize_bytes=%s\nbinding_sha256=%s\nbinding_size_bytes=%s\n' \
+            "$bundle_sha256" "$bundle_size_bytes" \
+            "$binding_sha256" "$binding_size_bytes" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer exact signed acceptance corpus
+        id: acceptance_transfer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          source_config="/home/ec2-user/.config/leadpoet/v2"
+          archive="$PARITY_TEMP/acceptance-corpus-v2.tar"
+          binding="$PARITY_TEMP/acceptance-corpus-v2-binding.json"
+          evidence="$PARITY_TEMP/acceptance-corpus-v2-transfer.json"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          python3 scripts/production_parity_acceptance_transfer.py \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --source-config-dir "$source_config" \
+            --archive "$archive" \
+            --binding "$binding" > "$evidence"
+          test -s "$archive" && test ! -L "$archive"
+          test -s "$binding" && test ! -L "$binding"
+          aws s3 cp "$archive" \
+            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/acceptance-corpus-v2.tar" \
+            --only-show-errors
+          aws s3 cp "$binding" \
+            "s3://${{ steps.stack.outputs.artifact_bucket }}/${{ steps.inputs.outputs.prefix }}/acceptance-corpus-v2-binding.json" \
+            --only-show-errors
+          python3 - "$evidence" "$GITHUB_OUTPUT" "$CANDIDATE_SHA" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if (
+              value.get("candidate_sha") != sys.argv[3]
+              or not isinstance(value.get("fixture_count"), int)
+              or value["fixture_count"] <= 0
+              or re.fullmatch(
+                  r"sha256:[0-9a-f]{64}",
+                  str(value.get("binding_hash") or ""),
+              )
+              is None
+          ):
+              raise SystemExit("acceptance transfer evidence differs")
+          with open(sys.argv[2], "a", encoding="utf-8") as handle:
+              handle.write(f"fixture_count={value['fixture_count']}\n")
+              handle.write(f"binding_hash={value['binding_hash']}\n")
+          PY
+          rm -f -- "$archive" "$binding" "$evidence"
 
       - name: Start candidate production paths
         id: execute
@@ -263,11 +386,20 @@ jobs:
           artifact_bucket = "${{ steps.stack.outputs.artifact_bucket }}"
           candidate_bundle_sha256 = "${{ steps.candidate_bundle.outputs.sha256 }}"
           candidate_bundle_size_bytes = "${{ steps.candidate_bundle.outputs.size_bytes }}"
+          candidate_bundle_binding_sha256 = "${{ steps.candidate_bundle.outputs.binding_sha256 }}"
+          candidate_bundle_binding_size_bytes = "${{ steps.candidate_bundle.outputs.binding_size_bytes }}"
           if (
               len(candidate_bundle_sha256) != 64
               or any(character not in "0123456789abcdef" for character in candidate_bundle_sha256)
               or not candidate_bundle_size_bytes.isdigit()
               or int(candidate_bundle_size_bytes) <= 0
+              or len(candidate_bundle_binding_sha256) != 64
+              or any(
+                  character not in "0123456789abcdef"
+                  for character in candidate_bundle_binding_sha256
+              )
+              or not candidate_bundle_binding_size_bytes.isdigit()
+              or not 0 < int(candidate_bundle_binding_size_bytes) <= 4096
           ):
               raise SystemExit("candidate bundle transfer metadata is invalid")
           root = f"/opt/leadpoet-production-parity/{run_id}"
@@ -277,46 +409,6 @@ jobs:
           compile(
               bootstrap_writer,
               "production_parity_bootstrap_evidence.py",
-              "exec",
-          )
-          candidate_bundle_metadata_validator = r'''import json
-          import sys
-
-          MAX_METADATA_BYTES = 4096
-
-          def exact_object(pairs):
-              value = {}
-              for key, item in pairs:
-                  if type(key) is not str or key in value:
-                      raise ValueError("metadata object keys are not unique strings")
-                  value[key] = item
-              return value
-
-          raw = sys.stdin.buffer.read(MAX_METADATA_BYTES + 1)
-          try:
-              if not raw or len(raw) > MAX_METADATA_BYTES or len(sys.argv) != 4:
-                  raise ValueError("metadata input is outside its bound")
-              actual = json.loads(
-                  raw.decode("utf-8"),
-                  object_pairs_hook=exact_object,
-              )
-          except (UnicodeDecodeError, ValueError):
-              raise SystemExit(1) from None
-          expected = {
-              "candidate-sha": sys.argv[1],
-              "bundle-sha256": sys.argv[2],
-              "bundle-size-bytes": sys.argv[3],
-          }
-          if (
-              type(actual) is not dict
-              or actual != expected
-              or any(type(value) is not str for value in actual.values())
-          ):
-              raise SystemExit(1)
-          '''
-          compile(
-              candidate_bundle_metadata_validator,
-              "candidate_bundle_metadata_validator.py",
               "exec",
           )
           q = shlex.quote
@@ -332,15 +424,30 @@ jobs:
           evidence=/run/leadpoet-production-parity/full-evidence.json
           authoritative_evidence={q(root + "/full-evidence.json")}
           candidate_bundle={q(root + "/candidate.bundle")}
-          candidate_bundle_verifier={q(root + "/candidate-bundle-verifier.git")}
+          candidate_bundle_binding={q(root + "/candidate-bundle-binding.json")}
           candidate_repo={q(root + "/repo")}
+          candidate_git_home={q(root + "/git-home")}
+          candidate_git_bin=
+          host_bootstrap_step=
           candidate_bundle_sha256={q(candidate_bundle_sha256)}
           candidate_bundle_size_bytes={q(candidate_bundle_size_bytes)}
+          candidate_bundle_binding_sha256={q(candidate_bundle_binding_sha256)}
+          candidate_bundle_binding_size_bytes={q(candidate_bundle_binding_size_bytes)}
           failure_response_code() {{
             case "$failure_stage" in
           {failure_response_cases}
               *) return 1 ;;
             esac
+          }}
+          candidate_git() {{
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              LC_ALL=C \
+              HOME="$candidate_git_home" \
+              XDG_CONFIG_HOME="$candidate_git_home/.config" \
+              GIT_CONFIG_NOSYSTEM=1 \
+              GIT_TERMINAL_PROMPT=0 \
+              "$candidate_git_bin" -c init.templateDir= "$@"
           }}
           retain_failure() {{
             evidence_parent="$(dirname -- "$evidence")" || return 1
@@ -365,6 +472,15 @@ jobs:
             final_status=$?
             trap - EXIT HUP INT TERM
             set +e
+            if [ "$final_status" -ne 0 ] && \
+               [ "$failure_stage" = host-python-bootstrap ]; then
+              case "$host_bootstrap_step" in
+                container-runtime-package|container-runtime-identity|container-runtime-service|venv-absence|runtime-package|venv-create|venv-identity|python-version|requirements-resolve|pip-bootstrap|pip-install|pip-check)
+                  printf 'LEADPOET_BOOTSTRAP_STEP=%s\n' \
+                    "$host_bootstrap_step" >&2
+                  ;;
+              esac
+            fi
             if [ "$final_status" -ne 0 ]; then
               retain_failure || true
             fi
@@ -394,7 +510,8 @@ jobs:
             elif [ "$final_status" -ne 0 ]; then
               final_status="$(failure_response_code)" || final_status=1
             fi
-            rm -f "$candidate_bundle" >/dev/null 2>&1 || true
+            rm -f "$candidate_bundle" "$candidate_bundle_binding" \
+              >/dev/null 2>&1 || true
             exit "$final_status"
           }}
           trap finalize_bootstrap EXIT
@@ -409,20 +526,25 @@ jobs:
           sudo mkdir -p {q(root)}
           sudo chown ec2-user:ec2-user {q(root)}
           failure_stage=candidate-bundle-download
-          candidate_bundle_metadata="$(aws s3api get-object \
+          aws s3api get-object \
             --bucket {q(artifact_bucket)} \
             --key {q(prefix + "/candidate.bundle")} \
-            --query Metadata \
-            --output json \
             --region {q(required['AWS_REGION'])} \
-            "$candidate_bundle" 2>/dev/null)"
+            "$candidate_bundle" >/dev/null 2>&1
           failure_stage=candidate-bundle-metadata
-          printf '%s' "$candidate_bundle_metadata" | \
-            /usr/bin/python3.11 -c {q(candidate_bundle_metadata_validator)} \
-            {q(required['CANDIDATE_SHA'])} \
-            "$candidate_bundle_sha256" \
-            "$candidate_bundle_size_bytes"
-          unset candidate_bundle_metadata
+          test ! -e "$candidate_bundle_binding"
+          aws s3api get-object \
+            --bucket {q(artifact_bucket)} \
+            --key {q(prefix + "/candidate-bundle-binding.json")} \
+            --region {q(required['AWS_REGION'])} \
+            "$candidate_bundle_binding" >/dev/null 2>&1
+          test -f "$candidate_bundle_binding"
+          test ! -L "$candidate_bundle_binding"
+          test "$(stat -c '%s' -- "$candidate_bundle_binding")" = \
+            "$candidate_bundle_binding_size_bytes"
+          test "$(sha256sum -- "$candidate_bundle_binding" | awk '{{print $1}}')" = \
+            "$candidate_bundle_binding_sha256"
+          rm -f "$candidate_bundle_binding"
           failure_stage=candidate-bundle-file-integrity
           test -f "$candidate_bundle"
           test ! -L "$candidate_bundle"
@@ -431,44 +553,129 @@ jobs:
           test "$(sha256sum -- "$candidate_bundle" | awk '{{print $1}}')" = \
             "$candidate_bundle_sha256"
           failure_stage=candidate-bundle-head
-          test "$(git bundle list-heads "$candidate_bundle" 2>/dev/null)" = \
-            {q(required['CANDIDATE_SHA'] + " HEAD")}
-          failure_stage=candidate-bundle-verify
-          git init --bare "$candidate_bundle_verifier" >/dev/null 2>&1
-          git -C "$candidate_bundle_verifier" bundle verify \
-            "$candidate_bundle" >/dev/null 2>&1
+          test "$(LC_ALL=C head -n 3 -- "$candidate_bundle")" = "$(
+            printf '%s\n%s HEAD' '# v2 git bundle' \
+              {q(required['CANDIDATE_SHA'])}
+          )"
+          failure_stage=candidate-repository-directory
+          mkdir -m 0700 -- "$candidate_repo" "$candidate_git_home"
+          test -d "$candidate_repo"
+          test ! -L "$candidate_repo"
+          test -d "$candidate_git_home"
+          test ! -L "$candidate_git_home"
+          failure_stage=candidate-git-runtime
+          if [ -x /usr/bin/git ]; then
+            candidate_git_bin=/usr/bin/git
+          elif [ -x /usr/local/bin/git ]; then
+            candidate_git_bin=/usr/local/bin/git
+          else
+            test -x /usr/bin/dnf
+            sudo -n /usr/bin/dnf -q -y install git-core >/dev/null 2>&1
+            candidate_git_bin=/usr/bin/git
+          fi
+          case "$candidate_git_bin" in
+            /*) ;;
+            *) false ;;
+          esac
+          test -x "$candidate_git_bin"
           failure_stage=candidate-repository-init
-          git init "$candidate_repo" >/dev/null 2>&1
-          failure_stage=candidate-bundle-fetch
-          git -C "$candidate_repo" fetch --no-tags \
+          candidate_git -C "$candidate_repo" init >/dev/null 2>&1
+          failure_stage=candidate-repository-structure
+          test -d "$candidate_repo/.git"
+          test ! -L "$candidate_repo/.git"
+          # Fetching into a newly initialized empty repository verifies the
+          # complete bundle and its object closure without depending on a
+          # second, host-configured bare verification repository.
+          failure_stage=candidate-bundle-verify
+          candidate_git -C "$candidate_repo" fetch --no-tags \
             "$candidate_bundle" HEAD >/dev/null 2>&1
-          test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
+          failure_stage=candidate-bundle-fetch
+          test "$(candidate_git -C "$candidate_repo" rev-parse FETCH_HEAD)" = \
             {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-checkout
-          git -C "$candidate_repo" checkout --detach \
+          candidate_git -C "$candidate_repo" checkout --detach \
             {q(required['CANDIDATE_SHA'])} >/dev/null 2>&1
-          test "$(git -C "$candidate_repo" rev-parse HEAD)" = \
+          test "$(candidate_git -C "$candidate_repo" rev-parse HEAD)" = \
             {q(required['CANDIDATE_SHA'])}
           failure_stage=candidate-remote-rebind
-          git -C "$candidate_repo" remote add origin \
+          candidate_git -C "$candidate_repo" remote add origin \
             https://github.com/leadpoet/leadpoet.git
-          test "$(git -C "$candidate_repo" remote get-url origin)" = \
+          test "$(candidate_git -C "$candidate_repo" remote get-url origin)" = \
             https://github.com/leadpoet/leadpoet.git
           failure_stage=canonical-origin-fetch
-          git -C "$candidate_repo" fetch --no-tags origin \
+          candidate_git -C "$candidate_repo" fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main >/dev/null 2>&1
-          test "$(git -C "$candidate_repo" rev-parse origin/main)" = \
+          test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" = \
             {q(required['CANDIDATE_SHA'])}
           cd "$candidate_repo"
+          host_venv={q(root + "/controller-venv")}
+          host_python="$host_venv/bin/python3"
+          failure_stage=host-python-bootstrap
+          failure_category=CommandFailed
+          host_bootstrap_step=container-runtime-package
+          if [ ! -x /usr/bin/docker ]; then
+            test -x /usr/bin/dnf
+            sudo -n /usr/bin/dnf -q -y install docker >/dev/null 2>&1
+          fi
+          host_bootstrap_step=container-runtime-identity
+          test -x /usr/bin/docker
+          /usr/bin/rpm -qf /usr/bin/docker \
+            | /usr/bin/grep -Eq '^docker-[0-9]'
+          host_bootstrap_step=container-runtime-service
+          sudo -n /usr/bin/systemctl start docker.service >/dev/null 2>&1
+          sudo -n /usr/bin/systemctl is-active --quiet docker.service
+          sudo -n /usr/bin/docker info >/dev/null 2>&1
+          host_bootstrap_step=venv-absence
+          test ! -e "$host_venv"
+          host_bootstrap_step=runtime-package
+          test -x /usr/bin/dnf
+          # Amazon Linux publishes the complete Python 3.11 venv bootstrap as
+          # the namespaced pip package. Install it before creating the venv so
+          # the base AMI's optional package set cannot make venv fail first.
+          sudo -n /usr/bin/dnf -q -y install \
+            python3.11-pip >/dev/null 2>&1
+          host_bootstrap_step=venv-create
+          /usr/bin/python3.11 -I -m venv "$host_venv"
+          host_bootstrap_step=venv-identity
+          test -d "$host_venv"
+          test ! -L "$host_venv"
+          test -x "$host_python"
+          test "$(readlink -f -- "$host_python")" = /usr/bin/python3.11
+          host_bootstrap_step=python-version
+          test "$("$host_python" -I -c \
+            'import sys; print(f"{{sys.version_info.major}}.{{sys.version_info.minor}}")')" = \
+            3.11
+          host_requirements={q(root + "/host-controller-requirements.txt")}
+          host_bootstrap_step=requirements-resolve
+          test ! -e "$host_requirements"
+          /usr/bin/python3.11 \
+            scripts/resolve_production_parity_controller_requirements.py \
+            --requirements requirements.txt \
+            --output "$host_requirements" >/dev/null 2>&1
+          test -f "$host_requirements"
+          test ! -L "$host_requirements"
+          host_bootstrap_step=pip-bootstrap
+          PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+            "$host_python" -m pip --version >/dev/null 2>&1
+          host_bootstrap_step=pip-install
+          PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+            "$host_python" -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --no-cache-dir \
+            --requirement "$host_requirements" >/dev/null 2>&1
+          host_bootstrap_step=pip-check
+          PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1 \
+            "$host_python" -m pip check >/dev/null 2>&1
           failure_stage=host-python-import
           failure_category=HostImportFailed
-          /home/ec2-user/venv311/bin/python3 \
+          "$host_python" \
             scripts/run_production_parity_full_host.py --help >/dev/null 2>&1
           evidence="$authoritative_evidence"
           failure_stage=host-entrypoint
           failure_category=HostEntrypointFailed
           status=0
-          /home/ec2-user/venv311/bin/python3 scripts/run_production_parity_full_host.py \
+          "$host_python" scripts/run_production_parity_full_host.py \
             --region {q(required['AWS_REGION'])} \
             --run-id {q(run_id)} \
             --base-sha {q(base)} \
@@ -530,6 +737,55 @@ jobs:
             --base-sha "${{ steps.inputs.outputs.base }}" \
             --candidate-sha "$CANDIDATE_SHA" \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Report bounded bootstrap substage
+        if: always() && steps.poll1.outcome == 'failure'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          diagnostic="$PARITY_TEMP/ssm-bootstrap-diagnostic.json"
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "${{ steps.execute.outputs.command_id }}" \
+            --instance-id "${{ steps.stack.outputs.instance_id }}" \
+            --query '{stdout:StandardOutputContent,stderr:StandardErrorContent}' \
+            --output json > "$diagnostic"
+          python3 - "$diagnostic" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          allowed = {
+              "container-runtime-package",
+              "container-runtime-identity",
+              "container-runtime-service",
+              "venv-absence",
+              "runtime-package",
+              "venv-create",
+              "venv-identity",
+              "python-version",
+              "requirements-resolve",
+              "pip-bootstrap",
+              "pip-install",
+              "pip-check",
+          }
+          value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          combined = "\n".join(
+              str(value.get(key) or "") for key in ("stdout", "stderr")
+          )
+          observed = re.findall(
+              r"^LEADPOET_BOOTSTRAP_STEP=([a-z0-9-]+)$",
+              combined,
+              flags=re.MULTILINE,
+          )
+          exact = sorted(set(observed).intersection(allowed))
+          print(json.dumps({
+              "bootstrap_step": exact[0] if len(exact) == 1 else "unavailable",
+              "schema_version": "leadpoet.production_parity_bootstrap_diagnostic.v1",
+          }, sort_keys=True))
+          PY
+          rm -f -- "$diagnostic"
 
       - name: Refresh parity AWS role for poll window 2
         if: steps.poll1.outputs.status == 'pending'
@@ -713,6 +969,12 @@ jobs:
               or value.get("acceptance_corpus", {}).get("candidate_sha")
                   != sys.argv[2]
               or value.get("acceptance_corpus", {}).get("fixture_count", 0) <= 0
+              or value.get("acceptance_corpus", {}).get("transfer", {}).get(
+                  "validated_exact"
+              ) is not True
+              or value.get("acceptance_corpus", {}).get("transfer", {}).get(
+                  "source"
+              ) != "run-scoped-object-lock"
               or value.get("external_write_boundaries", {}).get("arweave")
                   != "blocked-production-parity"
               or value.get("miner_intake", {}).get("status") != "passed"

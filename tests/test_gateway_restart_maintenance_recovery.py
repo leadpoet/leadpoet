@@ -30,6 +30,36 @@ def _pause_state(
     }
 
 
+@pytest.mark.parametrize(
+    ("normalizer", "control_key"),
+    (
+        (
+            maintenance.normalize_autoresearch_maintenance_state,
+            maintenance.AUTORESEARCH_MAINTENANCE_CONTROL_KEY,
+        ),
+        (
+            maintenance.normalize_scoring_maintenance_state,
+            maintenance.SCORING_MAINTENANCE_CONTROL_KEY,
+        ),
+    ),
+    ids=("autoresearch", "scoring"),
+)
+def test_maintenance_state_normalizers_preserve_first_event_sequence(
+    normalizer,
+    control_key: str,
+) -> None:
+    state = normalizer(
+        {
+            "control_key": control_key,
+            "current_control_status": "active",
+            "current_event_seq": 0,
+            "seq": 9,
+        }
+    )
+
+    assert state["event_seq"] == 0
+
+
 @pytest.mark.asyncio
 async def test_restart_recovery_preserves_owned_autoresearch_and_scoring_pauses(
     monkeypatch,
@@ -173,6 +203,82 @@ async def _async_value(value):
 def test_restart_recovery_cli_requires_exact_commit() -> None:
     with pytest.raises(SystemExit):
         admin.build_parser().parse_args(["resume-restart-maintenance"])
+
+
+@pytest.mark.parametrize(
+    ("command", "action", "extra_arguments"),
+    (
+        (
+            "pause-source-add",
+            "pause",
+            ["--reason", "gateway_restart"],
+        ),
+        ("resume-source-add", "resume", []),
+    ),
+)
+def test_source_add_control_aliases_apply_immediately(
+    command: str,
+    action: str,
+    extra_arguments: list[str],
+) -> None:
+    parsed = admin.build_parser().parse_args(
+        [command, *extra_arguments, "--actor-ref", "operator:gateway-restart"]
+    )
+
+    assert parsed.command == command
+    assert parsed.source_add_command == action
+    assert parsed.apply is True
+    assert parsed.actor_ref == "operator:gateway-restart"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "action", "paused"),
+    (
+        ("pause-source-add", "pause", True),
+        ("resume-source-add", "resume", False),
+    ),
+)
+async def test_source_add_control_aliases_only_change_source_add(
+    monkeypatch,
+    command: str,
+    action: str,
+    paused: bool,
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    async def call_rpc(name: str, parameters: dict):
+        calls.append((name, parameters))
+        return [{"paused": paused, "reason": "gateway_restart"}]
+
+    async def select_one(*_args, **_kwargs):
+        return {"paused": not paused, "reason": "prior_state"}
+
+    monkeypatch.setattr(admin, "call_rpc", call_rpc)
+    monkeypatch.setattr(admin, "select_one", select_one)
+    result = await admin._run(
+        argparse.Namespace(
+            command=command,
+            source_add_command=action,
+            reason="gateway_restart",
+            actor_ref="operator:gateway-restart",
+            apply=True,
+        )
+    )
+
+    assert calls == [
+        (
+            "research_lab_source_add_set_paused",
+            {
+                "p_paused": paused,
+                "p_reason": "gateway_restart",
+                "p_actor_ref": "operator:gateway-restart",
+            },
+        )
+    ]
+    assert result["ok"] is True
+    assert result["action"] == f"source-add {action}"
+    assert result["dry_run"] is False
 
 
 @pytest.mark.asyncio

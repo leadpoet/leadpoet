@@ -31,7 +31,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -9339,21 +9339,6 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         "retry resume bypassed its full-fleet lease owner"
                     )
                 phase["lease_available"] = True
-                refreshed = await (
-                    retry_worker._run_lease_held_recovery_and_preflight(
-                        {"paused": False}
-                    )
-                )
-                if (
-                    refreshed.get("proceed") is not True
-                    or set(
-                        retry_worker._baseline_profile_preflight_monotonic_at
-                    )
-                    != set(range(worker_count))
-                ):
-                    raise RuntimeError(
-                        "retry resume lacked forced full-fleet freshness"
-                    )
                 resumed_after_refresh = [
                     *restored_attempts,
                     *persisted_extension_attempts,
@@ -9371,6 +9356,12 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                         retry_worker._enforce_baseline_wave_preflight_freshness
                     ),
                 )
+                if set(
+                    retry_worker._baseline_profile_preflight_monotonic_at
+                ) != set(range(worker_count)):
+                    raise RuntimeError(
+                        "retry wave did not refresh forced full-fleet freshness inline"
+                    )
             finally:
                 scoring_worker_module.get_scoring_maintenance_state = (
                     original_maintenance_reader
@@ -9405,7 +9396,7 @@ def _exercise_rebenchmark_provider_transport_evidence() -> dict[str, Any]:
                 or not all(full_fleet_phases)
             ):
                 raise RuntimeError(
-                    "stale-profile recycle did not bind forced fleet evidence"
+                    "stale-profile wave refresh did not bind forced fleet evidence"
                 )
             if len(rows) != retry_item_count or stats != {
                 "retried": retry_item_count * current_retry_rounds,
@@ -10474,9 +10465,23 @@ def _exercise_company_fit_numeric_observation_projection() -> dict[str, Any]:
     return {
         "numeric_observation_with_web_evidence_matched": True,
         "raw_observation_committed": True,
-        "explicit_false_remained_mismatch": True,
+        "contradictory_boolean_failed_closed": True,
         "malformed_range_decimal_negative_failed_closed": True,
     }
+
+
+def _company_fit_numeric_observation_projection_evidence_is_complete(
+    evidence: Mapping[str, Any],
+) -> bool:
+    return all(
+        evidence.get(field) is True
+        for field in (
+            "numeric_observation_with_web_evidence_matched",
+            "raw_observation_committed",
+            "contradictory_boolean_failed_closed",
+            "malformed_range_decimal_negative_failed_closed",
+        )
+    )
 
 
 def _exercise_measured_raw_provider_transport(
@@ -11206,6 +11211,29 @@ def _exercise_full_rebenchmark_publication_path(
                         raise RuntimeError("23505 duplicate key unique constraint seq")
             self.tables[table].append(inserted)
             return copy.deepcopy(inserted)
+
+        async def insert_rows(
+            self,
+            table: str,
+            rows: Iterable[Mapping[str, Any]],
+        ) -> list[dict[str, Any]]:
+            payload = [copy.deepcopy(dict(row)) for row in rows]
+            if not payload:
+                raise ValueError(f"{table}: batch insert requires at least one row")
+
+            # A PostgreSQL multi-row INSERT is atomic. Preserve that external
+            # boundary contract if a later row hits one of the strict unique
+            # checks exercised by ``insert_row``.
+            prior_rows = copy.deepcopy(self.tables[table])
+            prior_ordinal = self._ordinal
+            prior_log_length = len(self.insert_log)
+            try:
+                return [await self.insert_row(table, row) for row in payload]
+            except Exception:
+                self.tables[table] = prior_rows
+                self._ordinal = prior_ordinal
+                del self.insert_log[prior_log_length:]
+                raise
 
         async def next_event_seq(
             self,
@@ -12661,6 +12689,7 @@ def _exercise_full_rebenchmark_publication_path(
     patchers = (
         patch.dict(os.environ, launch_environment),
         patch.object(research_lab_store, "insert_row", boundary.insert_row),
+        patch.object(research_lab_store, "insert_rows", boundary.insert_rows),
         patch.object(research_lab_store, "select_one", boundary.select_one),
         patch.object(research_lab_store, "select_many", boundary.select_many),
         patch.object(research_lab_store, "select_all", boundary.select_all),
@@ -12684,6 +12713,7 @@ def _exercise_full_rebenchmark_publication_path(
         ),
         patch.object(active_model_authority_v2, "select_many", boundary.select_many),
         patch.object(attested_v2_store, "insert_row", boundary.insert_row),
+        patch.object(attested_v2_store, "insert_rows", boundary.insert_rows),
         patch.object(attested_v2_store, "select_one", boundary.select_one),
         patch.object(attested_v2_store, "select_many", boundary.select_many),
         patch.object(attested_v2_store, "select_all", boundary.select_all),
@@ -12992,6 +13022,13 @@ def _exercise_full_rebenchmark_publication_path(
                         research_lab_store,
                         "next_event_seq",
                         recovery_boundary.next_event_seq,
+                    )
+                )
+                recovery_stack.enter_context(
+                    patch.object(
+                        research_lab_store,
+                        "insert_rows",
+                        recovery_boundary.insert_rows,
                     )
                 )
                 recovery_stack.enter_context(
@@ -14066,12 +14103,34 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         ),
         None,
     )
+    source_add_independent_assignment = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_SOURCE_ADD_INDEPENDENT_PATHS"
+                for target in node.targets
+            )
+        ),
+        None,
+    )
     ready_definition = next(
         (
             node
             for node in main_tree.body
             if isinstance(node, ast.FunctionDef)
             and node.name == "_gateway_worker_startup_ready"
+        ),
+        None,
+    )
+    source_add_ready_definition = next(
+        (
+            node
+            for node in main_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_gateway_source_add_dispatcher_ready"
         ),
         None,
     )
@@ -14086,7 +14145,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
     )
     if (
         diagnostic_assignment is None
+        or source_add_independent_assignment is None
         or ready_definition is None
+        or source_add_ready_definition is None
         or gate_definition is None
     ):
         raise RuntimeError("candidate gateway worker authority gate is incomplete")
@@ -14096,7 +14157,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         ast.Module(
             body=[
                 copy.deepcopy(diagnostic_assignment),
+                copy.deepcopy(source_add_independent_assignment),
                 copy.deepcopy(ready_definition),
+                copy.deepcopy(source_add_ready_definition),
                 extracted_gate,
             ],
             type_ignores=[],
@@ -14112,6 +14175,9 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
         gate_namespace,
     )
     candidate_startup_ready = gate_namespace["_gateway_worker_startup_ready"]
+    candidate_source_add_ready = gate_namespace[
+        "_gateway_source_add_dispatcher_ready"
+    ]
     candidate_authority_gate = gate_namespace[
         "require_worker_authority_after_liveness"
     ]
@@ -14149,6 +14215,11 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
 
         @asynccontextmanager
         async def probe_lifespan(application: FastAPI):
+            async def source_add_dispatcher() -> None:
+                await asyncio.Event().wait()
+
+            source_add_task = asyncio.create_task(source_add_dispatcher())
+            application.state.source_add_dispatcher_task = source_add_task
             startup_task = asyncio.create_task(
                 start_worker_supervisor_without_blocking_event_loop(
                     supervisor  # type: ignore[arg-type]
@@ -14159,7 +14230,12 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
                 yield
             finally:
                 startup_task.cancel()
-                await asyncio.gather(startup_task, return_exceptions=True)
+                source_add_task.cancel()
+                await asyncio.gather(
+                    startup_task,
+                    source_add_task,
+                    return_exceptions=True,
+                )
                 supervisor.stop()
 
         probe_app = FastAPI(lifespan=probe_lifespan)
@@ -14176,6 +14252,14 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
                 raise HTTPException(status_code=503)
             return {"ready": True}
 
+        @probe_app.get("/research-lab/status")
+        async def probe_source_add_status() -> dict[str, bool]:
+            return {"source_add": candidate_source_add_ready(probe_app)}
+
+        @probe_app.post("/research-lab/source-adapters")
+        async def probe_source_add() -> dict[str, bool]:
+            return {"accepted": candidate_source_add_ready(probe_app)}
+
         return probe_app, supervisor
 
     caller_thread = threading.get_ident()
@@ -14187,6 +14271,14 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
             raise RuntimeError("ASGI liveness was unavailable during worker startup")
         if client.get("/authority").status_code != 503:
             raise RuntimeError("ASGI authority did not fail closed during startup")
+        if client.get("/research-lab/status").status_code != 200:
+            raise RuntimeError("SOURCE_ADD status was coupled to worker startup")
+        source_add_response = client.post("/research-lab/source-adapters")
+        if (
+            source_add_response.status_code != 200
+            or source_add_response.json() != {"accepted": True}
+        ):
+            raise RuntimeError("SOURCE_ADD intake was coupled to worker startup")
         supervisor.release.set()
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
@@ -14221,6 +14313,16 @@ def _exercise_gateway_startup_transition_safety() -> dict[str, Any]:
             raise RuntimeError("ASGI liveness failed after worker startup error")
         if client.get("/authority").status_code != 503:
             raise RuntimeError("ASGI authority opened after worker startup error")
+        source_add_task = failed_app.state.source_add_dispatcher_task
+        source_add_response = client.post("/research-lab/source-adapters")
+        if (
+            source_add_task.done()
+            or source_add_response.status_code != 200
+            or source_add_response.json() != {"accepted": True}
+        ):
+            raise RuntimeError(
+                "SOURCE_ADD did not survive an independent worker startup error"
+            )
 
     cancel_app, cancel_supervisor = build_asgi_probe()
     release_timer: threading.Timer | None = None
@@ -16362,26 +16464,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             is True
         ),
         "company_fit_numeric_observation_projection_verified": (
-            behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("numeric_observation_with_web_evidence_matched")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("raw_observation_committed")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("explicit_false_remained_mismatch")
-            is True
-            and behavior_evidence.get(
-                "company-fit-numeric-observation-projection",
-                {},
-            ).get("malformed_range_decimal_negative_failed_closed")
-            is True
+            _company_fit_numeric_observation_projection_evidence_is_complete(
+                behavior_evidence.get(
+                    "company-fit-numeric-observation-projection",
+                    {},
+                )
+            )
         ),
         "measured_assigned_proxy_raw_transport_verified": (
             behavior_evidence.get(

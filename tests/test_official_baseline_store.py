@@ -5,6 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.research_lab import (
+    official_baseline_store as official_baseline_store_module,
+)
+
 from gateway.research_lab.official_baseline_model_runner import (
     EXACT_MODEL_RUNNER_FAMILY,
     OFFICIAL_BASELINE_ACTION_AUTHORIZATION_SCHEMA_VERSION,
@@ -89,6 +93,17 @@ def _authorization() -> dict:
         "protected_request_sha256": _sha("1"),
         "lease_holder_sha256": _sha("2"),
         "expected_frontier_sha256": _sha("3"),
+    }
+
+
+def _verifier_authorization() -> dict:
+    return {
+        **_authorization(),
+        "action_type": "verify_company",
+        "tool_id": "verifier.company",
+        "call_cap": 0,
+        "credit_cap_microunits": 0,
+        "timeout_ms": 0,
     }
 
 
@@ -246,6 +261,19 @@ class _Client:
         return _RpcCall(response)
 
 
+class _SequencedClient(_Client):
+    def __init__(self, responses, sequence):
+        super().__init__(responses)
+        self.sequence = list(sequence)
+
+    def rpc(self, name, params):
+        self.calls.append((name, deepcopy(params)))
+        response = self.sequence.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return _RpcCall(response)
+
+
 def _responses() -> dict:
     registration = _registration()
     authorization = _authorization()
@@ -335,6 +363,89 @@ def test_supabase_store_uses_all_seven_exact_rpc_shapes():
         {"p_completion"},
         {"p_run_sha256", "p_unit_ref"},
     ]
+
+
+def test_supabase_store_retries_exact_rpc_after_ambiguous_timeout(monkeypatch):
+    responses = _responses()
+    response = responses[OFFICIAL_BASELINE_RPCS[2]]
+    client = _SequencedClient(
+        responses,
+        [TimeoutError("fixture timeout"), response],
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        official_baseline_store_module.time,
+        "sleep",
+        sleeps.append,
+    )
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    result = store.record_terminal_known(terminal=_terminal_known())
+
+    assert result["state"] == "terminal_known"
+    assert client.calls == [
+        (OFFICIAL_BASELINE_RPCS[2], {"p_terminal": _terminal_known()}),
+        (OFFICIAL_BASELINE_RPCS[2], {"p_terminal": _terminal_known()}),
+    ]
+    assert sleeps == [0.1]
+
+
+def test_supabase_store_never_retries_logic_or_conflict_error(monkeypatch):
+    responses = _responses()
+    client = _SequencedClient(
+        responses,
+        [ValueError("fixture conflict")],
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        official_baseline_store_module.time,
+        "sleep",
+        sleeps.append,
+    )
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    with pytest.raises(OfficialBaselineStoreError, match="ValueError"):
+        store.record_terminal_known(terminal=_terminal_known())
+
+    assert len(client.calls) == 1
+    assert sleeps == []
+
+
+def test_supabase_store_accepts_exact_zero_call_verifier_authorization():
+    authorization = _verifier_authorization()
+    responses = _responses()
+    reservation = responses[OFFICIAL_BASELINE_RPCS[1]]
+    reservation.update(
+        protected_job_ref=authorization["protected_job_ref"],
+        protected_request_sha256=authorization["protected_request_sha256"],
+        attempt_sha256=sha256_json(authorization),
+    )
+    client = _Client(responses)
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    result = store.reserve_action(authorization=authorization)
+
+    assert result["disposition"] == "reserved_new"
+    assert client.calls == [
+        (OFFICIAL_BASELINE_RPCS[1], {"p_authorization": authorization})
+    ]
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    (
+        {**_authorization(), "timeout_ms": 0},
+        {**_verifier_authorization(), "timeout_ms": 1},
+    ),
+)
+def test_supabase_store_rejects_wrong_timeout_class_before_rpc(authorization):
+    client = _Client(_responses())
+    store = SupabaseOfficialBaselineAttemptStore(client)
+
+    with pytest.raises(OfficialBaselineStoreError, match="accounting is invalid"):
+        store.reserve_action(authorization=authorization)
+
+    assert client.calls == []
 
 
 @pytest.mark.parametrize(
@@ -504,7 +615,7 @@ def test_worker_factory_rejects_non_migration_store():
         )
 
 
-def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
+def test_official_baseline_tables_and_all_rpcs_are_restart_gated():
     relations = {
         (migration, relation)
         for migration, relation, _columns in REQUIRED_SUPABASE_V2_SCHEMA
@@ -518,12 +629,27 @@ def test_migration_163_tables_and_all_seven_rpcs_are_restart_gated():
     assert {
         (OFFICIAL_BASELINE_MIGRATION, relation) for relation in expected_relations
     } <= relations
+    reserve_migration = "scripts/166-research-lab-zero-call-verifier-timeout.sql"
+    request_scope_migration = (
+        "scripts/168-research-lab-legacy-provider-terminal-custody.sql"
+    )
     assert {
-        (OFFICIAL_BASELINE_MIGRATION, rpc) for rpc in OFFICIAL_BASELINE_RPCS
+        (OFFICIAL_BASELINE_MIGRATION, rpc)
+        for rpc in OFFICIAL_BASELINE_RPCS
+        if rpc != OFFICIAL_BASELINE_RPCS[1]
     } <= set(REQUIRED_SUPABASE_V2_RPCS)
+    assert (reserve_migration, OFFICIAL_BASELINE_RPCS[1]) in set(
+        REQUIRED_SUPABASE_V2_RPCS
+    )
+    assert (
+        request_scope_migration,
+        "research_lab_official_baseline_request_scope_v3",
+    ) in set(REQUIRED_SUPABASE_V2_RPCS)
     assert {
         "gateway/research_lab/official_baseline_model_runner.py",
         "gateway/research_lab/official_baseline_store.py",
         OFFICIAL_BASELINE_MIGRATION,
+        reserve_migration,
+        request_scope_migration,
     } <= set(EXACT_PRODUCTION_ENTRYPOINTS)
     OFFICIAL_BASELINE_EXECUTION_SCHEMA_VERSION,

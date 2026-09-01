@@ -244,6 +244,29 @@ class _MemoryPostgREST:
         self.insert_count += 1
         return copy.deepcopy(normalized)
 
+    async def insert_rows(
+        self,
+        table: str,
+        rows: Iterable[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        payload = [copy.deepcopy(dict(row)) for row in rows]
+        if not payload:
+            raise ValueError(f"{table}: batch insert requires at least one row")
+
+        # Preserve the atomicity of one production multi-row INSERT.  This
+        # adapter may expose only the PostgREST boundary; graph ordering,
+        # uniqueness reconciliation, and conflict handling remain production
+        # code exercised by the joined scenario.
+        normalized_table = str(table)
+        prior_rows = copy.deepcopy(self.tables.get(normalized_table, []))
+        prior_insert_count = self.insert_count
+        try:
+            return [await self.insert_row(normalized_table, row) for row in payload]
+        except Exception:
+            self.tables[normalized_table] = prior_rows
+            self.insert_count = prior_insert_count
+            raise
+
     async def select_one(
         self, table: str, *, filters: Iterable[tuple], **_kwargs: Any
     ) -> dict[str, Any] | None:
@@ -2134,6 +2157,7 @@ async def _run_joined(runtime: Mapping[str, Any]) -> dict[str, Any]:
         )
         with ExitStack() as stack:
             stack.enter_context(_patched(store_module, "insert_row", memory.insert_row))
+            stack.enter_context(_patched(store_module, "insert_rows", memory.insert_rows))
             stack.enter_context(_patched(store_module, "select_one", memory.select_one))
             stack.enter_context(_patched(store_module, "select_all", memory.select_all))
             stack.enter_context(_patched(store_module, "select_many", memory.select_many))

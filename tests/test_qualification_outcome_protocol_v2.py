@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from copy import deepcopy
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -66,7 +67,11 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from research_lab.eval.private_runtime import (
+    QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1,
+    QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1,
+    QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1,
     QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+    QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
     QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
     QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2,
     PrivateModelRuntimeError,
@@ -77,6 +82,7 @@ from research_lab.eval.private_runtime import (
     end_attested_receipt_hash_collection,
     publish_attested_receipt_hash,
     qualification_outcome_contract_v2,
+    validate_qualification_branch_control_failure_v1,
     validate_qualification_outcome_envelope_v2,
     validate_qualification_outcome_protocol_metadata_v2,
     validate_qualification_outcome_protocol_probe_cases_v1,
@@ -107,7 +113,13 @@ def _plain_hash(value) -> str:
     return sha256_json(value).removeprefix("sha256:")
 
 
-def _metadata(*, major: int = 2, capabilities=None, extra_cases=()):
+def _metadata(
+    *,
+    major: int = 2,
+    capabilities=None,
+    extra_cases=(),
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+):
     return {
         "protocol_id": "sourcing-model.qualification-outcome",
         "major": major,
@@ -117,7 +129,7 @@ def _metadata(*, major: int = 2, capabilities=None, extra_cases=()):
         "route_completion_receipt_schema_version": (
             "sourcing-model.route-completion-receipt.v1"
         ),
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "capabilities": sorted(
             capabilities
             or {
@@ -234,7 +246,12 @@ def _required_route_outcomes(commitments, state: str) -> list[dict[str, str]]:
     ]
 
 
-def _envelope(case_id: str, nonce: str) -> dict:
+def _envelope(
+    case_id: str,
+    nonce: str,
+    *,
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+) -> dict:
     complete = case_id == "complete_confirmed_empty"
     summary = {
         "attempted": 1,
@@ -247,7 +264,7 @@ def _envelope(case_id: str, nonce: str) -> dict:
     }
     receipt_body = {
         "schema_version": "sourcing-model.route-completion-receipt.v1",
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "outcome_authority": "sourcing_model",
         "completion_state": "complete" if complete else "incomplete",
         "disposition": case_id,
@@ -272,7 +289,7 @@ def _envelope(case_id: str, nonce: str) -> dict:
         "schema_version": "sourcing-model.qualification-outcome.v2",
         "protocol_major": 2,
         "protocol_minor": 4,
-        "contract_sha256": QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        "contract_sha256": contract_sha256,
         "completion_state": receipt["completion_state"],
         "companies": [],
         "route_completion_receipt": receipt,
@@ -335,6 +352,427 @@ def _production_company_envelope(companies: list[dict]) -> dict:
         }
     )
     return _bind_company_hash_and_rehash(envelope)
+
+
+def _branch_control_failure_proof(
+    *,
+    match_mode: str = "any",
+    branch_number: int = 2,
+    branch_id: str = "intent:FUNDING:2",
+    reason: str = "required_branch_deadline_exhausted",
+    failure_class: str = "",
+) -> dict:
+    policy = qualification_outcome_contract_v2()["branch_control_failure"]
+    reason_policy = policy["reason_policy"][reason]
+    normalized_failure_class = str(
+        failure_class or reason_policy.get("failure_class") or ""
+    )
+    body = {
+        "schema_version": policy["schema_version"],
+        "authority": policy["authority"],
+        "reason": reason,
+        "phase": reason_policy["phase"],
+        "match_mode": match_mode,
+        "branch_number": branch_number,
+        "branch_id_sha256": _plain_hash(branch_id),
+        "failure_class": normalized_failure_class,
+        "retryable": reason_policy["retryable"],
+    }
+    return {**body, "proof_sha256": _plain_hash(body)}
+
+
+def _branch_control_incomplete_envelope(
+    companies: list[dict] | None = None,
+) -> dict:
+    envelope = _production_company_envelope(list(companies or ()))
+    envelope["completion_state"] = "incomplete"
+    receipt = envelope["route_completion_receipt"]
+    receipt.update(
+        {
+            "completion_state": "incomplete",
+            "disposition": "incomplete_retryable",
+            "retryable": True,
+            "partial": bool(companies),
+            "failure_classes": [
+                QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1
+            ],
+        }
+    )
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ] = _branch_control_failure_proof()
+    return _rehash_receipt(envelope)
+
+
+def _rehash_branch_control_proof(envelope: dict) -> dict:
+    proof = envelope["route_completion_receipt"]["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    proof["proof_sha256"] = _plain_hash(
+        {
+            key: item
+            for key, item in proof.items()
+            if key != "proof_sha256"
+        }
+    )
+    return _rehash_receipt(envelope)
+
+
+def test_branch_control_incomplete_preserves_provider_route_counters() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    route_summary = deepcopy(receipt["route_summary"])
+    required_routes = deepcopy(
+        receipt["extensions"][
+            QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+        ]
+    )
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+
+    assert validated["completion_state"] == "incomplete"
+    assert receipt["disposition"] == "incomplete_retryable"
+    assert route_summary == {
+        "attempted": 1,
+        "completed": 0,
+        "confirmed_empty": 1,
+        "retryable_failed": 0,
+        "terminal_failed": 0,
+        "skipped": 0,
+        "retried": 0,
+    }
+    assert receipt["route_summary"] == route_summary
+    assert receipt["extensions"][
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    ] == required_routes
+    assert validate_qualification_branch_control_failure_v1(
+        receipt["extensions"][
+            QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+        ]
+    )["failure_class"] == (
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1
+    )
+
+
+def test_terminal_branch_control_preserves_provider_route_counters() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    receipt.update({
+        "disposition": "incomplete_terminal",
+        "retryable": False,
+        "failure_classes": ["transport_invariant_failed"],
+    })
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ] = _branch_control_failure_proof(
+        reason="required_branch_terminal_control",
+        failure_class="transport_invariant_failed",
+    )
+    envelope = _rehash_receipt(envelope)
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+
+    validated_receipt = validated["route_completion_receipt"]
+    assert validated_receipt["disposition"] == "incomplete_terminal"
+    assert validated_receipt["retryable"] is False
+    assert validated_receipt["route_summary"]["terminal_failed"] == 0
+    proof = validated_receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    assert proof["reason"] == "required_branch_terminal_control"
+    assert proof["failure_class"] == "transport_invariant_failed"
+
+    invalid = deepcopy(envelope)
+    invalid_proof = invalid["route_completion_receipt"]["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    invalid_proof["failure_class"] = "retryable_provider"
+    _rehash_branch_control_proof(invalid)
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="branch control failure differs from protocol",
+    ):
+        validate_qualification_outcome_envelope_v2(invalid)
+
+
+def test_legacy_contract_rejects_terminal_branch_control_extension() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    receipt.update({
+        "contract_sha256": QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
+        "disposition": "incomplete_terminal",
+        "retryable": False,
+        "failure_classes": ["transport_invariant_failed"],
+    })
+    envelope["contract_sha256"] = (
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ] = _branch_control_failure_proof(
+        reason="required_branch_terminal_control",
+        failure_class="transport_invariant_failed",
+    )
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="branch control failure differs from protocol",
+    ):
+        validate_qualification_outcome_envelope_v2(_rehash_receipt(envelope))
+
+
+def test_branch_control_incomplete_can_retain_partial_companies() -> None:
+    envelope = _branch_control_incomplete_envelope(
+        [{"company_name": "Partial but qualified"}]
+    )
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+
+    assert validated["route_completion_receipt"]["partial"] is True
+    assert validated["companies"] == [{"company_name": "Partial but qualified"}]
+
+
+def test_provider_failure_remains_independent_incomplete_authority() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    receipt["extensions"].pop(
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    )
+    receipt["extensions"][
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    ][0]["state"] = "retryable_failed"
+    receipt["route_summary"]["confirmed_empty"] = 0
+    receipt["route_summary"]["retryable_failed"] = 1
+    receipt["failure_classes"] = ["retryable_provider"]
+    _rehash_receipt(envelope)
+
+    validated = validate_qualification_outcome_envelope_v2(envelope)
+
+    assert validated["route_completion_receipt"]["disposition"] == (
+        "incomplete_retryable"
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "missing_field",
+        "extra_field",
+        "schema_version",
+        "authority",
+        "reason",
+        "phase",
+        "match_mode",
+        "branch_number_bool",
+        "branch_number_zero",
+        "branch_number_over_cap",
+        "branch_id_sha256",
+        "failure_class",
+        "retryable",
+        "proof_sha256",
+    ),
+)
+def test_branch_control_proof_tampering_fails_closed(fault: str) -> None:
+    envelope = _branch_control_incomplete_envelope()
+    proof = envelope["route_completion_receipt"]["extensions"][
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    ]
+    if fault == "missing_field":
+        proof.pop("phase")
+    elif fault == "extra_field":
+        proof["unexpected"] = True
+    elif fault == "schema_version":
+        proof["schema_version"] = "sourcing-model.branch-control-failure.v2"
+    elif fault == "authority":
+        proof["authority"] = "host"
+    elif fault == "reason":
+        proof["reason"] = "unknown_control_failure"
+    elif fault == "phase":
+        proof["phase"] = "post_dispatch"
+    elif fault == "match_mode":
+        proof["match_mode"] = "some"
+    elif fault == "branch_number_bool":
+        proof["branch_number"] = True
+    elif fault == "branch_number_zero":
+        proof["branch_number"] = 0
+    elif fault == "branch_number_over_cap":
+        proof["branch_number"] = (
+            QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 + 1
+        )
+    elif fault == "branch_id_sha256":
+        proof["branch_id_sha256"] = "not-a-hash"
+    elif fault == "failure_class":
+        proof["failure_class"] = "retryable_provider"
+    elif fault == "retryable":
+        proof["retryable"] = False
+    else:
+        proof["proof_sha256"] = "0" * 64
+    if fault != "proof_sha256":
+        _rehash_branch_control_proof(envelope)
+    else:
+        _rehash_receipt(envelope)
+
+    with pytest.raises(PrivateModelRuntimeError):
+        validate_qualification_outcome_envelope_v2(envelope)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "missing_proof",
+        "null_proof",
+        "missing_failure_class",
+        "proof_on_complete",
+        "proof_on_probe",
+        "proof_on_envelope",
+        "terminal_without_terminal_authority",
+    ),
+)
+def test_branch_control_completion_cross_bindings_fail_closed(fault: str) -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    if fault == "missing_proof":
+        receipt["extensions"].pop(
+            QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+        )
+    elif fault == "null_proof":
+        receipt["extensions"][
+            QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+        ] = None
+    elif fault == "missing_failure_class":
+        receipt["failure_classes"] = []
+    elif fault == "proof_on_complete":
+        envelope["completion_state"] = "complete"
+        receipt.update(
+            {
+                "completion_state": "complete",
+                "disposition": "complete_confirmed_empty",
+                "retryable": False,
+                "failure_classes": [],
+            }
+        )
+    elif fault == "proof_on_probe":
+        receipt["probe"] = {
+            "schema_version": "sourcing-model.qualification-outcome-probe.v1",
+            "case_id": "incomplete_retryable",
+            "nonce_sha256": "1" * 64,
+        }
+    elif fault == "proof_on_envelope":
+        envelope["extensions"] = {
+            QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1: deepcopy(
+                receipt["extensions"][
+                    QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+                ]
+            )
+        }
+    else:
+        receipt["disposition"] = "incomplete_terminal"
+        receipt["retryable"] = False
+    _rehash_receipt(envelope)
+
+    with pytest.raises(PrivateModelRuntimeError):
+        validate_qualification_outcome_envelope_v2(envelope)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ("zero_routes", "attempted", "state", "commitment"),
+)
+def test_branch_control_does_not_relax_required_route_reconciliation(
+    fault: str,
+) -> None:
+    envelope = _branch_control_incomplete_envelope()
+    receipt = envelope["route_completion_receipt"]
+    required_routes = receipt["extensions"][
+        QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
+    ]
+    if fault == "zero_routes":
+        required_routes.clear()
+        receipt["route_summary"] = {
+            "attempted": 0,
+            "completed": 0,
+            "confirmed_empty": 0,
+            "retryable_failed": 0,
+            "terminal_failed": 0,
+            "skipped": 0,
+            "retried": 0,
+        }
+    elif fault == "attempted":
+        receipt["route_summary"]["attempted"] = 2
+        receipt["route_summary"]["confirmed_empty"] = 2
+    elif fault == "state":
+        required_routes[0]["state"] = "completed"
+    else:
+        required_routes.append(
+            {"commitment": "b" * 64, "state": "confirmed_empty"}
+        )
+    _rehash_receipt(envelope)
+
+    with pytest.raises(PrivateModelRuntimeError):
+        validate_qualification_outcome_envelope_v2(envelope)
+
+
+def test_branch_control_does_not_relax_host_provider_terminal_join() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    attempt_hash = "sha256:" + "c" * 64
+    observation = {
+        "schema_version": "leadpoet.provider-terminal-observation.v1",
+        "request_intent_count": 1,
+        "terminal_count": 1,
+        "latest_operation_count": 1,
+        "accepted_latest_terminal_count": 1,
+        "successful_latest_terminal_count": 1,
+        "failed_latest_terminal_count": 0,
+        "unresolved_latest_terminal_count": 0,
+        "latest_terminal_attempt_hashes": [attempt_hash],
+        "successful_latest_terminal_attempt_hashes": [attempt_hash],
+        "required_route_commitments": ["a" * 64],
+        "required_route_count": 1,
+        "successful_required_route_count": 1,
+        "unresolved_required_route_count": 0,
+        "required_route_terminals": [
+            {
+                "route_commitment": "a" * 64,
+                "attempt_hash": attempt_hash,
+                "terminal_status": "authenticated_response",
+                "http_status": 200,
+            }
+        ],
+    }
+
+    assert _validate_qualification_terminal_observation_v1(
+        envelope,
+        observation,
+    ) == observation
+
+    failed = deepcopy(observation)
+    failed.update(
+        {
+            "successful_latest_terminal_count": 0,
+            "unresolved_latest_terminal_count": 1,
+            "successful_latest_terminal_attempt_hashes": [],
+            "successful_required_route_count": 0,
+            "unresolved_required_route_count": 1,
+        }
+    )
+    failed["required_route_terminals"][0]["http_status"] = 500
+    with pytest.raises(ModelSandboxV2Error):
+        _validate_qualification_terminal_observation_v1(envelope, failed)
+
+
+def test_prior_contract_identity_cannot_admit_branch_control_receipt() -> None:
+    envelope = _branch_control_incomplete_envelope()
+    prior_contract_sha256 = (
+        "e618f73abddd2ddef88fa62d09fd7ad90b3ca7c69b97da7444424abdd8e9c0fa"
+    )
+    envelope["contract_sha256"] = prior_contract_sha256
+    envelope["route_completion_receipt"][
+        "contract_sha256"
+    ] = prior_contract_sha256
+    _rehash_receipt(envelope)
+
+    with pytest.raises(PrivateModelRuntimeError, match="differs from protocol"):
+        validate_qualification_outcome_envelope_v2(envelope)
 
 
 def test_production_company_hash_joins_exact_raw_ordered_payload() -> None:
@@ -643,6 +1081,49 @@ def test_cross_repository_semantic_contract_fixture_is_exact() -> None:
 
     assert _plain_hash(document) == QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
     assert document["entrypoint"] == "run_icp_outcome"
+    assert document["protocol_minor"] == 2
+    assert document["branch_control_failure"] == {
+        "extension_key": "com.leadpoet.branch-control-failure",
+        "schema_version": "sourcing-model.branch-control-failure.v1",
+        "authority": "sourcing_model",
+        "provider_route_outcome": False,
+        "host_route_counters_unchanged": True,
+        "proof_hash_excludes_only": "proof_sha256",
+        "proof_fields": [
+            "authority",
+            "branch_id_sha256",
+            "branch_number",
+            "failure_class",
+            "match_mode",
+            "phase",
+            "proof_sha256",
+            "reason",
+            "retryable",
+            "schema_version",
+        ],
+        "allowed_match_modes": ["all", "any"],
+        "maximum_branch_number": 4,
+        "reason_policy": {
+            "required_branch_deadline_exhausted": {
+                "phase": "pre_dispatch",
+                "failure_class": "branch_deadline_exhausted",
+                "retryable": True,
+                "required_branch_status": "skipped",
+            },
+            "required_branch_terminal_control": {
+                "phase": "branch_execution",
+                "allowed_failure_classes": [
+                    "budget_blocked",
+                    "terminal_auth",
+                    "terminal_quota",
+                    "tracking_failed",
+                    "transport_invariant_failed",
+                ],
+                "retryable": False,
+                "required_branch_status": "failed",
+            },
+        },
+    }
     assert document["completion_rules"]["unreceipted_empty_allowed"] is False
     assert document["production_complete_authority"] == (
         "model_semantics_joined_to_every_state_compatible_"
@@ -671,6 +1152,82 @@ def test_same_major_metadata_allows_harmless_additive_capability() -> None:
     }
 
     assert validate_qualification_outcome_protocol_metadata_v2(document) == document
+
+
+def test_selected_signed_v21_contract_remains_strictly_compatible() -> None:
+    metadata = _metadata(
+        contract_sha256=QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+    metadata["minor"] = 1
+    assert (
+        validate_qualification_outcome_protocol_metadata_v2(metadata)
+        == metadata
+    )
+
+    complete_nonce = "legacy-complete-probe-01"
+    incomplete_nonce = "legacy-incomplete-probe-01"
+    cases = {
+        "complete_confirmed_empty": _envelope(
+            "complete_confirmed_empty",
+            complete_nonce,
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+        "incomplete_retryable": _envelope(
+            "incomplete_retryable",
+            incomplete_nonce,
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+    }
+    expected_hashes = {
+        "complete_confirmed_empty": hashlib.sha256(
+            complete_nonce.encode("ascii")
+        ).hexdigest(),
+        "incomplete_retryable": hashlib.sha256(
+            incomplete_nonce.encode("ascii")
+        ).hexdigest(),
+    }
+    assert validate_qualification_outcome_protocol_probe_cases_v1(
+        cases,
+        expected_nonce_sha256s=expected_hashes,
+        expected_contract_sha256=(
+            QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+        ),
+    ) == cases
+
+
+def test_qualification_contract_versions_cannot_mix_within_one_probe() -> None:
+    cases = {
+        "complete_confirmed_empty": _envelope(
+            "complete_confirmed_empty",
+            "mixed-complete-probe-01",
+            contract_sha256=(
+                QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+            ),
+        ),
+        "incomplete_retryable": _envelope(
+            "incomplete_retryable",
+            "mixed-incomplete-probe-01",
+        ),
+    }
+    with pytest.raises(PrivateModelRuntimeError, match="probe contract differs"):
+        validate_qualification_outcome_protocol_probe_cases_v1(cases)
+
+
+def test_qualification_envelope_and_receipt_contracts_must_match() -> None:
+    envelope = _envelope(
+        "complete_confirmed_empty",
+        "mismatched-contract-probe-01",
+    )
+    envelope["contract_sha256"] = (
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+    )
+
+    with pytest.raises(PrivateModelRuntimeError, match="differs from protocol"):
+        validate_qualification_outcome_envelope_v2(envelope)
 
 
 def test_measured_metadata_requires_exact_v2_proof_identity() -> None:
@@ -1820,6 +2377,147 @@ def test_local_replay_hint_cannot_override_host_authority(tmp_path) -> None:
     )
     with pytest.raises(ModelSandboxV2Error, match="cache body is invalid"):
         tampered_resolver(request_doc, "provider_evidence_cache")
+
+
+@pytest.mark.parametrize(
+    ("recorded_error", "expected_failure_code"),
+    [
+        (http.client.IncompleteRead(b"partial", 12), "unexpected_eof"),
+        (TimeoutError("provider timed out"), "timeout"),
+    ],
+)
+def test_frozen_transport_failure_is_one_measured_terminal(
+    monkeypatch,
+    request,
+    recorded_error,
+    expected_failure_code,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    short_root = Path(tempfile.mkdtemp(prefix="lp-replay-failure-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(short_root, ignore_errors=True))
+    socket_path = short_root / "provider.sock"
+    snapshot_root = short_root / "snapshot"
+    url = "https://api.exa.ai/search"
+    body = b"{}"
+    record_store = ProviderSnapshotStore(
+        str(snapshot_root),
+        mode=MODE_RECORD,
+    )
+    record_store.record_urllib_transport_error(
+        build_snapshot_request("POST", url, body=body),
+        error=recorded_error,
+    )
+    record_store.write_dev_icp_items(
+        [{"icp_ref": "qualification-transport-failure-test"}]
+    )
+    manifest = record_store.build_manifest(
+        recorded_at="2026-08-27T00:00:00Z"
+    )
+    record_store.write_manifest(manifest)
+    retained_attempts = []
+    retained_artifacts = []
+    transport = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail(
+            "frozen transport failure reached the live coordinator"
+        )
+    )
+    scope = transport.create_scope(
+        job_id="qualification-replay-failure",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="qualification-replay-failure",
+        retry_policy_hashes={"exa": "sha256:" + "b" * 64},
+        terminal_sink=lambda attempt: retained_attempts.append(
+            deepcopy(dict(attempt))
+        ),
+        artifact_sink=retained_artifacts.append,
+        allow_transport_failures=True,
+    )
+    resolver = _local_provider_replay_resolver_v2(
+        evidence_mode="frozen",
+        evidence_cache={},
+        evidence_cache_hash=sha256_json({}),
+        snapshot_root=snapshot_root,
+        snapshot_manifest_hash=str(manifest["manifest_hash"]),
+    )
+    server = SandboxProviderSocketServerV2(
+        socket_path=socket_path,
+        transport=transport,
+        execution_scope=scope,
+        local_replay_resolver=resolver,
+    )
+    package = ModuleType("sourcing_model")
+    package.__path__ = []
+    route_module = ModuleType("sourcing_model.qualification_route")
+    route_module.transport_headers = lambda: {}
+    package.qualification_route = route_module
+    monkeypatch.setitem(sys.modules, "sourcing_model", package)
+    monkeypatch.setitem(
+        sys.modules,
+        "sourcing_model.qualification_route",
+        route_module,
+    )
+    monkeypatch.setenv(shim.QUALIFICATION_PROTOCOL_V2_ENV, "1")
+    monkeypatch.setenv(shim.EVIDENCE_MODE_ENV, "frozen")
+    monkeypatch.setenv(shim.SNAPSHOT_DIR_ENV, str(snapshot_root))
+    monkeypatch.setenv(shim.SOCKET_ENV, str(socket_path))
+    server.start()
+    try:
+        terminal = shim.execute(
+            method="POST",
+            url=url,
+            headers={"accept": "application/json"},
+            body=body,
+            timeout_ms=1000,
+        )
+    finally:
+        server.close()
+
+    scope.assert_accepted_result_is_complete()
+    assert terminal["terminal_status"] == "transport_failure"
+    assert terminal["failure_code"] == expected_failure_code
+    assert terminal["http_status"] is None
+    assert terminal["body_b64"] == ""
+    assert len(retained_attempts) == 1
+    assert retained_attempts[0]["terminal_status"] == "transport_failure"
+    assert retained_attempts[0]["failure_code"] == expected_failure_code
+    assert retained_attempts[0]["response_artifact_hash"] is None
+    assert len(set(retained_artifacts)) == 2
+
+
+def test_attested_local_transport_failure_rejects_response_payload() -> None:
+    transport = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("local replay reached the live coordinator")
+    )
+    scope = transport.create_scope(
+        job_id="qualification-replay-invalid-failure",
+        purpose="research_lab.private_model_run.v2",
+        logical_operation_id="qualification-replay-invalid-failure",
+        retry_policy_hashes={"exa": "sha256:" + "b" * 64},
+        allow_transport_failures=True,
+    )
+
+    with transport.activate_scope(scope):
+        with pytest.raises(
+            ProviderClientV2Error,
+            match="attested local response authority is invalid",
+        ):
+            transport.execute_attested_local_http(
+                method="POST",
+                url="https://api.exa.ai/search",
+                headers={},
+                body=b"{}",
+                timeout_ms=1000,
+                replay_kind="snapshot",
+                resolver=lambda _request, _kind: {
+                    "terminal_status": "transport_failure",
+                    "http_status": None,
+                    "headers": {},
+                    "body_b64": base64.b64encode(b"forbidden").decode("ascii"),
+                    "failure_code": "unexpected_eof",
+                    "local_authority_sha256": "sha256:" + "a" * 64,
+                },
+            )
 
 
 @pytest.mark.asyncio

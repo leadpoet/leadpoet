@@ -1,9 +1,12 @@
 import copy
 import json
+import subprocess
 
 import pytest
 
 from gateway.tee.release_channel_v2 import (
+    DEFAULT_PREFIX,
+    MAX_LINEAGE_RELEASES,
     ReleaseChannelV2Error,
     build_release_channel_v2,
     build_release_lineage_v2,
@@ -14,6 +17,10 @@ from gateway.tee.release_channel_v2 import (
     publish_release_channel_v2,
     release_channel_key,
     validate_release_channel_v2,
+)
+from gateway.tee.prepare_active_release_lineage_v2 import (
+    PrepareActiveReleaseLineageV2Error,
+    _fetch_exact_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
@@ -101,9 +108,12 @@ class _Body:
 class _S3:
     def __init__(self):
         self.objects = {}
+        self.gets = []
+        self.lists = []
         self.puts = []
 
     def get_object(self, *, Bucket, Key):
+        self.gets.append((Bucket, Key))
         if (Bucket, Key) not in self.objects:
             raise KeyError(Key)
         return {"Body": _Body(self.objects[(Bucket, Key)])}
@@ -116,6 +126,14 @@ class _S3:
         self.puts.append(kwargs)
 
     def list_objects_v2(self, *, Bucket, Prefix, MaxKeys, **kwargs):
+        self.lists.append(
+            {
+                "Bucket": Bucket,
+                "Prefix": Prefix,
+                "MaxKeys": MaxKeys,
+                **kwargs,
+            }
+        )
         del MaxKeys, kwargs
         keys = sorted(
             key
@@ -309,6 +327,255 @@ def test_release_lineage_ignores_unrelated_channels_before_size_bound():
     assert tuple(lineage["releases"]) == (COMMIT,)
 
 
+def test_required_release_lineage_direct_gets_only_explicit_commits():
+    historical_commit = "2" * 40
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    historical = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(historical_commit),
+        validator_release_manifest=_validator_manifest(historical_commit),
+    )
+    s3 = _S3()
+    for channel in (current, historical):
+        key = release_channel_key(channel["commit_sha"])
+        s3.objects[("release-bucket", key)] = (
+            json.dumps(channel, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+    for index in range(MAX_LINEAGE_RELEASES + 1):
+        unrelated_commit = f"{index + 3:040x}"
+        s3.objects[
+            ("release-bucket", release_channel_key(unrelated_commit))
+        ] = b"untrusted branch release"
+
+    lineage = fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(historical_commit, COMMIT),
+        required_commits=(historical_commit, COMMIT),
+    )
+
+    assert lineage == build_release_lineage_v2(
+        [historical, current],
+        current_commit=COMMIT,
+    )
+    assert s3.lists == []
+    assert s3.gets == [
+        ("release-bucket", release_channel_key(COMMIT)),
+        ("release-bucket", release_channel_key(historical_commit)),
+    ]
+
+
+def test_required_release_lineage_rejects_more_than_bound_before_io():
+    required = (COMMIT,) + tuple(
+        f"{index:040x}" for index in range(MAX_LINEAGE_RELEASES)
+    )
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="size"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            required_commits=required,
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+def test_required_release_lineage_rejects_missing_current_before_io():
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="current release"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            required_commits=("2" * 40,),
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+def test_required_release_lineage_rejects_duplicate_before_io():
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="duplicated"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            required_commits=(COMMIT, COMMIT),
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+@pytest.mark.parametrize("allowed_commits", (None, (), COMMIT))
+def test_required_release_lineage_requires_nonempty_allowed_ancestry_before_io(
+    allowed_commits,
+):
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="Git ancestry"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            allowed_commits=allowed_commits,
+            required_commits=(COMMIT,),
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+@pytest.mark.parametrize(
+    "invalid_commit",
+    (
+        "A" * 40,
+        "a" * 39,
+        " " + "a" * 40,
+        None,
+    ),
+)
+def test_required_release_lineage_rejects_noncanonical_commit_before_io(
+    invalid_commit,
+):
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="commits are invalid"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            required_commits=(COMMIT, invalid_commit),
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+def test_required_release_lineage_rejects_nonancestor_before_io():
+    s3 = _S3()
+
+    with pytest.raises(ReleaseChannelV2Error, match="Git ancestry"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            allowed_commits=(COMMIT,),
+            required_commits=(COMMIT, "2" * 40),
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []
+
+
+def test_required_release_lineage_rejects_missing_channel():
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    s3 = _S3()
+    s3.objects[("release-bucket", release_channel_key(COMMIT))] = (
+        json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+
+    with pytest.raises(ReleaseChannelV2Error, match="channel is unavailable"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            allowed_commits=(COMMIT, "2" * 40),
+            required_commits=(COMMIT, "2" * 40),
+        )
+
+    assert s3.lists == []
+
+
+def test_required_release_lineage_rejects_tampered_channel():
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    current["channel_hash"] = _hash("0")
+    s3 = _S3()
+    s3.objects[("release-bucket", release_channel_key(COMMIT))] = (
+        json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+
+    with pytest.raises(ReleaseChannelV2Error, match="hash differs"):
+        fetch_release_lineage_v2(
+            bucket="release-bucket",
+            current_commit=COMMIT,
+            s3_client=s3,
+            allowed_commits=(COMMIT,),
+            required_commits=(COMMIT,),
+        )
+
+    assert s3.lists == []
+
+
+def test_cli_forwards_explicit_required_release_commits(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    historical_commit = "2" * 40
+    observed = {}
+
+    monkeypatch.setattr(
+        "gateway.tee.release_channel_v2.local_release_inputs_match",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "gateway.tee.release_channel_v2.git_ancestor_commits_v2",
+        lambda **_kwargs: (COMMIT, historical_commit),
+    )
+
+    def fetch_lineage(**kwargs):
+        observed.update(kwargs)
+        return {
+            "lineage_hash": _hash("9"),
+            "releases": {COMMIT: {}, historical_commit: {}},
+        }
+
+    monkeypatch.setattr(
+        "gateway.tee.release_channel_v2.fetch_release_lineage_v2",
+        fetch_lineage,
+    )
+
+    result = cli(
+        [
+            "--ensure",
+            "--expected-commit",
+            COMMIT,
+            "--lineage-output",
+            str(tmp_path / "lineage.json"),
+            "--lineage-repository",
+            str(tmp_path),
+            "--lineage-authority-commit",
+            COMMIT,
+            "--lineage-required-commit",
+            COMMIT,
+            "--lineage-required-commit",
+            historical_commit,
+        ]
+    )
+
+    assert result == 0
+    assert observed["current_commit"] == COMMIT
+    assert observed["allowed_commits"] == (COMMIT, historical_commit)
+    assert observed["required_commits"] == [COMMIT, historical_commit]
+    assert json.loads(capsys.readouterr().out)["lineage_release_count"] == 2
+
+
 def test_cli_reports_unpublished_channel_without_traceback(monkeypatch, capsys):
     def _unavailable(**_kwargs):
         raise ReleaseChannelV2Error("approved release channel is unavailable")
@@ -328,3 +595,129 @@ def test_cli_reports_unpublished_channel_without_traceback(monkeypatch, capsys):
         "approved release channel is unavailable\n"
     )
     assert "Traceback" not in captured.err
+
+
+def _real_three_commit_dag(repository):
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(repository)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Release Test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "config",
+            "user.email",
+            "release-test@example.invalid",
+        ],
+        check=True,
+    )
+    commits = []
+    for index in range(3):
+        (repository / "state.txt").write_text(str(index), encoding="ascii")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "state.txt"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-m", f"state {index}"],
+            check=True,
+            capture_output=True,
+        )
+        commits.append(
+            subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    return tuple(commits)
+
+
+@pytest.mark.parametrize(
+    ("target_index", "required_indexes"),
+    (
+        (1, (0, 1)),
+        (0, (0, 1)),
+        (2, (0, 2)),
+    ),
+    ids=("forward", "rollback", "roll-forward"),
+)
+def test_exact_release_selection_real_dag_ignores_lifetime_catalog(
+    tmp_path,
+    target_index,
+    required_indexes,
+):
+    repository = tmp_path / "release-dag"
+    commits = _real_three_commit_dag(repository)
+    channels = {
+        commit: build_release_channel_v2(
+            gateway_release_manifest=_gateway_manifest(commit),
+            validator_release_manifest=_validator_manifest(commit),
+        )
+        for commit in commits
+    }
+    s3 = _S3()
+    for commit, channel in channels.items():
+        s3.objects[("release-bucket", release_channel_key(commit))] = (
+            json.dumps(channel, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+    for index in range(MAX_LINEAGE_RELEASES + 1):
+        decoy = f"{index + 1000:040x}"
+        if decoy not in channels:
+            s3.objects[("release-bucket", release_channel_key(decoy))] = (
+                b"untrusted lifetime catalog entry"
+            )
+
+    target = commits[target_index]
+    authority = commits[2]
+    required = sorted(commits[index] for index in required_indexes)
+    lineage = _fetch_exact_release_lineage_v2(
+        candidate_commit_sha=target,
+        authority_commit_sha=authority,
+        required_commits=required,
+        repository=repository,
+        bucket="release-bucket",
+        prefix=DEFAULT_PREFIX,
+        s3_client=s3,
+    )
+
+    assert lineage["current_commit_sha"] == target
+    assert sorted(lineage["releases"]) == required
+    assert s3.lists == []
+    assert sorted(s3.gets) == sorted(
+        ("release-bucket", release_channel_key(commit)) for commit in required
+    )
+
+
+def test_exact_release_selection_does_not_substitute_target_for_authority(
+    tmp_path,
+) -> None:
+    repository = tmp_path / "release-dag"
+    oldest, newer, _newest = _real_three_commit_dag(repository)
+    s3 = _S3()
+
+    with pytest.raises(
+        PrepareActiveReleaseLineageV2Error,
+        match="outside release authority Git ancestry",
+    ):
+        _fetch_exact_release_lineage_v2(
+            candidate_commit_sha=oldest,
+            authority_commit_sha=oldest,
+            required_commits=sorted((oldest, newer)),
+            repository=repository,
+            bucket="release-bucket",
+            prefix=DEFAULT_PREFIX,
+            s3_client=s3,
+        )
+
+    assert s3.gets == []
+    assert s3.lists == []

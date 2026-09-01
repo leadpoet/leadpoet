@@ -12,6 +12,7 @@ from .canonical import sha256_json
 
 SOURCE_ADD_IDENTITY_VERSION = "v2"
 SOURCE_ADD_LEGACY_IDENTITY_VERSION = "v1"
+SOURCE_ADD_PROVIDER_ORIGIN_VERSION = "v1"
 
 
 def _source_add_url_candidate(value: str) -> str:
@@ -74,6 +75,88 @@ def normalize_source_add_api_base(value: str) -> str:
     parsed = urllib.parse.urlsplit(normalized)
     path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/") or "/"
     return urllib.parse.urlunsplit(("https", parsed.netloc.lower(), path, "", ""))
+
+
+def normalize_source_add_provider_origin(value: str) -> str:
+    """Return the exact normalized provider host, independent of API paths."""
+
+    text = str(value or "").strip()
+    if not text or any(character.isspace() for character in text):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except (TypeError, ValueError):
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    authority = str(parsed.netloc or "")
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close <= 1 or authority[close + 1 :] not in ("", ":443"):
+            return ""
+        if "%" in authority[1:close]:
+            return ""
+    elif ":" in authority:
+        if authority.count(":") != 1 or not authority.endswith(":443"):
+            return ""
+    host = str(parsed.hostname).lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or len(host) > 253:
+        return ""
+    try:
+        host.encode("ascii")
+    except UnicodeEncodeError:
+        return ""
+    try:
+        address = ipaddress.ip_address(host)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            return ""
+        return address.compressed
+    except ValueError:
+        pass
+    if re.fullmatch(r"[0-9.]+", host):
+        return ""
+    labels = host.split(".")
+    if len(labels) < 2 or any(
+        not label
+        or len(label) > 63
+        or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        is None
+        for label in labels
+    ):
+        return ""
+    return host
+
+
+def source_provider_origin_payload(api_base_url: str = "") -> dict[str, str]:
+    """Build the independent provider-origin identity without changing v1/v2."""
+
+    return {
+        "identity_version": SOURCE_ADD_PROVIDER_ORIGIN_VERSION,
+        "identity_kind": "provider_origin",
+        "provider_host": normalize_source_add_provider_origin(api_base_url),
+    }
+
+
+def source_provider_origin_hash(api_base_url: str = "") -> str:
+    """Hash one exact provider host so path aliases share one reservation."""
+
+    payload = source_provider_origin_payload(api_base_url)
+    if not payload["provider_host"]:
+        return ""
+    return sha256_json({"source_identity": payload})
+
+
+def source_provider_origin_hash_from_metadata(metadata: Mapping[str, Any]) -> str:
+    return source_provider_origin_hash(str(metadata.get("api_base_url") or ""))
 
 
 def normalize_source_add_documentation_alias(value: str) -> str:
@@ -207,14 +290,19 @@ def source_identity_hash_from_metadata(
 __all__ = [
     "SOURCE_ADD_LEGACY_IDENTITY_VERSION",
     "SOURCE_ADD_IDENTITY_VERSION",
+    "SOURCE_ADD_PROVIDER_ORIGIN_VERSION",
     "legacy_source_identity_hash",
     "normalize_source_add_api_base",
     "normalize_source_add_documentation_alias",
     "normalize_source_add_domain",
+    "normalize_source_add_provider_origin",
     "normalize_source_add_url",
     "source_identity_hash",
     "source_identity_alias_hashes_from_metadata",
     "source_identity_hash_from_metadata",
     "source_identity_payload",
     "source_documentation_identity_hash",
+    "source_provider_origin_hash",
+    "source_provider_origin_hash_from_metadata",
+    "source_provider_origin_payload",
 ]

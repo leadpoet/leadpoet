@@ -15,6 +15,10 @@ from research_lab.eval import private_runtime
 
 
 IMAGE_REF = "example.invalid/model@sha256:" + ("a" * 64)
+ECR_IMAGE_REF = (
+    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model"
+    "@sha256:" + ("b" * 64)
+)
 
 
 @pytest.mark.parametrize("timeout_seconds", (0, -1, float("nan"), float("inf")))
@@ -243,6 +247,111 @@ def test_private_model_daemon_readiness_failure_is_bounded_and_retryable(
             stdin_payload={"icp": {}, "context": {}},
         )
     assert time.monotonic() - started < 2
+
+
+def test_private_model_pull_refreshes_expired_ecr_auth_ephemerally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    auth_config_dirs: list[Path] = []
+
+    def run(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((list(command), dict(kwargs)))
+        if command[-1:] == ["info"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:2] == ["docker", "pull"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr="denied: Your authorization token has expired",
+            )
+        if command[:4] == ["aws", "ecr", "get-login-password", "--region"]:
+            assert command[4] == "us-east-1"
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="ephemeral-password\n",
+                stderr="",
+            )
+        if command[0:2] == ["docker", "--config"]:
+            config_dir = Path(command[2])
+            auth_config_dirs.append(config_dir)
+            assert config_dir.is_dir()
+            if command[3] == "login":
+                assert kwargs.get("input") == "ephemeral-password\n"
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="Login Succeeded", stderr=""
+                )
+            assert command[3] == "pull"
+            assert command[-1] == ECR_IMAGE_REF
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(private_runtime.subprocess, "run", run)
+    private_runtime.DockerPrivateModelRunner(
+        private_runtime.DockerPrivateModelSpec(
+            image_digest=ECR_IMAGE_REF,
+            timeout_seconds=5,
+        )
+    )
+
+    assert [call[0][0] for call in calls] == [
+        "docker",
+        "docker",
+        "aws",
+        "docker",
+        "docker",
+    ]
+    assert len(set(auth_config_dirs)) == 1
+    assert auth_config_dirs[0].exists() is False
+    assert all("ephemeral-password" not in " ".join(call[0]) for call in calls)
+
+
+def test_private_model_pull_does_not_refresh_unrecognized_or_non_ecr_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        str(tmp_path / "docker-operation.lock"),
+    )
+    calls: list[list[str]] = []
+
+    def run(
+        command: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(list(command))
+        if command[-1:] == ["info"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="manifest digest mismatch",
+        )
+
+    monkeypatch.setattr(private_runtime.subprocess, "run", run)
+    with pytest.raises(
+        private_runtime.PrivateModelRuntimeError,
+        match="docker pull failed with code 1",
+    ):
+        private_runtime.DockerPrivateModelRunner(
+            private_runtime.DockerPrivateModelSpec(
+                image_digest=ECR_IMAGE_REF,
+                timeout_seconds=5,
+            )
+        )
+    assert [command[0] for command in calls] == ["docker", "docker"]
 
 
 def test_private_model_timeout_removes_named_container_before_unlock(

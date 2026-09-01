@@ -547,6 +547,105 @@ async def test_openrouter_registration_preserves_attested_ciphertext_client_erro
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attempt,expected_status,expected_detail",
+    [
+        (
+            {
+                "terminal_status": "authenticated_response",
+                "http_status": 500,
+            },
+            503,
+            "OpenRouter credential verification transport is unavailable",
+        ),
+        (
+            {
+                "terminal_status": "authenticated_response",
+                "http_status": 429,
+            },
+            503,
+            "OpenRouter credential verification transport is unavailable",
+        ),
+        (
+            {
+                "terminal_status": "authenticated_response",
+                "http_status": 401,
+            },
+            400,
+            "OpenRouter credential verification failed",
+        ),
+    ],
+)
+async def test_openrouter_registration_classifies_attested_provider_response(
+    monkeypatch,
+    attempt,
+    expected_status,
+    expected_detail,
+):
+    from gateway.research_lab.attested_scoring_v2 import AttestedScoringV2Error
+    import gateway.research_lab.attested_coordinator_v2 as coordinator_bridge
+
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                evaluation_epoch=123,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "_enforce_openrouter_key_registration_rate_limit",
+        lambda _hotkey: None,
+    )
+
+    async def seal(*, credential_kind, **_kwargs):
+        return {"credential_kind": credential_kind}
+
+    async def register(**_kwargs):
+        raise AttestedScoringV2Error(
+            "V2 scoring failed closed: execution_providerclientv2error",
+            authority={"transport_attempts": [attempt]},
+        )
+
+    monkeypatch.setattr(api, "_seal_openrouter_credential_v2", seal)
+    monkeypatch.setattr(
+        api,
+        "resolve_research_lab_evaluation_epoch",
+        lambda _configured: _async_value((123, 456, "test")),
+    )
+    monkeypatch.setattr(
+        coordinator_bridge,
+        "register_openrouter_credentials_v2",
+        register,
+    )
+    encrypted = AttestedCredentialCiphertextV2(
+        request_id="sha256:" + "8" * 64,
+        ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
+    )
+    payload = ResearchLabOpenRouterKeyRegisterRequest(
+        miner_hotkey=MINER,
+        signature="s" * 64,
+        timestamp=int(time.time()),
+        idempotency_key="openrouter-registration-provider-response",
+        openrouter_api_key_v2=encrypted,
+        openrouter_management_key_v2=encrypted.model_copy(
+            update={"request_id": "sha256:" + "9" * 64}
+        ),
+    )
+
+    with pytest.raises(api.HTTPException) as captured:
+        await api.register_research_lab_openrouter_key(payload)
+    assert captured.value.status_code == expected_status
+    assert captured.value.detail == expected_detail
+
+
+@pytest.mark.asyncio
 async def test_openrouter_seal_preserves_transport_failure_as_retryable_503(
     monkeypatch,
 ):

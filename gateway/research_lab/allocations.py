@@ -908,6 +908,7 @@ async def _active_source_add_obligations(
                 "adapter_id": str(row.get("adapter_id") or ""),
                 "leg": int(row.get("leg") or 0),
                 "reward_kind": str(row.get("reward_kind") or ""),
+                "created_at": str(row.get("created_at") or ""),
                 "status": "active",
                 **replay_obligation,
             }

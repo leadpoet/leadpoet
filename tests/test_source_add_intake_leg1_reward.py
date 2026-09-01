@@ -394,8 +394,67 @@ async def test_manual_provenance_never_queues_probe_or_reward(monkeypatch):
     assert "reward_intent" not in finished
 
 
+@pytest.mark.parametrize(
+    ("http_status", "expected_disposition"),
+    (
+        (400, "retry"),
+        (408, "retry"),
+        (429, "retry"),
+        (503, "retry"),
+        (404, "complete"),
+        (410, "complete"),
+    ),
+)
 @pytest.mark.asyncio
-async def test_exact_functional_pass_queues_one_leg1_intent(monkeypatch):
+async def test_documentation_fetch_retries_only_transient_statuses(
+    monkeypatch, http_status, expected_disposition
+):
+    finished = {}
+
+    async def fake_provenance(**_kwargs):
+        return (
+            SourceAddProvenanceResult(
+                PRECHECK_MANUAL,
+                ("documentation_fetch_failed",),
+                {"docs_fetch": {"provider_status": "ok", "status": http_status}},
+            ),
+            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        )
+
+    async def fake_finish(_work, **kwargs):
+        finished.update(kwargs)
+        return {
+            "status": (
+                "retry_wait"
+                if kwargs["disposition"] == "retry"
+                else "completed"
+            )
+        }
+
+    monkeypatch.setattr(
+        workflow, "_load_submission", lambda _sid: _async_value(_submission_row())
+    )
+    monkeypatch.setattr(
+        workflow, "evaluate_source_add_provenance_v2", fake_provenance
+    )
+    monkeypatch.setattr(workflow, "_finish_work", fake_finish)
+
+    await workflow._process_provenance(
+        _leased_work("provenance"), config=_config()
+    )
+
+    assert finished["disposition"] == expected_disposition
+    assert finished["stage"] == PRECHECK_MANUAL
+    if expected_disposition == "retry":
+        assert "next_work" not in finished
+        assert "reward_intent" not in finished
+    else:
+        assert finished["next_work"] == {}
+        assert "reward_intent" not in finished
+
+
+@pytest.mark.asyncio
+async def test_exact_functional_pass_waits_for_final_acceptance(monkeypatch):
     config_ref = "source_add_probe_config:0123456789abcdef"
     result_doc = {
         "schema_version": "leadpoet.source_add_functional_probe_result.v2",
@@ -449,15 +508,10 @@ async def test_exact_functional_pass_queues_one_leg1_intent(monkeypatch):
 
     await workflow._process_functional_probe(_leased_work("functional_probe"), config=_config())
 
-    assert finished["stage"] == "leg1_queued"
+    assert finished["stage"] == "functional_probe_passed"
     assert finished["functional_attempt"]["receipt_hash"] == receipt_hash
-    assert finished["reward_intent"] == {
-        "intent_id": workflow.source_add_reward_intent_id(SUBMISSION_ID, ADAPTER_ID),
-        "miner_hotkey": MINER_HOTKEY,
-        "functional_receipt_hash": receipt_hash,
-        "business_artifact_hash": sha256_json(result_doc),
-    }
-    assert finished["next_work"]["work_kind"] == "leg1_reward"
+    assert "reward_intent" not in finished
+    assert "next_work" not in finished
 
 
 @pytest.mark.asyncio
@@ -607,6 +661,38 @@ async def test_disabled_functional_rewards_remain_retryable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_leg1_fifo_wait_is_returned_without_reward_side_effects(monkeypatch):
+    work = _leased_work(
+        "leg1_reward",
+        job_doc={"intent_id": "source_add_reward_intent:0123456789abcdef"},
+    )
+
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_reward_intents"
+        return {"intent_id": work["job_doc"]["intent_id"]}
+
+    async def fake_rpc(name, params):
+        assert name == "research_lab_source_add_reserve_leg1_slot_v2"
+        assert params["p_work_id"] == work["work_id"]
+        assert params["p_work_lease_token"] == work["lease_token"]
+        return {"status": "fifo_wait", "available_at": "2026-08-31T00:00:00Z"}
+
+    async def fail_load(*_args, **_kwargs):
+        raise AssertionError("fifo wait must not build or finalize a reward")
+
+    monkeypatch.setattr(workflow, "select_one", fake_select_one)
+    monkeypatch.setattr(workflow, "_rpc", fake_rpc)
+    monkeypatch.setattr(workflow, "_load_submission", fail_load)
+
+    result = await workflow._process_leg1_reward(work, config=_config())
+
+    assert result == {
+        "status": "fifo_wait",
+        "available_at": "2026-08-31T00:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
 async def test_reward_worker_exception_never_dead_letters(monkeypatch):
     finished = {}
 
@@ -631,7 +717,9 @@ async def test_reward_worker_exception_never_dead_letters(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
+async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
+    monkeypatch,
+):
     functional_result = {
         "schema_version": "leadpoet.source_add_functional_probe_result.v2",
         "evaluator_version": "leadpoet.source_add_functional_probe_evaluator.v2.1",
@@ -640,9 +728,18 @@ async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
     }
     functional_hash = sha256_json(functional_result)
     functional_receipt = "sha256:" + "3" * 64
+    smoke_result = {
+        **functional_result,
+        "evaluation_mode": "provisioning_smoke",
+    }
+    smoke_hash = sha256_json(smoke_result)
+    smoke_receipt = "sha256:" + "6" * 64
     decision_receipt = "sha256:" + "4" * 64
-    decision_artifact = "sha256:" + "5" * 64
+    decision_artifacts = []
+    existing_decision = {"available": False}
+    finalize_status = {"value": "created"}
     finalized_payload = {}
+    authorize_payload = {}
 
     async def fake_select_one(table, **_kwargs):
         if table == "research_lab_source_add_reward_intents":
@@ -656,30 +753,68 @@ async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
                 "submission_id": SUBMISSION_ID,
                 "adapter_id": ADAPTER_ID,
                 "attempt_ref": "source_add_probe_attempt:0123456789abcdef",
+                "config_ref": "source_add_probe_config:0123456789abcdef",
                 "result_status": "passed",
                 "receipt_hash": functional_receipt,
                 "business_artifact_hash": functional_hash,
                 "result_doc": functional_result,
             }
+        if table == "research_lab_source_add_provisioning_smoke_current":
+            return {
+                "submission_id": SUBMISSION_ID,
+                "adapter_id": ADAPTER_ID,
+                "attempt_ref": "source_add_probe_attempt:fedcba9876543210",
+                "evaluation_mode": "provisioning_smoke",
+                "config_ref": "source_add_probe_config:0123456789abcdef",
+                "result_status": "passed",
+                "receipt_hash": smoke_receipt,
+                "business_artifact_hash": smoke_hash,
+                "result_doc": smoke_result,
+            }
+        if table == "research_lab_source_add_provisioning_current":
+            return {
+                "submission_id": SUBMISSION_ID,
+                "adapter_id": ADAPTER_ID,
+                "miner_hotkey": MINER_HOTKEY,
+                "provision_ref": "source_add_provision:0123456789abcdef",
+                "catalog_id": "source_catalog:0123456789abcdef",
+                "registry_provider_id": "credible_api",
+                "provision_status": "provisioned_autoresearch_eligible",
+            }
         if table == "research_lab_source_add_reward_current":
+            return None
+        if table == "research_lab_attested_business_artifact_links_v2":
+            if existing_decision["available"]:
+                return {
+                    "receipt_hash": decision_receipt,
+                    "artifact_hash": decision_artifacts[0],
+                }
             return None
         raise AssertionError(table)
 
     async def fake_rpc(name, params):
-        if name == "research_lab_source_add_reserve_leg1_slot":
+        if name == "research_lab_source_add_reserve_leg1_slot_v2":
             return {
                 "status": "reserved",
                 "slot_lease_token": "22222222-2222-2222-2222-222222222222",
             }
-        if name == "research_lab_source_add_finalize_leg1":
+        if name == "research_lab_source_add_finalize_leg1_v2":
             finalized_payload.update(params)
             return {
-                "status": "created",
+                "status": finalize_status["value"],
                 "reward_ref": params["p_reward"]["reward_ref"],
             }
         raise AssertionError(name)
 
-    async def fake_authorize(**_kwargs):
+    async def fake_authorize(**kwargs):
+        authorize_payload.update(kwargs)
+        decision_artifact = sha256_json(
+            workflow.source_add_reward_row_projection_v2(
+                "source_add_leg1",
+                kwargs["expected_result"]["reward"],
+            )
+        )
+        decision_artifacts.append(decision_artifact)
         return {
             "status": "matched",
             "execution_receipt": {
@@ -691,7 +826,7 @@ async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
     monkeypatch.setattr(
         workflow,
         "_load_submission",
-        lambda _sid: _async_value(_submission_row(stage="leg1_queued")),
+        lambda _sid: _async_value(_submission_row(stage="accepted")),
     )
     monkeypatch.setattr(workflow, "select_one", fake_select_one)
     monkeypatch.setattr(workflow, "_rpc", fake_rpc)
@@ -701,9 +836,33 @@ async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
         "resolve_research_lab_evaluation_epoch",
         lambda _epoch: _async_value((700, 0, "test")),
     )
+    async def load_graph(**kwargs):
+        if kwargs["artifact_kind"] == "source_add_functional_probe":
+            return {"root_receipt_hash": functional_receipt}
+        if kwargs["artifact_kind"] == "source_add_provisioning_smoke":
+            return {"root_receipt_hash": smoke_receipt}
+        assert kwargs == {
+            "artifact_kind": "source_add_reward_decision",
+            "artifact_ref": finalized_payload["p_reward"]["reward_ref"],
+            "artifact_hash": decision_artifacts[0],
+        }
+        return {
+            "root_receipt_hash": decision_receipt,
+            "receipts": [
+                {
+                    "receipt_hash": decision_receipt,
+                    "purpose": "research_lab.reward_decision.v2",
+                    "output_root": decision_artifacts[0],
+                    "parent_receipt_hashes": sorted(
+                        (functional_receipt, smoke_receipt)
+                    ),
+                }
+            ],
+        }
+
     monkeypatch.setattr(
         "gateway.research_lab.attested_v2_store.load_business_artifact_graph_v2",
-        lambda **_kwargs: _async_value({"root_receipt_hash": functional_receipt}),
+        load_graph,
     )
 
     result = await workflow._process_leg1_reward(
@@ -713,11 +872,56 @@ async def test_leg1_finalization_binds_reward_decision_receipt(monkeypatch):
         ),
         config=_config(),
     )
+    existing_decision["available"] = True
+    recovered = await workflow._process_leg1_reward(
+        _leased_work(
+            "leg1_reward",
+            job_doc={"intent_id": "source_add_reward_intent:0123456789abcdef"},
+        ),
+        config=_config(),
+    )
+    finalize_status["value"] = "fifo_wait"
+    waited = await workflow._process_leg1_reward(
+        _leased_work(
+            "leg1_reward",
+            job_doc={"intent_id": "source_add_reward_intent:0123456789abcdef"},
+        ),
+        config=_config(),
+    )
 
     assert result["status"] == "created"
+    assert recovered["status"] == "created"
+    assert waited["status"] == "fifo_wait"
+    assert len(decision_artifacts) == 1
     assert finalized_payload["p_reward"]["decision_receipt_hash"] == decision_receipt
-    assert finalized_payload["p_reward"]["decision_artifact_hash"] == decision_artifact
+    assert finalized_payload["p_reward"]["decision_artifact_hash"] == decision_artifacts[0]
     assert finalized_payload["p_reward"]["start_epoch"] == 701
+    assert tuple(
+        graph["root_receipt_hash"] for graph in authorize_payload["parent_graphs"]
+    ) == (functional_receipt, smoke_receipt)
+    assert authorize_payload["decision_payload"]["provisioning_smoke_result"] == (
+        smoke_result
+    )
+    assert finalized_payload["p_reward"]["trigger_evidence_doc"] == {
+        "functional_probe_passed": True,
+        "attempt_ref": "source_add_probe_attempt:0123456789abcdef",
+        "functional_probe_receipt_hash": functional_receipt,
+        "business_artifact_hash": functional_hash,
+        "functional_probe_result_hash": functional_hash,
+        "evaluator_version": functional_result["evaluator_version"],
+        "route_hash": functional_result["route_hash"],
+        "provisioning_smoke_passed": True,
+        "provisioning_smoke_attempt_ref": "source_add_probe_attempt:fedcba9876543210",
+        "provisioning_smoke_receipt_hash": smoke_receipt,
+        "provisioning_smoke_business_artifact_hash": smoke_hash,
+        "provisioning_smoke_result_hash": smoke_hash,
+        "submission_id": SUBMISSION_ID,
+        "final_acceptance_stage": "accepted",
+        "provision_ref": "source_add_provision:0123456789abcdef",
+        "catalog_id": "source_catalog:0123456789abcdef",
+        "registry_provider_id": "credible_api",
+        "provision_status": "provisioned_autoresearch_eligible",
+    }
 
 
 @pytest.mark.asyncio

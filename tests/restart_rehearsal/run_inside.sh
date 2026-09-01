@@ -79,6 +79,7 @@ BOUNDARY_SERVICE_PID=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
 TLS_PROXY_SERVICE_PID=""
+RUNNING_VALIDATOR_FIXTURE_PID=""
 preserve_rehearsal_evidence() {
   if [ -f "$REHEARSAL_STATE_ROOT/events.jsonl" ]; then
     cp "$REHEARSAL_STATE_ROOT/events.jsonl" \
@@ -113,6 +114,10 @@ preserve_rehearsal_evidence() {
   fi
 }
 cleanup_boundary_service() {
+  if [ -n "$RUNNING_VALIDATOR_FIXTURE_PID" ]; then
+    kill "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
+    wait "$RUNNING_VALIDATOR_FIXTURE_PID" 2>/dev/null || true
+  fi
   if [ -n "$GATEWAY_ENCLAVE_SERVICE_PIDS" ]; then
     for pid in $GATEWAY_ENCLAVE_SERVICE_PIDS; do
       kill "$pid" 2>/dev/null || true
@@ -229,6 +234,7 @@ from validator_tee.enclave.hotkey_authority_v2 import (
     MEASURED_DRAND_LIBRARY_PATH,
 )
 from validator_tee.host.hotkey_bootstrap_v2 import build_hotkey_envelope_v2
+from leadpoet_canonical.attested_v2 import sha256_json
 
 root = Path("/home/ec2-user/.config/leadpoet")
 seed = hashlib.sha256(b"leadpoet-local-validator-hotkey").digest()
@@ -237,6 +243,11 @@ keypair = Keypair.create_from_seed(
 )
 hotkey = keypair.ss58_address
 public_key = keypair.public_key.hex()
+chain_signing_profile = json.loads(
+    Path(
+        "/source/validator_tee/enclave/chain_signing_profile_v2.json"
+    ).read_text(encoding="utf-8")
+)
 drand_hash = Path(
     "/source/validator_tee/enclave/libbittensor_drand_v2.sha256"
 ).read_text(encoding="ascii").strip()
@@ -244,7 +255,7 @@ configuration = {
     "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
     "validator_hotkey": hotkey,
     "hotkey_public_key": public_key,
-    "chain_signing_profile_hash": "sha256:" + "0" * 64,
+    "chain_signing_profile_hash": sha256_json(chain_signing_profile),
     "drand_library_path": MEASURED_DRAND_LIBRARY_PATH,
     "drand_library_sha256": drand_hash,
 }
@@ -461,6 +472,293 @@ else
     /usr/bin/python3.11 /harness/prepare_host_fixtures.py \
     --output-dir /home/ec2-user/.config/leadpoet/v2 \
     --candidate-sha "$CANDIDATE_SHA"
+fi
+
+# The physical restart is one paired controller operation.  The exact launcher
+# replicas run in isolated component containers, so materialize the controller's
+# bounded cross-host handoff before starting either unchanged production wrapper.
+# All documents are built and validated by the candidate's production lineage
+# implementation against the same immutable local release channel used below.
+PAIRED_ACTIVE_RELEASE_FIXTURE=0
+ACTIVE_RELEASE_RESTART_INVOCATION_ID=""
+ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS=""
+ACTIVE_RELEASE_VALIDATOR_OUTPUT=""
+ACTIVE_RELEASE_GATEWAY_REQUIREMENTS=""
+ACTIVE_RELEASE_GATEWAY_LINEAGE=""
+ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE=""
+ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE=""
+ACTIVE_RELEASE_COORDINATION_FILE=""
+if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
+    && [ "$WEIGHT_READINESS_SCENARIO" = "production_success" ]; then
+  PAIRED_ACTIVE_RELEASE_FIXTURE=1
+  ACTIVE_RELEASE_FIXTURE_SUFFIX="rehearsal-${RUN_ORDINAL}-${CANDIDATE_SHA:0:12}"
+  ACTIVE_RELEASE_RESTART_INVOCATION_ID="restart-${ACTIVE_RELEASE_FIXTURE_SUFFIX}"
+  ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS="/tmp/leadpoet-validator-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_VALIDATOR_OUTPUT="/tmp/leadpoet-validator-active-release-output.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_GATEWAY_REQUIREMENTS="/tmp/leadpoet-gateway-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_GATEWAY_LINEAGE="/tmp/leadpoet-gateway-active-release-lineage.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json"
+  ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE="/tmp/leadpoet-gateway-paired-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
+  ACTIVE_RELEASE_COORDINATION_FILE="/tmp/leadpoet-coordinated-restart.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.ready"
+  ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE="$(
+    printf '%s' \
+      "$FROM_SHA:$CANDIDATE_SHA:$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      | sha256sum | cut -d' ' -f1
+  )"
+  ACTIVE_RELEASE_AUTHORITY_SHA="$(
+    git --git-dir=/srv/origin.git rev-parse --verify refs/heads/main
+  )"
+  rm -f -- \
+    "$ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS" \
+    "$ACTIVE_RELEASE_VALIDATOR_OUTPUT" \
+    "$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS" \
+    "$ACTIVE_RELEASE_GATEWAY_LINEAGE" \
+    "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE" \
+    "$ACTIVE_RELEASE_COORDINATION_FILE"
+  PYTHONDONTWRITEBYTECODE=1 \
+    LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json \
+    PYTHONPATH=/source:/harness \
+    /usr/bin/python3.11 - \
+      "$CANDIDATE_SHA" \
+      "$ACTIVE_RELEASE_AUTHORITY_SHA" \
+      "$FROM_SHA" \
+      "$ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      "$ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS" \
+      "$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS" \
+      "$ACTIVE_RELEASE_GATEWAY_LINEAGE" \
+      /home/ec2-user/tee/gateway-v2-release-manifest.json <<'PY'
+import asyncio
+import copy
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+import boto3
+
+from gateway.tee.active_release_requirements_v2 import (
+    validate_active_release_requirements_v2,
+)
+from gateway.tee.bootstrap_active_ancestry_checkpoints_v2 import _lineage_id
+from gateway.tee.prepare_active_release_lineage_v2 import (
+    prepare_gateway_final_active_lineage_v2,
+    prepare_validator_initial_active_lineage_v2,
+)
+from gateway.tee.release_channel_v2 import fetch_release_channel_v2
+from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from validator_tee.enclave.hotkey_authority_v2 import (
+    validate_hotkey_authority_configuration,
+)
+from leadpoet_canonical.hotkey_authority_v2 import (
+    validate_chain_signing_profile,
+)
+
+(
+    candidate,
+    authority,
+    running,
+    invocation,
+    initial_path,
+    final_path,
+    lineage_path,
+    running_gateway_manifest_path,
+) = sys.argv[1:]
+repository = Path("/source")
+config_root = Path("/home/ec2-user/.config/leadpoet")
+hotkey_configuration = validate_hotkey_authority_configuration(
+    json.loads(
+        (config_root / "validator-hotkey-config-v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+)
+chain_signing_profile = validate_chain_signing_profile(
+    json.loads(
+        Path(
+            "/source/validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+)
+if hotkey_configuration["chain_signing_profile_hash"] != sha256_json(
+    chain_signing_profile
+):
+    raise SystemExit("rehearsal validator authority profile differs")
+
+s3_client = boto3.client("s3", region_name="us-east-1")
+lineage_id = _lineage_id()
+initial = prepare_validator_initial_active_lineage_v2(
+    candidate_commit_sha=candidate,
+    authority_commit_sha=authority,
+    restart_invocation_id=invocation,
+    running_validator_commit_sha=running,
+    expected_validator_hotkey=hotkey_configuration["validator_hotkey"],
+    chain_signing_profile=chain_signing_profile,
+    journal_loader=lambda: None,
+    repository=repository,
+    expected_lineage_id=lineage_id,
+    s3_client=s3_client,
+)
+
+
+async def no_active_graphs(**_kwargs):
+    return []
+
+
+running_channel = fetch_release_channel_v2(
+    bucket="leadpoet-attested-v2-artifacts-493765492819",
+    commit_sha=running,
+    s3_client=s3_client,
+)
+final = asyncio.run(
+    prepare_gateway_final_active_lineage_v2(
+        candidate_commit_sha=candidate,
+        authority_commit_sha=authority,
+        restart_invocation_id=invocation,
+        running_gateway_release_manifest=(
+            running_channel["gateway_release_manifest"]
+        ),
+        validator_requirements=initial["requirements"],
+        epoch_id=0,
+        netuid=71,
+        policy={},
+        repository=repository,
+        expected_lineage_id=lineage_id,
+        s3_client=s3_client,
+        load_allocation_graphs=no_active_graphs,
+        load_sourcing_graphs=no_active_graphs,
+    )
+)
+initial_requirements = validate_active_release_requirements_v2(
+    initial["requirements"]
+)
+final_requirements = validate_active_release_requirements_v2(
+    final["requirements"]
+)
+lineage = validate_compact_release_lineage_v2(
+    final["lineage"],
+    expected_current_commit=candidate,
+)
+if not set(initial_requirements["required_commits"]).issubset(
+    final_requirements["required_commits"]
+):
+    raise SystemExit("paired rehearsal final authority omits validator authority")
+if set(final_requirements["required_commits"]) != set(lineage["releases"]):
+    raise SystemExit("paired rehearsal requirements and lineage differ")
+
+# Prove the fixture did not turn conflicting controller identity into a
+# permissive replay.  The production validator must reject the mutation.
+conflicting = copy.deepcopy(final_requirements)
+conflicting["restart_invocation_id"] += "-conflict"
+try:
+    validate_active_release_requirements_v2(conflicting)
+except Exception:
+    pass
+else:
+    raise SystemExit("conflicting paired restart identity did not fail closed")
+
+
+def write_atomic(path: str, value: dict) -> None:
+    destination = Path(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        dir=str(destination.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write((canonical_json(value) + "\n").encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+write_atomic(initial_path, initial_requirements)
+write_atomic(final_path, final_requirements)
+write_atomic(lineage_path, lineage)
+write_atomic(
+    running_gateway_manifest_path,
+    running_channel["gateway_release_manifest"],
+)
+PY
+  printf '%s %s\n' \
+    "$CANDIDATE_SHA" "$ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE" \
+    >"$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE.tmp"
+  chmod 0600 "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE.tmp"
+  mv -f -- \
+    "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE.tmp" \
+    "$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE"
+  printf '%s\n' "$CANDIDATE_SHA" >"$ACTIVE_RELEASE_COORDINATION_FILE.tmp"
+  chmod 0600 "$ACTIVE_RELEASE_COORDINATION_FILE.tmp"
+  mv -f -- \
+    "$ACTIVE_RELEASE_COORDINATION_FILE.tmp" \
+    "$ACTIVE_RELEASE_COORDINATION_FILE"
+
+  # The exact N-1 validator launcher reads the currently deployed container's
+  # immutable commit before any shutdown.  Seed that already-running external
+  # fact in the Docker boundary; the unchanged wrapper removes it normally.
+  if [ "$COMPONENT" = "validator" ]; then
+    /usr/bin/python3.11 -c \
+      'import time; time.sleep(1800)' &
+    RUNNING_VALIDATOR_FIXTURE_PID="$!"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/harness \
+      /usr/bin/python3.11 - \
+        "$FROM_SHA" "$RUNNING_VALIDATOR_FIXTURE_PID" <<'PY'
+import re
+import sys
+
+from contract_adapter import _locked_state, _save_state
+
+running_commit, process_id = sys.argv[1:]
+if re.fullmatch(r"[0-9a-f]{40}", running_commit) is None:
+    raise SystemExit("rehearsal running validator commit is invalid")
+if not process_id.isdigit() or int(process_id) <= 1:
+    raise SystemExit("rehearsal running validator process is invalid")
+handle, state = _locked_state()
+containers = state.setdefault("containers", {})
+if "leadpoet-validator-main" in containers:
+    handle.close()
+    raise SystemExit("rehearsal running validator identity is duplicated")
+containers["leadpoet-validator-main"] = {
+    "argv": ["sanitized-n-minus-one-validator"],
+    "environment": [f"VALIDATOR_V2_DEPLOY_COMMIT={running_commit}"],
+    "image_id": "sha256:" + running_commit + "0" * 24,
+    "image_revision": running_commit,
+    "log_path": "",
+    "mounts": [],
+    "pid": int(process_id),
+    "restart_count": 0,
+    "role": "validator.coordinator",
+    "running": True,
+    "worker_id": "",
+}
+_save_state(handle, state)
+PY
+  fi
+fi
+
+GATEWAY_ACTIVE_RELEASE_ENV=()
+VALIDATOR_ACTIVE_RELEASE_ENV=()
+if [ "$PAIRED_ACTIVE_RELEASE_FIXTURE" = "1" ]; then
+  GATEWAY_ACTIVE_RELEASE_ENV=(
+    "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+    "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED=1"
+    "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS=$ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS"
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE=$ACTIVE_RELEASE_GATEWAY_HANDOFF_FILE"
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE=$ACTIVE_RELEASE_GATEWAY_HANDOFF_NONCE"
+    "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS=30"
+  )
+  VALIDATOR_ACTIVE_RELEASE_ENV=(
+    "VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID=$ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+    "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"
+    "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=$ACTIVE_RELEASE_VALIDATOR_OUTPUT"
+    "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=$ACTIVE_RELEASE_GATEWAY_REQUIREMENTS"
+    "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=$ACTIVE_RELEASE_GATEWAY_LINEAGE"
+    "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=$ACTIVE_RELEASE_COORDINATION_FILE"
+  )
 fi
 
 if [ "$COMPONENT" = "gateway" ]; then
@@ -680,6 +978,7 @@ PY
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
+      "${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"
     RESTART_STATUS=$?
   elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then
@@ -746,6 +1045,7 @@ PY
       GATEWAY_V2_RELEASE_PREFIX=attested-v2/releases \
       AWS_REGION=us-east-1 \
       AWS_DEFAULT_REGION=us-east-1 \
+      "${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \
       bash "$MINER_BOOTSTRAP_ROOT/candidate/gw_restart.sh" \
         --commit "$CANDIDATE_SHA" \
         --miner-maintenance-bootstrap-plan "$MINER_BOOTSTRAP_ROOT/plan.json" \
@@ -822,6 +1122,7 @@ PY
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
+      "${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/gw_restart.sh
     RESTART_STATUS=$?
   fi
@@ -1102,6 +1403,7 @@ else
       VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
       VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
+      "${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/validator_restart.sh \
         --commit "$CANDIDATE_SHA"
   else
@@ -1110,6 +1412,7 @@ else
       VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
       VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
+      "${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \
       bash /home/ec2-user/validator_restart.sh
   fi
 

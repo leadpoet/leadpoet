@@ -4,10 +4,13 @@ import base64
 import json
 import subprocess
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from gateway.research_lab import provider_evidence_proxy
 from research_lab.canonical import sha256_json
@@ -455,6 +458,53 @@ def test_openrouter_missing_cost_for_perplexity_without_usage_is_zero_until_reco
     assert not estimate.tracking_failed
     assert estimate.tracking_reason == "missing_openrouter_cost"
     assert estimate.generation_id == "gen-sonar-no-usage"
+
+
+def test_openrouter_generation_cost_reconciliation_honors_request_deadline(
+    monkeypatch,
+):
+    estimate = ProviderCostEstimate(
+        provider="or",
+        endpoint="/api/v1/chat/completions",
+        model="perplexity/sonar",
+        generation_id="gen-bounded-reconciliation",
+        cost_source="openrouter_missing_cost_zero_cost",
+        tracking_reason="missing_openrouter_cost",
+    )
+    entry = provider_evidence_proxy.ProviderRegistryEntry(
+        id="or",
+        base_url="https://openrouter.ai",
+        auth_kind="bearer",
+    )
+    now = [100.0]
+    observed_timeouts = []
+
+    monkeypatch.setattr(
+        provider_evidence_proxy.time,
+        "monotonic",
+        lambda: now[0],
+    )
+
+    def unavailable(_request, *, timeout):
+        observed_timeouts.append(timeout)
+        now[0] += timeout
+        raise TimeoutError("bounded fixture timeout")
+
+    monkeypatch.setattr(
+        provider_evidence_proxy.urllib.request,
+        "urlopen",
+        unavailable,
+    )
+
+    result = provider_evidence_proxy._reconcile_openrouter_generation_cost(
+        entry=entry,
+        credential="redacted-fixture-key",
+        estimate=estimate,
+        deadline=101.0,
+    )
+
+    assert result == estimate
+    assert observed_timeouts == pytest.approx([0.75])
 
 
 def test_exa_agent_running_poll_is_not_billable_until_completed():
@@ -960,8 +1010,16 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
         upstream.server_close()
 
 
-def test_evidence_proxy_tracks_deepline_private_model_play_run():
+def test_evidence_proxy_tracks_deepline_private_model_play_run(monkeypatch):
     _FakeDeeplineProvider.seen_auth_headers = []
+    monkeypatch.setenv("DEEPLINE_MAX_CONCURRENCY", "1")
+    monkeypatch.setenv("DEEPLINE_GATE_WAIT_SECONDS", "0.01")
+    monkeypatch.setenv("DEEPLINE_RUN_TTL_SECONDS", "9999")
+    monkeypatch.setattr(
+        provider_evidence_proxy,
+        "_DEEPLINE_GATE",
+        provider_evidence_proxy.DeeplineConcurrencyGate(),
+    )
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeDeeplineProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
@@ -1007,6 +1065,29 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert event["credits"] == 0
         assert event["tracking_failed"] is False
 
+        blocked_req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/plays/run",
+            data=json.dumps(
+                {"name": "company-domain-firmographics", "input": {"domain": "blocked.example"}}
+            ).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "deepline-blocked-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "1.00",
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as blocked_error:
+            urllib.request.urlopen(blocked_req, timeout=5)
+        assert blocked_error.value.code == 429
+        assert json.loads(blocked_error.value.read()) == {
+            "error": "deepline concurrency gate wait timeout",
+            "transient": True,
+        }
+        assert _FakeDeeplineProvider.seen_auth_headers == [
+            "Bearer redacted-test-key"
+        ]
+
         poll_req = urllib.request.Request(
             f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/runs/run_deepline_123",
             headers={
@@ -1046,6 +1127,13 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert billing_event["cost_usd"] == 0.002
         assert billing_event["cost_source"] == "deepline_response_credits"
         assert billing_event["tracking_failed"] is False
+
+        with urllib.request.urlopen(blocked_req, timeout=5):
+            pass
+        assert _FakeDeeplineProvider.seen_auth_headers == [
+            "Bearer redacted-test-key",
+            "Bearer redacted-test-key",
+        ]
     finally:
         if proxy is not None:
             proxy.shutdown()
@@ -1455,3 +1543,142 @@ def test_evidence_store_ignores_preexisting_nonterminal_exa_agent_cache(tmp_path
     store = provider_evidence_proxy.EvidenceStore(day_cache_path=str(cache_path))
 
     assert store.lookup(fingerprint) is None
+
+
+def test_evidence_store_single_flight_timeout_is_one_absolute_deadline(
+    monkeypatch,
+):
+    fingerprint = "e" * 64
+    store = provider_evidence_proxy.EvidenceStore()
+    store._inflight.add(fingerprint)
+    now = [100.0]
+
+    class SpuriousCondition:
+        def __init__(self):
+            self.waits = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            now[0] += min(0.04, float(timeout))
+            return len(self.waits) < 4
+
+        def notify_all(self):
+            return None
+
+    condition = SpuriousCondition()
+    store._cond = condition
+    monkeypatch.setattr(
+        provider_evidence_proxy.time,
+        "monotonic",
+        lambda: now[0],
+    )
+
+    assert store.acquire_or_wait(fingerprint, timeout=0.1) == (None, False)
+    assert condition.waits == pytest.approx([0.1, 0.06, 0.02])
+
+
+def test_live_single_flight_timeout_returns_pending_without_duplicate_call(
+    monkeypatch,
+):
+    registry = [
+        provider_evidence_proxy.ProviderRegistryEntry(
+            id="exa",
+            base_url="http://127.0.0.1:9",
+            auth_kind="none",
+        )
+    ]
+    proxy = None
+    try:
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        acquire_calls = []
+
+        def acquire_or_wait(*args, **kwargs):
+            acquire_calls.append((args, kwargs))
+            return None, False
+
+        monkeypatch.setattr(store, "acquire_or_wait", acquire_or_wait)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            headers={provider_evidence_proxy.REQUEST_TIMEOUT_MS_HEADER: "2500"},
+            method="GET",
+        )
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=3)
+
+        assert raised.value.code == 409
+        assert raised.value.headers.get("X-Research-Lab-Evidence") == (
+            provider_evidence_proxy.REQUEST_PENDING_EVIDENCE
+        )
+        assert json.loads(raised.value.read().decode("utf-8")) == {
+            "error": "request_pending"
+        }
+        assert len(acquire_calls) == 1
+        assert acquire_calls[0][0]
+        assert 0 < acquire_calls[0][1]["timeout"] <= 2.25
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+
+
+def test_replay_only_miss_does_not_wait_for_live_single_flight(monkeypatch):
+    registry = [
+        provider_evidence_proxy.ProviderRegistryEntry(
+            id="exa",
+            base_url="http://127.0.0.1:9",
+            auth_kind="none",
+        )
+    ]
+    proxy = None
+    try:
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        upstream_url = "http://127.0.0.1:9/search"
+        fingerprint = provider_evidence_proxy.canonical_request_fingerprint(
+            "GET",
+            upstream_url,
+            None,
+        )
+        with store._cond:
+            store._inflight.add(fingerprint)
+
+        acquire_calls = []
+
+        def acquire_or_wait(*args, **kwargs):
+            acquire_calls.append((args, kwargs))
+            return None, False
+
+        monkeypatch.setattr(store, "acquire_or_wait", acquire_or_wait)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            headers={provider_evidence_proxy.REPLAY_ONLY_HEADER: "1"},
+            method="GET",
+        )
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+
+        assert raised.value.code == 409
+        assert json.loads(raised.value.read().decode("utf-8")) == {
+            "error": "replay_miss"
+        }
+        assert acquire_calls == []
+        assert store.lookup(fingerprint) is None
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()

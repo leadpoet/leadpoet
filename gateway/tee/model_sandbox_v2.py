@@ -76,10 +76,12 @@ from research_lab.eval.provider_evidence_cache import (
     merge_evidence_caches,
 )
 from research_lab.eval.snapshot_store import (
+    HTTPX_TRANSPORT_OUTCOME,
     MODE_REPLAY,
     ProviderSnapshotStore,
     SNAPSHOT_MISS_SENTINEL,
     SnapshotMiss,
+    URLLIB_TRANSPORT_OUTCOME,
     container_replay_env,
     dev_replay_bootstrap,
 )
@@ -1297,6 +1299,7 @@ def validate_consumer_runtime_probe_v1(
             validate_qualification_outcome_protocol_probe_cases_v1(
                 observed_qualification["cases"],
                 expected_nonce_sha256s=observed_qualification["nonce_sha256s"],
+                expected_contract_sha256=metadata_protocol["contract_sha256"],
             )
         except PrivateModelRuntimeError as exc:
             raise ModelSandboxV2Error(
@@ -1377,6 +1380,9 @@ def _build_consumer_runtime_probe_from_observation_v1(
                 validate_qualification_outcome_protocol_probe_cases_v1(
                     cases,
                     expected_nonce_sha256s=nonce_hashes,
+                    expected_contract_sha256=metadata_document[
+                        "qualification_outcome_protocol"
+                    ]["contract_sha256"],
                 )
             )
         except PrivateModelRuntimeError as exc:
@@ -2205,15 +2211,91 @@ def _local_provider_replay_resolver_v2(
                 response = None
             if response is not None:
                 selected_kind = "snapshot"
-                selected = {
-                    "terminal_status": "attested_local_response",
-                    "http_status": int(response.get("status") or 0),
-                    "headers": dict(response.get("headers") or {}),
-                    "body_b64": base64.b64encode(
-                        str(response.get("body_text") or "").encode("utf-8")
-                    ).decode("ascii"),
-                    "failure_code": None,
-                }
+                outcome = str(response.get("outcome") or "")
+                if outcome == URLLIB_TRANSPORT_OUTCOME:
+                    error_type = str(response.get("error_type") or "")
+                    reason_type = str(response.get("reason_type") or "")
+                    if error_type == "TimeoutError" and reason_type == "timeout":
+                        failure_code = "timeout"
+                    elif (
+                        error_type == "IncompleteRead"
+                        and reason_type == "unexpected_eof"
+                    ):
+                        failure_code = "unexpected_eof"
+                    elif error_type == "URLError":
+                        failure_code = {
+                            "timeout": "timeout",
+                            "dns": "dns_failure",
+                            "connection_refused": "connection_refused",
+                            "connection_reset": "connection_reset",
+                            "connection_aborted": "host_dropped",
+                            "tls_certificate": "certificate_invalid",
+                            "tls": "tls_failure",
+                            "os_error": "unexpected_eof",
+                            "message": "unexpected_eof",
+                        }.get(reason_type, "")
+                    else:
+                        failure_code = ""
+                    if not failure_code:
+                        raise ModelSandboxV2Error(
+                            "provider replay snapshot transport record is invalid"
+                        )
+                    selected = {
+                        "terminal_status": "transport_failure",
+                        "http_status": None,
+                        "headers": {},
+                        "body_b64": "",
+                        "failure_code": failure_code,
+                    }
+                elif outcome == HTTPX_TRANSPORT_OUTCOME:
+                    error_type = str(response.get("error_type") or "")
+                    if error_type in {
+                        "ConnectTimeout",
+                        "PoolTimeout",
+                        "ReadTimeout",
+                        "WriteTimeout",
+                    }:
+                        failure_code = "timeout"
+                    elif error_type == "ProxyError":
+                        failure_code = "proxy_failure"
+                    elif error_type in {
+                        "LocalProtocolError",
+                        "RemoteProtocolError",
+                        "UnsupportedProtocol",
+                    }:
+                        failure_code = "malformed_reply"
+                    elif error_type in {
+                        "CloseError",
+                        "ConnectError",
+                        "ReadError",
+                        "WriteError",
+                    }:
+                        failure_code = "unexpected_eof"
+                    else:
+                        raise ModelSandboxV2Error(
+                            "provider replay snapshot transport record is invalid"
+                        )
+                    selected = {
+                        "terminal_status": "transport_failure",
+                        "http_status": None,
+                        "headers": {},
+                        "body_b64": "",
+                        "failure_code": failure_code,
+                    }
+                elif outcome:
+                    raise ModelSandboxV2Error(
+                        "provider replay snapshot transport record is invalid"
+                    )
+                else:
+                    selected = {
+                        "terminal_status": "attested_local_response",
+                        "http_status": int(response.get("status") or 0),
+                        "headers": dict(response.get("headers") or {}),
+                        "body_b64": base64.b64encode(
+                            str(response.get("body_text") or "").encode("utf-8")
+                        ).decode("ascii"),
+                        "failure_code": None,
+                    }
                 authority_hash = str(snapshot_manifest_hash)
         if selected is None and normalized_mode != "live":
             fingerprint = canonical_request_fingerprint(method, url, body)
@@ -3666,6 +3748,9 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             if EVIDENCE_MISS_SENTINEL in stderr:
                 fingerprint = stderr.rsplit(EVIDENCE_MISS_SENTINEL, 1)[-1].splitlines()[0]
                 raise SnapshotMiss("provider-evidence:" + fingerprint.strip())
+            if SNAPSHOT_MISS_SENTINEL in stderr:
+                request_key = stderr.rsplit(SNAPSHOT_MISS_SENTINEL, 1)[-1].splitlines()[0]
+                raise SnapshotMiss(request_key.strip())
             raise _runsc_model_sandbox_error(
                 stderr=stderr,
                 returncode=completed.returncode,

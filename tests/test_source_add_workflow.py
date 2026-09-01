@@ -218,6 +218,11 @@ def _smoke_work() -> dict:
             "provision_row": {
                 "adapter_id": "adapter:test-source",
                 "provision_status": "provisioned_autoresearch_eligible",
+                "provision_doc": {
+                    "provider_registry_entry": {
+                        "base_url": "https://api.test-source.example/v1"
+                    }
+                },
             },
         },
     }
@@ -232,6 +237,17 @@ def _workflow_config() -> SimpleNamespace:
     )
 
 
+def _functional_proof(work: dict) -> dict:
+    return {
+        "attempt_ref": "source_add_probe_attempt:1111111111111111",
+        "submission_id": work["submission_id"],
+        "adapter_id": work["adapter_id"],
+        "result_status": "passed",
+        "receipt_hash": "sha256:" + "6" * 64,
+        "business_artifact_hash": "sha256:" + "7" * 64,
+    }
+
+
 @pytest.mark.asyncio
 async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypatch):
     work = _smoke_work()
@@ -242,10 +258,19 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
             "submission_id": work["submission_id"],
             "adapter_id": work["adapter_id"],
             "miner_hotkey": "hk-owner",
-            "submission_doc": {"manifest": {}, "source_metadata": {}},
+            "submission_doc": {
+                "manifest": {},
+                "source_metadata": {
+                    "api_base_url": "https://api.test-source.example/v1"
+                },
+            },
             "precheck_status": "provenance_precheck_passed",
             "precheck_doc": {},
         }
+
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_functional_probe_current"
+        return _functional_proof(work)
 
     async def fake_evaluate(**kwargs):
         assert kwargs["evaluation_mode"] == "provisioning_smoke"
@@ -277,14 +302,21 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     monkeypatch.setattr(
         source_add_workflow, "evaluate_source_add_functional_probe_v2", fake_evaluate
     )
+    monkeypatch.setattr(source_add_workflow, "select_one", fake_select_one)
     monkeypatch.setattr(source_add_workflow, "_rpc", fake_rpc)
+    # In-memory test replacement only: production exposes no request/env bypass.
+    monkeypatch.setattr(
+        source_add_workflow.source_add_catalog_contract,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
 
     response = await source_add_workflow.process_source_add_work_item(
         work, config=_workflow_config()
     )
 
     assert response["status"] == "provisioned"
-    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke"
+    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke_v2"
     assert observed["params"]["p_work_id"] == work["work_id"]
     assert observed["params"]["p_lease_token"] == work["lease_token"]
     smoke = observed["params"]["p_smoke_attempt"]
@@ -293,6 +325,228 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     assert smoke["evaluation_mode"] == "provisioning_smoke"
     assert smoke["receipt_hash"] == "sha256:" + "4" * 64
     assert smoke["business_artifact_hash"] == sha256_json(result)
+    assert observed["params"]["p_reward_intent"] == {
+        "intent_id": source_add_workflow.source_add_reward_intent_id(
+            work["submission_id"], work["adapter_id"]
+        ),
+        "miner_hotkey": "hk-owner",
+        "functional_receipt_hash": "sha256:" + "6" * 64,
+        "business_artifact_hash": "sha256:" + "7" * 64,
+    }
+    assert observed["params"]["p_reward_work"]["work_kind"] == "leg1_reward"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rpc_status", "should_fail_closed"),
+    (("not_eligible", False), ("completed", True)),
+)
+async def test_current_model_domain_added_after_admission_blocks_final_acceptance(
+    monkeypatch,
+    rpc_status,
+    should_fail_closed,
+):
+    from gateway.research_lab import provider_evidence_proxy, source_add_catalog
+
+    work = _smoke_work()
+    work["job_doc"]["catalog_row"] = {
+        "catalog_id": "source_catalog:0123456789abcdef",
+        "adapter_id": work["adapter_id"],
+    }
+    work["job_doc"]["provision_row"].update(
+        {
+            "provision_ref": "source_add_provision:0123456789abcdef",
+            "submission_id": work["submission_id"],
+            "miner_hotkey": "hk-owner",
+            "registry_provider_id": "test_source",
+            "credential_envelope": {
+                "credential_ref": "encrypted_ref:source_add:synthetic"
+            },
+        }
+    )
+    work["job_doc"]["provision_row"]["provision_doc"].update(
+        {
+            "secret_note": "synthetic-redacted-value",
+            "provider_registry_entry": {
+                "id": "test_source",
+                "base_url": "https://api.test-source.example/v1",
+                "active": True,
+            },
+        }
+    )
+    result = _smoke_result("passed")
+    current_domains: set[str] = set()
+    monkeypatch.setattr(
+        provider_evidence_proxy,
+        "reserved_builtin_provider_domains_sync",
+        lambda: set(current_domains),
+    )
+    assert source_add_catalog.source_add_api_is_current_builtin_sync(
+        "https://api.test-source.example/v1"
+    ) is False
+    current_domains.add("api.test-source.example")
+
+    async def fake_load(_submission_id):
+        return {
+            "submission_id": work["submission_id"],
+            "adapter_id": work["adapter_id"],
+            "miner_hotkey": "hk-owner",
+            "submission_doc": {
+                "manifest": {},
+                "source_metadata": {
+                    "api_base_url": "https://api.test-source.example/v1"
+                },
+            },
+            "precheck_status": "provenance_precheck_passed",
+            "precheck_doc": {},
+        }
+
+    async def fake_evaluate(**_kwargs):
+        return result, {
+            "execution_receipt": {
+                "receipt_hash": "sha256:" + "4" * 64,
+                "output_root": sha256_json(result),
+            }
+        }
+
+    observed = {}
+
+    async def fail_finish(*_args, **_kwargs):
+        raise AssertionError("current-model provider rejection must be atomic")
+
+    async def fake_rpc(name, params):
+        observed["name"] = name
+        observed["params"] = params
+        return {"status": rpc_status}
+
+    async def fail_select(*_args, **_kwargs):
+        raise AssertionError("current-model provider must not load reward proof")
+
+    monkeypatch.setattr(source_add_workflow, "_load_submission", fake_load)
+    monkeypatch.setattr(
+        source_add_workflow,
+        "_begin_provider_execution",
+        lambda value: asyncio.sleep(0, result=dict(value)),
+    )
+    monkeypatch.setattr(
+        source_add_workflow, "evaluate_source_add_functional_probe_v2", fake_evaluate
+    )
+    monkeypatch.setattr(source_add_workflow, "_finish_work", fail_finish)
+    monkeypatch.setattr(source_add_workflow, "_rpc", fake_rpc)
+    monkeypatch.setattr(source_add_workflow, "select_one", fail_select)
+
+    if should_fail_closed:
+        with pytest.raises(
+            source_add_workflow.SourceAddWorkflowError,
+            match="rejection did not finalize",
+        ):
+            await source_add_workflow.process_source_add_work_item(
+                work, config=_workflow_config()
+            )
+    else:
+        response = await source_add_workflow.process_source_add_work_item(
+            work, config=_workflow_config()
+        )
+        assert response == {"status": "not_eligible"}
+
+    assert observed["name"] == "research_lab_source_add_reject_current_builtin_v2"
+    params = observed["params"]
+    assert params["p_work_id"] == work["work_id"]
+    assert params["p_lease_token"] == work["lease_token"]
+    assert params["p_smoke_attempt"]["result_status"] == "passed"
+    disabled = params["p_disabled_provision_row"]
+    assert disabled["provision_status"] == "disabled"
+    assert disabled["provision_ref"].startswith("source_add_provision:")
+    assert disabled["provision_ref"] != "source_add_provision:0123456789abcdef"
+    assert disabled["provision_doc"]["provider_registry_entry"]["active"] is False
+    assert disabled["provision_doc"]["secret_note"] == "[redacted]"
+    assert disabled["credential_envelope"] == {
+        "credential_ref": "encrypted_ref:source_add:synthetic"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attempt_count", "finish_status", "expected_disposition"),
+    ((1, "retry_wait", "retry"), (5, "completed", "complete")),
+)
+async def test_current_model_catalog_read_failure_blocks_final_acceptance(
+    monkeypatch,
+    caplog,
+    attempt_count,
+    finish_status,
+    expected_disposition,
+):
+    caplog.set_level(logging.WARNING, logger=source_add_workflow.__name__)
+    work = _smoke_work()
+    work["attempt_count"] = attempt_count
+    result = _smoke_result("passed")
+
+    async def fake_load(_submission_id):
+        return {
+            "submission_id": work["submission_id"],
+            "adapter_id": work["adapter_id"],
+            "miner_hotkey": "hk-owner",
+            "submission_doc": {
+                "manifest": {},
+                "source_metadata": {
+                    "api_base_url": "https://api.test-source.example/v1"
+                },
+            },
+            "precheck_status": "provenance_precheck_passed",
+            "precheck_doc": {},
+        }
+
+    async def fake_evaluate(**_kwargs):
+        return result, {
+            "execution_receipt": {
+                "receipt_hash": "sha256:" + "4" * 64,
+                "output_root": sha256_json(result),
+            }
+        }
+
+    observed = {}
+
+    async def fake_finish(_work, **kwargs):
+        observed.update(kwargs)
+        return {"status": finish_status}
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("unreadable catalog must not reach finalizer")
+
+    monkeypatch.setattr(source_add_workflow, "_load_submission", fake_load)
+    monkeypatch.setattr(
+        source_add_workflow,
+        "_begin_provider_execution",
+        lambda value: asyncio.sleep(0, result=dict(value)),
+    )
+    monkeypatch.setattr(
+        source_add_workflow, "evaluate_source_add_functional_probe_v2", fake_evaluate
+    )
+    monkeypatch.setattr(source_add_workflow, "_finish_work", fake_finish)
+    monkeypatch.setattr(source_add_workflow, "_rpc", fail_rpc)
+    monkeypatch.setattr(
+        source_add_workflow.source_add_catalog_contract,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("sensitive catalog failure detail")
+        ),
+    )
+
+    response = await source_add_workflow.process_source_add_work_item(
+        work, config=_workflow_config()
+    )
+
+    assert response == {"status": finish_status}
+    assert observed["disposition"] == expected_disposition
+    assert observed["result_doc"] == {"status": "current_model_catalog_unavailable"}
+    assert (observed["available_at"] is not None) is (
+        expected_disposition == "retry"
+    )
+    assert "reward_intent" not in observed
+    assert "next_work" not in observed
+    assert "sensitive catalog failure detail" not in caplog.text
+    assert "type=RuntimeError" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -344,6 +598,60 @@ async def test_provisioning_smoke_transient_failure_persists_retry(monkeypatch):
     assert observed["available_at"] is not None
     assert observed["functional_attempt"]["evaluation_mode"] == "provisioning_smoke"
     assert observed["functional_attempt"]["work_id"] == work["work_id"]
+
+
+@pytest.mark.asyncio
+async def test_provisioning_smoke_terminal_failure_persists_requeue_authority(
+    monkeypatch,
+):
+    work = _smoke_work()
+    result = _smoke_result("failed")
+
+    async def fake_load(_submission_id):
+        return {
+            "submission_id": work["submission_id"],
+            "adapter_id": work["adapter_id"],
+            "miner_hotkey": "hk-owner",
+            "submission_doc": {"manifest": {}, "source_metadata": {}},
+            "precheck_status": "provenance_precheck_passed",
+            "precheck_doc": {},
+        }
+
+    async def fake_evaluate(**_kwargs):
+        return result, {
+            "receipt": {
+                "receipt_hash": "sha256:" + "4" * 64,
+                "output_root": sha256_json(result),
+            }
+        }
+
+    observed = {}
+
+    async def fake_finish(_work, **kwargs):
+        observed.update(kwargs)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(source_add_workflow, "_load_submission", fake_load)
+    monkeypatch.setattr(
+        source_add_workflow,
+        "_begin_provider_execution",
+        lambda value: asyncio.sleep(0, result=dict(value)),
+    )
+    monkeypatch.setattr(
+        source_add_workflow, "evaluate_source_add_functional_probe_v2", fake_evaluate
+    )
+    monkeypatch.setattr(source_add_workflow, "_finish_work", fake_finish)
+
+    response = await source_add_workflow.process_source_add_work_item(
+        work, config=_workflow_config()
+    )
+
+    assert response["status"] == "completed"
+    assert observed["disposition"] == "complete"
+    assert observed["available_at"] is None
+    assert observed["result_doc"] == result
+    assert observed["functional_attempt"]["result_status"] == "failed"
+    assert observed["functional_attempt"]["attempt_number"] == work["attempt_count"]
 
 
 @pytest.mark.asyncio

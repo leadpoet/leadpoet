@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from typing import Any, Iterator, Mapping, Sequence
@@ -108,6 +109,15 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
 )
 PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
+_PRIVATE_ECR_REGISTRY_RE = re.compile(
+    r"^(?P<registry>[0-9]+\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?)/"
+)
+_PRIVATE_ECR_AUTH_FAILURE_MARKERS = (
+    "authorization token has expired",
+    "no basic auth credentials",
+    "pull access denied",
+    "requested access to the resource is denied",
+)
 SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 # Match the adapter's result/receipt finalization window before sandbox kill.
@@ -139,6 +149,18 @@ QUALIFICATION_OUTCOME_CONTRACT_V2_PATH = (
 QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2 = (
     QUALIFICATION_PROTOCOL_POLICY_SHA256_V2.removeprefix("sha256:")
 )
+# The currently selected signed model predates the additive terminal branch-
+# control extension. Keep that exact contract readable until a 2.2 model is
+# selected; no other historical or unknown contract is admitted.
+QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1 = (
+    "188d825489ed2308519c282bf5273de4a3d8caf5c069212bc76cfafe304a8a07"
+)
+QUALIFICATION_OUTCOME_SUPPORTED_CONTRACT_SHA256S_V2 = frozenset(
+    {
+        QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+        QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1,
+    }
+)
 _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2 = json.loads(
     QUALIFICATION_OUTCOME_CONTRACT_V2_PATH.read_text(encoding="utf-8")
 )
@@ -155,6 +177,9 @@ _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2 = dict(
 )
 _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2 = dict(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["required_route_outcomes"]
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["branch_control_failure"]
 )
 QUALIFICATION_OUTCOME_PROTOCOL_ID_V2 = str(
     _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["protocol_id"]
@@ -202,6 +227,50 @@ QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2 = str(
 )
 QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOME_STATES_V2 = tuple(
     str(item) for item in _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["states"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["extension_key"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["schema_version"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["authority"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1 = tuple(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["proof_fields"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1 = frozenset(
+    str(item)
+    for item in _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1[
+        "allowed_match_modes"
+    ]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 = int(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["maximum_branch_number"]
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1["reason_policy"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1 = (
+    "required_branch_deadline_exhausted"
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1[
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1
+    ]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1 = str(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1["failure_class"]
+)
+QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1 = (
+    "required_branch_terminal_control"
+)
+_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1 = dict(
+    _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1[
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1
+    ]
 )
 _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_SORTED_UNIQUE_BY_V2 = str(
     _QUALIFICATION_OUTCOME_ROUTE_POLICY_V2["sorted_unique_by"]
@@ -273,6 +342,75 @@ if (
     is not False
 ):
     raise RuntimeError("qualification outcome route policy is unsupported")
+if (
+    QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    != "com.leadpoet.branch-control-failure"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1
+    != "sourcing-model.branch-control-failure.v1"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1
+    != "sourcing_model"
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "provider_route_outcome"
+    )
+    is not False
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "host_route_counters_unchanged"
+    )
+    is not True
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1.get(
+        "proof_hash_excludes_only"
+    )
+    != "proof_sha256"
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1
+    != (
+        "authority",
+        "branch_id_sha256",
+        "branch_number",
+        "failure_class",
+        "match_mode",
+        "phase",
+        "proof_sha256",
+        "reason",
+        "retryable",
+        "schema_version",
+    )
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1 != {"all", "any"}
+    or QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1 != 4
+    or set(_QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1)
+    != {
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1,
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1,
+    }
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_POLICY_V1
+    != {
+        "phase": "pre_dispatch",
+        "failure_class": "branch_deadline_exhausted",
+        "retryable": True,
+        "required_branch_status": "skipped",
+    }
+    or _QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1
+    != {
+        "phase": "branch_execution",
+        "allowed_failure_classes": [
+            "budget_blocked",
+            "terminal_auth",
+            "terminal_quota",
+            "tracking_failed",
+            "transport_invariant_failed",
+        ],
+        "retryable": False,
+        "required_branch_status": "failed",
+    }
+    or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
+        "incomplete_retryable"
+    ].get("retryable_branch_control_alternative")
+    is not True
+    or _QUALIFICATION_OUTCOME_CONTRACT_POLICY_V2["completion_rules"][
+        "incomplete_terminal"
+    ].get("terminal_branch_control_alternative")
+    is not True
+):
+    raise RuntimeError("qualification outcome branch control policy is unsupported")
 _QUALIFICATION_OUTCOME_EXTENSION_MAXIMUM_NESTING_DEPTH_V2 = int(
     _QUALIFICATION_OUTCOME_EXTENSION_POLICY_V2["maximum_nesting_depth"]
 )
@@ -689,6 +827,82 @@ def _qualification_outcome_sha256(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def validate_qualification_branch_control_failure_v1(
+    value: Mapping[str, Any],
+    *,
+    contract_sha256: str = QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2,
+) -> dict[str, Any]:
+    """Validate one model-owned, non-provider branch-control authority."""
+
+    if not isinstance(value, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model branch control failure is invalid"
+        )
+    document = dict(value)
+    reason = document.get("reason")
+    reason_policy = (
+        _QUALIFICATION_OUTCOME_BRANCH_CONTROL_REASON_POLICY_V1.get(reason)
+        if (
+            isinstance(reason, str)
+            and _qualification_outcome_contract_sha256_supported_v2(
+                contract_sha256
+            )
+            and (
+                contract_sha256
+                != QUALIFICATION_OUTCOME_LEGACY_CONTRACT_SHA256_V2_1
+                or reason
+                == QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_REASON_V1
+            )
+        )
+        else None
+    )
+    body = {
+        key: item
+        for key, item in document.items()
+        if key != "proof_sha256"
+    }
+    if (
+        set(document)
+        != set(QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1)
+        or document.get("schema_version")
+        != QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1
+        or document.get("authority")
+        != QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_AUTHORITY_V1
+        or not isinstance(reason_policy, Mapping)
+        or document.get("phase") != reason_policy.get("phase")
+        or document.get("match_mode")
+        not in QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1
+        or type(document.get("branch_number")) is not int
+        or not 1
+        <= document["branch_number"]
+        <= QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(document.get("branch_id_sha256") or "")
+        )
+        or (
+            reason_policy.get("failure_class") is not None
+            and document.get("failure_class")
+            != reason_policy.get("failure_class")
+        )
+        or (
+            reason_policy.get("allowed_failure_classes") is not None
+            and document.get("failure_class")
+            not in reason_policy.get("allowed_failure_classes")
+        )
+        or type(document.get("retryable")) is not bool
+        or document.get("retryable") is not reason_policy.get("retryable")
+        or not _QUALIFICATION_OUTCOME_HASH_RE.fullmatch(
+            str(document.get("proof_sha256") or "")
+        )
+        or document.get("proof_sha256")
+        != _qualification_outcome_sha256(body)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model branch control failure differs from protocol"
+        )
+    return document
+
+
 def qualification_outcome_contract_v2() -> dict[str, Any]:
     """Load the candidate-bound, cross-repository protocol semantics."""
 
@@ -722,6 +936,16 @@ def qualification_outcome_contract_v2() -> dict[str, Any]:
 def qualification_outcome_contract_sha256_v2() -> str:
     qualification_outcome_contract_v2()
     return QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+
+
+def _qualification_outcome_contract_sha256_supported_v2(value: Any) -> bool:
+    """Validate current policy identity before admitting one exact V2 hash."""
+
+    qualification_outcome_contract_v2()
+    return (
+        isinstance(value, str)
+        and value in QUALIFICATION_OUTCOME_SUPPORTED_CONTRACT_SHA256S_V2
+    )
 
 
 def _qualification_outcome_extension_limits_v2() -> tuple[int, int]:
@@ -901,8 +1125,9 @@ def validate_qualification_outcome_protocol_metadata_v2(
         != QUALIFICATION_OUTCOME_ENVELOPE_SCHEMA_V2
         or document.get("route_completion_receipt_schema_version")
         != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            document.get("contract_sha256")
+        )
     ):
         raise PrivateModelRuntimeError(
             "private model qualification outcome protocol is unsupported"
@@ -967,8 +1192,9 @@ def validate_qualification_route_completion_receipt_v1(
         or document.get("schema_version")
         != QUALIFICATION_ROUTE_COMPLETION_RECEIPT_SCHEMA_V1
         or document.get("outcome_authority") != "sourcing_model"
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            document.get("contract_sha256")
+        )
         or document.get("completion_state") not in {"complete", "incomplete"}
         or document.get("disposition")
         not in {
@@ -1018,6 +1244,14 @@ def validate_qualification_route_completion_receipt_v1(
         raise PrivateModelRuntimeError(
             "private model route completion receipt differs from protocol"
         )
+    branch_control = None
+    if QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 in extensions:
+        branch_control = validate_qualification_branch_control_failure_v1(
+            extensions[
+                QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+            ],
+            contract_sha256=document["contract_sha256"],
+        )
     if probe is not None and (
         not isinstance(probe, Mapping)
         or set(probe) != {"schema_version", "case_id", "nonce_sha256"}
@@ -1032,6 +1266,10 @@ def validate_qualification_route_completion_receipt_v1(
         raise PrivateModelRuntimeError(
             "private model route completion probe is invalid"
         )
+    if probe is not None and branch_control is not None:
+        raise PrivateModelRuntimeError(
+            "private model route completion probe contains branch control failure"
+        )
     required_outcomes = dict(extensions).get(
         QUALIFICATION_OUTCOME_REQUIRED_ROUTE_OUTCOMES_EXTENSION_V2
     )
@@ -1040,6 +1278,7 @@ def validate_qualification_route_completion_receipt_v1(
         and _QUALIFICATION_OUTCOME_REQUIRED_ROUTE_PRODUCTION_REQUIRED_V2
         and (
             not isinstance(required_outcomes, list)
+            or not required_outcomes
             or summary.get("attempted") != len(required_outcomes)
             or any(
                 summary.get(state)
@@ -1064,6 +1303,7 @@ def validate_qualification_outcome_envelope_v2(
             "private model qualification outcome envelope is invalid"
         )
     document = dict(value)
+    contract_sha256 = document.get("contract_sha256")
     fields = set(
         qualification_outcome_contract_v2()["envelope_core_fields"]
     )
@@ -1111,8 +1351,10 @@ def validate_qualification_outcome_envelope_v2(
         or type(document.get("protocol_minor")) is not int
         or document["protocol_minor"] < 0
         or document.get("completion_state") not in {"complete", "incomplete"}
-        or document.get("contract_sha256")
-        != qualification_outcome_contract_sha256_v2()
+        or not _qualification_outcome_contract_sha256_supported_v2(
+            contract_sha256
+        )
+        or receipt.get("contract_sha256") != contract_sha256
         or document.get("completion_state") != receipt["completion_state"]
         or receipt.get("returned_count") != len(normalized_companies)
         or not _qualification_outcome_extensions_valid_v2(extensions)
@@ -1120,10 +1362,23 @@ def validate_qualification_outcome_envelope_v2(
         raise PrivateModelRuntimeError(
             "private model qualification outcome differs from protocol"
         )
+    if QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1 in extensions:
+        raise PrivateModelRuntimeError(
+            "private model branch control failure is not receipt-bound"
+        )
 
     complete = document["completion_state"] == "complete"
     disposition = receipt["disposition"]
     summary = receipt["route_summary"]
+    receipt_extensions = receipt["extensions"]
+    branch_control = receipt_extensions.get(
+        QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1
+    )
+    branch_control_failure_class = (
+        branch_control["failure_class"]
+        if isinstance(branch_control, Mapping)
+        else None
+    )
     if (
         receipt["partial"] != (
             not complete and bool(normalized_companies)
@@ -1135,6 +1390,7 @@ def validate_qualification_outcome_envelope_v2(
                 or receipt["failure_classes"]
                 or summary["retryable_failed"] != 0
                 or summary["terminal_failed"] != 0
+                or branch_control is not None
                 or disposition
                 != (
                     "complete_nonempty"
@@ -1149,15 +1405,35 @@ def validate_qualification_outcome_envelope_v2(
                 not receipt["failure_classes"]
                 or disposition
                 not in {"incomplete_retryable", "incomplete_terminal"}
+                or (
+                    branch_control_failure_class is not None
+                    and branch_control_failure_class
+                    not in receipt["failure_classes"]
+                )
+                or (
+                    QUALIFICATION_OUTCOME_BRANCH_CONTROL_DEADLINE_FAILURE_CLASS_V1
+                    in receipt["failure_classes"]
+                    and branch_control is None
+                )
                 or receipt["retryable"]
                 != (disposition == "incomplete_retryable")
                 or (
                     disposition == "incomplete_retryable"
                     and summary["retryable_failed"] <= 0
+                    and not (
+                        isinstance(branch_control, Mapping)
+                        and branch_control.get("retryable") is True
+                    )
                 )
                 or (
                     disposition == "incomplete_terminal"
                     and summary["terminal_failed"] <= 0
+                    and not (
+                        contract_sha256
+                        == QUALIFICATION_OUTCOME_CONTRACT_SHA256_V2
+                        and isinstance(branch_control, Mapping)
+                        and branch_control.get("retryable") is False
+                    )
                 )
             )
         )
@@ -1176,6 +1452,7 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
     value: Mapping[str, Any],
     *,
     expected_nonce_sha256s: Mapping[str, str] | None = None,
+    expected_contract_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Exercise both sides of the empty/incomplete boundary before activation."""
 
@@ -1184,6 +1461,16 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
             "private model qualification outcome protocol probe is invalid"
         )
     document = {str(key): item for key, item in value.items()}
+    selected_contract_sha256 = expected_contract_sha256
+    if (
+        selected_contract_sha256 is not None
+        and not _qualification_outcome_contract_sha256_supported_v2(
+            selected_contract_sha256
+        )
+    ):
+        raise PrivateModelRuntimeError(
+            "private model qualification outcome protocol probe contract differs"
+        )
     if (
         set(document) != set(QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASES_V1)
     ):
@@ -1192,6 +1479,12 @@ def validate_qualification_outcome_protocol_probe_cases_v1(
         )
     for case_id, expected in _QUALIFICATION_OUTCOME_REQUIRED_PROBE_CASE_POLICY_V1.items():
         envelope = validate_qualification_outcome_envelope_v2(document[case_id])
+        if selected_contract_sha256 is None:
+            selected_contract_sha256 = envelope["contract_sha256"]
+        if envelope["contract_sha256"] != selected_contract_sha256:
+            raise PrivateModelRuntimeError(
+                "private model qualification outcome protocol probe contract differs"
+            )
         receipt = envelope["route_completion_receipt"]
         expected_document = dict(expected)
         if (
@@ -1390,6 +1683,101 @@ def _docker_lifecycle_remaining_seconds(deadline_monotonic: float) -> float:
     return max(0.1, remaining)
 
 
+def _private_ecr_registry(image_digest: str) -> tuple[str, str] | None:
+    match = _PRIVATE_ECR_REGISTRY_RE.match(str(image_digest or "").strip())
+    if match is None:
+        return None
+    return match.group("registry"), match.group("region")
+
+
+def _private_ecr_auth_failure(
+    completed: subprocess.CompletedProcess[str],
+) -> bool:
+    text = " ".join(
+        (
+            str(completed.stderr or ""),
+            str(completed.stdout or ""),
+        )
+    ).lower()
+    return any(marker in text for marker in _PRIVATE_ECR_AUTH_FAILURE_MARKERS)
+
+
+def _pull_private_ecr_image_with_refreshed_auth(
+    spec: DockerPrivateModelSpec,
+    *,
+    registry: str,
+    region: str,
+    deadline_monotonic: float,
+    environment: Mapping[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Refresh private-ECR auth in memory and one ephemeral Docker config."""
+
+    try:
+        password_result = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", region],
+            text=True,
+            capture_output=True,
+            timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+            env=dict(environment),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PrivateModelRuntimeError(
+            "private ECR authentication refresh failed"
+        ) from exc
+    password = str(password_result.stdout or "").strip()
+    if password_result.returncode != 0 or not password:
+        raise PrivateModelRuntimeError(
+            "private ECR authentication refresh failed"
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="research-lab-private-model-docker-auth-"
+    ) as config_dir:
+        try:
+            login_result = subprocess.run(
+                [
+                    spec.docker_executable,
+                    "--config",
+                    config_dir,
+                    "login",
+                    "--username",
+                    "AWS",
+                    "--password-stdin",
+                    registry,
+                ],
+                input=password + "\n",
+                text=True,
+                capture_output=True,
+                timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+                env=dict(environment),
+                check=False,
+            )
+            if login_result.returncode != 0:
+                raise PrivateModelRuntimeError(
+                    "private ECR Docker login failed"
+                )
+            return subprocess.run(
+                [
+                    spec.docker_executable,
+                    "--config",
+                    config_dir,
+                    "pull",
+                    *_docker_platform_args(spec),
+                    spec.image_digest,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=_docker_lifecycle_remaining_seconds(deadline_monotonic),
+                env=dict(environment),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PrivateModelRuntimeError(
+                "private ECR authenticated pull failed"
+            ) from exc
+
+
 def _remove_private_model_container(
     spec: DockerPrivateModelSpec,
     *,
@@ -1488,15 +1876,29 @@ class DockerPrivateModelRunner:
         return validate_sourcing_adapter_metadata(decoded)
 
     def _pull_image(self) -> None:
+        environment = _build_docker_process_env(self.spec)
         with _docker_private_model_lifecycle(self.spec) as deadline:
             completed = subprocess.run(
                 [self.spec.docker_executable, "pull", *_docker_platform_args(self.spec), self.spec.image_digest],
                 text=True,
                 capture_output=True,
                 timeout=_docker_lifecycle_remaining_seconds(deadline),
-                env=_build_docker_process_env(self.spec),
+                env=environment,
                 check=False,
             )
+            registry = _private_ecr_registry(self.spec.image_digest)
+            if (
+                completed.returncode != 0
+                and registry is not None
+                and _private_ecr_auth_failure(completed)
+            ):
+                completed = _pull_private_ecr_image_with_refreshed_auth(
+                    self.spec,
+                    registry=registry[0],
+                    region=registry[1],
+                    deadline_monotonic=deadline,
+                    environment=environment,
+                )
         if completed.returncode != 0:
             stderr = _sanitize_text(completed.stderr)[-1200:]
             raise PrivateModelRuntimeError(f"docker pull failed with code {completed.returncode}: {stderr}")

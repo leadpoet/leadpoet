@@ -138,6 +138,19 @@ def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
         'GATEWAY_HOST_RESTART_SCRIPT="$POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT"'
         in script
     )
+    assert (
+        'GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT="$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh"'
+        in script
+    )
+    installer = _shell_function_source(script, "install_successful_restart_script")
+    assert (
+        'controller_sha="${GATEWAY_RESTART_AUTHORITY_COMMIT:-$GATEWAY_DEPLOY_SHA}"'
+        in installer
+    )
+    assert (
+        'controller_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"'
+        in installer
+    )
     materialize = script.index(
         'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
     )
@@ -191,19 +204,188 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
     )
 
 
+def test_gateway_restart_reconciles_retry_defaults_across_candidate_reexec() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime() {"
+    )
+    prepare_overlay = script.index('cat "$ENV_SECRET" >> "$ENV_CLONE"')
+    prepare_reconcile = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime",
+        prepare_overlay,
+    )
+    post_activate = script.index(
+        'elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then'
+    )
+    post_activate_reconcile = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime",
+        post_activate,
+    )
+    candidate_runtime = script.index(
+        'echo "Loading gateway runtime env for AWS/ECR checks"'
+    )
+
+    assert function_start < post_activate
+    assert prepare_overlay < prepare_reconcile
+    assert post_activate < post_activate_reconcile < candidate_runtime
+    assert (
+        "reconcile_gateway_rebenchmark_runtime_environment_file" in script
+    )
+    assert (
+        "unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" in script
+    )
+    assert "unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" in script
+
+
+def test_gateway_retry_reconciliation_uses_candidate_authority_over_n_minus_one(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script,
+        "reconcile_gateway_rebenchmark_retry_runtime",
+    )
+    old_root = tmp_path / "n-minus-one"
+    legacy_module = (
+        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
+    )
+    legacy_module.parent.mkdir(parents=True)
+    (old_root / "gateway" / "__init__.py").write_text("", encoding="utf-8")
+    (old_root / "gateway" / "tee" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+    legacy_module.write_text(
+        "# The deployed N-1 helper deliberately lacks candidate reconciliation.\n",
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "runtime.env"
+    authority = tmp_path / "authority.env"
+    runtime.write_text(
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
+        encoding="utf-8",
+    )
+    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
+    harness = tmp_path / "candidate-authority-reconcile.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -Eeuo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
+        f"GATEWAY_RESTART_AUTHORITY_ROOT={shlex.quote(str(ROOT))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
+        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
+        f"{function}\n"
+        "reconcile_gateway_rebenchmark_retry_runtime\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Reconciled secret-authoritative rebenchmark retry controls" in (
+        completed.stdout
+    )
+    reconciled = runtime.read_text(encoding="utf-8")
+    assert "UNRELATED=preserved" in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
+
+
+def test_gateway_retry_reconciliation_survives_bootstrap_authority_teardown(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script,
+        "reconcile_gateway_rebenchmark_retry_runtime",
+    )
+    old_root = tmp_path / "n-minus-one"
+    legacy_module = (
+        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
+    )
+    legacy_module.parent.mkdir(parents=True)
+    legacy_module.write_text("# no reconciliation contract\n", encoding="utf-8")
+    runtime = tmp_path / "runtime.env"
+    authority = tmp_path / "authority.env"
+    runtime.write_text(
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
+        encoding="utf-8",
+    )
+    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
+    helper = ROOT / "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+    harness = tmp_path / "sealed-candidate-reconcile.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -Eeuo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
+        "GATEWAY_RESTART_AUTHORITY_ROOT=\n"
+        "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="
+        f"{shlex.quote(str(helper))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
+        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
+        f"{function}\n"
+        "reconcile_gateway_rebenchmark_retry_runtime\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    reconciled = runtime.read_text(encoding="utf-8")
+    assert "export UNRELATED=preserved" in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
+    assert "managed=2 present=0 absent=2" in completed.stdout
+
+
 def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    reexec_start = script.index("exec env ")
+    reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))
     reexec = script[reexec_start : script.index("\nfi", reexec_start)]
 
     assert (
         'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
     )
+    assert (
+        'GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS"'
+        in reexec
+    )
+    assert (
+        'GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS='
+        '"$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS"'
+        in reexec
+    )
+    assert (
+        'GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS='
+        '"$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS"'
+        in reexec
+    )
     assert 'GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET"' in reexec
     assert 'GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX"' in reexec
 
 
-def test_gateway_restart_revalidates_release_lineage_after_n_minus_one_activation() -> None:
+def test_gateway_restart_installs_preselected_release_lineage_after_activation() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     reexec = script.index("GATEWAY_RESTART_PHASE=post_activate")
@@ -217,9 +399,19 @@ def test_gateway_restart_revalidates_release_lineage_after_n_minus_one_activatio
     assert "rev-parse --verify 'origin/main^{commit}'" in script
     assert "merge-base --is-ancestor" in script
     assert '"$GATEWAY_DEPLOY_SHA" "$authority_commit"' in script
-    assert '--expected-commit "$GATEWAY_DEPLOY_SHA"' in script
-    assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' in script
-    assert '--lineage-authority-commit "$authority_commit"' in script
+    installer = _shell_function_source(
+        script, "ensure_activated_gateway_release_lineage"
+    )
+    assert "validate_active_release_requirements_v2" in installer
+    assert "validate_compact_release_lineage_v2" in installer
+    assert 'expected_current_commit=expected_commit' in installer
+    assert (
+        'set(lineage["releases"]) != set(requirements["required_commits"])'
+        in installer
+    )
+    assert 'os.replace(temporary, destination)' in installer
+    assert 'gateway.tee.release_channel_v2' not in installer
+    assert "list_objects" not in installer
 
 
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
@@ -637,7 +829,7 @@ def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
 
 def test_gateway_restart_preserves_safe_ancestry_epoch_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    reexec_start = script.index("exec env ")
+    reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))
     reexec = script[reexec_start : script.index("\nfi", reexec_start)]
 
     assert (
@@ -965,10 +1157,19 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
         '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"'
         in pre_shutdown
     )
+    release_start = pre_shutdown.index(
+        'echo "Acquiring the independently built V2 release channel"'
+    )
+    release_end = pre_shutdown.index(
+        'record_gateway_restart_timing "release_ready"', release_start
+    )
+    release_acquisition = pre_shutdown[release_start:release_end]
     assert (
         '--lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
-        in pre_shutdown
+        not in release_acquisition
     )
+    assert "--lineage-repository" not in release_acquisition
+    assert "--lineage-authority-commit" not in release_acquisition
     assert (
         '--release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"'
         in pre_shutdown
@@ -977,15 +1178,49 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
     assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' not in pre_shutdown
     assert '--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"' not in pre_shutdown
 
-    revalidator = script[
-        script.index("ensure_activated_gateway_release_lineage()") : prepare
-    ]
-    assert '--gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"' in revalidator
-    assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' in revalidator
+    selector = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+    assert "gateway.tee.prepare_active_release_lineage_v2" in selector
+    assert "gateway-final" in selector
+    for argument in (
+        '--candidate-commit "$PREPARED_GATEWAY_SHA"',
+        '--authority-commit "$authority_commit"',
+        '--restart-invocation-id "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"',
+        '--running-gateway-manifest "$running_gateway_manifest"',
+        '--epoch "$GATEWAY_ANCESTRY_SAFE_EPOCH"',
+        '--netuid "${BITTENSOR_NETUID:-71}"',
+        '--repository "$LEADPOET_REPO_ROOT"',
+        '--lineage-id "$lineage_id"',
+        '--bucket "$GATEWAY_V2_RELEASE_BUCKET"',
+        '--prefix "$GATEWAY_V2_RELEASE_PREFIX"',
+    ):
+        assert argument in selector
+    assert (
+        '--validator-requirements "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS"'
+        in selector
+    )
+    assert (
+        '--requirements-output "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS"'
+        in selector
+    )
+    assert '--lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"' in selector
+    assert "--validator-hotkey-config" not in selector
+    assert "--chain-signing-profile" not in selector
+    assert "if ! prepare_gateway_active_release_lineage; then" in pre_shutdown
+    assert "list_objects" not in selector
+
+    revalidator = _shell_function_source(
+        script, "ensure_activated_gateway_release_lineage"
+    )
+    assert '"$GATEWAY_V2_RELEASE_MANIFEST"' in revalidator
+    assert '"$GATEWAY_V2_RELEASE_REQUIREMENTS"' in revalidator
+    assert '"$GATEWAY_V2_RELEASE_LINEAGE"' in revalidator
     assert (
         '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\\n'
+        '    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \\\n'
         '    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
-        in script
+        in revalidator
     )
 
 
@@ -1017,8 +1252,34 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
         "if ! start_gateway_ancestry_checkpoint_bootstrap; then",
         safe_frontier,
     )
-    assert checkpoint_prepare < safe_frontier < checkpoint_start < shutdown
-    assert script.index("wait_for_gateway_ancestry_checkpoint_bootstrap") < shutdown
+    checkpoint_join = script.index(
+        "if ! wait_for_gateway_ancestry_checkpoint_bootstrap; then",
+        checkpoint_start,
+    )
+    docker_guard = script.index(
+        "-m validator_tee.host.docker_operation_guard_v2",
+        checkpoint_join,
+    )
+    memory_wait = script.index("wait_for_gateway_build_memory", docker_guard)
+    paired_liveness_handoff = script.index(
+        "if ! wait_for_paired_gateway_destructive_handoff; then",
+        memory_wait,
+    )
+    active_release_selection = script.index(
+        "if ! prepare_gateway_active_release_lineage; then",
+        paired_liveness_handoff,
+    )
+    assert (
+        checkpoint_prepare
+        < safe_frontier
+        < checkpoint_start
+        < checkpoint_join
+        < docker_guard
+        < memory_wait
+        < paired_liveness_handoff
+        < active_release_selection
+        < shutdown
+    )
     assert runtime_ready < postcheckpoint < repair
     assert '--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"' in script[
         runtime_ready:repair
@@ -1028,6 +1289,88 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
     ).read_text(encoding="utf-8")
     assert '3)\n      # Expected exactly once' in script
     assert "candidate runtime did not durably bound active receipt ancestry" in script
+
+
+def test_gateway_active_release_selection_requires_paired_validator_authority(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+    harness = tmp_path / "require-paired-validator.sh"
+    harness.write_text(
+        "\n".join(
+            (
+                "#!/bin/bash",
+                "set -u",
+                    function,
+                    'GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="1"',
+                    'GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS=""',
+                "if prepare_gateway_active_release_lineage; then",
+                "  exit 9",
+                "fi",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert completed.returncode == 0
+    assert (
+        "paired validator active release requirements are unavailable"
+        in completed.stderr
+    )
+
+
+def test_gateway_standalone_active_release_uses_only_explicit_compact_fallback() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    selector = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+
+    paired_rejection = selector.index(
+        'elif [ "$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" = "1" ]; then'
+    )
+    fallback = selector.index(
+        '--fallback-lineage "$GATEWAY_V2_RELEASE_LINEAGE"',
+        paired_rejection,
+    )
+    controller_call = selector.index(
+        "gateway.tee.prepare_active_release_lineage_v2",
+        fallback,
+    )
+    assert paired_rejection < fallback < controller_call
+    assert '--fallback-context "$fallback_context"' in selector
+    assert (
+        '--validator-requirements "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS"'
+        in selector
+    )
+    assert "standalone gateway compact-lineage fallback is unavailable" in selector
+    assert "list_objects" not in selector
+    assert "fetch_release_lineage_v2" not in selector
+
+
+def test_gateway_component_lineage_comparison_uses_bounded_nofollow_reads() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    selector = _shell_function_source(
+        script, "prepare_gateway_active_release_lineage"
+    )
+
+    assert "os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW" in selector
+    assert "stat.S_ISREG(metadata.st_mode)" in selector
+    assert "max_document_bytes = 4 * 1024 * 1024" in selector
+    assert "os.read(descriptor, max_document_bytes + 1)" in selector
+    assert "Path(sys.argv[2]).read_text" not in selector
+    assert "Path(sys.argv[3]).read_text" not in selector
 
 
 def test_gateway_offline_artifact_prepare_overlaps_release_and_fails_closed(
@@ -1633,6 +1976,24 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     for key in (
+        "GATEWAY_RESTART_AUTHORITY_ROOT",
+        "GATEWAY_RESTART_AUTHORITY_COMMIT",
+    ):
+        assert script.count(f"-u {key} \\") == 6
+
+    for key in (
+        "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+        "GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED",
+        "GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT",
+        "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE",
+        "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
+        "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
+        "GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS",
+        "GATEWAY_COUNTERPART_RELEASE_LINEAGE",
+    ):
+        assert script.count(f"-u {key} \\") == 5
+
+    for key in (
         "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
         "GATEWAY_RESTART_STARTED_EPOCH",
         "GATEWAY_RESTART_TIMING_DIR",
@@ -1999,7 +2360,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -2024,7 +2385,7 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script

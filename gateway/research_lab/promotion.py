@@ -23,6 +23,7 @@ from gateway.research_lab.attested_scoring import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
+    CodeEditInfraFailureError,
     validate_private_code_edit_diff_artifact,
 )
 from gateway.research_lab.config import (
@@ -1898,6 +1899,22 @@ async def sync_active_model_to_repo_head(
         )
         current_artifact = admitted.artifact
         compatibility_receipt = admitted.compatibility_receipt
+    except CodeEditInfraFailureError as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "model_compatibility_infrastructure_unavailable",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "current_json_git_sha": current_artifact.git_commit_sha,
+            "active_is_repo_head": False,
+            "benchmark_blocked_reason": (
+                "model_compatibility_infrastructure_unavailable"
+            ),
+            "retryable": True,
+            "error": _safe_text(str(exc))[:200],
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -4010,6 +4027,11 @@ class ResearchLabPromotionController:
     ) -> dict[str, Any]:
         if not getattr(self.config, "source_add_rewards_enabled", False):
             return {"source_add_reward_status": "disabled"}
+        leg2_alpha_percent = float(
+            getattr(self.config, "source_add_leg2_alpha_percent", 0.0)
+        )
+        if leg2_alpha_percent <= 0.0:
+            return {"source_add_reward_status": "disabled"}
         status = str(champion_reward_status.get("champion_reward_status") or "")
         if status not in {"created", "already_created"}:
             return {
@@ -4157,7 +4179,7 @@ class ResearchLabPromotionController:
                     "provision_ref": str(matched_row.get("provision_ref") or ""),
                 },
                 existing_rewards=reward_rows,
-                alpha_percent=float(getattr(self.config, "source_add_leg2_alpha_percent", 5.0) or 5.0),
+                alpha_percent=leg2_alpha_percent,
                 reward_epochs=int(getattr(self.config, "lab_reward_epochs", 20) or 20),
             )
             blockers: list[str] = []
@@ -4190,10 +4212,7 @@ class ResearchLabPromotionController:
                             "trigger_evidence": dict(leg2.trigger_evidence or {}),
                             "judge_result": dict(judge_result),
                             "existing_rewards": list(reward_rows),
-                            "alpha_percent": float(
-                                getattr(self.config, "source_add_leg2_alpha_percent", 5.0)
-                                or 5.0
-                            ),
+                            "alpha_percent": leg2_alpha_percent,
                             "reward_epochs": int(
                                 getattr(self.config, "lab_reward_epochs", 20) or 20
                             ),

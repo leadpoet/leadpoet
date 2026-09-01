@@ -66,6 +66,26 @@ def test_sourcing_model_profile_authority_is_protected():
     } <= protected
 
 
+def test_qualification_branch_control_authority_is_protected():
+    protected = set(
+        PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"]
+    )
+    assert {
+        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1",
+        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1",
+        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1",
+        "_qualification_outcome_sha256",
+        "validate_qualification_branch_control_failure_v1",
+        "validate_qualification_route_completion_receipt_v1",
+        "validate_qualification_outcome_envelope_v2",
+    } <= protected
+
+
 def test_typed_dispatch_custody_v3_authority_is_protected():
     contract_symbols = set(
         PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
@@ -138,6 +158,17 @@ def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     )
     assert reproduced == manifest
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
+
+
+def test_rebenchmark_runtime_retry_reconciliation_is_protected():
+    assert {
+        "reconcile_gateway_rebenchmark_runtime_environment",
+        "reconcile_gateway_rebenchmark_runtime_environment_file",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+        ]
+    )
 
 
 def test_private_artifact_signature_boundary_is_protected():
@@ -367,7 +398,10 @@ def test_scoring_receipt_failure_policy_is_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/scoring_worker.py"])
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
+        "_DEV_EVALUATION_JOB_SCOPES",
+        "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
+        "MAX_DEV_EVALUATION_INPUT_BYTES",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
@@ -406,6 +440,8 @@ def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",
         "_ancestry_checkpoint_unknown_commit_sleep",
+        "_rehydrate_compact_execution_graph_v2",
+        "load_execution_result_v2",
         "persist_ancestry_checkpoint_v2",
     } <= set(
         PROTECTED_SYMBOLS["gateway/research_lab/attested_v2_store.py"]
@@ -433,6 +469,7 @@ def test_inter_enclave_replay_and_identity_boundaries_are_protected():
         "_retain_cleanup_failure",
         "_require_retired_cleanup",
         "_execute_broker_request",
+        "_run_blocking_transport",
         "execute",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/sandbox_http_shim_v2.py"])
     assert {
@@ -490,6 +527,15 @@ def test_git_tree_source_authority_boundaries_are_protected():
         "_HostGitTreeRepository",
         "_HostCandidateBuilder",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])
+    assert {
+        "_snapshot_compatibility_identity",
+        "_tree_evaluator_commitment",
+        "_tree_authority_evaluator_commitment",
+        "ResearchLabHostedWorker._load_tree_snapshot_readiness",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/worker.py"])
+    assert "compatibility_admission_mode_policy_identity" in PROTECTED_SYMBOLS[
+        "research_lab/sourcing_model_contract_check.py"
+    ]
 
 
 def test_model_sandbox_launcher_boundaries_are_protected():

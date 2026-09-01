@@ -91,6 +91,8 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert "docker_zero_runtime_reconciler_v2.py" in reconcile_function
     assert "require_same_online_gateway" in source
     assert "require_same_online_images" in source
+    assert "online_overlay_metadata_layout" in source
+    assert "online_fully_empty_stale_audit_manifest" in source
     assert 'inventory_empty_online_runtime "pre-stale-reclaim"' in source
     assert 'inventory_empty_online_runtime "post-reclaim"' in source
     assert "docker image prune" not in source

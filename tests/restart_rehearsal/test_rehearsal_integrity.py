@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 import urllib.request
 import uuid
 
@@ -56,6 +56,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _migration_provider_outcome_contract,
     _migration_schema_contract,
     _schema_contract,
+    _source_add_claim_control_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_MIGRATION_PREREQUISITES_SQL,
@@ -200,8 +201,238 @@ def _compact_weight_settlement_contract_fixture() -> dict[str, Any]:
     }
 
 
+def _source_add_provider_origin_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
+        "identity_version": "v1",
+        "identity_scope": "normalized_exact_host",
+        "admission_rpc": "research_lab_source_add_admit_v2",
+        "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+        "owner_count": 0,
+        "reserved_count": 0,
+        "coverage_complete": True,
+        "collision_free": True,
+        "submission_trigger_enabled": True,
+        "catalog_trigger_enabled": True,
+        "provision_trigger_enabled": True,
+        "terminal_release_trigger_enabled": True,
+        "append_only_trigger_enabled": True,
+        "row_level_security_enabled": True,
+        "service_role_policy_enabled": True,
+    }
+
+
+def _source_add_duplicate_privacy_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_duplicate_privacy_contract.v1",
+        "admission_rpc": "research_lab_source_add_admit_v3",
+        "admission_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+        ),
+        "compatibility_rpc": "research_lab_source_add_admit_v2",
+        "compatibility_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer"
+        ),
+        "compatibility_cooldown_seconds": 20,
+        "cooldown_parameter_min_seconds": 1,
+        "cooldown_parameter_max_seconds": 3600,
+        "cooldown_clock": "clock_timestamp_after_advisory_locks",
+        "cooldown_source": "durable_miner_provenance_work",
+        "duplicate_precedes_cooldown": True,
+        "lock_order": [
+            "provider_origin_or_identity",
+            "hotkey",
+            "submission_or_work",
+        ],
+        "function_authority_sha256": (
+            "sha256:26bf34c94725b855f81c2e48b6afbd72"
+            "d68db36a4aeffb5642494a5da32233e0"
+        ),
+        "functions": {
+            "admit_v1": True,
+            "admit_v2_compatibility": True,
+            "admit_v3": True,
+            "provider_origin_hash_v1": True,
+            "provider_origin_host_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v3_service_role_callable": True,
+            "v2_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+
+
+def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
+        "daily_cap": 10,
+        "leg1_alpha_percent": 1.0,
+        "leg1_reward_epochs": 20,
+        "function_authority_sha256": (
+            rehearsal_sitecustomize._candidate_post_accept_leg1_function_authority()
+        ),
+        "functions": {
+            "configure_probe_v2": True,
+            "finalize_provision_v2": True,
+            "reject_current_builtin_v2": True,
+            "reserve_leg1_slot_v2": True,
+            "finalize_leg1_v2": True,
+            "finalize_provision_smoke_v2": True,
+        },
+        "triggers": {
+            "acceptance": True,
+            "eligible": True,
+            "leg1_work": True,
+            "leg1_slot": True,
+            "leg1_obligation": True,
+            "leg1_initial_event": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v2_callable": True,
+            "legacy_not_callable": True,
+        },
+    }
+
+
 def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
+
+
+def test_local_schema_adapter_returns_full_source_add_origin_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://example.invalid/rest/v1/rpc/"
+            "research_lab_source_add_provider_origin_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_provider_origin_contract_fixture()
+
+
+def test_local_schema_adapter_returns_duplicate_privacy_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://example.invalid/rest/v1/rpc/"
+            "research_lab_source_add_duplicate_privacy_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_duplicate_privacy_contract_fixture()
+
+
+def test_local_schema_adapter_returns_full_source_add_leg1_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
+            "research_lab_source_add_post_accept_leg1_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_post_accept_leg1_contract_fixture()
+
+
+def test_local_schema_adapter_returns_source_add_claim_control_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
+            "research_lab_source_add_claim_control_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_claim_control_contract()
 
 
 def test_gateway_cli_secret_matches_initial_durable_secret(
@@ -227,8 +458,12 @@ def test_gateway_cli_secret_matches_initial_durable_secret(
         lambda: "false",
     )
 
-    assert contract_adapter._current_gateway_secret() == json.loads(
+    current = contract_adapter._current_gateway_secret()
+    assert current == json.loads(
         rehearsal_sitecustomize._initial_gateway_secret_string()
+    )
+    assert current["SUPABASE_URL"] == (
+        "https://qplwoislplkcegvdmbim.supabase.co"
     )
 
 
@@ -1330,6 +1565,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_source_add_provider_origin_contract_v1",
+            "research_lab_source_add_duplicate_privacy_contract_v1",
+            "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_routing_load_model_transition_v2",
@@ -1624,6 +1862,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "resume_research_lab_credit_blocked_run_v1",
             "research_lab_compact_weight_settlement_contract_v1",
             "research_lab_candidate_hybrid_purpose_contract_v1",
+            "research_lab_source_add_provider_origin_contract_v1",
+            "research_lab_source_add_duplicate_privacy_contract_v1",
+            "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_candidate_append_model_unit_terminal_v1",
@@ -8061,6 +8302,64 @@ def test_rehearsal_coordinator_binds_artifact_calls_to_peer_boot_identity(
         )
 
 
+def test_rehearsal_gateway_boot_generation_separates_restarts(
+    monkeypatch,
+) -> None:
+    role = "gateway_coordinator"
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_gateway_release_input",
+        lambda: {
+            "gateway_roles": {
+                role: {
+                    "commit_sha": "a" * 40,
+                    "pcr0": "b" * 96,
+                    "execution_manifest_hash": "sha256:" + "c" * 64,
+                    "dependency_lock_hash": "sha256:" + "d" * 64,
+                }
+            }
+        },
+    )
+    environment_name = (
+        rehearsal_sitecustomize.REHEARSAL_GATEWAY_BOOT_GENERATION_ENV
+    )
+    first_config = "sha256:" + "1" * 64
+    second_config = "sha256:" + "2" * 64
+
+    monkeypatch.setenv(environment_name, "3" * 32)
+    first = rehearsal_sitecustomize._local_boot_identity(role, first_config)
+    first_replay = rehearsal_sitecustomize._local_boot_identity(
+        role, first_config
+    )
+    assert first_replay == first
+
+    monkeypatch.setenv(environment_name, "4" * 32)
+    same_config_restart = rehearsal_sitecustomize._local_boot_identity(
+        role, first_config
+    )
+    changed_config_restart = rehearsal_sitecustomize._local_boot_identity(
+        role, second_config
+    )
+
+    def durable_boot_key(value: Mapping[str, object]) -> tuple[object, ...]:
+        return (
+            value["physical_role"],
+            value["commit_sha"],
+            value["pcr0"],
+            value["boot_nonce"],
+        )
+
+    assert same_config_restart["boot_identity_hash"] != first[
+        "boot_identity_hash"
+    ]
+    assert durable_boot_key(same_config_restart) != durable_boot_key(first)
+    assert durable_boot_key(changed_config_restart) != durable_boot_key(first)
+
+    monkeypatch.setenv(environment_name, "not-a-generation")
+    with pytest.raises(ValueError, match="boot generation is invalid"):
+        rehearsal_sitecustomize._local_boot_identity(role, first_config)
+
+
 def test_rehearsal_routes_credential_ingress_to_candidate_runtime(
     monkeypatch,
 ) -> None:
@@ -8853,6 +9152,44 @@ def test_rollback_rehearsal_keeps_newer_commit_on_origin_main() -> None:
     assert '"$CANDIDATE_SHA:refs/heads/rehearsal-target"' in rollback_section
     assert '"$CANDIDATE_SHA:refs/heads/main"' not in rollback_section
     assert '"$CANDIDATE_SHA:refs/heads/main"' in forward_section
+
+
+def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "prepare_validator_initial_active_lineage_v2(" in script
+    assert "prepare_gateway_final_active_lineage_v2(" in script
+    assert "validate_active_release_requirements_v2(conflicting)" in script
+    assert "running_channel[\"gateway_release_manifest\"]" in script
+    assert '"leadpoet-validator-main" in containers' in script
+    assert 'f"VALIDATOR_V2_DEPLOY_COMMIT={running_commit}"' in script
+    assert (
+        'ACTIVE_RELEASE_VALIDATOR_REQUIREMENTS="/tmp/leadpoet-'
+        "validator-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert (
+        'ACTIVE_RELEASE_GATEWAY_REQUIREMENTS="/tmp/leadpoet-'
+        "gateway-active-release-requirements.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert (
+        'ACTIVE_RELEASE_GATEWAY_LINEAGE="/tmp/leadpoet-'
+        "gateway-active-release-lineage.${ACTIVE_RELEASE_FIXTURE_SUFFIX}.json\""
+        in script
+    )
+    assert '"GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED=1"' in script
+    assert '"GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS=' in script
+    assert '"GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_FILE=' in script
+    assert '"VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1"' in script
+    assert '"VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=' in script
+    assert '"VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=' in script
+    assert '"VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=' in script
+    assert '"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=' in script
+    assert '"${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \\' in script
+    assert '"${VALIDATOR_ACTIVE_RELEASE_ENV[@]}" \\' in script
 
 
 def test_rehearsal_inherits_the_installed_cutover_manifest() -> None:

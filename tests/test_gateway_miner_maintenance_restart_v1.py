@@ -40,6 +40,72 @@ REAL_REQUIRE_HYDRATED_ENVIRONMENT_COMMITMENT = (
 REAL_LIVE_GATEWAY_RESTART_AUTHORITY_COMMITMENT = (
     maintenance._live_gateway_restart_authority_commitment
 )
+REAL_PAUSE_SOURCE_ADD_FOR_RESTART = maintenance._pause_source_add_for_restart
+REAL_REQUIRE_SOURCE_ADD_PAUSED = maintenance._require_source_add_paused
+REAL_WAIT_FOR_SOURCE_ADD_QUIESCENCE = (
+    maintenance._wait_for_source_add_quiescence
+)
+REAL_REQUIRE_SOURCE_ADD_QUIESCENT = maintenance._require_source_add_quiescent
+REAL_RENEW_SOURCE_ADD_RESTART_GUARD = (
+    maintenance._renew_source_add_restart_guard
+)
+REAL_RELEASE_SOURCE_ADD_RESTART_GUARD = (
+    maintenance._release_source_add_restart_guard
+)
+SOURCE_ADD_CONTROL_COMMITMENT = "sha256:" + "6" * 64
+SOURCE_ADD_QUIESCENCE_COMMITMENT = "sha256:" + "7" * 64
+DEFAULT_RESTART_INVOCATION_ID = "gateway-test-invocation"
+DEFAULT_SOURCE_ADD_GUARD_GENERATION = 1
+
+
+def _restart_guard_commitment(
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+) -> str:
+    return maintenance._source_add_restart_guard_identity(invocation_id)[
+        "guard_commitment"
+    ]
+
+
+def _restart_owner_commitment(
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+) -> str:
+    return maintenance._source_add_restart_guard_identity(invocation_id)[
+        "owner_commitment"
+    ]
+
+
+def _restart_owner_generation_commitment(
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    generation: int = DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+) -> str:
+    return maintenance._source_add_owner_generation_commitment(
+        _restart_owner_commitment(invocation_id), generation
+    )
+
+
+def _source_add_guard_result_fields(
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    generation: int = DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+) -> dict[str, str]:
+    return {
+        "source_add_restart_guard_commitment": (
+            _restart_guard_commitment(invocation_id)
+        ),
+        "source_add_restart_guard_generation": str(generation),
+        "source_add_restart_guard_owner_generation_commitment": (
+            _restart_owner_generation_commitment(invocation_id, generation)
+        ),
+    }
+
+
+def _closed_source_add_runtime_status() -> dict[str, object]:
+    return {
+        "source_add": {
+            "control": {"paused": True, "unavailable": False},
+            "effective_dispatcher_enabled": False,
+            "intake_enabled": False,
+        }
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +121,58 @@ def _stable_live_gateway_identity(monkeypatch: pytest.MonkeyPatch):
         maintenance,
         "_require_hydrated_environment_commitment",
         lambda **kwargs: str(kwargs["expected_commitment"]),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_pause_source_add_for_restart",
+        lambda **_kwargs: {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            **_source_add_guard_result_fields(),
+        },
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_paused",
+        lambda **_kwargs: {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        },
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_wait_for_source_add_quiescence",
+        lambda **_kwargs: {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_quiescent",
+        lambda **_kwargs: {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_renew_source_add_restart_guard",
+        lambda **_kwargs: {
+            "status": "renewed",
+            **_source_add_guard_result_fields(),
+        },
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_release_source_add_restart_guard",
+        lambda **_kwargs: {"status": "released_paused"},
     )
 
 
@@ -368,6 +486,302 @@ class FakeSecretsClient:
         self.stages[CONCURRENT_VERSION] = {"AWSCURRENT"}
 
 
+def _source_add_secret(service_role_key: str = "unit-test-service-role") -> str:
+    return (
+        f"SUPABASE_URL='{maintenance.PRODUCTION_SUPABASE_ORIGIN}'\n"
+        f"SUPABASE_SERVICE_ROLE_KEY='{service_role_key}'\n"
+        "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n"
+    )
+
+
+def _source_add_connection_factory(
+    responses: list[tuple[int, object]],
+    requests: list[dict[str, object]],
+):
+    class FakeResponse:
+        def __init__(self, status: int, payload: object):
+            self.status = status
+            self.payload = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+
+        def getheader(self, name: str):
+            if name == "Content-Length":
+                return str(len(self.payload))
+            return None
+
+        def read(self, limit: int):
+            return self.payload[:limit]
+
+    class FakeConnection:
+        def __init__(self, host: str, port: int, timeout: float):
+            if not responses:
+                raise AssertionError("unexpected SOURCE_ADD control connection")
+            self.response = FakeResponse(*responses.pop(0))
+            self.record: dict[str, object] = {
+                "host": host,
+                "port": port,
+                "timeout": timeout,
+            }
+            requests.append(self.record)
+
+        def request(self, method: str, path: str, body, headers):
+            self.record.update(
+                {
+                    "method": method,
+                    "path": path,
+                    "body": body,
+                    "headers": dict(headers),
+                }
+            )
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            self.record["closed"] = True
+
+    return FakeConnection
+
+
+def _paused_source_add_control(*, actor_ref: str) -> dict[str, object]:
+    return {
+        "singleton": True,
+        "paused": True,
+        "reason": maintenance.SOURCE_ADD_PAUSE_REASON,
+        "actor_ref": actor_ref,
+        "updated_at": "2026-08-31T18:20:00Z",
+    }
+
+
+def _source_add_admission_contract() -> dict[str, object]:
+    return {
+        "schema_version": "leadpoet.source_add_admission_control_contract.v1",
+        "control_row_present": True,
+        "trigger_enabled": True,
+        "pause_rpc": maintenance.SOURCE_ADD_PAUSE_RPC,
+        "admission_trigger": "trg_source_add_work_admission_control",
+    }
+
+
+def _source_add_claim_control_contract(
+    **overrides: object,
+) -> dict[str, object]:
+    contract: dict[str, object] = {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v1",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v1"
+        ),
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v1"
+        ),
+        "guard_state_signature": "",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v1"
+        ),
+        "release_guard_signature": "text,text,bigint,text",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+        ],
+        "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
+        "guard_commitment": "sha256_utf8_guard_id",
+        "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
+        "owner_commitment": "sha256_utf8_owner_id",
+        "owner_generation_commitment": (
+            "sha256_utf8_owner_commitment_colon_decimal_generation"
+        ),
+        "guard_lease_min_seconds": 60,
+        "guard_lease_max_seconds": 14400,
+        "active_guard_replay_extends_lease": True,
+        "acquire_compare_and_swap": "expected_generation",
+        "different_owner_takeover_increments_generation": True,
+        "expired_reacquire_increments_generation": True,
+        "generation_retained_after_release": True,
+        "resume_requires_guard_clear": True,
+        "expired_guard_recovery": "explicit_reacquire_then_exact_release",
+        "release_keeps_paused": True,
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text,text,bigint",
+        "restart_quiescence_schema_version": (
+            "leadpoet.source_add_restart_quiescence.v1"
+        ),
+        "restart_quiescence_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_matches",
+            "owner_matches",
+            "generation_matches",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "leased_work_count",
+            "quiescent",
+        ],
+        "lock_before_paused_read": True,
+        "leased_scope": "all_leased_regardless_of_expiry",
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "function_authority_sha256": (
+            maintenance.SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "restart_guard_state_v1": True,
+            "restart_quiescence_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "acquire_guard_service_role_callable": True,
+            "claim_service_role_callable": True,
+            "pause_service_role_callable": True,
+            "quiescence_service_role_callable": True,
+            "release_guard_service_role_callable": True,
+            "guard_state_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    contract.update(overrides)
+    return contract
+
+
+def _source_add_restart_guard(
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    generation: int = DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+) -> dict[str, object]:
+    return {
+        "schema_version": "leadpoet.source_add_restart_guard.v1",
+        "paused": True,
+        "guard_active": True,
+        "guard_commitment": _restart_guard_commitment(invocation_id),
+        "owner_commitment": _restart_owner_commitment(invocation_id),
+        "guard_generation": generation,
+        "owner_generation_commitment": (
+            _restart_owner_generation_commitment(invocation_id, generation)
+        ),
+        "guard_expires_at": "2099-01-01T00:00:00+00:00",
+    }
+
+
+def _source_add_guard_state(
+    *,
+    paused: bool = True,
+    guard_active: bool = True,
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    generation: int = DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+    guard_expires_at: str | None = "2099-01-01T00:00:00+00:00",
+) -> dict[str, object]:
+    if guard_active or guard_expires_at is not None:
+        guard_commitment = _restart_guard_commitment(invocation_id)
+        owner_commitment = _restart_owner_commitment(invocation_id)
+        owner_generation_commitment = (
+            _restart_owner_generation_commitment(invocation_id, generation)
+        )
+    else:
+        guard_commitment = ""
+        owner_commitment = ""
+        owner_generation_commitment = ""
+    return {
+        "schema_version": "leadpoet.source_add_restart_guard_state.v1",
+        "paused": paused,
+        "guard_active": guard_active,
+        "guard_commitment": guard_commitment,
+        "owner_commitment": owner_commitment,
+        "guard_generation": generation,
+        "owner_generation_commitment": owner_generation_commitment,
+        "guard_expires_at": guard_expires_at,
+    }
+
+
+def _empty_source_add_guard_state(
+    generation: int = 0,
+) -> dict[str, object]:
+    return _source_add_guard_state(
+        paused=False,
+        guard_active=False,
+        generation=generation,
+        guard_expires_at=None,
+    )
+
+
+def _source_add_quiescence(
+    *,
+    paused: bool = True,
+    guard_active: bool = True,
+    guard_matches: bool = True,
+    owner_matches: bool = True,
+    generation_matches: bool = True,
+    leased_work_count: int = 0,
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    generation: int = DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+) -> dict[str, object]:
+    return {
+        "schema_version": "leadpoet.source_add_restart_quiescence.v1",
+        "paused": paused,
+        "guard_active": guard_active,
+        "guard_matches": guard_matches,
+        "owner_matches": owner_matches,
+        "generation_matches": generation_matches,
+        "guard_commitment": _restart_guard_commitment(invocation_id),
+        "owner_commitment": _restart_owner_commitment(invocation_id),
+        "guard_generation": generation,
+        "owner_generation_commitment": (
+            _restart_owner_generation_commitment(invocation_id, generation)
+        ),
+        "guard_expires_at": "2099-01-01T00:00:00+00:00",
+        "leased_work_count": leased_work_count,
+        "quiescent": (
+            paused
+            and guard_active
+            and guard_matches
+            and owner_matches
+            and generation_matches
+            and leased_work_count == 0
+        ),
+    }
+
+
 def _controller_bundle(
     controller_commit: str = CONTROLLER_COMMIT,
 ) -> dict[str, object]:
@@ -384,6 +798,17 @@ def _controller_bundle(
             name: "sha256:" + hashlib.sha256(payload).hexdigest()
             for name, payload in payloads.items()
         },
+    }
+
+
+def _retry_reconciliation_helper() -> dict[str, object]:
+    payload = (
+        b"def reconcile_gateway_rebenchmark_runtime_environment_file(**_kwargs):\n"
+        b"    return {'status': 'reconciled'}\n"
+    )
+    return {
+        "payload": payload,
+        "commitment": "sha256:" + hashlib.sha256(payload).hexdigest(),
     }
 
 
@@ -409,7 +834,13 @@ def _prepare(
     *,
     candidate_commit: str = CANDIDATE_COMMIT,
     controller_commit: str = CONTROLLER_COMMIT,
-    invocation_id: str = "gateway-test-invocation",
+    invocation_id: str = DEFAULT_RESTART_INVOCATION_ID,
+    source_add_pause_hook=None,
+    source_add_readback_hook=None,
+    source_add_wait_hook=None,
+    source_add_quiescence_readback_hook=None,
+    runtime_status_hook=None,
+    live_process_commitment: str = "sha256:" + "1" * 64,
 ) -> dict[str, object]:
     monkeypatch.setattr(
         maintenance,
@@ -425,13 +856,14 @@ def _prepare(
             "previous_sha": controller_commit,
             "n_minus_one_controller_commit": controller_commit,
             "controller_bundle": _controller_bundle(controller_commit),
+            "retry_reconciliation_helper": _retry_reconciliation_helper(),
         },
     )
     monkeypatch.setattr(maintenance, "_verify_protected_source", lambda: None)
     monkeypatch.setattr(
         maintenance,
         "_live_gateway_restart_authority_commitment",
-        lambda **_kwargs: "sha256:" + "1" * 64,
+        lambda **_kwargs: live_process_commitment,
     )
     monkeypatch.setattr(
         maintenance,
@@ -442,6 +874,68 @@ def _prepare(
         maintenance,
         "validate_release_manifest",
         lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_pause_source_add_for_restart",
+        source_add_pause_hook
+        or (
+            lambda **kwargs: {
+                "status": "paused",
+                "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+                **_source_add_guard_result_fields(
+                    kwargs["restart_invocation_id"]
+                ),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_paused",
+        source_add_readback_hook
+        or (
+            lambda **_kwargs: {
+                "status": "paused",
+                "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_wait_for_source_add_quiescence",
+        source_add_wait_hook
+        or (
+            lambda **kwargs: {
+                "status": "quiescent",
+                **_source_add_guard_result_fields(
+                    kwargs["restart_invocation_id"]
+                ),
+                "source_add_quiescence_commitment": (
+                    SOURCE_ADD_QUIESCENCE_COMMITMENT
+                ),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_quiescent",
+        source_add_quiescence_readback_hook
+        or (
+            lambda **kwargs: {
+                "status": "quiescent",
+                **_source_add_guard_result_fields(
+                    kwargs["restart_invocation_id"]
+                ),
+                "source_add_quiescence_commitment": (
+                    SOURCE_ADD_QUIESCENCE_COMMITMENT
+                ),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_fetch_runtime_status",
+        runtime_status_hook or _closed_source_add_runtime_status,
     )
     return maintenance.prepare_gateway_miner_maintenance_restart(
         repo_root=tmp_path / "repo",
@@ -478,6 +972,13 @@ def test_prepare_changes_only_target_and_returns_redacted_invocation_proof(
     assert proof["current_secret_version_id"] == client.current
     assert proof["current_document_commitment"].startswith("sha256:")
     assert proof["current_stage_topology_commitment"].startswith("sha256:")
+    assert proof["source_add_restart_guard_commitment"] == (
+        _restart_guard_commitment()
+    )
+    assert proof["source_add_restart_guard_generation"] == "1"
+    assert proof[
+        "source_add_restart_guard_owner_generation_commitment"
+    ] == _restart_owner_generation_commitment()
     assert secret_marker not in json.dumps(proof)
     assert secret_marker not in json.dumps(
         {name: value for name, value in result.items() if name != "tree_evidence"}
@@ -488,6 +989,850 @@ def test_prepare_changes_only_target_and_returns_redacted_invocation_proof(
     assert "RESEARCH_LAB_AUTORESEARCH_WORKER_COUNT=0\n" in current_secret
     assert not (tmp_path / "private" / "transaction.json").exists()
     assert not any(path.name.endswith("receipt.json") for path in tmp_path.rglob("*"))
+
+
+def test_source_add_pause_uses_fixed_rpc_then_exact_durable_readback(
+    capsys: pytest.CaptureFixture[str],
+):
+    service_role_key = "unit-test-service-role-private"
+    client = FakeSecretsClient(_source_add_secret(service_role_key))
+    invocation_id = "gateway-source-add-pause-test"
+    actor_ref = "gateway-restart:" + hashlib.sha256(
+        invocation_id.encode("utf-8")
+    ).hexdigest()
+    row = _paused_source_add_control(actor_ref=actor_ref)
+    requests: list[dict[str, object]] = []
+    responses = [
+        (200, _source_add_admission_contract()),
+        (200, _source_add_claim_control_contract()),
+        (200, _empty_source_add_guard_state()),
+        (200, _source_add_restart_guard(invocation_id)),
+        (200, [row]),
+    ]
+
+    result = REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+        secrets_client=client,
+        restart_invocation_id=invocation_id,
+        connection_factory=_source_add_connection_factory(responses, requests),
+    )
+
+    assert result == {
+        "status": "paused",
+        "source_add_control_commitment": maintenance.sha256_json(row),
+        **_source_add_guard_result_fields(invocation_id),
+    }
+    assert responses == []
+    assert [request["method"] for request in requests] == [
+        "POST",
+        "POST",
+        "POST",
+        "POST",
+        "GET",
+    ]
+    assert [request["path"] for request in requests] == [
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ADMISSION_CONTRACT_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_CLAIM_CONTROL_CONTRACT_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_GUARD_STATE_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ACQUIRE_RESTART_GUARD_RPC}",
+        (
+            f"/rest/v1/{maintenance.SOURCE_ADD_CONTROL_TABLE}"
+            "?select=singleton,paused,reason,actor_ref,updated_at"
+            "&singleton=eq.true&limit=2"
+        ),
+    ]
+    assert all(
+        request["host"]
+        == maintenance.PRODUCTION_SUPABASE_ORIGIN.removeprefix("https://")
+        and request["port"] == 443
+        and request["closed"] is True
+        for request in requests
+    )
+    assert json.loads(requests[0]["body"]) == {}
+    assert json.loads(requests[1]["body"]) == {}
+    assert json.loads(requests[2]["body"]) == {}
+    identity = maintenance._source_add_restart_guard_identity(invocation_id)
+    assert json.loads(requests[3]["body"]) == {
+        "p_actor_ref": actor_ref,
+        "p_expected_generation": 0,
+        "p_guard_id": identity["guard_id"],
+        "p_lease_seconds": maintenance.SOURCE_ADD_RESTART_GUARD_LEASE_SECONDS,
+        "p_owner_id": identity["owner_id"],
+    }
+    assert requests[4]["body"] is None
+    assert all(service_role_key not in str(request["path"]) for request in requests)
+    assert service_role_key not in json.dumps(result)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_source_add_pause_fails_closed_when_migration_rpc_is_unavailable():
+    client = FakeSecretsClient(_source_add_secret())
+    before = dict(client.versions)
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="pause authority request was rejected",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id="gateway-source-add-missing-rpc",
+            connection_factory=_source_add_connection_factory(
+                [(404, {"code": "PGRST202"})], requests
+            ),
+        )
+
+    assert client.versions == before
+    assert len(requests) == 1
+    assert requests[0]["path"] == (
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ADMISSION_CONTRACT_RPC}"
+    )
+
+
+def test_source_add_guard_acquisition_fails_closed_when_rpc_is_unavailable():
+    client = FakeSecretsClient(_source_add_secret())
+    before = dict(client.versions)
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="pause authority request was rejected",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (200, _source_add_claim_control_contract()),
+                    (200, _empty_source_add_guard_state()),
+                    (404, {"code": "PGRST202"}),
+                ],
+                requests,
+            ),
+        )
+
+    assert client.versions == before
+    assert requests[-1]["path"] == (
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ACQUIRE_RESTART_GUARD_RPC}"
+    )
+
+
+def test_source_add_pause_fails_before_acquire_when_claim_control_rpc_is_missing():
+    client = FakeSecretsClient(_source_add_secret())
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="claim-control contract is unavailable or invalid",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (404, {"code": "PGRST202"}),
+                ],
+                requests,
+            ),
+        )
+
+    assert [request["path"] for request in requests] == [
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_ADMISSION_CONTRACT_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_CLAIM_CONTROL_CONTRACT_RPC}",
+    ]
+
+
+@pytest.mark.parametrize("invalid_field", ["schema", "hash", "signature", "acl"])
+def test_source_add_pause_rejects_wrong_claim_control_contract_before_acquire(
+    invalid_field: str,
+):
+    client = FakeSecretsClient(_source_add_secret())
+    contract = _source_add_claim_control_contract()
+    if invalid_field == "schema":
+        contract["schema_version"] = "leadpoet.invalid.v1"
+    elif invalid_field == "hash":
+        contract["function_authority_sha256"] = "sha256:" + "9" * 64
+    elif invalid_field == "signature":
+        contract["acquire_guard_signature"] = "text,integer"
+    else:
+        permissions = dict(contract["permissions"])
+        permissions["anon_callable"] = True
+        contract["permissions"] = permissions
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="claim-control contract is unavailable or invalid",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (200, contract),
+                ],
+                requests,
+            ),
+        )
+
+    assert len(requests) == 2
+    assert all(
+        maintenance.SOURCE_ADD_ACQUIRE_RESTART_GUARD_RPC
+        not in str(request["path"])
+        for request in requests
+    )
+
+
+def test_source_add_guard_acquisition_rejects_expired_or_wrong_guard():
+    client = FakeSecretsClient(_source_add_secret())
+    wrong_guard = {
+        **_source_add_restart_guard(),
+        "guard_commitment": "sha256:" + "9" * 64,
+        "guard_expires_at": "2020-01-01T00:00:00+00:00",
+    }
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="unexpected state",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (200, _source_add_claim_control_contract()),
+                    (200, _empty_source_add_guard_state()),
+                    (200, wrong_guard),
+                ],
+                [],
+            ),
+        )
+
+
+def test_source_add_restart_guard_identity_is_stable_across_exact_command_retry():
+    first = maintenance._source_add_restart_guard_identity(
+        "gateway-first-command-100"
+    )
+    retry = maintenance._source_add_restart_guard_identity(
+        "gateway-retry-command-200"
+    )
+
+    assert first["guard_id"] == retry["guard_id"]
+    assert first["guard_commitment"] == retry["guard_commitment"]
+    assert first["owner_id"] != retry["owner_id"]
+    assert first["owner_commitment"] != retry["owner_commitment"]
+    assert first["actor_ref"] != retry["actor_ref"]
+
+
+def test_fresh_retry_takeover_fences_stale_invocation_renewal_and_release():
+    client = FakeSecretsClient(_source_add_secret())
+    stale_invocation = "gateway-stale-command-100"
+    fresh_invocation = "gateway-fresh-command-200"
+    fresh_identity = maintenance._source_add_restart_guard_identity(
+        fresh_invocation
+    )
+    fresh_control = _paused_source_add_control(
+        actor_ref=fresh_identity["actor_ref"]
+    )
+    takeover_requests: list[dict[str, object]] = []
+
+    fresh = REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+        secrets_client=client,
+        restart_invocation_id=fresh_invocation,
+        connection_factory=_source_add_connection_factory(
+            [
+                (200, _source_add_admission_contract()),
+                (200, _source_add_claim_control_contract()),
+                (
+                    200,
+                    _source_add_guard_state(
+                        invocation_id=stale_invocation,
+                        generation=1,
+                    ),
+                ),
+                (200, _source_add_restart_guard(fresh_invocation, 2)),
+                (200, [fresh_control]),
+            ],
+            takeover_requests,
+        ),
+    )
+
+    assert fresh == {
+        "status": "paused",
+        "source_add_control_commitment": maintenance.sha256_json(
+            fresh_control
+        ),
+        **_source_add_guard_result_fields(fresh_invocation, 2),
+    }
+    takeover_payload = json.loads(takeover_requests[3]["body"])
+    assert takeover_payload["p_expected_generation"] == 1
+    assert takeover_payload["p_owner_id"] == fresh_identity["owner_id"]
+
+    for operation in (
+        REAL_RENEW_SOURCE_ADD_RESTART_GUARD,
+        REAL_RELEASE_SOURCE_ADD_RESTART_GUARD,
+    ):
+        stale_requests: list[dict[str, object]] = []
+        with pytest.raises(
+            maintenance.GatewayMinerMaintenanceRestartError,
+            match="not owned|ownership changed",
+        ):
+            operation(
+                secrets_client=client,
+                restart_invocation_id=stale_invocation,
+                connection_factory=_source_add_connection_factory(
+                    [
+                        (
+                            200,
+                            _source_add_guard_state(
+                                invocation_id=fresh_invocation,
+                                generation=2,
+                            ),
+                        )
+                    ],
+                    stale_requests,
+                ),
+            )
+        assert [request["path"] for request in stale_requests] == [
+            f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_GUARD_STATE_RPC}"
+        ]
+
+
+def test_shutdown_renewal_uses_full_canonical_deadline_lease_without_generation_change():
+    client = FakeSecretsClient(_source_add_secret())
+    requests: list[dict[str, object]] = []
+    before = {
+        **_source_add_guard_state(),
+        "guard_expires_at": "2098-01-01T00:00:00+00:00",
+    }
+    renewed = {
+        **_source_add_restart_guard(),
+        "guard_expires_at": "2099-01-01T00:00:00+00:00",
+    }
+
+    result = REAL_RENEW_SOURCE_ADD_RESTART_GUARD(
+        secrets_client=client,
+        restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+        expected_guard_generation="1",
+        expected_owner_generation_commitment=(
+            _restart_owner_generation_commitment()
+        ),
+        connection_factory=_source_add_connection_factory(
+            [(200, before), (200, renewed)], requests
+        ),
+    )
+
+    assert result == {
+        "status": "renewed",
+        **_source_add_guard_result_fields(),
+    }
+    payload = json.loads(requests[1]["body"])
+    assert payload["p_expected_generation"] == 1
+    assert payload["p_lease_seconds"] == 14_400
+    assert payload["p_lease_seconds"] == (
+        maintenance.SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
+        + maintenance.SOURCE_ADD_RESTART_GUARD_SAFETY_MARGIN_SECONDS
+    )
+    assert payload["p_lease_seconds"] > 9_300
+
+
+def test_source_add_pause_rejects_pre_145_or_disabled_admission_contract():
+    client = FakeSecretsClient(_source_add_secret())
+    contract = {**_source_add_admission_contract(), "trigger_enabled": False}
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="admission-control contract is unavailable",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id="gateway-source-add-old-contract",
+            connection_factory=_source_add_connection_factory(
+                [(200, contract)], requests
+            ),
+        )
+
+    assert len(requests) == 1
+
+
+def test_source_add_pause_rejects_invalid_or_changed_readback():
+    client = FakeSecretsClient(_source_add_secret())
+    invocation_id = "gateway-source-add-invalid-readback"
+    actor_ref = "gateway-restart:" + hashlib.sha256(
+        invocation_id.encode("utf-8")
+    ).hexdigest()
+    row = _paused_source_add_control(actor_ref=actor_ref)
+    resumed = {**row, "paused": False, "reason": "operator_resume"}
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="durable SOURCE_ADD pause readback is invalid",
+    ):
+        REAL_PAUSE_SOURCE_ADD_FOR_RESTART(
+            secrets_client=client,
+            restart_invocation_id=invocation_id,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_admission_contract()),
+                    (200, _source_add_claim_control_contract()),
+                    (200, _empty_source_add_guard_state()),
+                    (200, _source_add_restart_guard(invocation_id)),
+                    (200, [resumed]),
+                ],
+                requests,
+            ),
+        )
+
+    assert len(requests) == 5
+
+
+def test_source_add_quiescence_wait_polls_every_lease_until_exact_zero(
+    capsys: pytest.CaptureFixture[str],
+):
+    service_role_key = "unit-test-quiescence-service-role-private"
+    client = FakeSecretsClient(_source_add_secret(service_role_key))
+    requests: list[dict[str, object]] = []
+    responses = [
+        (200, _source_add_guard_state()),
+        (200, _source_add_quiescence(leased_work_count=2)),
+        (200, _source_add_quiescence(leased_work_count=1)),
+        (200, _source_add_quiescence()),
+    ]
+    clock = iter([0.0, 0.0, 0.5])
+    sleeps: list[float] = []
+
+    result = REAL_WAIT_FOR_SOURCE_ADD_QUIESCENCE(
+        secrets_client=client,
+        restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+        connection_factory=_source_add_connection_factory(responses, requests),
+        timeout_seconds=10.0,
+        poll_seconds=1.0,
+        monotonic=lambda: next(clock),
+        sleep=sleeps.append,
+    )
+
+    expected_state = _source_add_quiescence()
+    assert result == {
+        "status": "quiescent",
+        **_source_add_guard_result_fields(),
+        "source_add_quiescence_commitment": (
+            maintenance._source_add_quiescence_commitment(expected_state)
+        ),
+    }
+    assert responses == []
+    assert sleeps == [1.0, 1.0]
+    assert [request["method"] for request in requests] == ["POST"] * 4
+    assert [request["path"] for request in requests] == [
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_GUARD_STATE_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_QUIESCENCE_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_QUIESCENCE_RPC}",
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_QUIESCENCE_RPC}"
+    ]
+    identity = maintenance._source_add_restart_guard_identity(
+        DEFAULT_RESTART_INVOCATION_ID
+    )
+    assert json.loads(requests[0]["body"]) == {}
+    assert all(
+        json.loads(request["body"])
+        == {
+            "p_guard_generation": DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+            "p_guard_id": identity["guard_id"],
+            "p_owner_id": identity["owner_id"],
+        }
+        for request in requests[1:]
+    )
+    assert service_role_key not in json.dumps(result)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_source_add_quiescence_wait_times_out_fail_closed_without_secret_leak(
+    capsys: pytest.CaptureFixture[str],
+):
+    service_role_key = "unit-test-timeout-service-role-private"
+    client = FakeSecretsClient(_source_add_secret(service_role_key))
+    before = dict(client.versions)
+    requests: list[dict[str, object]] = []
+    clock = iter([0.0, 1.0])
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="did not quiesce before the restart deadline",
+    ):
+        REAL_WAIT_FOR_SOURCE_ADD_QUIESCENCE(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_guard_state()),
+                    (200, _source_add_quiescence(leased_work_count=1)),
+                ],
+                requests,
+            ),
+            timeout_seconds=1.0,
+            poll_seconds=0.1,
+            monotonic=lambda: next(clock),
+            sleep=lambda _seconds: pytest.fail("timeout must not sleep"),
+        )
+
+    assert client.versions == before
+    assert len(requests) == 2
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _source_add_quiescence(paused=False),
+        _source_add_quiescence(guard_active=False),
+        _source_add_quiescence(guard_matches=False),
+        _source_add_quiescence(leased_work_count=1),
+        {
+            **_source_add_quiescence(),
+            "leased_work_count": True,
+        },
+        {
+            **_source_add_quiescence(),
+            "quiescent": False,
+        },
+    ],
+)
+def test_source_add_quiescence_readback_rejects_nonquiescent_or_invalid_state(
+    response: dict[str, object],
+):
+    client = FakeSecretsClient(_source_add_secret())
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="restart-quiescence readback is invalid|work is not quiescent",
+    ):
+        REAL_REQUIRE_SOURCE_ADD_QUIESCENT(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [(200, _source_add_guard_state()), (200, response)], requests
+            ),
+        )
+
+    assert len(requests) == 2
+
+
+def test_source_add_quiescence_fails_closed_when_migration_rpc_is_unavailable():
+    client = FakeSecretsClient(_source_add_secret())
+    before = dict(client.versions)
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="pause authority request was rejected",
+    ):
+        REAL_REQUIRE_SOURCE_ADD_QUIESCENT(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_guard_state()),
+                    (404, {"code": "PGRST202"}),
+                ],
+                requests,
+            ),
+        )
+
+    assert client.versions == before
+    assert requests[-1]["path"] == (
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RESTART_QUIESCENCE_RPC}"
+    )
+
+
+def test_source_add_quiescence_readback_binds_exact_proof_commitment():
+    client = FakeSecretsClient(_source_add_secret())
+    requests: list[dict[str, object]] = []
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="differs from the invocation proof",
+    ):
+        REAL_REQUIRE_SOURCE_ADD_QUIESCENT(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            expected_quiescence_commitment="sha256:" + "9" * 64,
+            connection_factory=_source_add_connection_factory(
+                [
+                    (200, _source_add_guard_state()),
+                    (200, _source_add_quiescence()),
+                ],
+                requests,
+            ),
+        )
+
+    assert len(requests) == 2
+
+
+def test_source_add_quiescence_rejects_expired_guard_even_when_payload_claims_active():
+    client = FakeSecretsClient(_source_add_secret())
+    expired = {
+        **_source_add_quiescence(),
+        "guard_expires_at": "2020-01-01T00:00:00+00:00",
+    }
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="work is not quiescent",
+    ):
+        REAL_REQUIRE_SOURCE_ADD_QUIESCENT(
+            secrets_client=client,
+            restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+            connection_factory=_source_add_connection_factory(
+                [(200, _source_add_guard_state()), (200, expired)], []
+            ),
+        )
+
+
+def test_source_add_restart_guard_release_is_exact_and_leaves_pause_policy_external(
+    capsys: pytest.CaptureFixture[str],
+):
+    service_role_key = "unit-test-release-service-role-private"
+    client = FakeSecretsClient(_source_add_secret(service_role_key))
+    requests: list[dict[str, object]] = []
+    release = {
+        "schema_version": "leadpoet.source_add_restart_guard_release.v1",
+        "released": True,
+        "paused": True,
+        "guard_active": False,
+        "guard_generation": DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+        "owner_generation_commitment": (
+            _restart_owner_generation_commitment()
+        ),
+    }
+
+    result = REAL_RELEASE_SOURCE_ADD_RESTART_GUARD(
+        secrets_client=client,
+        restart_invocation_id=DEFAULT_RESTART_INVOCATION_ID,
+        connection_factory=_source_add_connection_factory(
+            [(200, _source_add_guard_state()), (200, release)], requests
+        ),
+    )
+
+    identity = maintenance._source_add_restart_guard_identity(
+        DEFAULT_RESTART_INVOCATION_ID
+    )
+    assert result == {
+        "status": "released_paused",
+        "source_add_restart_guard_generation": "1",
+        "source_add_restart_guard_owner_generation_commitment": (
+            _restart_owner_generation_commitment()
+        ),
+    }
+    assert requests[1]["path"] == (
+        f"/rest/v1/rpc/{maintenance.SOURCE_ADD_RELEASE_RESTART_GUARD_RPC}"
+    )
+    assert json.loads(requests[1]["body"]) == {
+        "p_actor_ref": identity["actor_ref"],
+        "p_guard_generation": DEFAULT_SOURCE_ADD_GUARD_GENERATION,
+        "p_guard_id": identity["guard_id"],
+        "p_owner_id": identity["owner_id"],
+    }
+    assert "p_paused" not in json.loads(requests[1]["body"])
+    assert service_role_key not in json.dumps(result)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_prepare_pauses_source_before_global_secret_and_rechecks_without_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n")
+    calls: list[str] = []
+
+    def pause(**_kwargs):
+        calls.append("source_pause")
+        assert len(client.versions) == 1
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            **_source_add_guard_result_fields(),
+        }
+
+    def readback(**kwargs):
+        calls.append("source_readback")
+        assert kwargs["expected_control_commitment"] == (
+            SOURCE_ADD_CONTROL_COMMITMENT
+        )
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        }
+
+    def wait_for_quiescence(**_kwargs):
+        calls.append("source_drain")
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        }
+
+    def quiescence_readback(**kwargs):
+        calls.append("source_quiescence_readback")
+        assert kwargs["expected_quiescence_commitment"] == (
+            SOURCE_ADD_QUIESCENCE_COMMITMENT
+        )
+        assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n" in client.versions[
+            client.current
+        ]
+        return {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        }
+
+    def runtime_status():
+        calls.append("runtime_closed")
+        return _closed_source_add_runtime_status()
+
+    result = _prepare(
+        tmp_path,
+        monkeypatch,
+        client,
+        source_add_pause_hook=pause,
+        source_add_readback_hook=readback,
+        source_add_wait_hook=wait_for_quiescence,
+        source_add_quiescence_readback_hook=quiescence_readback,
+        runtime_status_hook=runtime_status,
+    )
+
+    assert calls == [
+        "source_pause",
+        "runtime_closed",
+        "source_drain",
+        "source_readback",
+        "source_quiescence_readback",
+        "runtime_closed",
+    ]
+    assert result["proof"]["source_add_control_commitment"] == (
+        SOURCE_ADD_CONTROL_COMMITMENT
+    )
+    assert result["proof"]["source_add_quiescence_commitment"] == (
+        SOURCE_ADD_QUIESCENCE_COMMITMENT
+    )
+    assert all("resume" not in call for call in calls)
+
+
+def test_prepare_retry_with_proved_absent_gateway_skips_only_loopback_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n")
+    absent_commitment = maintenance.sha256_json({"status": "absent"})
+
+    def unexpected_runtime_status():
+        pytest.fail("proved-absent pre-hydration gateway has no loopback status")
+
+    result = _prepare(
+        tmp_path,
+        monkeypatch,
+        client,
+        live_process_commitment=absent_commitment,
+        runtime_status_hook=unexpected_runtime_status,
+    )
+
+    assert result["status"] == "prepared"
+    assert result["proof"]["pre_hydration_live_process_commitment"] == (
+        absent_commitment
+    )
+    assert result["proof"]["source_add_quiescence_commitment"] == (
+        SOURCE_ADD_QUIESCENCE_COMMITMENT
+    )
+    assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n" in client.versions[
+        client.current
+    ]
+
+
+def test_prepare_present_gateway_fails_closed_when_loopback_status_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n")
+    wait_called = False
+
+    def unavailable_runtime_status():
+        raise maintenance.GatewayMinerMaintenanceRestartError(
+            "running Research Lab status is unavailable"
+        )
+
+    def wait_for_quiescence(**_kwargs):
+        nonlocal wait_called
+        wait_called = True
+        return {
+            "status": "quiescent",
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        }
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="status is unavailable",
+    ):
+        _prepare(
+            tmp_path,
+            monkeypatch,
+            client,
+            runtime_status_hook=unavailable_runtime_status,
+            source_add_wait_hook=wait_for_quiescence,
+        )
+
+    assert wait_called is False
+    assert client.current == INITIAL_VERSION
+    assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n" in client.versions[
+        client.current
+    ]
+
+
+def test_prepare_quiescence_timeout_aborts_before_global_secret_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n")
+
+    def timeout(**_kwargs):
+        raise maintenance.GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD work did not quiesce before the restart deadline"
+        )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="did not quiesce before the restart deadline",
+    ):
+        _prepare(
+            tmp_path,
+            monkeypatch,
+            client,
+            source_add_wait_hook=timeout,
+        )
+
+    assert client.current == INITIAL_VERSION
+    assert set(client.versions) == {INITIAL_VERSION}
+    assert "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=true\n" in client.versions[
+        client.current
+    ]
 
 
 @pytest.mark.parametrize(
@@ -849,6 +2194,141 @@ def test_direct_restart_requires_durable_false_and_locked_release(
     assert result["current_secret_version_id"] == INITIAL_VERSION
     assert result["release_channel_object_version_id"] == OBJECT_VERSION
     assert calls == ["locked"]
+
+
+def test_direct_restart_acquires_guard_for_exact_restart_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
+    invocation_id = "gateway-direct-guard-test"
+    calls: list[tuple[str, object]] = []
+
+    def acquire(**kwargs):
+        calls.append(("acquire", kwargs["restart_invocation_id"]))
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+            **_source_add_guard_result_fields(invocation_id),
+        }
+
+    def quiescent(**kwargs):
+        calls.append(("quiescent", kwargs["expected_guard_commitment"]))
+        assert kwargs["restart_invocation_id"] == invocation_id
+        return {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(invocation_id),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        }
+
+    monkeypatch.setattr(maintenance, "_pause_source_add_for_restart", acquire)
+    monkeypatch.setattr(maintenance, "_require_source_add_quiescent", quiescent)
+    monkeypatch.setattr(
+        maintenance,
+        "_fetch_locked_release_channel",
+        lambda **_kwargs: _locked_release_evidence(),
+    )
+
+    result = maintenance.verify_gateway_miner_maintenance_state(
+        deploy_commit=CANDIDATE_COMMIT,
+        candidate_tree_hash=TREE_HASH,
+        gateway_release_hash=RELEASE_HASH,
+        parent_environment={
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
+            "GATEWAY_RESTART_INVOCATION_ID": invocation_id,
+        },
+        secrets_client=client,
+        release_s3_client=object(),
+    )
+
+    assert result["status"] == "durable_false_verified"
+    assert calls == [
+        ("acquire", invocation_id),
+        ("quiescent", _restart_guard_commitment(invocation_id)),
+    ]
+
+
+def test_shutdown_boundary_requires_same_active_guard_and_zero_leases(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        maintenance,
+        "_renew_source_add_restart_guard",
+        lambda **_kwargs: calls.append("renew")
+        or {
+            "status": "renewed",
+            **_source_add_guard_result_fields(),
+        },
+    )
+
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_paused",
+        lambda **_kwargs: calls.append("pause")
+        or {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        },
+    )
+
+    def quiescent(**kwargs):
+        calls.append("quiescence")
+        assert kwargs["restart_invocation_id"] == DEFAULT_RESTART_INVOCATION_ID
+        return {
+            "status": "quiescent",
+            **_source_add_guard_result_fields(),
+            "source_add_quiescence_commitment": (
+                SOURCE_ADD_QUIESCENCE_COMMITMENT
+            ),
+        }
+
+    monkeypatch.setattr(maintenance, "_require_source_add_quiescent", quiescent)
+
+    result = maintenance.verify_gateway_miner_maintenance_shutdown_quiescence(
+        deploy_commit=CANDIDATE_COMMIT,
+        parent_environment={
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
+            "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
+        },
+        secrets_client=client,
+    )
+
+    assert result["status"] == "shutdown_quiescence_verified"
+    assert calls == ["renew", "pause", "quiescence"]
+
+
+def test_resume_after_preflight_blocks_shutdown_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
+    monkeypatch.setattr(
+        maintenance,
+        "_require_source_add_quiescent",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            maintenance.GatewayMinerMaintenanceRestartError(
+                "SOURCE_ADD work is not quiescent for restart"
+            )
+        ),
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="work is not quiescent for restart",
+    ):
+        maintenance.verify_gateway_miner_maintenance_shutdown_quiescence(
+            deploy_commit=CANDIDATE_COMMIT,
+            parent_environment={
+                "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
+                "GATEWAY_RESTART_INVOCATION_ID": (
+                    DEFAULT_RESTART_INVOCATION_ID
+                ),
+            },
+            secrets_client=client,
+        )
 
 
 def test_receiptless_second_restart_binds_actual_hydrated_cache_bytes(
@@ -1578,7 +3058,10 @@ def test_runtime_state_requires_live_boolean_exact_false(
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             },
-            runtime_status={"miner_submissions_enabled": runtime_value},
+            runtime_status={
+                "miner_submissions_enabled": runtime_value,
+                **_closed_source_add_runtime_status(),
+            },
             secrets_client=client,
             release_s3_client=object(),
         )
@@ -1600,12 +3083,169 @@ def test_runtime_state_rechecks_live_false_durable_state_and_channel(
         runtime_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         },
-        runtime_status={"miner_submissions_enabled": False},
+        runtime_status={
+            "miner_submissions_enabled": False,
+            **_closed_source_add_runtime_status(),
+        },
         secrets_client=client,
         release_s3_client=object(),
     )
     assert result["runtime_status"] == "disabled"
     assert result["status"] == "durable_false_verified"
+    assert result["source_add_restart_guard_status"] == "released_paused"
+
+
+def test_runtime_releases_guard_only_after_candidate_state_verifies(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
+    calls: list[str] = []
+
+    def verify_state(**kwargs):
+        calls.append("candidate_state")
+        assert kwargs["acquire_source_add_restart_guard"] is False
+        return {
+            "status": "durable_false_verified",
+            "current_secret_version_id": INITIAL_VERSION,
+            **_source_add_guard_result_fields(),
+        }
+
+    def release(**kwargs):
+        calls.append("release")
+        assert kwargs["expected_current_version_id"] == INITIAL_VERSION
+        assert kwargs["expected_guard_generation"] == "1"
+        assert kwargs[
+            "expected_owner_generation_commitment"
+        ] == _restart_owner_generation_commitment()
+        return {"status": "released_paused"}
+
+    def paused(**_kwargs):
+        calls.append("paused_readback")
+        return {
+            "status": "paused",
+            "source_add_control_commitment": SOURCE_ADD_CONTROL_COMMITMENT,
+        }
+
+    monkeypatch.setattr(
+        maintenance, "verify_gateway_miner_maintenance_state", verify_state
+    )
+    monkeypatch.setattr(maintenance, "_release_source_add_restart_guard", release)
+    monkeypatch.setattr(maintenance, "_require_source_add_paused", paused)
+
+    result = maintenance.verify_gateway_miner_maintenance_runtime_state(
+        deploy_commit=CANDIDATE_COMMIT,
+        candidate_tree_hash=TREE_HASH,
+        gateway_release_hash=RELEASE_HASH,
+        runtime_environment={
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
+            "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
+        },
+        runtime_status={
+            "miner_submissions_enabled": False,
+            **_closed_source_add_runtime_status(),
+        },
+        secrets_client=client,
+        release_s3_client=object(),
+    )
+
+    assert calls == ["candidate_state", "release", "paused_readback"]
+    assert result["source_add_restart_guard_status"] == "released_paused"
+
+
+@pytest.mark.parametrize(
+    "source_add_override",
+    [
+        {"intake_enabled": True},
+        {"effective_dispatcher_enabled": True},
+        {"control": {"paused": False, "unavailable": False}},
+        {"control": {"paused": True, "unavailable": True}},
+    ],
+)
+def test_runtime_state_rejects_source_add_that_is_not_exactly_closed(
+    source_add_override: dict[str, object],
+):
+    status = _closed_source_add_runtime_status()
+    source_add = dict(status["source_add"])
+    source_add.update(source_add_override)
+    status["source_add"] = source_add
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance._require_runtime_source_add_closed(status)
+
+
+def test_runtime_source_add_check_accepts_missing_intake_only_for_explicit_legacy_path():
+    status = _closed_source_add_runtime_status()
+    del status["source_add"]["intake_enabled"]
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance._require_runtime_source_add_closed(status)
+
+    maintenance._require_runtime_source_add_closed(
+        status,
+        allow_legacy_missing_intake=True,
+    )
+
+
+def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    status = _closed_source_add_runtime_status()
+    del status["source_add"]["intake_enabled"]
+    monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
+
+    maintenance._require_pre_activation_runtime_source_add_closed()
+
+    bootstrap_names = (
+        maintenance.bootstrap_gateway_miner_maintenance_restart.__code__.co_names
+    )
+    assert "_require_pre_activation_runtime_source_add_closed" in bootstrap_names
+    assert "_require_runtime_source_add_closed" not in bootstrap_names
+
+
+def test_candidate_runtime_rejects_missing_source_add_intake_field(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    status = {
+        "miner_submissions_enabled": False,
+        **_closed_source_add_runtime_status(),
+    }
+    del status["source_add"]["intake_enabled"]
+    state_verification_called = False
+
+    def verify_state(**_kwargs):
+        nonlocal state_verification_called
+        state_verification_called = True
+        return {"status": "durable_false_verified"}
+
+    monkeypatch.setattr(
+        maintenance,
+        "verify_gateway_miner_maintenance_state",
+        verify_state,
+    )
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance.verify_gateway_miner_maintenance_runtime_state(
+            deploy_commit=CANDIDATE_COMMIT,
+            candidate_tree_hash=TREE_HASH,
+            gateway_release_hash=RELEASE_HASH,
+            runtime_environment={
+                "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
+            },
+            runtime_status=status,
+            secrets_client=object(),
+            release_s3_client=object(),
+        )
+
+    assert state_verification_called is False
 
 
 def test_runtime_status_fetch_uses_exact_loopback_path_and_never_follows_redirects(
@@ -1715,6 +3355,46 @@ def test_sealed_invocation_proof_survives_exec_and_rejects_writes(
     or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
     reason="Linux sealed memfd behavior",
 )
+def test_candidate_retry_reconciliation_helper_is_sealed_for_controller_exec():
+    helper = _retry_reconciliation_helper()
+    try:
+        os.close(maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER)
+    except OSError:
+        pass
+    try:
+        maintenance._install_retry_reconciliation_helper_memfd(
+            {"retry_reconciliation_helper": helper}
+        )
+        descriptor = maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        assert os.read(descriptor, 4 * 1024 * 1024) == helper["payload"]
+        required_seals = sum(
+            int(getattr(maintenance.fcntl, name))
+            for name in (
+                "F_SEAL_WRITE",
+                "F_SEAL_GROW",
+                "F_SEAL_SHRINK",
+                "F_SEAL_SEAL",
+            )
+        )
+        assert (
+            int(maintenance.fcntl.fcntl(descriptor, maintenance.fcntl.F_GET_SEALS))
+            & required_seals
+        ) == required_seals
+        with pytest.raises(OSError):
+            os.write(descriptor, b"tamper")
+    finally:
+        try:
+            os.close(maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER)
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "memfd_create")
+    or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
+    reason="Linux sealed memfd behavior",
+)
 def test_closed_or_tampered_proof_fd_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1745,10 +3425,17 @@ def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
         f"/tmp/gateway-miner-maintenance-bootstrap.{os.getpid()}cwd"
     )
     candidate_root = bootstrap_root / "candidate"
+    nested_root = candidate_root / "nested"
     original_cwd = os.open(".", os.O_RDONLY)
     try:
         bootstrap_root.mkdir(mode=0o700)
         candidate_root.mkdir()
+        nested_root.mkdir()
+        payload = nested_root / "payload"
+        payload.write_bytes(b"verified archive payload")
+        payload.chmod(0o400)
+        nested_root.chmod(0o500)
+        candidate_root.chmod(0o500)
         os.chdir(candidate_root)
 
         maintenance._leave_and_close_bootstrap_tree(bootstrap_root)
@@ -1759,6 +3446,12 @@ def test_bootstrap_cleanup_leaves_a_valid_exec_working_directory() -> None:
         os.fchdir(original_cwd)
         os.close(original_cwd)
         if bootstrap_root.exists():
+            for directory, _names, _files in os.walk(
+                bootstrap_root,
+                topdown=False,
+                followlinks=False,
+            ):
+                Path(directory).chmod(0o700)
             maintenance.shutil.rmtree(bootstrap_root)
 
 
@@ -1852,6 +3545,11 @@ def test_candidate_identity_binds_isolated_n_minus_one_plan_and_archive(
         "_verified_installed_controller_bundle",
         lambda **_kwargs: _controller_bundle(),
     )
+    monkeypatch.setattr(
+        maintenance,
+        "_run_git_bytes",
+        lambda *_args: _retry_reconciliation_helper()["payload"],
+    )
 
     evidence = maintenance._validate_candidate_identity(
         repo_root=repo,
@@ -1863,6 +3561,9 @@ def test_candidate_identity_binds_isolated_n_minus_one_plan_and_archive(
     )
 
     assert evidence["tree_hash"] == TREE_HASH
+    assert evidence["retry_reconciliation_helper"]["commitment"].startswith(
+        "sha256:"
+    )
     tampered = json.loads(plan.read_text(encoding="utf-8"))
     tampered["branch_head_sha"] = "f" * 40
     plan.write_text(json.dumps(tampered), encoding="utf-8")
@@ -2387,7 +4088,7 @@ def test_exact_deployed_n_minus_one_preserves_proof_until_candidate_gates():
         "finalize_deployment_record succeeded", runtime_verify
     )
     close_parent = candidate_restart.index(
-        "exec 190>&- 191>&- 192>&- 193>&- 194>&-",
+        "exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-",
         finalize,
     )
     completed = candidate_restart.index("GATEWAY_DEPLOY_COMPLETED=1", close_parent)
@@ -2398,7 +4099,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
     restart = (
         Path(__file__).resolve().parents[1] / "gw_restart.sh"
     ).read_text(encoding="utf-8")
-    close_set = "190>&- 191>&- 192>&- 193>&- 194>&-"
+    close_set = "190>&- 191>&- 192>&- 193>&- 194>&- 195>&-"
     for module_name in (
         "gateway.utils.tee_egress_forwarder",
         "gateway.utils.tee_inter_enclave_relay",
@@ -2406,9 +4107,11 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
     ):
         position = restart.rindex(f"-m {module_name}")
         position = restart.rfind("env -u", 0, position)
-        command = restart[position:position + 700]
+        command_end = restart.index("\n\n", position)
+        command = restart[position:command_end]
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
+        assert "-u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" in command
         assert "-u GATEWAY_GIT_HELPER" in command
         assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command
@@ -2422,6 +4125,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
         command = restart[command_start:position + 300]
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
+        assert "-u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" in command
         assert "-u GATEWAY_GIT_HELPER" in command
         assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command
@@ -2522,3 +4226,34 @@ def test_controller_install_recovers_every_publication_crash_point(
         assert stat.S_IMODE(installed.stat().st_mode) == (
             0o700 if relative_path == "gw_restart.sh" else 0o600
         )
+
+
+def test_candidate_restart_rechecks_guard_immediately_before_first_shutdown_action():
+    restart = (Path(__file__).resolve().parents[1] / "gw_restart.sh").read_text(
+        encoding="utf-8"
+    )
+    long_wait = restart.index("validator_tee.host.docker_operation_guard_v2")
+    handoff = restart.index("wait_for_paired_gateway_destructive_handoff", long_wait)
+    lineage = restart.index("prepare_gateway_active_release_lineage", handoff)
+    boundary = restart.index(
+        'GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"', lineage
+    )
+    boundary_rpc = restart.index("--verify-shutdown-quiescence", boundary)
+    shutdown = restart.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"',
+        boundary_rpc,
+    )
+    first_action = restart.index(
+        "sudo systemctl stop leadpoet-tee-egress-forwarder.service",
+        shutdown,
+    )
+    preflight_cleanup = restart.index(
+        'rm -rf "$GATEWAY_PREFLIGHT_TREE"', first_action
+    )
+
+    assert long_wait < handoff < lineage < boundary < boundary_rpc < shutdown
+    assert shutdown < first_action < preflight_cleanup
+    between_boundary_and_shutdown = restart[boundary_rpc:shutdown]
+    assert "wait_for_" not in between_boundary_and_shutdown
+    assert "prepare_" not in between_boundary_and_shutdown
+    assert 'rm -rf "$GATEWAY_PREFLIGHT_TREE"' not in between_boundary_and_shutdown

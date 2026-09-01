@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -162,7 +163,7 @@ def _authenticated_provider():
     return execute, calls
 
 
-def test_source_add_provenance_uses_three_authenticated_provider_terminals():
+def test_source_add_provenance_uses_complete_authenticated_provider_chain():
     execute, calls = _authenticated_provider()
     context = _context()
     resolver = CoordinatorSourceAddProvenanceV2(
@@ -175,15 +176,17 @@ def test_source_add_provenance_uses_three_authenticated_provider_terminals():
 
     assert result["schema_version"] == SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION
     assert result["precheck_status"] == PRECHECK_PASSED
-    assert len(calls) == 3
+    assert len(calls) == 5
     assert [call["provider_id"] for call in calls] == [
         "scrapingdog",
+        "wayback",
+        "wayback",
         "wayback",
         "scrapingdog",
     ]
     assert all("api_key" not in call["url"] for call in calls)
-    assert len(context.attempts) == 3
-    assert len(context.artifacts) == 7
+    assert len(context.attempts) == 5
+    assert len(context.artifacts) == 11
 
 
 def test_source_add_transport_failure_is_visible_manual_review():
@@ -355,6 +358,83 @@ def test_source_add_archive_uses_measured_wayback_cdx_before_arquivo():
         "https://web.archive.org/cdx/search/cdx?"
     )
     assert "fl=timestamp" in calls[2]["url"]
+
+
+def test_source_add_archive_checks_arquivo_after_fresh_wayback_success():
+    calls = []
+
+    def execute(request):
+        calls.append(dict(request))
+        if request["url"].startswith("https://archive.org/"):
+            body = json.dumps(
+                {
+                    "archived_snapshots": {
+                        "closest": {
+                            "available": True,
+                            "timestamp": datetime.now(timezone.utc).strftime(
+                                "%Y%m%d%H%M%S"
+                            ),
+                        }
+                    }
+                }
+            ).encode()
+            status = 200
+        elif request["url"].startswith("https://web.archive.org/"):
+            body = b"[]"
+            status = 200
+        elif request["url"].startswith("https://arquivo.pt/"):
+            body = json.dumps(
+                {
+                    "urlkey": "com,builtwith,api)/",
+                    "timestamp": "20160525081726",
+                    "status": "200",
+                }
+            ).encode()
+            status = 200
+        elif "/scrape?" in request["url"]:
+            body = (
+                b"<html>endpoint authentication rate limit curl status code</html>"
+            )
+            status = 200
+        else:
+            body = json.dumps(
+                {
+                    "markdown": "VERDICT: CREDIBLE. Example operates the official API.",
+                    "references": [
+                        {"url": "https://example.com/developers"},
+                        {"url": "https://www.g2.com/products/example"},
+                    ],
+                }
+            ).encode()
+            status = 200
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(body).decode(),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": response_hash,
+                "response_hash": response_hash,
+            },
+        }
+
+    context = _context()
+    result = CoordinatorSourceAddProvenanceV2(
+        execute_provider=execute,
+        retry_policy_hash=HASH_A,
+        wayback_retry_policy_hash=HASH_B,
+    ).resolve(payload=_payload(), context=context)
+
+    assert result["precheck_status"] == PRECHECK_PASSED
+    assert result["precheck_doc"]["archive_history"]["provider"] == "arquivo"
+    assert result["precheck_doc"]["archive_history"]["snapshot_year"] == "2016"
+    assert len(calls) == 5
+    assert calls[1]["url"].startswith("https://archive.org/wayback/available?")
+    assert calls[2]["url"].startswith("https://web.archive.org/cdx/search/cdx?")
+    assert calls[3]["url"].startswith("https://arquivo.pt/wayback/cdx?")
 
 
 def test_source_add_archive_fallback_failure_remains_manual_review():
@@ -618,14 +698,26 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         "reason_codes": ["bounded_json_data_response"],
         "probe_summaries": [],
     }
-    root_hash = HASH_A
-    graph = {
-        "root_receipt_hash": root_hash,
+    smoke = {**functional, "evaluation_mode": "provisioning_smoke"}
+    functional_root_hash = HASH_A
+    smoke_root_hash = "sha256:" + "c" * 64
+    functional_graph = {
+        "root_receipt_hash": functional_root_hash,
         "receipts": [
             {
-                "receipt_hash": root_hash,
+                "receipt_hash": functional_root_hash,
                 "purpose": "research_lab.source_add_functional_probe.v2",
                 "output_root": sha256_json(functional),
+            }
+        ],
+    }
+    smoke_graph = {
+        "root_receipt_hash": smoke_root_hash,
+        "receipts": [
+            {
+                "receipt_hash": smoke_root_hash,
+                "purpose": "research_lab.source_add_functional_probe.v2",
+                "output_root": sha256_json(smoke),
             }
         ],
     }
@@ -633,8 +725,10 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         job_id="reward-job",
         purpose="research_lab.reward_decision.v2",
         epoch_id=10,
-        parent_receipt_hashes=(root_hash,),
-        external_receipt_graphs=[graph],
+        parent_receipt_hashes=tuple(
+            sorted((functional_root_hash, smoke_root_hash))
+        ),
+        external_receipt_graphs=[functional_graph, smoke_graph],
     )
     payload = {
         "decision_kind": "source_add_leg1",
@@ -646,9 +740,12 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "alpha_percent": 1.0,
             "reward_epochs": 20,
             "functional_probe_result": functional,
+            "provisioning_smoke_result": smoke,
             "trigger_evidence": {
                 "functional_probe_passed": True,
                 "functional_probe_result_hash": sha256_json(functional),
+                "provisioning_smoke_passed": True,
+                "provisioning_smoke_result_hash": sha256_json(smoke),
             },
         },
     }
@@ -663,7 +760,7 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
     )
     assert outcome.output["reward"]["leg"] == 1
 
-    context.external_receipt_graphs[0]["receipts"][0]["output_root"] = HASH_B
+    context.external_receipt_graphs[1]["receipts"][0]["output_root"] = HASH_B
     with pytest.raises(ValueError, match="parent output"):
         await executor(OP_RESEARCH_LAB_REWARD_DECISION, payload, context)
 

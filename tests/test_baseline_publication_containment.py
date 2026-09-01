@@ -593,6 +593,7 @@ async def test_incomplete_bundle_event_enters_publication_recovery(monkeypatch):
     worker.proxy_ref_hash = None
     worker._baseline_already_logged_date = None
     worker._baseline_publication_verified_keys = set()
+    worker._active_official_baseline_evidence_proxy = None
     captured = []
 
     async def resolve_epoch():

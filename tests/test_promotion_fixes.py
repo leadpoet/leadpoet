@@ -2498,6 +2498,74 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
 
 
 @pytest.mark.parametrize(
+    ("preflight_error", "expected_status", "expected_retryable"),
+    [
+        (
+            promotion.CodeEditInfraFailureError(
+                "shared Docker lifecycle access timed out"
+            ),
+            "model_compatibility_infrastructure_unavailable",
+            True,
+        ),
+        (
+            RuntimeError("measured model compatibility differs"),
+            "model_compatibility_quarantined",
+            None,
+        ),
+    ],
+)
+async def test_repo_head_sync_distinguishes_retryable_preflight_infrastructure(
+    store,
+    monkeypatch,
+    preflight_error,
+    expected_status,
+    expected_retryable,
+):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda **_kwargs: current_artifact.git_commit_sha,
+    )
+
+    async def _manifest(*_args: Any, **_kwargs: Any):
+        return current_artifact, {"status": "manifest_ready"}
+
+    async def _failed_preflight(*_args: Any, **_kwargs: Any):
+        raise preflight_error
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _manifest)
+    monkeypatch.setattr(
+        promotion,
+        "_preflight_private_model_activation",
+        _failed_preflight,
+    )
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@example.invalid/private.git",
+            private_repo_branch=DEFAULT_PRIVATE_REPO_BRANCH,
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == expected_status
+    assert result["benchmark_blocked_reason"] == expected_status
+    assert result.get("retryable") is expected_retryable
+    if expected_retryable:
+        assert result["current_json_git_sha"] == current_artifact.git_commit_sha
+    else:
+        assert "current_json_git_sha" not in result
+    assert store.version_event_writes == []
+    assert store.version_writes == []
+
+
+@pytest.mark.parametrize(
     ("commit_status", "has_commit_sha", "event_doc"),
     [
         ("pushed", True, {}),
@@ -4258,6 +4326,25 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
         "evaluation_epoch": 200,
         "aggregates": {"per_icp_results": []},
     }
+
+
+@pytest.mark.asyncio
+async def test_source_add_leg2_zero_alpha_disables_before_attribution(store):
+    config = _source_add_reward_config()
+    config.source_add_leg2_alpha_percent = 0.0
+    controller = ResearchLabPromotionController(config, worker_ref="test-worker")
+
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate-leg1-only"},
+        score_bundle_row={"score_bundle_id": "score-leg1-only"},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created"},
+    )
+
+    assert result == {"source_add_reward_status": "disabled"}
+    assert store.reward_obligation_writes == []
 
 
 def _install_source_add_v2_judge(

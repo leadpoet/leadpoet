@@ -442,6 +442,15 @@ def snapshot_readiness(
             "model_config_hash": str(
                 provenance.get("model_config_hash") or ""
             ),
+            "compatibility_admission_mode": str(
+                provenance.get("compatibility_admission_mode") or ""
+            ),
+            "compatibility_policy_hash": str(
+                provenance.get("compatibility_policy_hash") or ""
+            ),
+            "compatibility_admission_hash": str(
+                provenance.get("compatibility_admission_hash") or ""
+            ),
             "provider_model_ids": provider_ids,
         }
     except Exception as exc:
@@ -1321,7 +1330,9 @@ class AttestedReplayDevEvaluatorV2:
                 generated_doc = dict(generated)
                 generated_hash = sha256_json(generated_doc)
                 if generated_hash != current_hash:
-                    authority_graph = authorities[-1].get("receipt_graph")
+                    authority_graph = authorities[-1].get(
+                        "execution_receipt_graph"
+                    )
                     if not isinstance(authority_graph, Mapping):
                         raise DevEvalRunnerError(
                             "hybrid discovery tape graph is missing"

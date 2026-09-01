@@ -322,6 +322,96 @@ def test_audit_reports_exact_partition_without_mutation(tmp_path: Path) -> None:
     assert (fixture.root / "overlay2" / fixture.stale_cache).is_dir()
 
 
+def test_accepts_a_completely_uninitialized_empty_overlay_layout(
+    tmp_path: Path,
+) -> None:
+    docker_root = tmp_path / "docker"
+    docker_root.mkdir()
+
+    def empty_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        argv = list(command)
+        if argv == ["docker", "info", "--format", "{{.DockerRootDir}}"]:
+            return subprocess.CompletedProcess(argv, 0, str(docker_root) + "\n", "")
+        if argv in (
+            ["docker", "images", "-aq", "--no-trunc"],
+            ["docker", "ps", "-aq", "--no-trunc"],
+        ):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv == ["docker", "system", "df", "--format", "{{json .}}"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {"Type": "Build Cache", "TotalCount": "0", "Active": "0"}
+                )
+                + "\n",
+                "",
+            )
+        if argv == ["findmnt", "-rn", "-t", "overlay", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv == ["findmnt", "-rn", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected command: {argv}")
+
+    audit = audit_stale_docker_overlay_state_v2(
+        runner=empty_runner,
+        expected_root=docker_root,
+    )
+    result = reclaim_stale_docker_overlay_mounts_v2(
+        runner=empty_runner,
+        expected_root=docker_root,
+    )
+
+    assert all(
+        audit[field] == 0
+        for field in (
+            "active_container_count",
+            "active_image_count",
+            "active_layer_count",
+            "active_mount_count",
+            "active_overlay_dir_count",
+            "mounted_overlay_count",
+            "stale_layer_record_count",
+            "stale_mount_record_count",
+            "stale_overlay_dir_count",
+            "stale_overlay_link_count",
+        )
+    )
+    assert result.active_container_count == 0
+    assert result.active_image_count == 0
+    assert result.reclaimed_layer_record_count == 0
+    assert not (docker_root / "overlay2").exists()
+
+
+def test_refuses_partially_initialized_overlay_metadata(tmp_path: Path) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+    shutil.rmtree(fixture.root / "image/overlay2/layerdb/sha256")
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="overlay metadata roots are only partially initialized",
+    ):
+        audit_stale_docker_overlay_state_v2(
+            runner=fixture,
+            expected_root=fixture.root,
+        )
+
+
+def test_refuses_absent_overlay_metadata_with_active_objects(tmp_path: Path) -> None:
+    fixture = _DockerFixture(tmp_path / "docker")
+    shutil.rmtree(fixture.root / "image/overlay2/layerdb")
+    shutil.rmtree(fixture.root / "overlay2")
+
+    with pytest.raises(
+        DockerStaleMountReclaimerV2Error,
+        match="overlay metadata is absent while active objects remain",
+    ):
+        audit_stale_docker_overlay_state_v2(
+            runner=fixture,
+            expected_root=fixture.root,
+        )
+
+
 def test_accepts_findmnt_no_overlay_match_status(tmp_path: Path) -> None:
     fixture = _DockerFixture(tmp_path / "docker")
     fixture.mounted.clear()

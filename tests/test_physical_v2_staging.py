@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 from botocore.exceptions import ClientError
 
 from scripts import setup_production_parity_staging as parity_setup
@@ -953,6 +954,17 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert 'get("acceptance_corpus", {}).get("copied_exact") is not True' in source
     assert 'get("acceptance_corpus", {}).get("candidate_sha")' in source
     assert 'get("acceptance_corpus", {}).get("fixture_count", 0) <= 0' in source
+    transfer = source.index(
+        "python3 scripts/production_parity_acceptance_transfer.py"
+    )
+    execute = source.index(
+        '"$host_python" scripts/run_production_parity_full_host.py'
+    )
+    assert transfer < execute
+    assert "/home/ec2-user/.config/leadpoet/v2" in source
+    assert "acceptance-corpus-v2-binding.json" in source
+    assert '"validated_exact"' in source
+    assert '"run-scoped-object-lock"' in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
 
@@ -961,34 +973,33 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
     source = (
         ROOT / ".github/workflows/physical-v2-staging.yml"
     ).read_text(encoding="utf-8")
-    initialize = source.index('git init "$candidate_repo"')
+    initialize = source.index('candidate_git -C "$candidate_repo" init')
     bundle_fetch = source.index(
-        'git -C "$candidate_repo" fetch --no-tags'
+        'candidate_git -C "$candidate_repo" fetch --no-tags'
     )
     exact_fetch = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse FETCH_HEAD)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse FETCH_HEAD)" ='
     )
     checkout = source.index(
-        'git -C "$candidate_repo" checkout --detach'
+        'candidate_git -C "$candidate_repo" checkout --detach'
     )
     exact_checkout = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse HEAD)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse HEAD)" ='
     )
     canonical_origin = source.index(
-        'git -C "$candidate_repo" remote add origin'
+        'candidate_git -C "$candidate_repo" remote add origin'
     )
     exact_origin = source.index(
-        'test "$(git -C "$candidate_repo" remote get-url origin)" ='
+        'test "$(candidate_git -C "$candidate_repo" remote get-url origin)" ='
     )
     fetch = source.index(
-        'git -C "$candidate_repo" fetch --no-tags origin'
+        'candidate_git -C "$candidate_repo" fetch --no-tags origin'
     )
     exact_main = source.index(
-        'test "$(git -C "$candidate_repo" rev-parse origin/main)" ='
+        'test "$(candidate_git -C "$candidate_repo" rev-parse origin/main)" ='
     )
     runner = source.index(
-        "/home/ec2-user/venv311/bin/python3 "
-        "scripts/run_production_parity_full_host.py"
+        '"$host_python" scripts/run_production_parity_full_host.py'
     )
 
     assert (
@@ -1003,6 +1014,49 @@ def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
         < exact_main
         < runner
     )
+    assert '"$candidate_git_bin" -c init.templateDir=' in source
+    assert "/usr/bin/env -i" in source
+    assert "sudo -n /usr/bin/dnf -q -y install git-core" in source
+    assert "scripts/resolve_production_parity_controller_requirements.py" in source
+    assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in source
+    assert 'host_python="$host_venv/bin/python3"' in source
+    assert 'test ! -e "$host_venv"' in source
+    assert (
+        'sudo -n /usr/bin/dnf -q -y install \\\n'
+        '            python3.11-pip >/dev/null 2>&1'
+        in source
+    )
+    assert (
+        '/usr/bin/python3.11 -I -m venv "$host_venv"'
+        in source
+    )
+    container_runtime_package = source.index(
+        "host_bootstrap_step=container-runtime-package"
+    )
+    container_runtime_identity = source.index(
+        "host_bootstrap_step=container-runtime-identity"
+    )
+    container_runtime_service = source.index(
+        "host_bootstrap_step=container-runtime-service"
+    )
+    venv_absence = source.index("host_bootstrap_step=venv-absence")
+    python_runtime_package = source.index("host_bootstrap_step=runtime-package")
+    venv_create = source.index("host_bootstrap_step=venv-create")
+    assert (
+        container_runtime_package
+        < container_runtime_identity
+        < container_runtime_service
+        < venv_absence
+        < python_runtime_package
+        < venv_create
+    )
+    assert "if [ ! -x /usr/bin/docker ]; then" in source
+    assert "sudo -n /usr/bin/dnf -q -y install docker" in source
+    assert "/usr/bin/rpm -qf /usr/bin/docker" in source
+    assert "sudo -n /usr/bin/systemctl start docker.service" in source
+    assert "sudo -n /usr/bin/docker info" in source
+    assert "python3.11-pip-wheel" not in source
+    assert "GIT_CONFIG_NOSYSTEM=1" in source
     assert "git clone" not in source
 
 
@@ -1011,19 +1065,78 @@ def test_parity_workflows_reject_non_main_code_before_aws_credentials():
         ".github/workflows/production-parity-fast.yml",
         ".github/workflows/physical-v2-staging.yml",
     ):
-        source = (ROOT / relative_path).read_text(encoding="utf-8")
-        main_gate = source.index(
-            "name: Require exact current main candidate before credentials"
+        workflow = yaml.safe_load(
+            (ROOT / relative_path).read_text(encoding="utf-8")
         )
-        local_action = source.index(
-            "uses: ./.github/actions/setup-production-parity-controller"
+        steps = workflow["jobs"]["validate"]["steps"]
+        main_gate = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name")
+            == "Require exact current main candidate before credentials"
         )
-        aws_credentials = source.index(
-            "uses: aws-actions/configure-aws-credentials@v4"
+        local_action = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses")
+            == "./.github/actions/setup-production-parity-controller"
+        )
+        aws_credentials = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("uses") == "aws-actions/configure-aws-credentials@v4"
         )
 
-        assert 'git rev-parse origin/main' in source
+        assert "git rev-parse origin/main" in steps[main_gate]["run"]
         assert main_gate < local_action < aws_credentials
+
+
+def test_full_manual_attestation_lookup_has_no_runner_cli_dependency():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/physical-v2-staging.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    gate = next(
+        step
+        for step in workflow["jobs"]["validate"]["steps"]
+        if step.get("name")
+        == "Require exact current main candidate before credentials"
+    )["run"]
+
+    assert "gh run list" not in gate
+    assert "https://api.github.com/repos/" in gate
+    assert 'os.environ.get("GH_TOKEN", "")' in gate
+    assert "request.urlopen(api_request, timeout=30)" in gate
+    assert 'run.get("head_sha") == candidate_sha' in gate
+    assert 'run.get("head_branch") == "main"' in gate
+    assert 'run.get("conclusion") == "success"' in gate
+
+
+def test_full_bootstrap_diagnostic_exposes_only_a_bounded_substage():
+    source = (
+        ROOT / ".github/workflows/physical-v2-staging.yml"
+    ).read_text(encoding="utf-8")
+    allowed = {
+        "container-runtime-package",
+        "container-runtime-identity",
+        "container-runtime-service",
+        "venv-absence",
+        "runtime-package",
+        "venv-create",
+        "venv-identity",
+        "python-version",
+        "requirements-resolve",
+        "pip-bootstrap",
+        "pip-install",
+        "pip-check",
+    }
+
+    assert "LEADPOET_BOOTSTRAP_STEP=%s" in source
+    assert "Report bounded bootstrap substage" in source
+    assert "exact[0] if len(exact) == 1 else \"unavailable\"" in source
+    assert all(marker in source for marker in allowed)
+    assert "print(combined)" not in source
 
 
 def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
@@ -1052,7 +1165,13 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
 
 def test_full_miner_intake_keeps_public_source_credentials_forbidden():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
+    assert '"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"' in source
     assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
+    assert "closed_recipient_response.status_code != 403" in source
+    assert '"global_miner_submissions_enabled": False' in source
+    assert '"autoresearch_paused": True' in source
+    assert '"scoring_paused": True' in source
+    assert '"source_add_paused": False' in source
     assert 'retired_response.status_code != 410' in source
     assert 'forbidden_response.status_code != 422' in source
     assert '"credential_transport": "operator-managed-production-contract"' in source

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from gateway.research_lab.routing_experiment_runtime import (
     ReviewedProviderBrokerRoutingRunner,
@@ -1257,7 +1257,12 @@ class ExactModelExperimentCoordinator:
         execution_mode: str,
         target_count: int,
         evaluated_on: str,
+        progress_callback: Callable[[], None] | None = None,
     ) -> ExactModelUnitResult:
+        if progress_callback is not None and not callable(progress_callback):
+            raise CommonModelExperimentError(
+                "Model progress callback is invalid"
+            )
         pinned_generation_sha256 = (
             self._transitions.resolve_run_protocol_generation(
                 experiment_hash=self._experiment_hash,
@@ -1530,6 +1535,8 @@ class ExactModelExperimentCoordinator:
             )
             state = protocol.validate_result(state, start_request=start)
             action_count += 1
+            if progress_callback is not None:
+                progress_callback()
         if state.get("status") != "completed":
             raise CommonModelExperimentError("Model terminal state is invalid")
         return ExactModelUnitResult(

@@ -205,6 +205,8 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert config.source_add_dispatcher_enabled is True
     assert config.source_add_functional_probes_enabled is True
     assert config.source_add_functional_rewards_enabled is True
+    assert config.source_add_leg1_alpha_percent == 1.0
+    assert config.source_add_leg2_alpha_percent == 0.0
     assert config.source_add_max_per_day_per_hotkey == 5
     assert not hasattr(config, "source_add_leg2_expiry_months")
     assert not hasattr(config, "source_add_ablation_required")
@@ -216,6 +218,9 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert status["source_add"]["dispatcher_enabled"] is True
     assert status["source_add"]["functional_probes_enabled"] is True
     assert status["source_add"]["functional_rewards_enabled"] is True
+    assert status["source_add"]["leg1_alpha_percent"] == 1.0
+    assert status["source_add"]["leg2_alpha_percent"] == 0.0
+    assert status["source_add"]["reward_epochs"] == 20
     assert status["source_add"]["max_per_day_per_hotkey"] == 5
 
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_ENABLED", "false")
@@ -223,6 +228,7 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "false")
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "false")
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_REWARDS_ENABLED", "false")
+    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", "0")
     config = ResearchLabGatewayConfig.from_env()
     status = config.public_status()
     assert config.source_add_enabled is False
@@ -230,12 +236,14 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert config.source_add_dispatcher_enabled is False
     assert config.source_add_functional_probes_enabled is False
     assert config.source_add_functional_rewards_enabled is False
+    assert config.source_add_leg2_alpha_percent == 0.0
     assert status["source_add_enabled"] is False
     assert status["source_add"]["enabled"] is False
     assert status["source_add"]["rewards_enabled"] is False
     assert status["source_add"]["dispatcher_enabled"] is False
     assert status["source_add"]["functional_probes_enabled"] is False
     assert status["source_add"]["functional_rewards_enabled"] is False
+    assert status["source_add"]["leg2_alpha_percent"] == 0.0
 
 
 def test_source_add_work_lease_covers_three_probe_deadline(clean_env):

@@ -253,8 +253,15 @@ def fetch_release_lineage_v2(
     prefix: str = DEFAULT_PREFIX,
     s3_client: Any = None,
     allowed_commits: Optional[Sequence[str]] = None,
+    required_commits: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """Fetch and validate every immutable V2 channel under the release prefix."""
+    """Fetch and validate the selected immutable V2 release channels.
+
+    An explicit ``required_commits`` set is the bounded production path. It
+    reads exactly those content-addressed channel objects and does not enumerate
+    the lifetime release catalog. The prefix scan remains for legacy callers
+    that do not yet provide an explicit requirement set.
+    """
 
     if s3_client is None:
         import boto3
@@ -263,6 +270,68 @@ def fetch_release_lineage_v2(
     normalized_prefix = str(prefix or "").strip("/")
     if not normalized_prefix or ".." in normalized_prefix.split("/"):
         raise ReleaseChannelV2Error("release channel prefix is invalid")
+    if required_commits is not None:
+        if isinstance(required_commits, (str, bytes)):
+            raise ReleaseChannelV2Error(
+                "required release lineage commits are invalid"
+            )
+        required = tuple(required_commits)
+        if not required or len(required) > MAX_LINEAGE_RELEASES:
+            raise ReleaseChannelV2Error(
+                "required release lineage size is invalid"
+            )
+        if any(
+            not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit)
+            for commit in required
+        ):
+            raise ReleaseChannelV2Error(
+                "required release lineage commits are invalid"
+            )
+        if len(required) != len(set(required)):
+            raise ReleaseChannelV2Error(
+                "required release lineage commit is duplicated"
+            )
+        current = str(current_commit or "").lower()
+        if not _COMMIT_RE.fullmatch(current) or current not in required:
+            raise ReleaseChannelV2Error(
+                "current release is absent from required release lineage"
+            )
+        if (
+            allowed_commits is None
+            or isinstance(allowed_commits, (str, bytes))
+        ):
+            raise ReleaseChannelV2Error(
+                "required release lineage Git ancestry is unavailable"
+            )
+        allowed_values = tuple(allowed_commits)
+        allowed = {str(commit or "").lower() for commit in allowed_values}
+        if (
+            not allowed_values
+            or not allowed
+            or any(
+                not isinstance(commit, str)
+                or commit != commit.lower()
+                or not _COMMIT_RE.fullmatch(commit)
+                for commit in allowed_values
+            )
+            or any(commit not in allowed for commit in required)
+        ):
+            raise ReleaseChannelV2Error(
+                "required release lineage Git ancestry is invalid"
+            )
+        channels = [
+            fetch_release_channel_v2(
+                bucket=bucket,
+                commit_sha=commit,
+                prefix=normalized_prefix,
+                s3_client=s3_client,
+            )
+            for commit in sorted(required)
+        ]
+        return build_release_lineage_v2(
+            channels,
+            current_commit=current,
+        )
     key_pattern = re.compile(
         rf"^{re.escape(normalized_prefix)}/([0-9a-f]{{40}})/"
         r"release-channel-v2\.json$"
@@ -418,6 +487,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--lineage-output", type=Path)
     parser.add_argument("--lineage-repository", type=Path)
     parser.add_argument("--lineage-authority-commit")
+    parser.add_argument("--lineage-required-commit", action="append")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
@@ -491,6 +561,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 current_commit=commit,
                 prefix=args.prefix,
                 allowed_commits=allowed_commits,
+                required_commits=args.lineage_required_commit,
             )
             _atomic_json(args.lineage_output, lineage)
             result = {

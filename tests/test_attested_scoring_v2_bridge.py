@@ -772,7 +772,7 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
 
 
 @pytest.mark.asyncio
-async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
+async def test_model_compatibility_reboot_reuses_durable_authority(
     monkeypatch,
 ):
     release = _release()
@@ -876,9 +876,13 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     )
     durable_proof = dict(first["ancestry_compact_proof"])
     original_clock = client.manager._clock
+    client = _Client(
+        release,
+        executor=execute_compatibility,
+    )
     with client.manager._lock:
-        client.manager._jobs.clear()
         client.manager._clock = lambda: original_clock() + 10.0
+    common["client"] = client
 
     second = await execute_scoring_v2(**common)
 
@@ -896,6 +900,12 @@ async def test_model_compatibility_process_cache_loss_reuses_durable_authority(
     )
     assert observed_current_receipts[0]["enclave_signature"] != (
         observed_current_receipts[1]["enclave_signature"]
+    )
+    assert observed_current_receipts[0]["boot_identity_hash"] != (
+        observed_current_receipts[1]["boot_identity_hash"]
+    )
+    assert observed_current_receipts[0]["enclave_pubkey"] != (
+        observed_current_receipts[1]["enclave_pubkey"]
     )
     assert len(persisted_graphs) == 1
     assert second["replay_status"] == "durable_model_compatibility_exact"
@@ -2792,6 +2802,292 @@ def _authenticated_attempt(context):
         failure_code=None,
         completed_at="2026-07-10T00:00:01Z",
     )
+
+
+def _attested_local_attempt(context):
+    authority_hash = _hash("a")
+    return build_transport_attempt(
+        request_id="b" * 32,
+        logical_operation_id="provider-snapshot-replay",
+        job_id=context.job_id,
+        purpose=context.purpose,
+        provider_id="snapshot_replay",
+        attempt_number=0,
+        method="POST",
+        destination_host="snapshot.example",
+        destination_port=443,
+        path_hash=_hash("1"),
+        nonsecret_headers_hash=_hash("2"),
+        body_hash=_hash("3"),
+        credential_ref_hash=sha256_json(
+            {
+                "schema_version": "leadpoet.attested-local-authority.v1",
+                "authority_sha256": authority_hash,
+            }
+        ),
+        retry_policy_hash=_hash("5"),
+        timeout_ms=30000,
+        started_at="2026-07-10T00:00:00Z",
+        terminal_status="attested_local_response",
+        http_status=200,
+        response_hash=_hash("6"),
+        request_artifact_hash=_hash("8"),
+        response_artifact_hash=_hash("6"),
+        tls_peer_chain_hash=None,
+        tls_protocol=None,
+        failure_code=None,
+        completed_at="2026-07-10T00:00:01Z",
+    )
+
+
+def _attested_local_failure_attempt(context, *, credential_ref_hash=None):
+    authority_hash = _hash("a")
+    return build_transport_attempt(
+        request_id="e" * 32,
+        logical_operation_id="provider-snapshot-replay-failure",
+        job_id=context.job_id,
+        purpose=context.purpose,
+        provider_id="snapshot_replay",
+        attempt_number=0,
+        method="POST",
+        destination_host="snapshot.example",
+        destination_port=443,
+        path_hash=_hash("1"),
+        nonsecret_headers_hash=_hash("2"),
+        body_hash=_hash("3"),
+        credential_ref_hash=(
+            credential_ref_hash
+            or sha256_json(
+                {
+                    "schema_version": "leadpoet.attested-local-authority.v1",
+                    "authority_sha256": authority_hash,
+                }
+            )
+        ),
+        retry_policy_hash=_hash("5"),
+        timeout_ms=30000,
+        started_at="2026-07-10T00:00:00Z",
+        terminal_status="transport_failure",
+        http_status=None,
+        response_hash=None,
+        request_artifact_hash=_hash("8"),
+        response_artifact_hash=None,
+        tls_peer_chain_hash=None,
+        tls_protocol=None,
+        failure_code="unexpected_eof",
+        completed_at="2026-07-10T00:00:01Z",
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_accepts_authority_bound_local_replay_without_envelopes():
+    release = _release()
+    listed_scopes = []
+    persisted = []
+
+    def executor(operation, payload, context):
+        attempt = _attested_local_attempt(context)
+        context.record_transport(attempt)
+        for digest in (_hash("a"), _hash("8"), _hash("6")):
+            context.record_artifact(digest)
+        return {"operation": operation, "echo": payload}
+
+    def load_profile(
+        profile, *, execution_role, worker_index, require_egress_proxy
+    ):
+        assert (profile, execution_role, worker_index, require_egress_proxy) == (
+            "default",
+            "gateway_scoring",
+            0,
+            False,
+        )
+        return {"profile": profile, "credential_ref_hashes": {}, "envelopes": []}
+
+    class EmptyArtifactCoordinator:
+        async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
+            listed_scopes.append((job_id, purpose))
+            return {"artifacts": []}
+
+    async def persist(graph, **_kwargs):
+        persisted.append(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def unexpected_artifact_upload(*_args, **_kwargs):
+        pytest.fail("authority-bound replay must not require duplicate envelopes")
+
+    result = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"scores": [1.0]},
+        worker_index=0,
+        provider_profile_loader=load_profile,
+        release_manifest=release,
+        client=_Client(release, executor=executor),
+        artifact_coordinator_client=EmptyArtifactCoordinator(),
+        persist_artifact=unexpected_artifact_upload,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["receipt_graph"]["transport_attempts"][0][
+        "terminal_status"
+    ] == "attested_local_response"
+    assert set(result["artifact_hashes"]) == {_hash("a"), _hash("8"), _hash("6")}
+    assert listed_scopes == [
+        (result["execution_receipt"]["job_id"], "research_lab.benchmark.v2")
+    ]
+    assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_accepts_authority_bound_local_failure_without_envelopes():
+    release = _release()
+    listed_scopes = []
+    persisted = []
+
+    def executor(operation, payload, context):
+        context.record_transport(_attested_local_failure_attempt(context))
+        for digest in (_hash("a"), _hash("8")):
+            context.record_artifact(digest)
+        return {"operation": operation, "echo": payload}
+
+    class EmptyArtifactCoordinator:
+        async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
+            listed_scopes.append((job_id, purpose))
+            return {"artifacts": []}
+
+    async def persist(graph, **_kwargs):
+        persisted.append(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def unexpected_artifact_upload(*_args, **_kwargs):
+        pytest.fail("authority-bound replay failure has no encrypted envelope")
+
+    result = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"scores": [1.0]},
+        worker_index=0,
+        provider_profile_loader=lambda *_args, **_kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        release_manifest=release,
+        client=_Client(release, executor=executor),
+        artifact_coordinator_client=EmptyArtifactCoordinator(),
+        persist_artifact=unexpected_artifact_upload,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["transport_attempts"][0]["terminal_status"] == "transport_failure"
+    assert result["transport_attempts"][0]["failure_code"] == "unexpected_eof"
+    assert set(result["artifact_hashes"]) == {_hash("a"), _hash("8")}
+    assert listed_scopes == [
+        (result["execution_receipt"]["job_id"], "research_lab.benchmark.v2")
+    ]
+    assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+def test_v2_bridge_keeps_live_transport_failure_in_encrypted_set():
+    attempt = _attested_local_failure_attempt(
+        type(
+            "Context",
+            (),
+            {
+                "job_id": "job-live-transport-failure",
+                "purpose": "research_lab.benchmark.v2",
+            },
+        )(),
+        credential_ref_hash=_hash("4"),
+    )
+
+    assert attested_scoring_v2._encrypted_transport_attempts_v2(
+        [attempt],
+        committed_artifact_hashes=(_hash("a"), _hash("8")),
+    ) == (attempt,)
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_preserves_failed_local_replay_without_envelopes(
+    monkeypatch,
+):
+    release = _release()
+    persisted = []
+
+    def executor(_operation, _payload, context):
+        context.record_transport(_attested_local_attempt(context))
+        for digest in (_hash("a"), _hash("8"), _hash("6")):
+            context.record_artifact(digest)
+        raise ValueError("measured replay scoring failure")
+
+    def load_profile(
+        profile, *, execution_role, worker_index, require_egress_proxy
+    ):
+        assert (profile, execution_role, worker_index, require_egress_proxy) == (
+            "default",
+            "gateway_scoring",
+            0,
+            False,
+        )
+        return {"profile": profile, "credential_ref_hashes": {}, "envelopes": []}
+
+    class EmptyArtifactCoordinator:
+        async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
+            assert job_id
+            assert purpose == "research_lab.benchmark.v2"
+            return {"artifacts": []}
+
+    async def persist(graph, *, allowed_failed_receipt_hashes=()):
+        assert set(allowed_failed_receipt_hashes) == {
+            graph["root_receipt_hash"]
+        }
+        persisted.append(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def unexpected_artifact_persistence(**_kwargs):
+        pytest.fail("authority-bound replay must persist its failed graph directly")
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_artifacts_v2."
+        "persist_execution_transport_artifacts_v2",
+        unexpected_artifact_persistence,
+    )
+
+    with pytest.raises(AttestedScoringV2Error, match="failed closed") as captured:
+        await execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0]},
+            worker_index=0,
+            provider_profile_loader=load_profile,
+            release_manifest=release,
+            client=_Client(release, executor=executor),
+            artifact_coordinator_client=EmptyArtifactCoordinator(),
+            persist_graph=persist,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    authority = captured.value.authority
+    assert authority is not None
+    assert authority["execution_receipt"]["status"] == "failed"
+    assert authority["receipt_graph"]["transport_attempts"][0][
+        "terminal_status"
+    ] == "attested_local_response"
+    assert set(authority["artifact_hashes"]) == {_hash("a"), _hash("8"), _hash("6")}
+    assert persisted == [authority["receipt_graph"]]
 
 
 def _storage_attempts_for_job(artifact_id, job_id):

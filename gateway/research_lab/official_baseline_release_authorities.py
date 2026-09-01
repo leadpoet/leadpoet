@@ -43,6 +43,9 @@ from gateway.research_lab.official_baseline_model_runner import (
 from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
 )
+from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+)
 from research_lab.canonical import sha256_json
 from research_lab.common_model_runner_host import HostActionResult
 from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
@@ -87,6 +90,12 @@ _HASH_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _BARE_HASH_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SAFE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,191}")
+_SOURCE_ADD_PROVIDER_ID_RE = re.compile(r"[a-z][a-z0-9_-]{1,79}")
+_SOURCE_ADD_QUERY_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+_SOURCE_ADD_SECRET_KEY_RE = re.compile(
+    r"(?:api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)",
+    re.IGNORECASE,
+)
 _PROVIDER_ACTION_TYPES = frozenset(
     {
         "normalize_icp",
@@ -118,6 +127,9 @@ _ARTIFACT_CREDENTIAL_BINDING_BY_PROVIDER = {
 }
 _HTTP_METHODS = frozenset({"GET", "POST"})
 _MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
+_PROXY_REQUEST_TIMEOUT_MS_HEADER = "X-Research-Lab-Request-Timeout-Ms"
+_PROXY_REQUEST_PENDING_EVIDENCE = "request_pending"
+_PROXY_RESPONSE_RESERVE_SECONDS = 5.0
 _DEEPLINE_TERMINAL_STATUSES = frozenset(
     {"completed", "failed", "cancelled"}
 )
@@ -383,6 +395,12 @@ def _canonical_bytes(value: Any) -> bytes:
         ) from exc
 
 
+def _artifact_wire_sha256(value: Any) -> str:
+    """Hash one model-owned wire document with the signed artifact contract."""
+
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
 def _load_json_object(value: bytes) -> Mapping[str, Any]:
     def _closed_pairs(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
         output: dict[str, Any] = {}
@@ -520,12 +538,12 @@ def _catalog_bindings(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
             catalog.get("binding_contracts_sha256"),
             "official baseline binding catalog hash",
         )
-        != sha256_json(normalized).removeprefix("sha256:")
+        != _artifact_wire_sha256(normalized)
         or _bare_hash(
             catalog.get("catalog_sha256"),
             "official baseline catalog identity",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 "schema_version": OFFICIAL_BINDING_CATALOG_SCHEMA_VERSION,
                 "bindings": normalized,
@@ -552,12 +570,12 @@ def _validate_inventory_catalog(
             inventory.get("entries_sha256"),
             "official baseline compiler entries hash",
         )
-        != sha256_json(entries).removeprefix("sha256:")
+        != _artifact_wire_sha256(entries)
         or _bare_hash(
             inventory.get("inventory_sha256"),
             "official baseline compiler inventory hash",
         )
-        != sha256_json(
+        != _artifact_wire_sha256(
             {
                 key: item
                 for key, item in inventory.items()
@@ -622,6 +640,71 @@ def _reviewed_provider_transport_available(provider: Any) -> bool:
     )
 
 
+def _source_add_registry_transport_available(
+    entry: Mapping[str, Any],
+    ready_provider_ids: frozenset[str],
+) -> bool:
+    provider_id = str(entry.get("provider") or "")
+    return bool(
+        entry.get("action_type") == "execute_intent_tool"
+        and entry.get("tool_id") == f"intent.source_add.{provider_id}"
+        and entry.get("compiler_id")
+        == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        and _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider_id)
+        and provider_id in ready_provider_ids
+    )
+
+
+def _source_add_registry_credential_binding(provider_id: str) -> dict[str, Any]:
+    return {
+        "location": "source_add_registry",
+        "name": provider_id,
+        "scheme": "v2_envelope",
+        "source": "source_add_registry",
+        "persist": False,
+    }
+
+
+def _source_add_registry_request_valid(
+    request: Mapping[str, Any],
+    *,
+    provider_id: str,
+) -> bool:
+    path = str(request.get("path") or "")
+    query = request.get("query")
+    headers = request.get("static_headers")
+    credential = request.get("credential_binding")
+    return bool(
+        set(request)
+        == {
+            "method",
+            "path",
+            "static_headers",
+            "query",
+            "credential_binding",
+        }
+        and request.get("method") == "GET"
+        and path.startswith("/")
+        and path != "/"
+        and all(item not in path for item in ("?", "#", "\\", "//"))
+        and all(segment not in {"", ".", ".."} for segment in path.split("/")[1:])
+        and isinstance(query, Mapping)
+        and 1 <= len(query) <= 8
+        and all(
+            _SOURCE_ADD_QUERY_KEY_RE.fullmatch(str(key) or "")
+            and _SOURCE_ADD_SECRET_KEY_RE.search(str(key)) is None
+            and isinstance(value, str)
+            and 0 < len(value) <= 256
+            and not any(ord(character) < 32 for character in value)
+            for key, value in query.items()
+        )
+        and headers == {"Accept": "application/json"}
+        and isinstance(credential, Mapping)
+        and dict(credential)
+        == _source_add_registry_credential_binding(provider_id)
+    )
+
+
 def _official_host_availability(
     *,
     catalog: Mapping[str, Any],
@@ -638,18 +721,28 @@ def _official_host_availability(
         action_type = binding["action_type"]
         entry = indexed[(action_type, binding["tool_id"])]
         if action_type in _PROVIDER_ACTION_TYPES:
+            source_add_transport_ready = (
+                _source_add_registry_transport_available(
+                    entry,
+                    ready_providers,
+                )
+            )
+            static_transport_ready = bool(
+                not source_add_transport_ready
+                and entry.get("compiler_id")
+                != SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+                and _reviewed_provider_transport_available(entry.get("provider"))
+                and _PROXY_ROUTE_BY_PROVIDER.get(
+                    str(entry.get("provider") or "")
+                )
+                in ready_providers
+            )
             available = bool(
                 entry.get("status") == "supported"
                 and entry.get("execution_mode") == "invoke"
                 and isinstance(entry.get("compiler_id"), str)
                 and _SAFE_REF_RE.fullmatch(entry.get("compiler_id") or "")
-                and _reviewed_provider_transport_available(
-                    entry.get("provider")
-                )
-                and _PROXY_ROUTE_BY_PROVIDER.get(
-                    str(entry.get("provider") or "")
-                )
-                in ready_providers
+                and (static_transport_ready or source_add_transport_ready)
             )
         else:
             available = bool(
@@ -701,7 +794,31 @@ class _GatewayEvidenceProxyClient:
         self._proxy_url = _proxy_base_url(proxy_url)
         self._opener = opener
 
-    def _proxied_url(self, *, provider: str, upstream_url: str) -> str:
+    def _proxied_url(
+        self,
+        *,
+        provider: str,
+        upstream_url: str,
+        source_add_path: str = "",
+    ) -> str:
+        if source_add_path:
+            if (
+                upstream_url
+                or _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider) is None
+                or not source_add_path.startswith("/")
+                or source_add_path == "/"
+                or any(
+                    item in source_add_path for item in ("?", "#", "\\", "//")
+                )
+                or any(
+                    segment in {"", ".", ".."}
+                    for segment in source_add_path.split("/")[1:]
+                )
+            ):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline SOURCE_ADD proxy path is invalid"
+                )
+            return f"{self._proxy_url}/{provider}{source_add_path}"
         route = _PROXY_ROUTE_BY_PROVIDER.get(provider)
         expected_host = _UPSTREAM_HOST_BY_PROVIDER.get(provider)
         try:
@@ -737,6 +854,8 @@ class _GatewayEvidenceProxyClient:
         timeout_seconds: float,
         max_response_bytes: int,
         cost_scope: str,
+        source_add_path: str = "",
+        replay_only: bool = False,
     ) -> tuple[int, Mapping[str, Any], Mapping[str, str]]:
         normalized_method = str(method or "").upper()
         if normalized_method not in _HTTP_METHODS:
@@ -761,7 +880,11 @@ class _GatewayEvidenceProxyClient:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider transport bounds are invalid"
             )
-        target = self._proxied_url(provider=provider, upstream_url=upstream_url)
+        target = self._proxied_url(
+            provider=provider,
+            upstream_url=upstream_url,
+            source_add_path=source_add_path,
+        )
         if query:
             if not isinstance(query, Mapping):
                 raise OfficialBaselineProtectedAuthorityError(
@@ -779,14 +902,33 @@ class _GatewayEvidenceProxyClient:
                 split._replace(query=urllib.parse.urlencode(existing + supplied))
             )
         encoded = None if body is None else _canonical_bytes(body)
-        headers = {str(key): str(value) for key, value in static_headers.items()}
+        headers = {
+            str(key): str(value)
+            for key, value in static_headers.items()
+            if str(key).casefold()
+            not in {
+                "x-research-lab-replay-only",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER.casefold(),
+            }
+        }
+        proxy_reserve_seconds = min(
+            _PROXY_RESPONSE_RESERVE_SECONDS,
+            max(0.05, float(timeout_seconds) * 0.05),
+        )
+        proxy_timeout_ms = max(
+            1,
+            int((float(timeout_seconds) - proxy_reserve_seconds) * 1000),
+        )
         headers.update(
             {
                 "Accept": headers.get("Accept", "application/json"),
                 "X-Research-Lab-Cost-Scope": cost_scope,
                 "X-Research-Lab-Budget-Soft-Stop": "1",
+                _PROXY_REQUEST_TIMEOUT_MS_HEADER: str(proxy_timeout_ms),
             }
         )
+        if replay_only:
+            headers["X-Research-Lab-Replay-Only"] = "1"
         request = urllib.request.Request(
             target,
             data=encoded,
@@ -823,7 +965,24 @@ class _GatewayEvidenceProxyClient:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider response exceeds artifact bound"
             )
-        return status, _load_json_object(raw), response_headers
+        parsed_body = _load_json_object(raw)
+        evidence = next(
+            (
+                str(value).strip().casefold()
+                for key, value in response_headers.items()
+                if str(key).casefold() == "x-research-lab-evidence"
+            ),
+            "",
+        )
+        if evidence == _PROXY_REQUEST_PENDING_EVIDENCE:
+            if status != 409 or parsed_body != {"error": "request_pending"}:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline evidence proxy pending response is invalid"
+                )
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline provider request remains pending reconciliation"
+            )
+        return status, parsed_body, response_headers
 
 
 class ArtifactPreparedActionExecutor:
@@ -838,6 +997,7 @@ class ArtifactPreparedActionExecutor:
         custody: S3OfficialBaselineDocumentCustody,
         proxy_url: str,
         proxy_client: _GatewayEvidenceProxyClient | None = None,
+        model_transport: DockerModelRunnerTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -847,6 +1007,12 @@ class ArtifactPreparedActionExecutor:
         ):
             raise OfficialBaselineAuthorityUnavailable(
                 "official baseline release executor dependencies are invalid"
+            )
+        if model_transport is not None and not isinstance(
+            model_transport, DockerModelRunnerTransport
+        ):
+            raise OfficialBaselineAuthorityUnavailable(
+                "official baseline model transport is invalid"
             )
         bindings = _catalog_bindings(catalog)
         _validate_inventory_catalog(inventory, catalog)
@@ -867,6 +1033,7 @@ class ArtifactPreparedActionExecutor:
         self._proxy = proxy_client or _GatewayEvidenceProxyClient(
             proxy_url=proxy_url
         )
+        self._model_transport = model_transport
         self._clock = clock
         self._sleep = sleep
 
@@ -938,8 +1105,8 @@ class ArtifactPreparedActionExecutor:
                 value.get("request_sha256"),
                 "official baseline provider request hash",
             )
-            != sha256_json(dict(request)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(request))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact provider dispatch identity differs"
@@ -955,19 +1122,50 @@ class ArtifactPreparedActionExecutor:
             provider
         )
         credential = request.get("credential_binding")
+        source_add_dispatch = bool(
+            isinstance(inventory, Mapping)
+            and inventory.get("action_type") == "execute_intent_tool"
+            and inventory.get("tool_id") == f"intent.source_add.{provider}"
+            and inventory.get("compiler_id")
+            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            and value.get("action_type") == "execute_intent_tool"
+            and value.get("tool_id") == f"intent.source_add.{provider}"
+            and value.get("compiler_id")
+            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        )
+        credential_valid = bool(
+            isinstance(credential, Mapping)
+            and (
+                (
+                    source_add_dispatch
+                    and dict(credential)
+                    == _source_add_registry_credential_binding(provider)
+                )
+                or (
+                    not source_add_dispatch
+                    and expected_credential is not None
+                    and credential.get("location") == expected_credential[0]
+                    and credential.get("name") == expected_credential[1]
+                    and credential.get("source") == expected_credential[2]
+                    and credential.get("persist") is False
+                    and bool(str(credential.get("scheme") or "").strip())
+                )
+            )
+        )
         if (
             not isinstance(inventory, Mapping)
             or inventory.get("status") != "supported"
             or inventory.get("execution_mode") != "invoke"
             or inventory.get("provider") != provider
             or inventory.get("compiler_id") != value.get("compiler_id")
-            or expected_credential is None
-            or not isinstance(credential, Mapping)
-            or credential.get("location") != expected_credential[0]
-            or credential.get("name") != expected_credential[1]
-            or credential.get("source") != expected_credential[2]
-            or credential.get("persist") is not False
-            or not str(credential.get("scheme") or "").strip()
+            or not credential_valid
+            or (
+                source_add_dispatch
+                and not _source_add_registry_request_valid(
+                    request,
+                    provider_id=provider,
+                )
+            )
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact credential binding differs"
@@ -1020,6 +1218,8 @@ class ArtifactPreparedActionExecutor:
                 ),
             }
             request_body_sha256 = sha256_json(request_value)
+        verifier_action = action_type in _VERIFIER_ACTION_TYPES
+        provider_action = action_type in _PROVIDER_ACTION_TYPES
         if (
             type(call_cap) is not int
             or not 0 <= call_cap <= 100_000
@@ -1028,7 +1228,10 @@ class ArtifactPreparedActionExecutor:
             or not 0 <= float(credit_cap) <= 100
             or isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
-            or not 0 < float(timeout_seconds) <= 900
+            or not 0 <= float(timeout_seconds) <= 900
+            or (provider_action and float(timeout_seconds) == 0)
+            or (verifier_action and float(timeout_seconds) != 0)
+            or (not provider_action and not verifier_action)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected action budget is invalid"
@@ -1115,10 +1318,32 @@ class ArtifactPreparedActionExecutor:
         return expected, dispatch
 
     @staticmethod
-    def _request_ref(dispatch: Mapping[str, Any]) -> str:
-        return "provider_request:" + _bare_hash(
-            dispatch.get("dispatch_sha256"),
-            "official baseline dispatch hash",
+    def _request_ref(
+        preparation: OfficialBaselineProtectedPreparation,
+        dispatch: Mapping[str, Any],
+    ) -> str:
+        """Bind one logical provider request to its protected attempt.
+
+        The artifact dispatch hash is intentionally stable for identical model
+        actions.  It therefore cannot be the database request identity by
+        itself: a later benchmark retry executes under a distinct protected
+        reservation even when it deterministically emits the same action.
+        Keep the model-owned dispatch unchanged and scope only the host-owned
+        custody reference to the immutable preparation.
+        """
+
+        identity = {
+            "schema_version": (
+                "leadpoet.research_lab.official_baseline_provider_request.v2"
+            ),
+            "preparation_sha256": preparation.preparation_sha256,
+            "dispatch_sha256": _prefixed_hash(
+                dispatch.get("dispatch_sha256"),
+                "official baseline dispatch hash",
+            ),
+        }
+        return "provider_request_v2:" + sha256_json(identity).removeprefix(
+            "sha256:"
         )
 
     @staticmethod
@@ -1148,6 +1373,58 @@ class ArtifactPreparedActionExecutor:
                 if status:
                     return status
         return ""
+
+    @staticmethod
+    def _deepline_run_id(
+        value: Mapping[str, Any],
+        reconciliation: Mapping[str, Any],
+    ) -> str:
+        """Resolve the provider run ID from the exact model-owned pointer."""
+
+        pointer = reconciliation.get("run_id_json_pointer")
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id pointer is invalid"
+            )
+        current: Any = value
+        for raw_segment in pointer[1:].split("/"):
+            if not raw_segment or re.search(r"~(?:[^01]|$)", raw_segment):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline Deepline run id pointer is invalid"
+                )
+            segment = raw_segment.replace("~1", "/").replace("~0", "~")
+            if not isinstance(current, Mapping) or segment not in current:
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline Deepline run id is unavailable"
+                )
+            current = current[segment]
+        run_id = current.strip() if isinstance(current, str) else ""
+        if _SAFE_REF_RE.fullmatch(run_id) is None:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id is invalid"
+            )
+        return run_id
+
+    @staticmethod
+    def _deepline_poll_path_component(
+        progress: Mapping[str, Any],
+    ) -> str:
+        """Encode the run ID exactly as declared by the model artifact."""
+
+        reconciliation = progress.get("reconciliation")
+        if not isinstance(reconciliation, Mapping):
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline poll contract is invalid"
+            )
+        layers = reconciliation.get("run_id_path_encoding_layers", 1)
+        if type(layers) is not int or not 1 <= layers <= 4:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline Deepline run id path encoding is invalid"
+            )
+        encoded = str(progress.get("run_id") or "")
+        for _ in range(layers):
+            encoded = urllib.parse.quote(encoded, safe="")
+        return encoded
 
     @staticmethod
     def _progress_document(
@@ -1214,23 +1491,25 @@ class ArtifactPreparedActionExecutor:
             )
         return expected
 
-    def _one_request(
+    def _proxy_request(
         self,
         *,
         preparation: OfficialBaselineProtectedPreparation,
         provider: str,
         request: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> tuple[int, Mapping[str, Any]]:
+        replay_only: bool,
+    ) -> tuple[int, Mapping[str, Any], Mapping[str, str]]:
         method = str(request.get("method") or "")
         if method == "BATCH_GET":
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline nested batch request is invalid"
             )
-        status, body, _headers = self._proxy.request(
+        return self._proxy.request(
             provider=provider,
             method=method,
             upstream_url=str(request.get("url") or ""),
+            source_add_path=str(request.get("path") or ""),
             static_headers=(
                 request.get("static_headers")
                 if isinstance(request.get("static_headers"), Mapping)
@@ -1255,8 +1534,60 @@ class ArtifactPreparedActionExecutor:
             cost_scope="official-baseline-" + preparation.unit_ref.split(":", 1)[-1][
                 :32
             ],
+            replay_only=replay_only,
+        )
+
+    def _one_request(
+        self,
+        *,
+        preparation: OfficialBaselineProtectedPreparation,
+        provider: str,
+        request: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> tuple[int, Mapping[str, Any]]:
+        status, body, _headers = self._proxy_request(
+            preparation=preparation,
+            provider=provider,
+            request=request,
+            timeout_seconds=timeout_seconds,
+            replay_only=False,
         )
         return status, body
+
+    def _replay_one_request(
+        self,
+        *,
+        preparation: OfficialBaselineProtectedPreparation,
+        provider: str,
+        request: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> tuple[int, Mapping[str, Any]] | None:
+        status, body, headers = self._proxy_request(
+            preparation=preparation,
+            provider=provider,
+            request=request,
+            timeout_seconds=timeout_seconds,
+            replay_only=True,
+        )
+        evidence = next(
+            (
+                str(value).strip().casefold()
+                for key, value in headers.items()
+                if str(key).casefold() == "x-research-lab-evidence"
+            ),
+            "",
+        )
+        if evidence == "hit":
+            return status, body
+        if (
+            status == 409
+            and evidence in {"", "replay_miss"}
+            and dict(body) == {"error": "replay_miss"}
+        ):
+            return None
+        raise OfficialBaselineProtectedAuthorityError(
+            "official baseline evidence proxy replay response is invalid"
+        )
 
     def _batch_request(
         self,
@@ -1265,7 +1596,8 @@ class ArtifactPreparedActionExecutor:
         provider: str,
         request: Mapping[str, Any],
         timeout_seconds: float,
-    ) -> tuple[int, Mapping[str, Any], int]:
+        replay_only: bool = False,
+    ) -> tuple[int, Mapping[str, Any], int] | None:
         rows = request.get("requests")
         if (
             request.get("method") != "BATCH_GET"
@@ -1288,17 +1620,30 @@ class ArtifactPreparedActionExecutor:
                 raise OfficialBaselineProtectedAuthorityError(
                     "official baseline artifact batch member is invalid"
                 )
-            status, body = self._one_request(
-                preparation=preparation,
-                provider=provider,
-                request={
-                    "method": row["method"],
-                    "url": row["url"],
-                    "query": row["query"],
-                    "static_headers": request.get("static_headers") or {},
-                },
-                timeout_seconds=timeout_seconds,
+            member_request = {
+                "method": row["method"],
+                "url": row["url"],
+                "query": row["query"],
+                "static_headers": request.get("static_headers") or {},
+            }
+            terminal = (
+                self._replay_one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=member_request,
+                    timeout_seconds=timeout_seconds,
+                )
+                if replay_only
+                else self._one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=member_request,
+                    timeout_seconds=timeout_seconds,
+                )
             )
+            if terminal is None:
+                return None
+            status, body = terminal
             responses.append(
                 {
                     "request_sha256": row["request_sha256"],
@@ -1320,7 +1665,7 @@ class ArtifactPreparedActionExecutor:
         started: float,
     ) -> tuple[int, Mapping[str, Any]] | None:
         reconciliation = progress["reconciliation"]
-        run_id = urllib.parse.quote(str(progress["run_id"]), safe="")
+        run_id = self._deepline_poll_path_component(progress)
         deadline = started + preparation.timeout_ms / 1000
         first = True
         while first or self._clock() < deadline:
@@ -1378,7 +1723,7 @@ class ArtifactPreparedActionExecutor:
     ) -> OfficialBaselineProtectedTerminal:
         request = dispatch["request"]
         provider = str(dispatch.get("provider") or "")
-        request_ref = self._request_ref(dispatch)
+        request_ref = self._request_ref(preparation, dispatch)
         started = self._clock()
         calls = 1
         terminal: tuple[int, Mapping[str, Any]] | None
@@ -1406,11 +1751,12 @@ class ArtifactPreparedActionExecutor:
                         calls=1,
                         started=started,
                     )
-                run_id = str(body.get("id") or "")
-                if _SAFE_REF_RE.fullmatch(run_id) is None:
+                reconciliation = request.get("reconciliation")
+                if not isinstance(reconciliation, Mapping):
                     raise OfficialBaselineProtectedAuthorityError(
-                        "official baseline Deepline run id is invalid"
+                        "official baseline Deepline reconciliation contract is missing"
                     )
+                run_id = self._deepline_run_id(body, reconciliation)
                 progress = self._progress_document(
                     preparation=preparation,
                     dispatch=dispatch,
@@ -1451,22 +1797,36 @@ class ArtifactPreparedActionExecutor:
             if terminal is None:
                 return self._uncertain(request_ref)
             status, body = terminal
-        elif reconcile_only:
-            return self._uncertain(request_ref)
         elif request.get("method") == "BATCH_GET":
-            status, body, calls = self._batch_request(
+            terminal = self._batch_request(
                 preparation=preparation,
                 provider=provider,
                 request=request,
                 timeout_seconds=preparation.timeout_ms / 1000,
+                replay_only=reconcile_only,
             )
+            if terminal is None:
+                return self._uncertain(request_ref)
+            status, body, calls = terminal
         else:
-            status, body = self._one_request(
-                preparation=preparation,
-                provider=provider,
-                request=request,
-                timeout_seconds=preparation.timeout_ms / 1000,
+            terminal = (
+                self._replay_one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=request,
+                    timeout_seconds=preparation.timeout_ms / 1000,
+                )
+                if reconcile_only
+                else self._one_request(
+                    preparation=preparation,
+                    provider=provider,
+                    request=request,
+                    timeout_seconds=preparation.timeout_ms / 1000,
+                )
             )
+            if terminal is None:
+                return self._uncertain(request_ref)
+            status, body = terminal
         return self._known_provider_terminal(
             preparation=preparation,
             dispatch=dispatch,
@@ -1538,6 +1898,31 @@ class ArtifactPreparedActionExecutor:
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline provider response exceeds artifact bound"
             )
+        ingestion: Mapping[str, Any] | None = None
+        response_rejected = False
+        if response is not None:
+            try:
+                ingestion = self._protocol.ingest_provider_response(
+                    action,
+                    response,
+                )
+            except Exception:
+                # The provider has returned a known terminal response. A
+                # model-contract rejection is therefore a known adapter
+                # failure, not an unknown paid-call outcome. Retain only the
+                # response hash in the receipt and let the model-owned
+                # waterfall handle the failed completion.
+                response = None
+                succeeded = False
+                response_rejected = True
+            else:
+                if not isinstance(ingestion, Mapping):
+                    response = None
+                    succeeded = False
+                    response_rejected = True
+                    ingestion = None
+                else:
+                    ingestion = dict(ingestion)
         outcome = (
             ProviderOutcome.VERIFIED.value
             if succeeded
@@ -1592,32 +1977,20 @@ class ArtifactPreparedActionExecutor:
             reason_code=(
                 "protected_provider_verified"
                 if succeeded
-                else "protected_provider_adapter_failure"
+                else (
+                    "protected_provider_response_rejected"
+                    if response_rejected
+                    else "protected_provider_adapter_failure"
+                )
             ),
             provider_response=response,
             calls=calls,
             cost_credits=cost_credits,
             latency_ms=float(elapsed_ms),
-            provider_request_id=self._request_ref(dispatch),
+            provider_request_id=self._request_ref(preparation, dispatch),
             provider_receipt_ref=receipt.receipt_ref,
             provider_identity_sha256=provider_identity,
         )
-        ingestion: Mapping[str, Any] | None = None
-        if response is not None:
-            try:
-                ingestion = self._protocol.ingest_provider_response(
-                    action,
-                    response,
-                )
-            except Exception as exc:
-                raise OfficialBaselineProtectedAuthorityError(
-                    "official baseline artifact provider response ingestion failed"
-                ) from exc
-            if not isinstance(ingestion, Mapping):
-                raise OfficialBaselineProtectedAuthorityError(
-                    "official baseline artifact provider response ingestion is invalid"
-                )
-            ingestion = dict(ingestion)
         binding_host = (
             replace(
                 host,
@@ -1664,7 +2037,7 @@ class ArtifactPreparedActionExecutor:
                     dispatch.get("dispatch_sha256"),
                     "official baseline dispatch hash",
                 ),
-                "provider_request_ref": self._request_ref(dispatch),
+                "provider_request_ref": self._request_ref(preparation, dispatch),
                 "provider_receipt_ref": bound_host.provider_receipt_ref,
                 "provider_receipt_sha256": bound_host.provider_receipt_sha256,
             },
@@ -1673,7 +2046,7 @@ class ArtifactPreparedActionExecutor:
         return self._known_terminal(
             preparation=preparation,
             protected=protected,
-            provider_request_ref=self._request_ref(dispatch),
+            provider_request_ref=self._request_ref(preparation, dispatch),
         )
 
     def _verifier_terminal(
@@ -1717,13 +2090,26 @@ class ArtifactPreparedActionExecutor:
                 execution.get("result_sha256"),
                 "official baseline verifier result hash",
             )
-            != sha256_json(dict(result)).removeprefix("sha256:")
-            or claimed != sha256_json(body).removeprefix("sha256:")
+            != _artifact_wire_sha256(dict(result))
+            or claimed != _artifact_wire_sha256(body)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline artifact verifier identity differs"
             )
-        latency_ms = max(0, int(math.ceil((self._clock() - started) * 1000)))
+        admitted_latency_ms = (
+            self._model_transport.last_call_execution_latency_ms()
+            if self._model_transport is not None
+            else None
+        )
+        latency_ms = (
+            admitted_latency_ms
+            if admitted_latency_ms is not None
+            else max(0, int(math.ceil((self._clock() - started) * 1000)))
+        )
+        if latency_ms > 900_000:
+            raise OfficialBaselineProtectedAuthorityError(
+                "official baseline artifact verifier exceeded the host timeout"
+            )
         reason = str(result.get("reason_code") or "artifact_verifier_completed")
         if not re.fullmatch(r"[a-z][a-z0-9_]{1,127}", reason):
             raise OfficialBaselineProtectedAuthorityError(
@@ -1998,7 +2384,7 @@ def load_official_baseline_release_components(
             compiler_preflight.get("preflight_sha256"),
             "official baseline compiler preflight hash",
         )
-        != sha256_json(preflight_payload).removeprefix("sha256:")
+        != _artifact_wire_sha256(preflight_payload)
     ):
         raise OfficialBaselineAuthorityUnavailable(
             "official baseline artifact compiler preflight failed"
@@ -2019,6 +2405,7 @@ def load_official_baseline_release_components(
         inventory=inventory,
         custody=custody,
         proxy_url=proxy_url,
+        model_transport=transport,
     )
     bridge = GatewayLocalProtectedActionBridge(
         custody=custody,

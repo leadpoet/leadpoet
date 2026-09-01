@@ -31,6 +31,10 @@ from gateway.research_lab.dev_eval_runner import (
 from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
 from research_lab.eval.snapshot_store import POINTER_NAME, SNAPSHOT_URI_ENV
+from research_lab.sourcing_model_contract_check import (
+    compatibility_admission_mode_policy_identity,
+    compatibility_admission_policy_identity,
+)
 from scripts.record_research_lab_dev_snapshots import (
     DEFAULT_SNAPSHOT_ICP_TIMEOUT_SECONDS,
     SNAPSHOT_DOCKER_CLEANUP_TIMEOUT_SECONDS,
@@ -71,6 +75,7 @@ COMMAND_GROUP_EXIT_CONFIRMATION_SECONDS = 2.0
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _IMMUTABLE_SNAPSHOT_SUFFIX_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,120}$")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str], int], str]
 ReadinessLoader = Callable[..., Mapping[str, Any]]
@@ -455,6 +460,24 @@ def _active_model_compatibility_receipt(active: Any) -> dict[str, Any]:
     )
 
 
+def _compatibility_receipt_identity(
+    receipt: Mapping[str, Any],
+) -> tuple[str, str, str]:
+    try:
+        _policy, policy_hash = compatibility_admission_policy_identity(receipt)
+    except ValueError as exc:
+        raise RuntimeError(
+            "active model compatibility receipt is invalid"
+        ) from exc
+    admission_mode = str(receipt.get("admission_mode") or "")
+    admission_hash = str(receipt.get("receipt_hash") or "")
+    if _SHA256_RE.fullmatch(policy_hash) is None:
+        raise RuntimeError("active model compatibility policy hash is invalid")
+    if _SHA256_RE.fullmatch(admission_hash) is None:
+        raise RuntimeError("active model compatibility receipt hash is invalid")
+    return admission_mode, policy_hash, admission_hash
+
+
 async def _run_record_command_with_active_guard(
     *,
     config: Any,
@@ -544,6 +567,37 @@ def _state_artifact_identity(
     return identity if all(identity) else None
 
 
+def _state_compatibility_identity(
+    state: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    identity = (
+        str(state.get("compatibility_admission_mode") or ""),
+        str(state.get("compatibility_policy_hash") or ""),
+        str(state.get("compatibility_admission_hash") or ""),
+    )
+    if (
+        not all(identity)
+        or _SHA256_RE.fullmatch(identity[1]) is None
+        or _SHA256_RE.fullmatch(identity[2]) is None
+    ):
+        return None
+    return identity
+
+
+def _compatibility_identity_uses_current_policy(
+    identity: tuple[str, str, str] | None,
+) -> bool:
+    if identity is None:
+        return False
+    try:
+        _policy, current_policy_hash = (
+            compatibility_admission_mode_policy_identity(identity[0])
+        )
+    except ValueError:
+        return False
+    return identity[1] == current_policy_hash
+
+
 def _readiness_matches_artifact(
     readiness: Mapping[str, Any], identity: tuple[str, str, str, str]
 ) -> bool:
@@ -557,13 +611,34 @@ def _readiness_matches_artifact(
     )
 
 
+def _readiness_matches_compatibility_receipt(
+    readiness: Mapping[str, Any],
+    identity: tuple[str, str, str],
+) -> bool:
+    return bool(
+        readiness.get("ready")
+        and str(readiness.get("compatibility_admission_mode") or "")
+        == identity[0]
+        and str(readiness.get("compatibility_policy_hash") or "")
+        == identity[1]
+        and str(readiness.get("compatibility_admission_hash") or "")
+        == identity[2]
+    )
+
+
 def _refresh_reason(
-    readiness: Mapping[str, Any], identity: tuple[str, str, str, str]
+    readiness: Mapping[str, Any],
+    identity: tuple[str, str, str, str],
+    compatibility_identity: tuple[str, str, str],
 ) -> str:
     if not readiness.get("ready"):
         return str(readiness.get("reason") or "snapshot_not_ready")
     if not _readiness_matches_artifact(readiness, identity):
         return "snapshot_active_model_mismatch"
+    if not _readiness_matches_compatibility_receipt(
+        readiness, compatibility_identity
+    ):
+        return "snapshot_compatibility_provenance_mismatch"
     age = readiness.get("snapshot_age_seconds")
     try:
         age_seconds = float(age)
@@ -621,6 +696,11 @@ async def maybe_refresh_dev_snapshot(
     try:
         active_probe = await active_loader(config, register_bootstrap=False)
         identity_probe = _artifact_identity(active_probe)
+        compatibility_probe = _state_compatibility_identity(state)
+        if not _compatibility_identity_uses_current_policy(
+            compatibility_probe
+        ):
+            compatibility_probe = None
     except Exception:
         # The locked path below records the normal fail-closed error state.  A
         # transient authority read after an already-recorded failure observes
@@ -637,7 +717,9 @@ async def maybe_refresh_dev_snapshot(
             return {"status": "skipped", "reason": "failed_check_retry_not_due"}
     if (
         identity_probe is not None
+        and compatibility_probe is not None
         and _state_artifact_identity(state) == identity_probe
+        and _state_compatibility_identity(state) == compatibility_probe
         and last_check
         and timestamp - last_check < retry_after
     ):
@@ -660,6 +742,9 @@ async def maybe_refresh_dev_snapshot(
                 "active_git_commit_sha",
                 "active_config_hash",
                 "active_manifest_hash",
+                "compatibility_admission_mode",
+                "compatibility_policy_hash",
+                "compatibility_admission_hash",
                 "snapshot_manifest_hash",
                 "snapshot_ready",
                 "last_refresh_unix",
@@ -670,8 +755,30 @@ async def maybe_refresh_dev_snapshot(
         try:
             active_before = await active_loader(config, register_bootstrap=False)
             identity_before = _artifact_identity(active_before)
+            state_compatibility_identity = _state_compatibility_identity(state)
             if (
                 _state_artifact_identity(state) == identity_before
+                and _compatibility_identity_uses_current_policy(
+                    state_compatibility_identity
+                )
+                and last_check
+                and timestamp - last_check < retry_after
+            ):
+                return {
+                    "status": "skipped",
+                    "reason": "check_not_due_after_lock",
+                }
+            compatibility_receipt = await asyncio.to_thread(
+                _active_model_compatibility_receipt,
+                active_before,
+            )
+            compatibility_identity = _compatibility_receipt_identity(
+                compatibility_receipt
+            )
+            if (
+                _state_artifact_identity(state) == identity_before
+                and _state_compatibility_identity(state)
+                == compatibility_identity
                 and last_check
                 and timestamp - last_check < retry_after
             ):
@@ -689,6 +796,9 @@ async def maybe_refresh_dev_snapshot(
                 "active_git_commit_sha": identity_before[1],
                 "active_config_hash": identity_before[2],
                 "active_manifest_hash": identity_before[3],
+                "compatibility_admission_mode": compatibility_identity[0],
+                "compatibility_policy_hash": compatibility_identity[1],
+                "compatibility_admission_hash": compatibility_identity[2],
                 "snapshot_manifest_hash": str(
                     state.get("snapshot_manifest_hash") or ""
                 ),
@@ -704,7 +814,11 @@ async def maybe_refresh_dev_snapshot(
                 expected_dev_icp_count=tree_policy.live_max_icps_per_node,
                 require_current_day=True,
             )
-            reason = _refresh_reason(readiness, identity_before)
+            reason = _refresh_reason(
+                readiness,
+                identity_before,
+                compatibility_identity,
+            )
             base_state = {
                 **base_state,
                 "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
@@ -776,10 +890,6 @@ async def maybe_refresh_dev_snapshot(
                 if bank_size > MAX_DEV_SNAPSHOT_BANK_ICP_COUNT:
                     raise RuntimeError("snapshot exporter bank size exceeds the safety cap")
                 artifact_document = active_before.artifact.to_dict()
-                compatibility_receipt = await asyncio.to_thread(
-                    _active_model_compatibility_receipt,
-                    active_before,
-                )
                 artifact_path = inputs_dir / "private_model_artifact.json"
                 compatibility_receipt_path = (
                     inputs_dir / "private_model_compatibility_receipt.json"
@@ -868,6 +978,9 @@ async def maybe_refresh_dev_snapshot(
                 if not _readiness_matches_artifact(
                     immutable_readiness,
                     identity_before,
+                ) or not _readiness_matches_compatibility_receipt(
+                    immutable_readiness,
+                    compatibility_identity,
                 ):
                     raise RuntimeError(
                         "immutable snapshot is not eligible for pointer promotion: "
@@ -881,6 +994,17 @@ async def maybe_refresh_dev_snapshot(
                     raise RuntimeError(
                         "active private model changed before snapshot pointer promotion"
                     )
+                compatibility_after_record = _compatibility_receipt_identity(
+                    await asyncio.to_thread(
+                        _active_model_compatibility_receipt,
+                        active_after_record,
+                    )
+                )
+                if compatibility_after_record != compatibility_identity:
+                    raise RuntimeError(
+                        "active model compatibility authority changed before "
+                        "snapshot pointer promotion"
+                    )
                 await _await_command_completion(
                     command_runner, tuple(publish_base), env, timeout_seconds
                 )
@@ -893,7 +1017,12 @@ async def maybe_refresh_dev_snapshot(
                 expected_dev_icp_count=tree_policy.live_max_icps_per_node,
                 require_current_day=True,
             )
-            if not _readiness_matches_artifact(final_readiness, identity_before):
+            if not _readiness_matches_artifact(
+                final_readiness, identity_before
+            ) or not _readiness_matches_compatibility_receipt(
+                final_readiness,
+                compatibility_identity,
+            ):
                 raise RuntimeError("published snapshot does not match the active private model")
             completed = {
                 **base_state,

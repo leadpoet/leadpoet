@@ -92,16 +92,18 @@ class CoordinatorRewardSourceV2:
                 "SOURCE_ADD start epoch differs from finalized chain state"
             )
 
-        expected_alpha = float(
-            getattr(
-                config,
-                "source_add_leg1_alpha_percent"
-                if kind == "source_add_leg1"
-                else "source_add_leg2_alpha_percent",
-                1.0 if kind == "source_add_leg1" else 5.0,
-            )
-            or (1.0 if kind == "source_add_leg1" else 5.0)
+        alpha_attr = (
+            "source_add_leg1_alpha_percent"
+            if kind == "source_add_leg1"
+            else "source_add_leg2_alpha_percent"
         )
+        expected_alpha = float(
+            getattr(config, alpha_attr, 1.0 if kind == "source_add_leg1" else 5.0)
+        )
+        if expected_alpha <= 0.0:
+            raise CoordinatorRewardSourceV2Error(
+                "SOURCE_ADD reward leg is disabled"
+            )
         expected_epochs = int(getattr(config, "lab_reward_epochs", 20) or 20)
         if (
             float(decision.get("alpha_percent") or 0.0) != expected_alpha
@@ -142,9 +144,33 @@ class CoordinatorRewardSourceV2:
                 != str(decision.get("miner_ref") or "")
                 or str(submission.get("precheck_status") or "")
                 != "provenance_precheck_passed"
+                or str(submission.get("stage") or "") != "accepted"
             ):
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 owner or status differs from measured submission"
+                )
+            provision_rows = self._read(
+                "source_add_provisioning_by_adapter",
+                {"adapter_id": adapter_id},
+                context,
+            )
+            if len(provision_rows) != 1:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 final approval is missing or ambiguous"
+                )
+            provision = provision_rows[0]
+            if (
+                str(provision.get("submission_id") or "") != submission_id
+                or str(provision.get("adapter_id") or "") != adapter_id
+                or str(provision.get("miner_hotkey") or "")
+                != str(decision.get("miner_ref") or "")
+                or str(provision.get("provision_status") or "")
+                != "provisioned_autoresearch_eligible"
+                or not str(provision.get("catalog_id") or "")
+                or not str(provision.get("provision_ref") or "")
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 final approval differs from measured provisioning"
                 )
             functional_rows = self._read(
                 "source_add_functional_probe_by_submission",
@@ -158,55 +184,122 @@ class CoordinatorRewardSourceV2:
             measured = functional_rows[0]
             if (
                 str(measured.get("adapter_id") or "") != adapter_id
+                or str(measured.get("evaluation_mode") or "")
+                != "functional_probe"
                 or str(measured.get("result_status") or "") != "passed"
                 or dict(measured.get("result_doc") or {}) != dict(functional)
             ):
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 functional result differs from measured state"
                 )
+            smoke_result = decision.get("provisioning_smoke_result")
+            if (
+                not isinstance(smoke_result, Mapping)
+                or smoke_result.get("evaluation_mode") != "provisioning_smoke"
+                or smoke_result.get("result_status") != "passed"
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 provisioning smoke result is invalid"
+                )
+            smoke_rows = self._read(
+                "source_add_provisioning_smoke_by_submission",
+                {"submission_id": submission_id},
+                context,
+            )
+            if len(smoke_rows) != 1:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD provisioning smoke is missing or ambiguous"
+                )
+            measured_smoke = smoke_rows[0]
+            if (
+                str(measured_smoke.get("adapter_id") or "") != adapter_id
+                or str(measured_smoke.get("evaluation_mode") or "")
+                != "provisioning_smoke"
+                or str(measured_smoke.get("result_status") or "") != "passed"
+                or str(measured_smoke.get("config_ref") or "")
+                != str(measured.get("config_ref") or "")
+                or dict(measured_smoke.get("result_doc") or {})
+                != dict(smoke_result)
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 provisioning smoke differs from measured state"
+                )
             try:
                 graphs = list(context.external_receipt_authority_graphs())
             except ExecutionJobV2Error as exc:
                 raise CoordinatorRewardSourceV2Error(
-                    "SOURCE_ADD Leg 1 functional parent is invalid"
+                    "SOURCE_ADD Leg 1 approval parents are invalid"
                 ) from exc
-            if len(graphs) != 1:
+            if len(graphs) != 2:
                 raise CoordinatorRewardSourceV2Error(
-                    "SOURCE_ADD Leg 1 requires one functional parent"
+                    "SOURCE_ADD Leg 1 requires functional and smoke parents"
                 )
-            graph = graphs[0]
-            root_hash = str(graph.get("root_receipt_hash") or "")
-            root = next(
-                (
-                    item
-                    for item in graph.get("receipts") or ()
-                    if isinstance(item, Mapping)
-                    and item.get("receipt_hash") == root_hash
-                ),
-                None,
-            )
+            graphs_by_root = {
+                str(graph.get("root_receipt_hash") or ""): graph
+                for graph in graphs
+            }
+            functional_root_hash = str(measured.get("receipt_hash") or "")
+            smoke_root_hash = str(measured_smoke.get("receipt_hash") or "")
             if (
-                not isinstance(root, Mapping)
-                or root.get("purpose")
-                != "research_lab.source_add_functional_probe.v2"
-                or root.get("output_root") != sha256_json(dict(functional))
-                or tuple(context.parent_receipt_hashes) != (root_hash,)
-                or str(measured.get("receipt_hash") or "") != root_hash
+                functional_root_hash == smoke_root_hash
+                or set(graphs_by_root) != {functional_root_hash, smoke_root_hash}
+                or tuple(context.parent_receipt_hashes)
+                != tuple(sorted((functional_root_hash, smoke_root_hash)))
             ):
                 raise CoordinatorRewardSourceV2Error(
-                    "SOURCE_ADD Leg 1 functional receipt differs from measured state"
+                    "SOURCE_ADD Leg 1 approval receipt roots differ from measured state"
                 )
+            for root_hash, result_doc in (
+                (functional_root_hash, functional),
+                (smoke_root_hash, smoke_result),
+            ):
+                graph = graphs_by_root[root_hash]
+                root = next(
+                    (
+                        item
+                        for item in graph.get("receipts") or ()
+                        if isinstance(item, Mapping)
+                        and item.get("receipt_hash") == root_hash
+                    ),
+                    None,
+                )
+                if (
+                    not isinstance(root, Mapping)
+                    or root.get("purpose")
+                    != "research_lab.source_add_functional_probe.v2"
+                    or root.get("output_root") != sha256_json(dict(result_doc))
+                ):
+                    raise CoordinatorRewardSourceV2Error(
+                        "SOURCE_ADD Leg 1 approval receipt differs from measured state"
+                    )
             trigger = decision.get("trigger_evidence")
             expected_trigger = {
                 "functional_probe_passed": True,
                 "attempt_ref": str(measured.get("attempt_ref") or ""),
-                "functional_probe_receipt_hash": root_hash,
+                "functional_probe_receipt_hash": functional_root_hash,
                 "business_artifact_hash": str(
                     measured.get("business_artifact_hash") or ""
                 ),
                 "functional_probe_result_hash": sha256_json(dict(functional)),
                 "evaluator_version": str(functional.get("evaluator_version") or ""),
                 "route_hash": str(functional.get("route_hash") or ""),
+                "provisioning_smoke_passed": True,
+                "provisioning_smoke_attempt_ref": str(
+                    measured_smoke.get("attempt_ref") or ""
+                ),
+                "provisioning_smoke_receipt_hash": smoke_root_hash,
+                "provisioning_smoke_business_artifact_hash": str(
+                    measured_smoke.get("business_artifact_hash") or ""
+                ),
+                "provisioning_smoke_result_hash": sha256_json(dict(smoke_result)),
+                "submission_id": submission_id,
+                "final_acceptance_stage": "accepted",
+                "provision_ref": str(provision.get("provision_ref") or ""),
+                "catalog_id": str(provision.get("catalog_id") or ""),
+                "registry_provider_id": str(
+                    provision.get("registry_provider_id") or ""
+                ),
+                "provision_status": "provisioned_autoresearch_eligible",
             }
             if not isinstance(trigger, Mapping) or dict(trigger) != expected_trigger:
                 raise CoordinatorRewardSourceV2Error(
@@ -215,6 +308,10 @@ class CoordinatorRewardSourceV2:
             if not str(measured.get("business_artifact_hash") or ""):
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 business artifact link is missing"
+                )
+            if not str(measured_smoke.get("business_artifact_hash") or ""):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 smoke business artifact link is missing"
                 )
         else:
             judge_result = decision.get("judge_result")

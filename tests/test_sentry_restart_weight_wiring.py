@@ -69,9 +69,25 @@ def test_validator_restart_uses_an_isolated_host_telemetry_runtime():
 def test_restart_reexec_preserves_correlation_identity():
     gateway = _read("gw_restart.sh")
     validator = _read("validator_restart.sh")
-    for source in (gateway, validator):
-        for match in re.finditer(r"\bexec env \\\n(.*?)(?:\n\s+)(?:bash|\"\$)", source, flags=re.DOTALL):
-            assert "RESTART_INVOCATION_ID" in match.group(0)
+
+    gateway_target = 'bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"'
+    gateway_end = gateway.index(gateway_target) + len(gateway_target)
+    gateway_reexec = gateway[gateway.rfind("exec env", 0, gateway_end) : gateway_end]
+    assert "GATEWAY_RESTART_INVOCATION_ID" in gateway_reexec
+
+    validator_target = 'bash "$VALIDATOR_ROOT/validator_restart.sh"'
+    target_start = 0
+    validator_reexec_count = 0
+    while True:
+        target = validator.find(validator_target, target_start)
+        if target < 0:
+            break
+        target_end = validator.find("\n", target)
+        block = validator[validator.rfind("exec env", 0, target) : target_end]
+        assert "VALIDATOR_RESTART_INVOCATION_ID" in block
+        validator_reexec_count += 1
+        target_start = target_end
+    assert validator_reexec_count == 2
 
     assert gateway.count(
         'GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"'

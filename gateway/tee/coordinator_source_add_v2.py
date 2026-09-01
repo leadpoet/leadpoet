@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlsplit
 
 from gateway.research_lab.source_add_provenance import (
     SourceAddProvenanceResult,
+    _summarize_archive,
     evaluate_source_add_provenance,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
@@ -189,7 +190,7 @@ class CoordinatorSourceAddProvenanceV2:
                 context=context,
             )
             primary["archive_provider"] = "wayback"
-            if _provider_result_succeeded(primary):
+            if _archive_result_has_established_history(primary):
                 return primary
 
             cdx = self._fetch_provider(
@@ -203,7 +204,7 @@ class CoordinatorSourceAddProvenanceV2:
                 context=context,
             )
             cdx["archive_provider"] = "wayback_cdx"
-            if _provider_result_succeeded(cdx):
+            if _archive_result_has_established_history(cdx):
                 return cdx
 
             fallback_params = _arquivo_archive_params(params)
@@ -218,6 +219,15 @@ class CoordinatorSourceAddProvenanceV2:
                 context=context,
             )
             fallback["archive_provider"] = "arquivo"
+            if _archive_result_has_established_history(fallback):
+                return fallback
+
+            # A successful Wayback availability response reports the closest
+            # snapshot, not the oldest one. Preserve a successful no-history
+            # result only after every measured archive has been checked.
+            for result in (fallback, cdx, primary):
+                if _provider_result_succeeded(result):
+                    return result
             return fallback
 
         return self._fetch_provider(
@@ -326,6 +336,12 @@ def _provider_result_succeeded(result: Mapping[str, Any]) -> bool:
     return str(result.get("provider_status") or "") == "ok" and 200 <= int(
         result.get("status") or 0
     ) < 300
+
+
+def _archive_result_has_established_history(result: Mapping[str, Any]) -> bool:
+    return _provider_result_succeeded(result) and bool(
+        _summarize_archive(result).get("established_history")
+    )
 
 
 def _wayback_cdx_archive_params(params: Mapping[str, str]) -> Dict[str, str]:

@@ -984,6 +984,9 @@ async def test_exact_employee_count_is_bucketed_without_rewriting_company(
             scored_calls.append(kwargs)
             return {"final_score": 10.0}
 
+    class FakeProviderModule:
+        OPENROUTER_API_KEY = ""
+
     def fake_import(name):
         if name == "gateway.qualification.models":
             return FakeModels

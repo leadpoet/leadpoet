@@ -1045,6 +1045,63 @@ async def test_weight_inputs_v2_coalesces_retries_and_caches_exact_success(
 
 
 @pytest.mark.asyncio
+async def test_weight_inputs_v2_reuses_done_task_before_cache_callback(monkeypatch):
+    from gateway.research_lab import attested_v2_store, attested_weight_inputs_v2
+
+    expected = {"input_receipt_hashes": {"allocation": "sha256:" + "7" * 64}}
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    contender_ready = asyncio.Event()
+
+    async def load_graph(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        contender_ready.set()
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RETRY_GENERATIONS", {})
+    monkeypatch.setattr(attested_v2_store, "load_business_artifact_graph_v2", load_graph)
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+    kwargs = {
+        "request_hash": "sha256:" + "1" * 64,
+        "epoch_id": 300,
+        "allocation_hash": "sha256:" + "2" * 64,
+        "calculation_snapshot": {},
+        "leaderboard_window_start": "2026-07-03T20:00:00Z",
+        "leaderboard_window_end": "2026-07-10T20:00:00Z",
+    }
+
+    first = asyncio.create_task(
+        weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    async def contend_after_build_finishes():
+        await contender_ready.wait()
+        return await weights_api._build_weight_inputs_v2_singleflight(**kwargs)
+
+    contender = asyncio.create_task(contend_after_build_finishes())
+    release.set()
+    first_result, contender_result = await asyncio.gather(first, contender)
+
+    assert first_result == expected
+    assert contender_result == expected
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_weight_inputs_v2_exact_retry_reuses_authorized_work_after_block_drift(
     monkeypatch,
 ):

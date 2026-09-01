@@ -296,11 +296,52 @@ class _PlanSourceBindingResult:
     ambiguous_references: tuple[str, ...] = ()
 
 
+def _required_source_add_inspection_references(
+    source_incorporation_context: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return exact model-owned symbols required by approved SOURCE_ADD work."""
+
+    requests = (
+        source_incorporation_context.get("requests")
+        if isinstance(source_incorporation_context, Mapping)
+        else None
+    )
+    if not isinstance(requests, list):
+        return ()
+    references: list[str] = []
+    for request in requests:
+        if not isinstance(request, Mapping):
+            continue
+        if (
+            request.get("registration_symbol")
+            == (
+                "sourcing_model/routing/runtime.py::"
+                "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            )
+            and request.get("registration_type")
+            == "SourceAddRoutingRegistration"
+        ):
+            references.append(
+                "sourcing_model/routing/runtime.py::"
+                "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            )
+        provider_id = str(request.get("provider_id") or "")
+        if (
+            request.get("stage") == "intent_evidence"
+            and request.get("tool_id") == f"intent.source_add.{provider_id}"
+        ):
+            references.append(
+                "sourcing_model/model_runner.py::_COMMON_SOURCE_ADD_BY_INTENT"
+            )
+    return tuple(dict.fromkeys(references))
+
+
 def _bind_loop_direction_plan(
     plan_doc: Mapping[str, Any] | None,
     *,
     source_context: Any,
     candidate_edit_constraints: Mapping[str, Any],
+    source_incorporation_context: Mapping[str, Any] | None = None,
 ) -> _PlanSourceBindingResult:
     if not isinstance(plan_doc, Mapping):
         return _PlanSourceBindingResult(plan_doc=None)
@@ -319,11 +360,52 @@ def _bind_loop_direction_plan(
             errors=tuple(dict.fromkeys(errors)),
         )
 
+    required_references = _required_source_add_inspection_references(
+        source_incorporation_context
+    )
+    requested_references = tuple(plan.must_inspect)
+    incorporation_requests = (
+        source_incorporation_context.get("requests")
+        if isinstance(source_incorporation_context, Mapping)
+        else None
+    )
+    if isinstance(incorporation_requests, list):
+        for request in incorporation_requests:
+            if not isinstance(request, Mapping):
+                continue
+            registration_symbol = str(request.get("registration_symbol") or "")
+            registration_type = str(request.get("registration_type") or "")
+            if (
+                registration_symbol
+                == (
+                    "sourcing_model/routing/runtime.py::"
+                    "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                )
+                and registration_type == "SourceAddRoutingRegistration"
+            ):
+                constructor_reference = (
+                    registration_symbol.rsplit("::", 1)[0]
+                    + "::"
+                    + registration_type
+                )
+                requested_references = tuple(
+                    constructor_reference
+                    if reference
+                    == (
+                        "sourcing_model/routing/contracts.py::"
+                        "SourceAddRoutingRegistration"
+                    )
+                    else reference
+                    for reference in requested_references
+                )
+                break
     reference_binding = bind_source_references_exact(
         index_doc=getattr(source_context, "planner_source_index", {}),
         source_root=source_context.source_root,
         editable_files=getattr(source_context, "editable_files", ()),
-        references=plan.must_inspect,
+        references=tuple(
+            dict.fromkeys((*requested_references, *required_references))
+        ),
     )
     ranked_paths: list[dict[str, Any]] = []
     for raw_path in canonical_doc.get("ranked_paths", []):
@@ -374,11 +456,13 @@ def _plan_source_feasibility_errors(
     *,
     source_context: Any,
     candidate_edit_constraints: Mapping[str, Any],
+    source_incorporation_context: Mapping[str, Any] | None = None,
 ) -> tuple[list[str], tuple[str, ...]]:
     binding = _bind_loop_direction_plan(
         plan_doc,
         source_context=source_context,
         candidate_edit_constraints=candidate_edit_constraints,
+        source_incorporation_context=source_incorporation_context,
     )
     return list(binding.errors), binding.missing_references
 
@@ -3716,6 +3800,7 @@ class CodeEditLoopEngine:
                     resume["loop_direction_plan"],
                     source_context=source_context,
                     candidate_edit_constraints=candidate_edit_constraints,
+                    source_incorporation_context=source_incorporation_context,
                 )
                 loop_direction_plan_doc = resume_binding.plan_doc
             except Exception as exc:
@@ -3910,6 +3995,7 @@ class CodeEditLoopEngine:
                     repaired_plan.to_dict(),
                     source_context=source_context,
                     candidate_edit_constraints=candidate_edit_constraints,
+                    source_incorporation_context=source_incorporation_context,
                 )
                 repaired_doc = dict(repaired_binding.plan_doc or repaired_plan.to_dict())
                 repaired_plan = loop_direction_plan_from_mapping(repaired_doc)
@@ -4120,6 +4206,7 @@ class CodeEditLoopEngine:
                             loop_plan.to_dict(),
                             source_context=source_context,
                             candidate_edit_constraints=candidate_edit_constraints,
+                            source_incorporation_context=source_incorporation_context,
                         )
                         loop_direction_plan_doc = dict(initial_binding.plan_doc or loop_plan.to_dict())
                         loop_plan = loop_direction_plan_from_mapping(loop_direction_plan_doc)
@@ -4231,6 +4318,7 @@ class CodeEditLoopEngine:
                 loop_direction_plan_doc,
                 source_context=source_context,
                 candidate_edit_constraints=candidate_edit_constraints,
+                source_incorporation_context=source_incorporation_context,
             )
             loop_direction_plan_doc = dict(plan_binding.plan_doc or loop_direction_plan_doc)
             plan_feasibility_errors = list(plan_binding.errors)
@@ -4551,6 +4639,7 @@ class CodeEditLoopEngine:
                     branch_direction_plan_doc,
                     source_context=source_context,
                     candidate_edit_constraints=candidate_edit_constraints,
+                    source_incorporation_context=source_incorporation_context,
                 )
                 branch_binding_errors = tuple(branch_binding.errors)
                 branch_direction_plan_doc = dict(

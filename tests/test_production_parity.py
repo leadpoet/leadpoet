@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -82,6 +83,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
 HASH = "sha256:" + "b" * 64
 ORIGIN = "https://d111111abcdef8.cloudfront.net"
+PARITY_GATEWAY_PUBLIC_KEY = "c" * 64
 
 
 def test_setup_targets_the_authoritative_github_repository():
@@ -1448,6 +1450,9 @@ def test_full_acceptance_corpus_fails_before_restart(
     assert not (destination_config / "acceptance-corpus-v2").exists()
 
     source = inspect.getsource(full_host.run_full)
+    assert source.index("fetch_and_unpack_transfer(") < source.index(
+        "_materialize_acceptance_corpus("
+    )
     assert source.index("_materialize_acceptance_corpus(") < source.index(
         '["bash", str(ROOT / "gw_restart.sh"), "--commit", candidate_sha]'
     )
@@ -1730,18 +1735,14 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
     monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
     monkeypatch.setattr(
         full_host,
-        "_validated_baked_gateway_private_key_path",
-        lambda: "/home/ec2-user/gateway/secrets/gateway_private_key.pem",
-    )
-    monkeypatch.setattr(
-        full_host,
-        "_validated_baked_arweave_keyfile_path",
-        lambda: "/home/ec2-user/gateway/secrets/arweave_keyfile.json",
-    )
-    monkeypatch.setattr(
-        full_host,
-        "_validated_baked_private_model_ssh_command",
-        lambda: "ssh -i /home/ec2-user/.ssh/research_lab_private_model_deploy",
+        "_materialize_run_owned_runtime_identity",
+        lambda _path: {
+            "gateway_private_key_path": "/run/parity/gateway-private.pem",
+            "gateway_public_key": PARITY_GATEWAY_PUBLIC_KEY,
+            "gateway_public_key_hash": "sha256:" + "1" * 64,
+            "arweave_keyfile_path": "/run/parity/arweave.json",
+            "arweave_address_hash": "sha256:" + "2" * 64,
+        },
     )
     monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
     monkeypatch.setattr(full_host.time, "monotonic", lambda: next(monotonic_values))
@@ -1797,6 +1798,51 @@ def test_full_runner_forwards_remaining_clone_budget_and_cleans_runtime(
         assert cleanup["database_error"] == "OSError"
     else:
         assert cleanup["database"] == {"status": "removed"}
+
+
+def test_full_runner_retains_exact_bounded_initialization_stage(
+    monkeypatch,
+    tmp_path: Path,
+):
+    marker = tmp_path / "early-boot-isolated"
+    marker.write_text("isolated\n", encoding="utf-8")
+    work_root = tmp_path / "encrypted-root-volume"
+    output = tmp_path / "evidence" / "full.json"
+    secret = "must-not-escape-initialization-failure"
+
+    monkeypatch.setattr(full_host, "EARLY_BOOT_MARKER", marker)
+    monkeypatch.setattr(full_host, "FULL_WORK_ROOT", work_root)
+    monkeypatch.setattr(full_host, "_checkout_identity", lambda _sha: None)
+    monkeypatch.setattr(
+        full_host,
+        "_materialize_run_owned_runtime_identity",
+        lambda _path: (_ for _ in ()).throw(FullParityError(secret)),
+    )
+
+    with pytest.raises(FullParityError, match=secret):
+        full_host.run_full(
+            region="us-east-1",
+            run_id="pp-test-1",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            production_gateway_secret_id="gateway-secret",
+            readonly_dsn_secret_id="readonly-secret",
+            miner_intake_secret_id="miner-secret",
+            supabase_origin=ORIGIN,
+            artifact_bucket="parity-artifacts",
+            postgres_image="postgres@sha256:" + "c" * 64,
+            postgrest_image="postgrest@sha256:" + "d" * 64,
+            output=output,
+            timeout_seconds=1_000,
+        )
+
+    encoded = output.read_text(encoding="utf-8")
+    evidence = json.loads(encoded)
+    assert evidence["status"] == "failed"
+    assert evidence["failure_stage"] == "runtime-identity"
+    assert evidence["error_type"] == "FullParityError"
+    assert evidence["cleanup"] == {"work": "removed"}
+    assert secret not in encoded
 
 
 @pytest.mark.parametrize(
@@ -2363,9 +2409,75 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "constraint_valid": True,
             "constraint_definition": purpose_definition,
         }
+        source_add_origin_contract = {
+            "schema_version": "leadpoet.source_add_provider_origin_contract.v1",
+            "identity_version": "v1",
+            "identity_scope": "normalized_exact_host",
+            "admission_rpc": "research_lab_source_add_admit_v2",
+            "recheck_rpc": "research_lab_source_add_requeue_provenance_v2",
+            "owner_count": 0,
+            "reserved_count": 0,
+            "coverage_complete": True,
+            "collision_free": True,
+            "submission_trigger_enabled": True,
+            "catalog_trigger_enabled": True,
+            "provision_trigger_enabled": True,
+            "terminal_release_trigger_enabled": True,
+            "append_only_trigger_enabled": True,
+            "row_level_security_enabled": True,
+            "service_role_policy_enabled": True,
+        }
+        source_add_duplicate_privacy_contract = {
+            "schema_version": (
+                "leadpoet.source_add_duplicate_privacy_contract.v1"
+            ),
+            "admission_rpc": "research_lab_source_add_admit_v3",
+            "admission_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+            ),
+            "compatibility_rpc": "research_lab_source_add_admit_v2",
+            "compatibility_signature": (
+                "jsonb,text,text,text,text,text,integer,integer,integer"
+            ),
+            "compatibility_cooldown_seconds": 20,
+            "cooldown_parameter_min_seconds": 1,
+            "cooldown_parameter_max_seconds": 3600,
+            "cooldown_clock": "clock_timestamp_after_advisory_locks",
+            "cooldown_source": "durable_miner_provenance_work",
+            "duplicate_precedes_cooldown": True,
+            "lock_order": [
+                "provider_origin_or_identity",
+                "hotkey",
+                "submission_or_work",
+            ],
+            "function_authority_sha256": (
+                schema_preflight.SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
+            ),
+            "functions": {
+                "admit_v1": True,
+                "admit_v2_compatibility": True,
+                "admit_v3": True,
+                "provider_origin_hash_v1": True,
+                "provider_origin_host_v1": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "v3_service_role_callable": True,
+                "v2_service_role_callable": True,
+                "contract_service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        }
         contract_functions = {
             "research_lab_compact_weight_settlement_contract_v1": compact_contract,
             "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
+            "research_lab_source_add_provider_origin_contract_v1": (
+                source_add_origin_contract
+            ),
+            "research_lab_source_add_duplicate_privacy_contract_v1": (
+                source_add_duplicate_privacy_contract
+            ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:
             assert re.fullmatch(r"[a-z_][a-z0-9_]*", function_name)
@@ -2409,7 +2521,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         assert result["status"] == "ready"
-        assert result["data_probe_count"] == 3
+        assert result["data_probe_count"] == 4
         assert (
             result["chain_realized_settlement_activation_http_probe_count"] == 0
         )
@@ -2424,6 +2536,10 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
         }
         assert result["compact_weight_settlement_contract"] == compact_contract
         assert result["candidate_hybrid_purpose_contract"]["constraint_valid"] is True
+        assert (
+            result["source_add_provider_origin_contract"]
+            == source_add_origin_contract
+        )
         assert result["rpc_probe_count"] == len(
             schema_preflight.REQUIRED_SUPABASE_V2_RPCS
         )
@@ -3545,6 +3661,7 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
         },
         run_id="pp-1-1",
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket=artifact_bucket,
         benchmark_date="2026-08-16",
@@ -3653,6 +3770,7 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
         {},
         run_id=run_id,
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket=artifact_bucket,
         benchmark_date="2026-08-19",
@@ -3757,92 +3875,64 @@ def test_full_clone_environment_rejects_tampered_trace_destination(
             )
 
 
-def test_full_baked_gateway_private_key_path_is_exact_and_metadata_only(
-    monkeypatch, tmp_path: Path
+def test_full_runtime_identity_is_run_owned_and_non_production(tmp_path: Path):
+    identity_dir = tmp_path / "runtime-identity"
+    identity = full_host._materialize_run_owned_runtime_identity(identity_dir)
+
+    assert set(identity) == {
+        "gateway_private_key_path",
+        "gateway_public_key",
+        "gateway_public_key_hash",
+        "arweave_keyfile_path",
+        "arweave_address_hash",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", identity["gateway_public_key"])
+    for field in ("gateway_public_key_hash", "arweave_address_hash"):
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", identity[field])
+    for field in ("gateway_private_key_path", "arweave_keyfile_path"):
+        path = Path(identity[field])
+        metadata = path.lstat()
+        assert path.parent == identity_dir
+        assert path.is_file()
+        assert not path.is_symlink()
+        assert metadata.st_size > 0
+        assert metadata.st_uid == os.getuid()
+        assert metadata.st_gid == os.getgid()
+        assert metadata.st_mode & 0o777 == 0o600
+
+
+def test_full_runtime_identity_normalizes_inherited_setgid_directory(
+    monkeypatch,
+    tmp_path: Path,
 ):
-    private_key_path = tmp_path / "gateway_private_key.pem"
-    private_key_path.write_bytes(b"not-read-by-validator")
-    private_key_path.chmod(0o600)
-    monkeypatch.setattr(
-        full_host, "PRODUCTION_GATEWAY_PRIVATE_KEY_PATH", private_key_path
-    )
-    monkeypatch.setattr(
-        full_host,
-        "PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER",
-        (os.getuid(), os.getgid()),
-    )
-    assert full_host._validated_baked_gateway_private_key_path() == str(
-        private_key_path
-    )
+    identity_dir = tmp_path / "runtime-identity"
+    original_mkdir = Path.mkdir
 
-    private_key_path.chmod(0o640)
-    with pytest.raises(FullParityError, match="private-key path identity differs"):
-        full_host._validated_baked_gateway_private_key_path()
+    def mkdir_with_inherited_setgid(path: Path, *args, **kwargs) -> None:
+        original_mkdir(path, *args, **kwargs)
+        if path == identity_dir:
+            os.chmod(path, 0o2700)
 
-    private_key_path.chmod(0o600)
-    symlink_path = tmp_path / "gateway-private-key-link.pem"
-    symlink_path.symlink_to(private_key_path)
-    monkeypatch.setattr(
-        full_host, "PRODUCTION_GATEWAY_PRIVATE_KEY_PATH", symlink_path
-    )
-    with pytest.raises(FullParityError, match="private-key path identity differs"):
-        full_host._validated_baked_gateway_private_key_path()
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_inherited_setgid)
+
+    identity = full_host._materialize_run_owned_runtime_identity(identity_dir)
+
+    metadata = identity_dir.lstat()
+    assert metadata.st_uid == os.getuid()
+    assert metadata.st_gid == os.getgid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert Path(identity["gateway_private_key_path"]).is_file()
+    assert Path(identity["arweave_keyfile_path"]).is_file()
 
 
-def test_full_baked_arweave_keyfile_path_is_exact_and_metadata_only(
-    monkeypatch, tmp_path: Path
-):
-    keyfile_path = tmp_path / "arweave_keyfile.json"
-    keyfile_path.write_bytes(b"not-read-by-validator")
-    keyfile_path.chmod(0o600)
-    monkeypatch.setattr(
-        full_host, "PRODUCTION_ARWEAVE_KEYFILE_PATH", keyfile_path
-    )
-    monkeypatch.setattr(
-        full_host,
-        "PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER",
-        (os.getuid(), os.getgid()),
-    )
-    assert full_host._validated_baked_arweave_keyfile_path() == str(
-        keyfile_path
-    )
-
-    keyfile_path.chmod(0o640)
-    with pytest.raises(FullParityError, match="Arweave keyfile path identity"):
-        full_host._validated_baked_arweave_keyfile_path()
-
-
-def test_full_baked_private_model_ssh_command_is_exact_and_metadata_only(
-    monkeypatch, tmp_path: Path
-):
-    deploy_key = tmp_path / "research_lab_private_model_deploy"
-    known_hosts = tmp_path / "known_hosts"
-    for path in (deploy_key, known_hosts):
-        path.write_bytes(b"not-read-by-validator")
-        path.chmod(0o600)
-    monkeypatch.setattr(
-        full_host, "PRODUCTION_PRIVATE_MODEL_DEPLOY_KEY_PATH", deploy_key
-    )
-    monkeypatch.setattr(
-        full_host, "PRODUCTION_PRIVATE_MODEL_KNOWN_HOSTS_PATH", known_hosts
-    )
-    monkeypatch.setattr(
-        full_host,
-        "PRODUCTION_GATEWAY_PRIVATE_KEY_OWNER",
-        (os.getuid(), os.getgid()),
-    )
-    assert full_host._validated_baked_private_model_ssh_command() == (
-        f"ssh -i {deploy_key} -o IdentitiesOnly=yes -o BatchMode=yes "
-        "-o StrictHostKeyChecking=yes "
-        f"-o UserKnownHostsFile={known_hosts} "
-        "-o GlobalKnownHostsFile=/dev/null"
-    )
-
-    known_hosts.write_bytes(b"")
+def test_full_runtime_identity_rejects_existing_directory(tmp_path: Path):
+    identity_dir = tmp_path / "runtime-identity"
+    identity_dir.mkdir(mode=0o700)
     with pytest.raises(
-        FullParityError, match="private-model known-hosts path identity"
+        FullParityError,
+        match="runtime identity directory is unavailable",
     ):
-        full_host._validated_baked_private_model_ssh_command()
+        full_host._materialize_run_owned_runtime_identity(identity_dir)
 
 
 def test_full_gateway_restart_reasserts_run_owned_path_authority():
@@ -3902,15 +3992,25 @@ def test_full_gateway_restart_reasserts_run_owned_path_authority():
     assert '"GATEWAY_PRIVATE_KEY_PATH": gateway_private_key_path' in full_source
     assert '"ARWEAVE_KEYFILE_PATH": arweave_keyfile_path' in full_source
     assert (
-        '"GATEWAY_RESTART_GIT_SSH_COMMAND": ('
+        '"GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT": "full-parity"'
         in full_source
     )
+    assert '"GATEWAY_RESTART_GIT_SSH_COMMAND":' not in full_source
+    assert "research_lab_private_model_deploy" not in full_source
 
 
-def test_controller_dependency_closure_includes_gateway_database_client():
+def test_controller_dependency_closure_includes_runtime_identity_and_database_clients():
     selected = resolve_controller_requirements(ROOT / "requirements.txt")
     names = {re.split(r"[<>=!~ ]", item, maxsplit=1)[0].lower() for item in selected}
-    assert names == {"bittensor", "boto3", "cryptography", "httpx", "supabase"}
+    assert names == {
+        "arweave-python-client",
+        "bittensor",
+        "boto3",
+        "cryptography",
+        "httpx",
+        "supabase",
+    }
+    assert "arweave-python-client>=1.0.19" in selected
     assert 'bittensor==10.5.0; python_version >= "3.10"' in selected
 
 
@@ -3925,6 +4025,7 @@ def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchan
         {},
         run_id=run_id,
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket=bucket,
         benchmark_date="2026-08-19",
@@ -3997,6 +4098,7 @@ def test_full_baseline_checkpoint_rejects_mismatched_run_identity(
         {},
         run_id=run_id,
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket=bucket,
         benchmark_date="2026-08-19",
@@ -4160,7 +4262,14 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "production_chain_mutated": False,
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
                     "openrouter": {"admitted": True},
-                    "source_add": {"admitted": True},
+                    "source_add": {
+                        "admitted": True,
+                        "global_miner_submissions_enabled": False,
+                        "autoresearch_paused": True,
+                        "scoring_paused": True,
+                        "source_add_paused": False,
+                        "non_source_miner_route_rejected": True,
+                    },
                 }
             ),
             stderr="",
@@ -4187,6 +4296,8 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
     assert child_env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
     assert child_env["AWS_REGION"] == "us-east-1"
     assert child_env["AWS_DEFAULT_REGION"] == "us-east-1"
+    assert child_env["RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"] == "false"
+    assert child_env["RESEARCH_LAB_SOURCE_ADD_ENABLED"] == "true"
     for key in poisoned_clone:
         if key != "PATH":
             assert key not in child_env
@@ -4214,7 +4325,7 @@ def test_miner_intake_secret_resolution_is_strict_and_value_opaque():
 
 
 @pytest.mark.asyncio
-async def test_miner_intake_restores_every_preexisting_clone_pause():
+async def test_miner_intake_restores_controls_changed_for_source_only_state():
     observed: list[tuple[str, object]] = []
 
     async def call_rpc(name, payload):
@@ -4229,8 +4340,8 @@ async def test_miner_intake_restores_every_preexisting_clone_pause():
     await full_host._restore_miner_intake_controls(
         {
             "source_add_paused": True,
-            "autoresearch_paused": True,
-            "scoring_paused": True,
+            "autoresearch_paused": False,
+            "scoring_paused": False,
         },
         call_rpc=call_rpc,
         set_autoresearch_maintenance_paused=set_autoresearch,
@@ -4243,12 +4354,45 @@ async def test_miner_intake_restores_every_preexisting_clone_pause():
         "scoring",
     ]
     assert all(payload["p_paused"] is True for name, payload in observed[:1])
-    assert all(payload["paused"] is True for name, payload in observed[1:])
+    assert all(payload["paused"] is False for name, payload in observed[1:])
     assert all(
         payload.get("p_reason", payload.get("reason"))
         == "production_parity_miner_intake_complete"
         for _name, payload in observed
     )
+
+
+@pytest.mark.asyncio
+async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
+    observed: list[tuple[str, object]] = []
+
+    async def call_rpc(name, payload):
+        observed.append((name, dict(payload)))
+
+    async def unexpected_setter(**_payload):
+        raise AssertionError("an already-paused independent lane was rewritten")
+
+    await full_host._restore_miner_intake_controls(
+        {
+            "source_add_paused": True,
+            "autoresearch_paused": True,
+            "scoring_paused": True,
+        },
+        call_rpc=call_rpc,
+        set_autoresearch_maintenance_paused=unexpected_setter,
+        set_scoring_maintenance_paused=unexpected_setter,
+    )
+
+    assert observed == [
+        (
+            "research_lab_source_add_set_paused",
+            {
+                "p_paused": True,
+                "p_reason": "production_parity_miner_intake_complete",
+                "p_actor_ref": "system:production-parity",
+            },
+        )
+    ]
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
@@ -4257,6 +4401,7 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
         {},
         run_id="parity-20260815",
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket="leadpoet-parity-artifacts-example",
         benchmark_date="2026-08-16",
@@ -4347,6 +4492,7 @@ def test_rebenchmark_readiness_uses_explicit_region_and_filters_secret_poison(
         {},
         run_id="pp-1-1",
         candidate_sha=SHA,
+        gateway_public_key=PARITY_GATEWAY_PUBLIC_KEY,
         supabase_origin=ORIGIN,
         artifact_bucket="leadpoet-parity-493765492819-" + "d" * 16,
         benchmark_date="2026-08-19",

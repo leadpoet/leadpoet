@@ -51,6 +51,16 @@ SOURCE_ADD_AUTH_TYPES: tuple[str, ...] = (
 )
 
 
+def source_add_submission_ready(status: Mapping[str, Any]) -> bool:
+    """Return the gateway's authoritative, fail-closed SOURCE_ADD intake state."""
+
+    source_add = status.get("source_add") if isinstance(status, Mapping) else None
+    return bool(
+        isinstance(source_add, Mapping)
+        and source_add.get("intake_enabled") is True
+    )
+
+
 def normalize_source_add_domain(value: str) -> str:
     """Normalize user-provided host or URL into a bare domain."""
 

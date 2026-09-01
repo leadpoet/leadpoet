@@ -78,6 +78,10 @@ class OfficialBaselineProtectedAuthorityError(OfficialBaselineModelError):
     """The protected action state machine cannot prove one exact outcome."""
 
 
+class OfficialBaselineTerminalUncertainError(CommonModelExperimentRecoveryError):
+    """A bounded fresh attempt is required after an unresolved paid call."""
+
+
 def _prefixed_hash(value: Any, label: str) -> str:
     text = str(value or "").lower()
     normalized = text if text.startswith("sha256:") else "sha256:" + text
@@ -684,7 +688,7 @@ class _ReservedOfficialBaselineDispatcher:
             or type(value.credit_cap_microunits) is not int
             or not 0 <= value.credit_cap_microunits <= 100_000_000
             or type(value.timeout_ms) is not int
-            or not 1 <= value.timeout_ms <= 900_000
+            or not 0 <= value.timeout_ms <= 900_000
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected preparation identity differs"
@@ -703,9 +707,13 @@ class _ReservedOfficialBaselineDispatcher:
             not verifier
             and not provider
             or verifier
-            and (value.call_cap != 0 or value.credit_cap_microunits != 0)
+            and (
+                value.call_cap != 0
+                or value.credit_cap_microunits != 0
+                or value.timeout_ms != 0
+            )
             or provider
-            and value.call_cap < 1
+            and (value.call_cap < 1 or value.timeout_ms < 1)
         ):
             raise OfficialBaselineProtectedAuthorityError(
                 "official baseline protected action accounting differs"
@@ -1000,7 +1008,7 @@ class _ReservedOfficialBaselineDispatcher:
             )
         replay = self._authority.store.load_replay(identity=identity)
         if replay.get("state") == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         if replay.get("state") != "reserved":
@@ -1021,7 +1029,7 @@ class _ReservedOfficialBaselineDispatcher:
                 "uncertainty_sha256": validated.uncertainty_sha256,
             }
         )
-        raise CommonModelExperimentRecoveryError(
+        raise OfficialBaselineTerminalUncertainError(
             "official baseline protected call is terminal uncertain"
         )
 
@@ -1128,7 +1136,7 @@ class _ReservedOfficialBaselineDispatcher:
         replay = self._authority.store.load_replay(identity=identity)
         state = replay.get("state")
         if state == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         if state == "terminal_known":
@@ -1188,7 +1196,7 @@ class _ReservedOfficialBaselineDispatcher:
                 allow_execute_after_absence=False,
             )
         if state == "terminal_uncertain":
-            raise CommonModelExperimentRecoveryError(
+            raise OfficialBaselineTerminalUncertainError(
                 "official baseline protected call is terminal uncertain"
             )
         raise OfficialBaselineProtectedAuthorityError(
@@ -1424,12 +1432,26 @@ def _production_custody() -> S3OfficialBaselineDocumentCustody:
         ) from exc
     try:
         import boto3  # type: ignore
+        from botocore.config import Config as BotocoreConfig  # type: ignore
     except Exception as exc:  # pragma: no cover - production dependency
         raise OfficialBaselineAuthorityUnavailable(
             "official baseline encrypted custody client is unavailable"
         ) from exc
+    # One custody client is shared by every concurrent official-baseline unit.
+    # Keep the pool above the model's maximum supported 40-way wave and bound
+    # every transport attempt so a small immutable-document readback cannot
+    # strand an otherwise completed model action indefinitely.  These are
+    # durable code defaults rather than release- or environment-specific
+    # identities; SDK retries never relax the append-only byte comparisons.
+    transport = BotocoreConfig(
+        connect_timeout=5,
+        read_timeout=15,
+        max_pool_connections=64,
+        retries={"mode": "standard", "total_max_attempts": 3},
+        tcp_keepalive=True,
+    )
     return S3OfficialBaselineDocumentCustody(
-        client=boto3.client("s3"),
+        client=boto3.client("s3", config=transport),
         bucket=configuration["bucket"],
         prefix=configuration["prefix"],
         kms_key_id=configuration["kms_key_id"],

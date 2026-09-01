@@ -712,6 +712,9 @@ def exercise_transition(
         )
         return dict(control_state)
 
+    async def lease_unavailable(**_kwargs: Any) -> bool:
+        return False
+
     class HeldHeartbeat:
         def __init__(self, fail_on_check: int | None = None) -> None:
             self.check_count = 0
@@ -786,6 +789,14 @@ def exercise_transition(
     # maintenance-lease path below can refresh the full fleet afterward.
     candidate_worker._baseline_profile_preflight_monotonic_at = uncached_freshness
     with (
+        patch.object(
+            scoring_worker_module, "get_scoring_maintenance_state", read_control
+        ),
+        patch.object(
+            scoring_worker_module,
+            "try_acquire_maintenance_lease",
+            lease_unavailable,
+        ),
         patch.object(
             scoring_worker_module,
             "provider_preflight_settings",

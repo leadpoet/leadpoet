@@ -248,6 +248,37 @@
     "parity_sha256": "sha256:deef2e842dc70dd5e1e10f19693237e5714527a17b814c05e4f5bb47fd16e003",
     "contract_snapshot_path": "research_lab/sourcing_model_contract_v68.json",
     "parity_snapshot_path": "research_lab/sourcing_model_parity_fixtures_v28.json",
+    "additional_reviewed_profiles": [
+      {
+        "profile_id": "typed-dispatch-v68-dddf30c2",
+        "profile_sha256": "sha256:b68a38213768c2d8cf47ee4da2f1e92447fc9c6f1214c650e70504da102fe092",
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v68",
+        "contract_sha256": "sha256:dddf30c25b3d53b7c8db5f20114d80a40d62ce20598c17ede7a2458399b2a075",
+        "parity_sha256": "sha256:674d3ad18239fe4f6be1181a9f1adc476734cea4000ad46d2358971feec5d028",
+        "contract_snapshot_path": "research_lab/sourcing_model_contract_v68_a6f.json",
+        "parity_snapshot_path": "research_lab/sourcing_model_parity_fixtures_v28_a6f.json",
+        "exact_constants": {
+          "sourcing_model/model_runner.py": {
+            "MODEL_RUNNER_V2_CONSUMER_CONTRACT_SHA256": "3531bb9ebe7f4455813468b667989777ef16007bcff71f34a2bbf10f91e08712"
+          }
+        },
+        "critical_binding_slices": {
+          "qualification/scoring/company_fit_decision.py": {
+            "roots": ["aggregate_company_fit_decisions", "company_fit_decision_contract_identity", "reconcile_company_fit_decisions", "strict_company_fit_boolean"],
+            "sha256": "sha256:83d135ea03e7b0f6e8e058adf0dfa6fd126396e81ef2ea4fba5d7a9b7272d99b"
+          },
+          "sourcing_model/model_runner.py": {
+            "roots": ["custody_typed_encode", "custody_json_loads", "custody_json_dumps", "custody_json_bytes", "custody_envelope_sha256", "model_runner_custody_metadata", "model_runner_custody_parity_vectors", "build_model_start_request_custody_v3", "validate_model_start_request_custody_v3", "build_model_action_custody_v3", "validate_model_action_custody_v3", "build_model_initial_continuation_custody_v3", "validate_model_initial_continuation_custody_v3"],
+            "sha256": "sha256:d48c75a7fedbd84dfcf216bc76ee62f7158df2adf00f356d402276272f29999f"
+          }
+        },
+        "import_time_binding_slices": {
+          "sourcing_model/core.py": "sha256:97c712601e969515a7c7268d3c71855c58a70cd5d1b988c21f98b91e3b2d2c3c",
+          "sourcing_model/discovery.py": "sha256:3cdfba4160eefe32a2d84f3d2d87d8791b3c9eb8f3f2ed8558c971932f6e985c",
+          "sourcing_model/routing/runtime.py": "sha256:80113b396a605459b01157f0c95ff5adac18c7454af28f3e1e6ad2c7ff1695ef"
+        }
+      }
+    ],
     "required_files": [
       "sourcing_model/model_runner.py"
     ],

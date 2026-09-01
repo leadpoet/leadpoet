@@ -879,6 +879,61 @@ def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
         )
 
 
+def test_large_dev_evaluation_input_is_scoped_to_measured_candidate_jobs():
+    production_shaped_size = 101 * 1024 * 1024
+    allowed_scopes = {
+        "run_dev_replay_v2": "research_lab.candidate_test.v2",
+        "run_dev_hybrid_v2": "research_lab.candidate_hybrid_test.v2",
+    }
+
+    for operation, purpose in allowed_scopes.items():
+        normalized = job_manager_v2._manifest(
+            _manifest(
+                b"{}",
+                operation=operation,
+                purpose=purpose,
+                payload_size_bytes=production_shaped_size,
+            ),
+            role="gateway_scoring",
+            operations={operation: {purpose}},
+        )
+        assert normalized["payload_size_bytes"] == production_shaped_size
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
+            _manifest(
+                b"{}",
+                operation="score",
+                purpose="research_lab.candidate_score.v2",
+                payload_size_bytes=production_shaped_size,
+            ),
+            role="gateway_scoring",
+            operations={"score": {"research_lab.candidate_score.v2"}},
+        )
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
+            _manifest(
+                b"{}",
+                operation="run_dev_replay_v2",
+                purpose="research_lab.candidate_test.v2",
+                payload_size_bytes=(
+                    job_manager_v2.MAX_DEV_EVALUATION_INPUT_BYTES + 1
+                ),
+            ),
+            role="gateway_scoring",
+            operations={
+                "run_dev_replay_v2": {"research_lab.candidate_test.v2"}
+            },
+        )
+
+
 def test_large_ancestry_scope_is_applied_to_external_parent_graphs(monkeypatch):
     monkeypatch.setattr(
         job_manager_v2,

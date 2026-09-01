@@ -1519,6 +1519,19 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(
                 external_receipt_graphs=cache_graphs,
             ),
         )
+        compact_hybrid_measured = await executor(
+            OP_DEV_HYBRID_V2,
+            hybrid_payload,
+            ExecutionContextV2(
+                job_id="dev-hybrid-job-compact-1",
+                purpose="research_lab.candidate_hybrid_test.v2",
+                epoch_id=24000,
+                external_ancestry_proofs=[
+                    {"disclosed_receipts": graph["receipts"]}
+                    for graph in cache_graphs
+                ],
+            ),
+        )
     finally:
         executor.close()
 
@@ -1552,6 +1565,7 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(
     assert hybrid_measured.output["evaluation_mode"] == "hybrid"
     assert hybrid_measured.output["overlay_hash"] == overlay_hash
     assert hybrid_measured.output["cohort_hash"] == hybrid_cohort_hash
+    assert compact_hybrid_measured.output == hybrid_measured.output
     assert hybrid_measured.output["score_commitment"] == sha256_json(
         {
             "schema_version": "research_lab.git_tree_dev_score_commitment.v1",
@@ -1564,7 +1578,7 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(
             "cohort_hash": hybrid_cohort_hash,
         }
     )
-    assert len(sandbox.hybrid_calls) == len(dev_items)
+    assert len(sandbox.hybrid_calls) == 2 * len(dev_items)
     assert hybrid_cohort_hash in hybrid_measured.artifact_hashes
     assert overlay_hash in hybrid_measured.artifact_hashes
 

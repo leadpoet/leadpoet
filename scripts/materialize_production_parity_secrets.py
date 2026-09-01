@@ -198,6 +198,8 @@ _FORCED_KEYS = {
     "VALIDATOR_SUBTENSOR_NETWORK",
     "VALIDATOR_NETUID",
     "GATEWAY_URL",
+    "GATEWAY_PUBLIC_KEY",
+    "GATEWAY_PRIVATE_KEY_PASSWORD",
     "VALIDATOR_V2_GATEWAY_URL",
     "DISABLE_BACKGROUND_TASKS",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
@@ -372,6 +374,7 @@ def build_gateway_environment(
     *,
     run_id: str,
     candidate_sha: str,
+    gateway_public_key: str,
     supabase_origin: str,
     artifact_bucket: str,
     benchmark_date: str,
@@ -381,6 +384,9 @@ def build_gateway_environment(
         raise SecretMaterializationError("parity run or candidate identity is invalid")
     if not DATE_RE.fullmatch(benchmark_date):
         raise SecretMaterializationError("parity benchmark date is invalid")
+    normalized_gateway_public_key = str(gateway_public_key or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", normalized_gateway_public_key) is None:
+        raise SecretMaterializationError("parity gateway public key is invalid")
     if not re.fullmatch(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", artifact_bucket):
         raise SecretMaterializationError("parity artifact bucket is invalid")
     boundary_environment = {
@@ -416,6 +422,8 @@ def build_gateway_environment(
         "VALIDATOR_SUBTENSOR_NETWORK": "finney",
         "VALIDATOR_NETUID": "71",
         "GATEWAY_URL": "http://127.0.0.1:8000",
+        "GATEWAY_PUBLIC_KEY": normalized_gateway_public_key,
+        "GATEWAY_PRIVATE_KEY_PASSWORD": "",
         "VALIDATOR_V2_GATEWAY_URL": "http://127.0.0.1:8000",
         "DISABLE_BACKGROUND_TASKS": "true",
         "GATEWAY_STATEFUL_CUTOVER_CEREMONY": "0",
@@ -486,6 +494,7 @@ def create(
     source_secret_id: str,
     run_id: str,
     candidate_sha: str,
+    gateway_public_key: str,
     supabase_origin: str,
     artifact_bucket: str,
     benchmark_date: str,
@@ -500,6 +509,7 @@ def create(
         source,
         run_id=run_id,
         candidate_sha=candidate_sha,
+        gateway_public_key=gateway_public_key,
         supabase_origin=supabase_origin,
         artifact_bucket=artifact_bucket,
         benchmark_date=benchmark_date,
@@ -567,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     create_parser.add_argument("--source-secret-id", required=True)
     create_parser.add_argument("--run-id", required=True)
     create_parser.add_argument("--candidate-sha", required=True)
+    create_parser.add_argument("--gateway-public-key", required=True)
     create_parser.add_argument("--supabase-origin", required=True)
     create_parser.add_argument("--artifact-bucket", required=True)
     create_parser.add_argument("--benchmark-date", required=True)
@@ -583,6 +594,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_secret_id=args.source_secret_id,
                 run_id=args.run_id,
                 candidate_sha=args.candidate_sha.lower(),
+                gateway_public_key=args.gateway_public_key,
                 supabase_origin=args.supabase_origin,
                 artifact_bucket=args.artifact_bucket,
                 benchmark_date=args.benchmark_date,

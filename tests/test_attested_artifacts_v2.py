@@ -127,6 +127,7 @@ async def _exercise(
     duplicate_transport: bool = False,
     missing_distinct: bool = False,
     storage_transport: bool = False,
+    child_transport_scope: bool = False,
 ) -> dict:
     artifacts = _artifacts(persisted=replay)
     if partial:
@@ -146,6 +147,12 @@ async def _exercise(
     }
     transport_attempts = [
         {
+            "job_id": "child-job" if child_transport_scope else "source-job",
+            "purpose": (
+                "research_lab.private_model_run.v2"
+                if child_transport_scope
+                else "research_lab.test.v2"
+            ),
             "request_artifact_hash": _hash("1"),
             "response_artifact_hash": _hash("2"),
             "terminal_status": "authenticated_response",
@@ -161,6 +168,8 @@ async def _exercise(
         )
         transport_attempts.append(
             {
+                "job_id": transport_attempts[0]["job_id"],
+                "purpose": transport_attempts[0]["purpose"],
                 "request_artifact_hash": _hash("3"),
                 "response_artifact_hash": _hash("2"),
                 "terminal_status": "authenticated_response",
@@ -182,8 +191,13 @@ async def _exercise(
 
     class Client:
         async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
-            assert job_id == "source-job"
-            assert purpose == "research_lab.test.v2"
+            if (job_id, purpose) == ("source-job", "research_lab.test.v2"):
+                return {"artifacts": [] if child_transport_scope else artifacts}
+            assert child_transport_scope
+            assert (job_id, purpose) == (
+                "child-job",
+                "research_lab.private_model_run.v2",
+            )
             return {"artifacts": artifacts}
 
     async def persist_artifact(artifact_id, **kwargs):
@@ -354,6 +368,18 @@ async def test_transport_artifacts_deduplicate_repeated_plaintext_commitments(
         monkeypatch,
         replay=False,
         duplicate_transport=True,
+    )
+    assert len(result["artifacts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_transport_artifacts_load_descendant_execution_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _exercise(
+        monkeypatch,
+        replay=False,
+        child_transport_scope=True,
     )
     assert len(result["artifacts"]) == 2
 

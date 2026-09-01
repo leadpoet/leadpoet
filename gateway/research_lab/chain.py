@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 from typing import Any, Iterable
@@ -15,6 +16,7 @@ _DIRECT_EPOCH_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_TIMEOUT_SECONDS"
 _DIRECT_EPOCH_ATTEMPTS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_ATTEMPTS"
 _DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS = 60.0
 _DEFAULT_DIRECT_EPOCH_ATTEMPTS = 3
+_DIRECT_EPOCH_STOP_SECONDS = 5.0
 _DIRECT_EPOCH_RESULT_PREFIX = "LEADPOET_EPOCH_RESULT="
 
 
@@ -70,12 +72,7 @@ async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | No
             str(exc)[:200],
         )
         try:
-            # The subprocess has its own hard timeout and is safe to retry.
-            # Avoid a competing asyncio deadline that can cancel the thread
-            # immediately before a valid exact-hash result is returned.
-            epoch, block, network = await asyncio.to_thread(
-                _fetch_current_chain_epoch_direct
-            )
+            epoch, block, network = await _fetch_current_chain_epoch_direct()
             source = f"direct_subtensor_official:{network}"
         except Exception as direct_exc:
             raise RuntimeError(
@@ -128,7 +125,95 @@ async def _get_metagraph() -> Any:
         return await asyncio.to_thread(_fetch_metagraph_direct)
 
 
-def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
+async def _stop_direct_epoch_probe(
+    process: Any,
+    communication_task: asyncio.Task[tuple[bytes, bytes]],
+) -> None:
+    """Reap one isolated epoch probe and all of its descendants."""
+
+    def signal_owned_group(signum: int) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signum)
+            elif process.returncode is None and signum == signal.SIGTERM:
+                process.terminate()
+            elif process.returncode is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    def owned_group_exists() -> bool:
+        if os.name != "posix":
+            return process.returncode is None
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    signal_owned_group(signal.SIGTERM)
+    communication_timed_out = False
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(communication_task),
+            timeout=_DIRECT_EPOCH_STOP_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        communication_timed_out = True
+    except BaseException:
+        # The caller retains the original communication/cancellation failure;
+        # reaching this branch proves the pipe tasks themselves are complete.
+        pass
+    if communication_timed_out or owned_group_exists():
+        signal_owned_group(signal.SIGKILL)
+    if not communication_task.done():
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(communication_task),
+                timeout=_DIRECT_EPOCH_STOP_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            communication_task.cancel()
+            await asyncio.gather(communication_task, return_exceptions=True)
+            raise RuntimeError("direct epoch probe output did not close")
+        except BaseException:
+            pass
+    else:
+        try:
+            communication_task.result()
+        except BaseException:
+            pass
+    await process.wait()
+    if os.name == "posix":
+        deadline = asyncio.get_running_loop().time() + _DIRECT_EPOCH_STOP_SECONDS
+        while owned_group_exists() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        if owned_group_exists():
+            raise RuntimeError("direct epoch probe process group survived cleanup")
+
+
+async def _stop_direct_epoch_probe_atomic(
+    process: Any,
+    communication_task: asyncio.Task[tuple[bytes, bytes]],
+) -> bool:
+    """Finish cleanup despite repeated cancellation of the owning task."""
+
+    cleanup_task = asyncio.create_task(
+        _stop_direct_epoch_probe(process, communication_task)
+    )
+    cancelled_during_cleanup = False
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            cancelled_during_cleanup = True
+    cleanup_task.result()
+    return cancelled_during_cleanup
+
+
+async def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
     network = os.getenv("BITTENSOR_NETWORK", "finney")
     proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
     child_env = {key: value for key, value in os.environ.items() if key not in proxy_keys}
@@ -183,22 +268,65 @@ os._exit(0)
     failures: list[str] = []
     attempts = _direct_epoch_attempts()
     for attempt in range(1, attempts + 1):
+        command = [sys.executable, "-c", probe]
+        candidate = None
+        communication_task = None
         try:
-            candidate = subprocess.run(
-                [sys.executable, "-c", probe],
-                capture_output=True,
-                check=False,
+            candidate = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=child_env,
-                text=True,
+                start_new_session=(os.name == "posix"),
+            )
+            communication_task = asyncio.create_task(candidate.communicate())
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                asyncio.shield(communication_task),
                 timeout=timeout_seconds,
             )
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            if candidate is None or communication_task is None:
+                raise RuntimeError("direct epoch probe ownership is unavailable")
+            cancelled = await _stop_direct_epoch_probe_atomic(
+                candidate,
+                communication_task,
+            )
+            if cancelled:
+                raise asyncio.CancelledError()
             failures.append(f"attempt {attempt} timed out after {timeout_seconds:.1f}s")
+        except BaseException as exc:
+            if candidate is None:
+                raise
+            if communication_task is None:
+                communication_task = asyncio.create_task(candidate.communicate())
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            cancelled = (
+                await _stop_direct_epoch_probe_atomic(
+                    candidate,
+                    communication_task,
+                )
+                or cancelled
+            )
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise
         else:
+            try:
+                stdout = stdout_bytes.decode("utf-8")
+                stderr = stderr_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(
+                    "direct subtensor epoch probe returned invalid output"
+                ) from exc
             if candidate.returncode == 0:
-                completed = candidate
+                completed = subprocess.CompletedProcess(
+                    command,
+                    candidate.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
                 break
-            detail = (candidate.stderr or candidate.stdout or "").strip().splitlines()
+            detail = (stderr or stdout or "").strip().splitlines()
             failures.append(
                 "attempt %d failed: %s"
                 % (

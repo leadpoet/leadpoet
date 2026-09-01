@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import hashlib
 from io import StringIO
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -29,11 +33,17 @@ from research_lab.model_runner_protocol import (
 )
 from research_lab.docker_model_runner_transport import (
     _COMMON_RUNNER_BOOTSTRAP,
+    _COMMON_RUNNER_SESSION_BOOTSTRAP,
+    _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+    _DockerModelRunnerSessionError,
     DockerModelRunnerTransport,
 )
+import research_lab.docker_model_runner_transport as docker_model_runner_transport
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    PrivateModelRuntimeError,
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
 )
 from tests.model_runner_protocol_fixtures import (
     runner_declaration,
@@ -1407,6 +1417,396 @@ def test_oci_runner_transport_does_not_forward_provider_credentials(
     assert transport._runner.spec.env_passthrough == ()
     assert transport._runner.spec.extra_env == {}
     assert transport._runner.spec.pull_before_run is False
+
+
+def test_common_runner_session_reuses_preloaded_model_but_not_python_process(
+    tmp_path,
+):
+    if not hasattr(os, "fork"):
+        pytest.skip("fresh fork runner is unavailable")
+    (tmp_path / "fixture_adapter.py").write_text(
+        "\n".join((
+            "import os",
+            "IMPORT_PID = os.getpid()",
+            "STATE = []",
+            "_research_lab_provider_cost_scope = "
+            "os.environ.get('RESEARCH_LAB_PROVIDER_COST_SCOPE', '')",
+            "",
+        )),
+        encoding="utf-8",
+    )
+    child_bootstrap = """
+import json
+import os
+import sys
+import time
+import fixture_adapter
+
+payload = json.load(sys.stdin)
+if payload.get("sleep"):
+    time.sleep(float(payload["sleep"]))
+fixture_adapter.STATE.append(payload)
+sys.stdout.write(json.dumps({
+    "operation": sys.argv[2],
+    "payload": payload,
+    "pid": os.getpid(),
+    "import_pid": fixture_adapter.IMPORT_PID,
+    "state_count": len(fixture_adapter.STATE),
+    "provider_cost_scope": fixture_adapter._research_lab_provider_cost_scope,
+}, sort_keys=True, separators=(",", ":")))
+"""
+    session_scope = "sha256:" + "a" * 64
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(tmp_path)
+    environment[PROVIDER_COST_EVALUATION_SCOPE_ENV] = session_scope
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            _COMMON_RUNNER_SESSION_BOOTSTRAP,
+            child_bootstrap,
+            "fixture_adapter",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert json.loads(process.stdout.readline()) == {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "status": "ready",
+    }
+
+    results = []
+    for index in range(2):
+        request = {
+            "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+            "request_id": f"{index + 1:032x}",
+            "operation": "continue_runner",
+            "payload": {"index": index},
+            "timeout_seconds": 5.0,
+            "provider_cost_scope": "sha256:" + f"{index + 1:064x}",
+        }
+        process.stdin.write(
+            json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        process.stdin.flush()
+        response = json.loads(process.stdout.readline())
+        assert response["status"] == "succeeded"
+        results.append(json.loads(response["stdout"]))
+
+    assert [result["payload"] for result in results] == [
+        {"index": 0},
+        {"index": 1},
+    ]
+    assert results[0]["pid"] != results[1]["pid"]
+    assert results[0]["import_pid"] == results[1]["import_pid"]
+    assert results[0]["import_pid"] not in {
+        results[0]["pid"],
+        results[1]["pid"],
+    }
+    assert [result["state_count"] for result in results] == [1, 1]
+    assert [result["provider_cost_scope"] for result in results] == [
+        "sha256:" + f"{index + 1:064x}"
+        for index in range(2)
+    ]
+
+    timeout_request = {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "request_id": f"{3:032x}",
+        "operation": "continue_runner",
+        "payload": {"sleep": 0.5},
+        "timeout_seconds": 0.1,
+        "provider_cost_scope": "sha256:" + "3" * 64,
+    }
+    process.stdin.write(
+        json.dumps(timeout_request, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    process.stdin.flush()
+    timeout_response = json.loads(process.stdout.readline())
+    assert timeout_response["status"] == "timeout", timeout_response
+    assert timeout_response["returncode"] is None
+
+    recovery_request = {
+        "schema_version": _COMMON_RUNNER_SESSION_SCHEMA_VERSION,
+        "request_id": f"{4:032x}",
+        "operation": "continue_runner",
+        "payload": {"index": 2},
+        "timeout_seconds": 5.0,
+        "provider_cost_scope": "sha256:" + "4" * 64,
+    }
+    process.stdin.write(
+        json.dumps(recovery_request, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    process.stdin.flush()
+    recovery_response = json.loads(process.stdout.readline())
+    assert recovery_response["status"] == "succeeded"
+    recovery = json.loads(recovery_response["stdout"])
+    assert recovery["payload"] == {"index": 2}
+    assert recovery["state_count"] == 1
+    assert recovery["provider_cost_scope"] == "sha256:" + "4" * 64
+    process.stdin.close()
+    assert process.wait(timeout=5) == 0
+
+
+def test_oci_runner_transport_reuses_one_credential_free_session(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        env_passthrough=("DEEPLINE_API_KEY",),
+        extra_env={"DEEPLINE_API_KEY": "must-not-cross"},
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, runner):
+            self.runner = runner
+            self.calls = []
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            self.calls.append((operation, dict(payload)))
+            return {"operation": operation}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    assert transport._call("runner_preflight", {"one": 1}) == {
+        "operation": "runner_preflight"
+    }
+    assert transport._call("continue_runner", {"two": 2}) == {
+        "operation": "continue_runner"
+    }
+    assert len(sessions) == 1
+    assert sessions[0].runner.spec.env_passthrough == ()
+    assert sessions[0].runner.spec.extra_env == {}
+    assert sessions[0].calls == [
+        ("runner_preflight", {"one": 1}),
+        ("continue_runner", {"two": 2}),
+    ]
+    transport.close()
+    assert sessions[0].closed is True
+
+
+def test_oci_runner_transport_latency_excludes_pool_admission_wait(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    clock = {"value": 0.0}
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+
+        def call(self, _operation, payload):
+            if payload["index"] == 0:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            else:
+                clock["value"] += 0.005
+            return dict(payload)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_common_runner_session_capacity",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    monkeypatch.setattr(
+        docker_model_runner_transport.time,
+        "monotonic",
+        lambda: clock["value"],
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    def invoke(index):
+        result = transport._call("continue_runner", {"index": index})
+        return result, transport.last_call_execution_latency_ms()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(invoke, 0)
+        assert first_entered.wait(timeout=1)
+        second = executor.submit(invoke, 1)
+        clock["value"] = 1000.0
+        release_first.set()
+        first.result(timeout=2)
+        second_result, second_latency_ms = second.result(timeout=2)
+
+    assert second_result == {"index": 1}
+    assert second_latency_ms == 5
+    transport.close()
+
+
+def test_oci_runner_transport_runs_independent_calls_in_parallel(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_common_runner_session_capacity",
+        lambda: 2,
+    )
+    barrier = threading.Barrier(2, timeout=2)
+    sessions = []
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            barrier.wait()
+            return {"operation": operation, "index": payload["index"]}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(
+            lambda index: transport._call(
+                "continue_runner",
+                {"index": index},
+            ),
+            range(2),
+        ))
+
+    assert sorted(result["index"] for result in results) == [0, 1]
+    assert len(sessions) == 2
+    transport.close()
+    assert all(session.closed for session in sessions)
+
+
+def test_oci_runner_transport_replaces_only_broken_session(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, operation, payload):
+            if len(sessions) == 1:
+                raise _DockerModelRunnerSessionError("session disconnected")
+            return {"operation": operation}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    assert transport._call("continue_runner", {}) == {
+        "operation": "continue_runner"
+    }
+    assert len(sessions) == 2
+    assert sessions[0].closed is True
+    transport.close()
+
+
+def test_oci_runner_transport_does_not_retry_artifact_failure(monkeypatch):
+    source = object.__new__(DockerPrivateModelRunner)
+    source.spec = DockerPrivateModelSpec(
+        image_digest="model@sha256:" + "1" * 64,
+        pull_before_run=False,
+    )
+
+    def capture_spec(instance, spec):
+        instance.spec = spec
+
+    monkeypatch.setattr(DockerPrivateModelRunner, "__init__", capture_spec)
+    sessions = []
+
+    class Session:
+        def __init__(self, _runner):
+            self.closed = False
+            sessions.append(self)
+
+        def call(self, _operation, _payload):
+            raise PrivateModelRuntimeError("artifact rejected request")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        docker_model_runner_transport,
+        "_DockerModelRunnerSession",
+        Session,
+    )
+    transport = DockerModelRunnerTransport(source)
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="artifact rejected request",
+    ):
+        transport._call("continue_runner", {})
+    assert len(sessions) == 1
+    assert sessions[0].closed is False
+    transport.close()
+    assert sessions[0].closed is True
 
 
 def test_oci_generation_discovers_signed_role_path_and_extensions(

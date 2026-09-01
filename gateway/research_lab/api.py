@@ -61,7 +61,9 @@ from .key_vault import (
 from .v2_credential_envelopes import (
     persist_openrouter_credential_envelope_v2,
 )
-from .maintenance import get_autoresearch_maintenance_state
+from .maintenance import (
+    get_autoresearch_maintenance_state,
+)
 from .ticket_intake_validation import validate_ticket_direction
 from .ticket_lifecycle import (
     TERMINAL_TICKET_STATUSES,
@@ -171,8 +173,10 @@ from research_lab.source_add_execution import intake_source_add_submission
 from research_lab.source_add_identity import (
     SOURCE_ADD_IDENTITY_VERSION,
     legacy_source_identity_hash,
+    normalize_source_add_provider_origin,
     source_identity_alias_hashes_from_metadata,
     source_identity_hash_from_metadata,
+    source_provider_origin_hash_from_metadata,
 )
 from .source_add_workflow import (
     source_add_control_state,
@@ -181,6 +185,7 @@ from .source_add_workflow import (
     source_add_ref,
     source_add_work_id,
 )
+from . import source_add_catalog as source_add_catalog_contract
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
 from leadpoet_canonical.constants import EPOCH_LENGTH
@@ -189,11 +194,41 @@ from gateway.research_lab import allocation_handoff_disk_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/research-lab", tags=["research-lab"])
+_SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS = 20
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
 ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started", "paused"}
 AUTORESEARCH_PROXY_PREFIXES = HOSTED_PROXY_PREFIXES
+
+
+def _openrouter_registration_failure_is_retryable(
+    authority_doc: Mapping[str, Any],
+) -> bool:
+    attempts = authority_doc.get("transport_attempts")
+    if not isinstance(attempts, list):
+        return False
+    for item in attempts:
+        if not isinstance(item, Mapping):
+            continue
+        terminal_status = str(item.get("terminal_status") or "")
+        if terminal_status == "transport_failure":
+            return True
+        if terminal_status not in {
+            "authenticated_response",
+            "attested_local_response",
+        }:
+            continue
+        http_status = item.get("http_status")
+        if isinstance(http_status, bool):
+            continue
+        try:
+            status = int(http_status)
+        except (TypeError, ValueError):
+            continue
+        if status in {408, 429} or 500 <= status <= 599:
+            return True
+    return False
 
 
 def _source_add_provision_credential_ref(miner_hotkey: str, adapter_id: str) -> str:
@@ -455,8 +490,22 @@ async def _seal_openrouter_credential_v2(
     return dict(envelope)
 
 
+def _source_add_dispatcher_runtime_ready(request: Request) -> bool:
+    """Project the same live dispatcher gate used by gateway middleware."""
+
+    task = getattr(request.app.state, "source_add_dispatcher_task", None)
+    try:
+        return bool(task is not None and not task.done())
+    except Exception as exc:
+        logger.warning(
+            "research_lab_source_add_dispatcher_status_unavailable type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 @router.get("/status")
-async def research_lab_status() -> dict[str, object]:
+async def research_lab_status(request: Request) -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
     maintenance, source_add_control = await asyncio.gather(
         get_autoresearch_maintenance_state(),
@@ -499,9 +548,22 @@ async def research_lab_status() -> dict[str, object]:
         for key in ("paused", "status", "updated_at", "unavailable")
         if key in source_add_control
     }
+    dispatcher_runtime_ready = _source_add_dispatcher_runtime_ready(request)
     source_add_public["effective_dispatcher_enabled"] = bool(
         config.source_add_enabled
         and config.source_add_dispatcher_enabled
+        and dispatcher_runtime_ready
+        and not source_add_control.get("paused", True)
+    )
+    # This is the public, fail-closed projection of every launch gate checked
+    # before the source-adapter POST verifies a miner or persists anything.
+    # Miner clients use it to exit before prompting when intake is closed.
+    source_add_public["intake_enabled"] = bool(
+        config.api_enabled
+        and config.production_writes_enabled
+        and config.source_add_enabled
+        and config.source_add_dispatcher_enabled
+        and dispatcher_runtime_ready
         and not source_add_control.get("paused", True)
     )
     return {
@@ -640,6 +702,19 @@ async def _source_add_rpc(name: str, params: Mapping[str, Any]) -> dict[str, Any
     return dict(value)
 
 
+_SOURCE_ADD_FINAL_APPROVAL_STAGES = frozenset(
+    {"accepted", "leg1_queued", "leg1_created"}
+)
+
+
+def _require_source_add_final_approval_mutable(row: Mapping[str, Any]) -> None:
+    if str(row.get("stage") or "") in _SOURCE_ADD_FINAL_APPROVAL_STAGES:
+        raise HTTPException(
+            status_code=409,
+            detail="SOURCE_ADD final approval is frozen",
+        )
+
+
 @router.post(
     "/source-adapters/credential-recipient",
     response_model=ResearchLabCredentialRecipientResponse,
@@ -666,21 +741,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
-    _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
-    # SOURCE_ADD intake mints emission rewards, so a maintenance pause on
-    # scoring or autoresearch must also stop new source submissions: rewards
-    # granted while everything else is frozen only drain the burn share.
-    from gateway.research_lab.maintenance import (
-        is_autoresearch_maintenance_paused,
-        is_scoring_maintenance_paused,
-    )
-
-    if await is_scoring_maintenance_paused() or await is_autoresearch_maintenance_paused():
-        raise HTTPException(
-            status_code=503,
-            detail="Research Lab maintenance is active; source adapter intake is paused",
-        )
     source_add_control = await source_add_control_state()
     if source_add_control.get("paused", True):
         raise HTTPException(
@@ -688,7 +749,6 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             detail="SOURCE_ADD workflow is paused",
         )
     await _verify_signed_miner(payload)
-    await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
 
     if payload.adapter_credential is not None or payload.adapter_credential_v2 is not None:
         raise HTTPException(
@@ -697,6 +757,22 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         )
 
     source_metadata = payload.source_metadata.model_dump(mode="json")
+    try:
+        current_model_uses_api = await asyncio.to_thread(
+            source_add_catalog_contract.source_add_api_is_current_builtin_sync,
+            str(source_metadata.get("api_base_url") or ""),
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_BUILTIN_CATALOG_UNAVAILABLE type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="SOURCE_ADD workflow temporarily unavailable",
+        ) from exc
+    if current_model_uses_api:
+        raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
     declared_domains = (
         payload.manifest.get("declared_base_domains")
         if isinstance(payload.manifest, Mapping)
@@ -722,6 +798,14 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             documentation_url=str(source_metadata.get("documentation_url") or ""),
             declared_base_domains=declared_domains,
         )
+        provider_origin_host = normalize_source_add_provider_origin(
+            str(source_metadata.get("api_base_url") or "")
+        )
+        provider_origin_ref = source_provider_origin_hash_from_metadata(
+            source_metadata
+        )
+        if not provider_origin_host or not provider_origin_ref:
+            raise ValueError("provider origin is unavailable")
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -747,13 +831,15 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     record_doc = record.to_dict()
     record_doc["source_metadata"] = source_metadata
     record_doc["source_identity_version"] = SOURCE_ADD_IDENTITY_VERSION
+    record_doc["provider_origin_host"] = provider_origin_host
+    record_doc["provider_origin_hash"] = provider_origin_ref
     work_id = source_add_work_id(
         record.submission_id,
         "provenance",
         "%s:%s" % (payload.idempotency_key, payload.timestamp),
     )
     admitted = await _source_add_rpc(
-        "research_lab_source_add_admit",
+        "research_lab_source_add_admit_v3",
         {
             "p_record_doc": record_doc,
             "p_identity_hash": source_identity_ref,
@@ -761,15 +847,54 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
                 source_identity_aliases[0] if source_identity_aliases else ""
             ),
             "p_legacy_identity_hash": legacy_identity_ref,
+            "p_provider_origin_hash": provider_origin_ref,
             "p_work_id": work_id,
             "p_max_open": int(config.source_add_max_concurrent_per_hotkey),
             "p_max_day": int(config.source_add_max_per_day_per_hotkey),
             "p_max_30d": int(config.source_add_max_per_30d_per_hotkey),
+            "p_cooldown_seconds": _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS,
         },
     )
     status = str(admitted.get("status") or "")
     if status == "duplicate":
         raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
+    if status == "route_cooldown":
+        try:
+            cooldown_seconds = int(admitted.get("cooldown_seconds") or 0)
+            wait_seconds = int(admitted.get("wait_seconds") or 0)
+        except (TypeError, ValueError):
+            cooldown_seconds = 0
+            wait_seconds = 0
+        if (
+            cooldown_seconds != _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS
+            or wait_seconds < 1
+            or wait_seconds > cooldown_seconds
+        ):
+            logger.warning(
+                "SOURCE_ADD_ADMISSION_INVALID_COOLDOWN cooldown=%s wait=%s",
+                cooldown_seconds,
+                wait_seconds,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD workflow temporarily unavailable",
+            )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "research_lab_rate_limited",
+                "route": "source_adapters",
+                "message": (
+                    f"Please wait {wait_seconds} seconds before submitting "
+                    "another lead (anti-spam cooldown)."
+                ),
+                "stats": {
+                    "limit_type": "cooldown",
+                    "cooldown_seconds": cooldown_seconds,
+                    "wait_seconds": wait_seconds,
+                },
+            },
+        )
     if status in {"hotkey_open_cap", "hotkey_day_cap", "hotkey_30d_cap"}:
         raise HTTPException(status_code=429, detail="SOURCE_ADD submission limit reached")
     if status != "admitted":
@@ -864,13 +989,21 @@ async def recheck_research_lab_source_adapter_provenance(
         documentation_url=str(source_metadata.get("documentation_url") or ""),
         declared_base_domains=[str(item) for item in declared],
     )
+    provider_origin_hash = source_provider_origin_hash_from_metadata(
+        source_metadata
+    )
+    if not provider_origin_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="submission metadata is incomplete or invalid",
+        )
     work_id = source_add_work_id(
         submission_id,
         "provenance",
         "operator-recheck:%s" % (int(row.get("seq") or 0) + 1),
     )
     queued = await _source_add_rpc(
-        "research_lab_source_add_requeue_provenance",
+        "research_lab_source_add_requeue_provenance_v2",
         {
             "p_submission_id": submission_id,
             "p_identity_hash": identity_hash,
@@ -878,6 +1011,7 @@ async def recheck_research_lab_source_adapter_provenance(
                 identity_aliases[0] if identity_aliases else ""
             ),
             "p_legacy_identity_hash": legacy_hash,
+            "p_provider_origin_hash": provider_origin_hash,
             "p_work_id": work_id,
             "p_actor_ref": "operator:source-add-recheck",
         },
@@ -977,6 +1111,7 @@ async def configure_research_lab_source_adapter_test(
     )
     if not row:
         raise HTTPException(status_code=404, detail="submission not found")
+    _require_source_add_final_approval_mutable(row)
     _doc, _manifest, source_metadata = _source_add_submission_parts(row)
     if str(row.get("precheck_status") or "") != "provenance_precheck_passed":
         raise HTTPException(status_code=400, detail="SOURCE_ADD provenance pass is required")
@@ -1044,7 +1179,7 @@ async def configure_research_lab_source_adapter_test(
         "operator-config:%s" % config_ref,
     )
     queued = await _source_add_rpc(
-        "research_lab_source_add_configure_probe",
+        "research_lab_source_add_configure_probe_v2",
         {
             "p_submission_id": submission_id,
             "p_config_ref": config_ref,
@@ -1060,6 +1195,8 @@ async def configure_research_lab_source_adapter_test(
         raise HTTPException(status_code=404, detail="submission not found")
     if queue_status == "terminal":
         raise HTTPException(status_code=400, detail="SOURCE_ADD submission is terminal")
+    if queue_status == "final_approval_frozen":
+        raise HTTPException(status_code=409, detail="SOURCE_ADD final approval is frozen")
     if queue_status == "provenance_required":
         raise HTTPException(status_code=400, detail="SOURCE_ADD provenance pass is required")
     if queue_status not in {"queued", "already_configured"}:
@@ -1110,6 +1247,7 @@ async def provision_research_lab_source_adapter(
     )
     if not row:
         raise HTTPException(status_code=404, detail="submission not found")
+    _require_source_add_final_approval_mutable(row)
     doc, manifest, source_metadata = _source_add_submission_parts(row)
     adapter_id = str(row.get("adapter_id") or "")
     miner_hotkey = str(row.get("miner_hotkey") or "")
@@ -1236,6 +1374,12 @@ async def provision_research_lab_source_adapter(
                             )
                             or 0
                         ),
+                        probe_endpoints=probe_endpoints,
+                        tested_probes=[
+                            dict(item)
+                            for item in probe_doc.get("probes") or []
+                            if isinstance(item, Mapping)
+                        ],
                     )
                 )
             except (TypeError, ValueError) as exc:
@@ -1416,7 +1560,7 @@ async def provision_research_lab_source_adapter(
             pending_catalog_id = str(existing_provision.get("catalog_id") or catalog_id)
         else:
             pending = await _source_add_rpc(
-                "research_lab_source_add_finalize_provision",
+                "research_lab_source_add_finalize_provision_v2",
                 {
                     "p_submission_id": submission_id,
                     "p_catalog_row": pending_catalog_row,
@@ -1424,7 +1568,13 @@ async def provision_research_lab_source_adapter(
                     "p_smoke_attempt": {},
                 },
             )
-            if str(pending.get("status") or "") not in {
+            pending_status = str(pending.get("status") or "")
+            if pending_status == "final_approval_frozen":
+                raise HTTPException(
+                    status_code=409,
+                    detail="SOURCE_ADD final approval is frozen",
+                )
+            if pending_status not in {
                 "provisioned",
                 "already_provisioned",
             }:
@@ -1465,6 +1615,11 @@ async def provision_research_lab_source_adapter(
             },
         )
         queue_status = str(queued.get("status") or "")
+        if queue_status == "final_approval_frozen":
+            raise HTTPException(
+                status_code=409,
+                detail="SOURCE_ADD final approval is frozen",
+            )
         if queue_status in {
             "current_probe_config_required",
             "pending_approval_required",
@@ -1493,7 +1648,7 @@ async def provision_research_lab_source_adapter(
         )
 
     finalized = await _source_add_rpc(
-        "research_lab_source_add_finalize_provision",
+        "research_lab_source_add_finalize_provision_v2",
         {
             "p_submission_id": submission_id,
             "p_catalog_row": catalog_row,
@@ -1508,6 +1663,8 @@ async def provision_research_lab_source_adapter(
         raise HTTPException(status_code=400, detail="provisioning configuration differs from tested config")
     if final_status == "registry_provider_conflict":
         raise HTTPException(status_code=409, detail="registry_provider_id is already in use")
+    if final_status == "final_approval_frozen":
+        raise HTTPException(status_code=409, detail="SOURCE_ADD final approval is frozen")
     if final_status in {"missing", "catalog_missing"}:
         raise HTTPException(status_code=404, detail="SOURCE_ADD record not found")
     if final_status not in {"provisioned", "already_provisioned"}:
@@ -2012,12 +2169,7 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
 
         if isinstance(exc, AttestedScoringV2Error):
             authority_doc = exc.authority or {}
-            attempts = authority_doc.get("transport_attempts") or []
-            if any(
-                isinstance(item, Mapping)
-                and item.get("terminal_status") == "transport_failure"
-                for item in attempts
-            ):
+            if _openrouter_registration_failure_is_retryable(authority_doc):
                 raise HTTPException(
                     status_code=503,
                     detail="OpenRouter credential verification transport is unavailable",

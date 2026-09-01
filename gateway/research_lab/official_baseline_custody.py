@@ -177,11 +177,38 @@ class S3OfficialBaselineDocumentCustody:
             response.get("ServerSideEncryption") != "aws:kms"
             or not isinstance(metadata, Mapping)
             or not callable(getattr(body_reader, "read", None))
+            or not callable(getattr(body_reader, "close", None))
         ):
+            close = getattr(body_reader, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 - cleanup is fail-closed
+                    raise OfficialBaselineCustodyError(
+                        "official baseline custody response cleanup failed"
+                    ) from exc
             raise OfficialBaselineCustodyError(
                 "official baseline custody object is not SSE-KMS protected"
             )
-        body = bytes(body_reader.read())
+        read_error: Exception | None = None
+        close_error: Exception | None = None
+        body = b""
+        try:
+            body = bytes(body_reader.read())
+        except Exception as exc:  # noqa: BLE001 - normalize SDK/body failures
+            read_error = exc
+        try:
+            body_reader.close()
+        except Exception as exc:  # noqa: BLE001 - cleanup is fail-closed
+            close_error = exc
+        if read_error is not None:
+            raise OfficialBaselineCustodyError(
+                "official baseline encrypted custody body read failed"
+            ) from read_error
+        if close_error is not None:
+            raise OfficialBaselineCustodyError(
+                "official baseline custody response cleanup failed"
+            ) from close_error
         expected = str(metadata.get("content-sha256") or "")
         expected_kms = str(metadata.get("kms-key-id-sha256") or "")
         if (
@@ -569,11 +596,13 @@ class S3OfficialBaselineTransitionRepository:
         variant_id: str,
         unit_ref: str,
         idempotency_key: str,
+        artifact_key: str,
     ) -> Mapping[str, Any] | None:
         if (
             experiment_hash != self._run_sha256
             or variant_id != "official_baseline"
             or unit_ref != self._unit_ref
+            or artifact_key != self._registration.key
         ):
             raise OfficialBaselineCustodyError(
                 "official baseline transition lookup identity differs"
@@ -602,6 +631,7 @@ class S3OfficialBaselineTransitionRepository:
         experiment_hash: str,
         variant_id: str,
         unit_ref: str,
+        artifact_key: str,
         action: Mapping[str, Any],
         continuation: Mapping[str, Any],
         completion: Mapping[str, Any],
@@ -612,7 +642,7 @@ class S3OfficialBaselineTransitionRepository:
         generation = self.resolve_run_protocol_generation(
             experiment_hash=experiment_hash,
             variant_id=variant_id,
-            artifact_key=self._registration.key,
+            artifact_key=artifact_key,
         )
         if (
             unit_ref != self._unit_ref

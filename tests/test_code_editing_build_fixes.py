@@ -9,9 +9,11 @@ head sha recorded), bug #30 (infra-vs-candidate build failure classification).
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sys
 from types import SimpleNamespace
@@ -58,31 +60,167 @@ class _SourceAddMaterializationConfig:
         return (".py", ".json")
 
 
-def _source_add_materialization_fixture(tmp_path: Path, *, omit_evaluator: str = ""):
+def _source_add_materialization_fixture(
+    tmp_path: Path,
+    *,
+    omit_evaluator: str = "",
+    contract_digest: str | None = None,
+    bind_contract_hash: bool = True,
+    generator_adds_secret: bool = False,
+):
     source_root = tmp_path / "source"
     routing_dir = source_root / "sourcing_model" / "routing"
     routing_dir.mkdir(parents=True)
     (source_root / "sourcing_model" / "__init__.py").write_text("", encoding="utf-8")
     (routing_dir / "__init__.py").write_text("", encoding="utf-8")
     runtime_path = routing_dir / "runtime.py"
-    runtime_path.write_text(
-        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n",
+    runtime_source = (
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "    SourceAddRoutingRegistration(provider_id='existing'),\n"
+        ")\n"
+    )
+    runtime_path.write_text(runtime_source, encoding="utf-8")
+    semantic_registry_path = (
+        source_root / code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH
+    )
+    semantic_registry_path.write_text(
+        '{"has_builtwith":false}\n',
+        encoding="utf-8",
+    )
+    scripts_dir = source_root / "scripts"
+    scripts_dir.mkdir()
+    semantic_registry_builder_source = (
+        "import argparse\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "ROOT = Path(__file__).resolve().parents[1]\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--write', action='store_true')\n"
+        "args = parser.parse_args()\n"
+        "if not args.write:\n"
+        "    raise SystemExit(2)\n"
+        "runtime = (ROOT / 'sourcing_model' / 'routing' / 'runtime.py').read_text(encoding='utf-8')\n"
+        "document = {'credential': 'absent', 'has_builtwith': 'builtwith_trends' in runtime}\n"
+    )
+    if generator_adds_secret:
+        semantic_registry_builder_source += (
+            "if document['has_builtwith']:\n"
+            "    document['generated_marker'] = 'sk-' + 'x' * 24\n"
+        )
+    semantic_registry_builder_source += (
+        "(ROOT / 'sourcing_model' / 'production_semantic_registry.json').write_text(\n"
+        "    json.dumps(document, sort_keys=True, separators=(',', ':')) + '\\n',\n"
+        "    encoding='utf-8',\n"
+        ")\n"
+    )
+    (
+        scripts_dir
+        / Path(code_build._SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH).name
+    ).write_text(
+        semantic_registry_builder_source,
         encoding="utf-8",
     )
     fixture_path = source_root / code_build._SOURCE_ADD_PARITY_FIXTURE_PATH
-    fixture_path.write_text('{"fixture_id": "source-add"}\n', encoding="utf-8")
+    custody_metadata = {
+        "required_dispatch_vector_kinds": ["start"],
+        "kind_ids": {"start": "start-request"},
+        "domain": "fixture-custody",
+        "self_hash_fields": {"start": "request_sha256"},
+        "dispatch_vector_builder_id": "fixture-builder",
+        "custody_fields": ["request_sha256"],
+    }
+
+    def custody_sha256(kind: str, payload: dict) -> str:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(kind.encode("utf-8") + b"\0" + encoded).hexdigest()
+
+    custody_payload = {
+        "route_sha256": hashlib.sha256(runtime_source.encode("utf-8")).hexdigest()
+    }
+    custody_hash = custody_sha256("start", custody_payload)
+    custody_envelope = {**custody_payload, "request_sha256": custody_hash}
+    custody_bytes = json.dumps(
+        custody_envelope,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    custody_vector = {
+        "fixture_id": "start-dispatch",
+        "kind": "start",
+        "kind_id": "start-request",
+        "domain": "fixture-custody",
+        "domain_terminator_hex": "00",
+        "self_hash_field": "request_sha256",
+        "builder_id": "fixture-builder",
+        "custody_sha256": custody_hash,
+        "persisted_json_hex": custody_bytes.hex(),
+        "persisted_bytes_sha256": hashlib.sha256(custody_bytes).hexdigest(),
+        "persisted_bytes_length": len(custody_bytes),
+    }
+    fixture_document = {
+        "fixture_id": "source-add",
+        "adversarial_request": {"access_token": "synthetic-secret"},
+        "model_runner_custody_v3": {
+            **custody_metadata,
+            "dispatch_vector_count": 1,
+            "dispatch_vectors": [custody_vector],
+        },
+        "expected_model_runner_custody_v3_projection": {
+            "dispatch_vectors": [
+                {
+                    "fixture_id": "start-dispatch",
+                    "custody_sha256": custody_hash,
+                    "persisted_bytes_sha256": hashlib.sha256(custody_bytes).hexdigest(),
+                }
+            ]
+        },
+    }
+    fixture_path.write_text(
+        json.dumps(fixture_document, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    fixture_digest = hashlib.sha256(
+        json.dumps(
+            fixture_document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
     evaluator_names = [
         evaluator
         for _, evaluator in code_build._SOURCE_ADD_PARITY_PROJECTION_EVALUATORS
         if evaluator != omit_evaluator
     ]
     expected_pairs = list(code_build._SOURCE_ADD_PARITY_PROJECTION_EVALUATORS)
-    (source_root / "sourcing_model" / "consumer_parity.py").write_text(
+    parity_path = source_root / code_build._SOURCE_ADD_PARITY_MODULE_PATH
+    parity_path.write_text(
         """
 import hashlib
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+"""
+        + f"{code_build._SOURCE_ADD_PARITY_HASH_CONSTANT} = {fixture_digest!r}\n\n"
+        + f"FAKE_CUSTODY_METADATA = {custody_metadata!r}\n\n"
+        + """
+def _fixture_document_sha256(document):
+    canonical = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 def _projection(name, fixtures):
     runtime = (ROOT / "routing" / "runtime.py").read_text(encoding="utf-8")
@@ -92,8 +230,57 @@ def _runtime_identity_sha256():
     runtime = (ROOT / "routing" / "runtime.py").read_bytes()
     return hashlib.sha256(runtime).hexdigest()
 
+_INTENT_SOURCE_CALL_COUNT = 0
+
 def _evaluate_intent_source_parity_cases(fixtures):
-    return [_projection("intent_source", fixtures)]
+    global _INTENT_SOURCE_CALL_COUNT
+    _INTENT_SOURCE_CALL_COUNT += 1
+    return [{
+        **_projection("intent_source", fixtures),
+        "outcome": (
+            "accepted" if _INTENT_SOURCE_CALL_COUNT == 1 else "unavailable"
+        ),
+    }]
+
+def model_runner_custody_metadata():
+    return FAKE_CUSTODY_METADATA
+
+def custody_json_bytes(value):
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+def custody_envelope_sha256(kind, payload):
+    return hashlib.sha256(
+        kind.encode("utf-8") + b"\\0" + custody_json_bytes(payload)
+    ).hexdigest()
+
+def model_runner_custody_parity_vectors():
+    runtime = (ROOT / "routing" / "runtime.py").read_bytes()
+    payload = {"route_sha256": hashlib.sha256(runtime).hexdigest()}
+    custody_hash = custody_envelope_sha256("start", payload)
+    return [{
+        "kind": "start",
+        "envelope": {**payload, "request_sha256": custody_hash},
+    }]
+
+def evaluate_model_runner_custody_v3_parity(fixtures):
+    section = fixtures["model_runner_custody_v3"]
+    vector = section["dispatch_vectors"][0]
+    generated = model_runner_custody_parity_vectors()[0]["envelope"]
+    persisted = custody_json_bytes(generated)
+    if bytes.fromhex(vector["persisted_json_hex"]) != persisted:
+        raise ValueError("custody persisted envelope differs")
+    return {
+        "dispatch_vectors": [{
+            "fixture_id": vector["fixture_id"],
+            "custody_sha256": vector["custody_sha256"],
+            "persisted_bytes_sha256": vector["persisted_bytes_sha256"],
+        }]
+    }
 
 """
         + "\n".join(
@@ -101,7 +288,13 @@ def _evaluate_intent_source_parity_cases(fixtures):
             for name in evaluator_names
         )
         + f"""
-def verify_expected_projections(fixtures):
+def verify_expected_projections(fixtures=None):
+    if fixtures is None:
+        fixtures = json.loads(
+            (ROOT / "consumer_parity_fixtures.json").read_text(encoding="utf-8")
+        )
+    if _fixture_document_sha256(fixtures) != {code_build._SOURCE_ADD_PARITY_HASH_CONSTANT}:
+        raise ValueError("fixture document differs")
     for expected_key, evaluator_name in {expected_pairs!r}:
         evaluator = globals()[evaluator_name]
         if fixtures.get(expected_key) != evaluator(fixtures):
@@ -113,8 +306,33 @@ def verify_expected_projections(fixtures):
     }}
     if fixtures.get("expected_intent_source_evaluation_projection") != expected_source:
         raise ValueError("intent source projection differs")
+    custody = evaluate_model_runner_custody_v3_parity(fixtures)
+    if fixtures.get("expected_model_runner_custody_v3_projection") != custody:
+        raise ValueError("model runner custody projection differs")
     return fixtures["expected_projections"]
 """,
+        encoding="utf-8",
+    )
+    contract_path = source_root / code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH
+    contract_path.write_text(
+        json.dumps(
+            {
+                "exact_constants": (
+                    {
+                        code_build._SOURCE_ADD_PARITY_MODULE_PATH: {
+                            code_build._SOURCE_ADD_PARITY_HASH_CONSTANT: (
+                                contract_digest or fixture_digest
+                            ),
+                        }
+                    }
+                    if bind_contract_hash
+                    else {"research_lab_adapter.py": {}}
+                )
+            },
+            indent=2,
+            ensure_ascii=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (source_root / "sourcing_model" / "intent_source_evaluation.py").write_text(
@@ -129,20 +347,24 @@ def verify_expected_projections(fixtures):
         source_tree_hash="sha256:" + "2" * 64,
         top_level_paths=("sourcing_model",),
         editable_files=(
+            code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH,
             code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
             code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
+            code_build._SOURCE_ADD_PARITY_MODULE_PATH,
+            code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH,
         ),
         file_previews=(),
     )
+    # Real model diffs may omit the enclosing tuple name from the hunk label
+    # and context while inserting a registration inside the tuple.
     unified_diff = (
         "diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py\n"
         "--- a/sourcing_model/routing/runtime.py\n"
         "+++ b/sourcing_model/routing/runtime.py\n"
-        "@@ -1 +1,4 @@\n"
-        "-SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
-        "+SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "@@ -2,2 +2,3 @@\n"
+        "     SourceAddRoutingRegistration(provider_id='existing'),\n"
         "+    SourceAddRoutingRegistration(provider_id='builtwith_trends'),\n"
-        "+)\n"
+        " )\n"
     )
     draft = _draft(
         target_files=(code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,),
@@ -165,15 +387,97 @@ def test_source_add_materialization_binds_verified_parity_fixture(
     )
 
     assert materialized.target_files == (
+        code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH,
+        code_build._SOURCE_ADD_PARITY_MODULE_PATH,
         code_build._SOURCE_ADD_PARITY_FIXTURE_PATH,
+        code_build._SOURCE_ADD_SEMANTIC_REGISTRY_PATH,
         code_build._SOURCE_ADD_ROUTING_RUNTIME_PATH,
     )
-    assert code_build._SOURCE_ADD_PARITY_FIXTURE_PATH in materialized.unified_diff
+    for path in code_build._SOURCE_ADD_DERIVED_ARTIFACT_PATHS:
+        assert path in materialized.unified_diff
     assert "builtwith_trends" in materialized.unified_diff
+    added_lines = "\n".join(
+        line[1:]
+        for line in materialized.unified_diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    contract_hash = re.search(
+        rf'"{code_build._SOURCE_ADD_PARITY_HASH_CONSTANT}": "([0-9a-f]{{64}})"',
+        added_lines,
+    )
+    assert contract_hash is not None
+    assert added_lines.count(contract_hash.group(1)) == 2
     assert materialized == builder.materialize_source_add_derived_artifacts(
         draft=draft,
         source_context=source_context,
     )
+
+
+def test_source_add_materialization_requires_model_semantic_registry_builder(
+    tmp_path,
+):
+    source_context, draft = _source_add_materialization_fixture(tmp_path)
+    (
+        source_context.source_root
+        / code_build._SOURCE_ADD_SEMANTIC_REGISTRY_BUILDER_PATH
+    ).unlink()
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="parity projection materialization failed",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
+
+
+def test_source_add_materialization_preserves_unbound_consumer_contract(tmp_path):
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        bind_contract_hash=False,
+    )
+    contract_path = (
+        source_context.source_root
+        / code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH
+    )
+    original_contract = contract_path.read_bytes()
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    materialized = builder.materialize_source_add_derived_artifacts(
+        draft=draft,
+        source_context=source_context,
+    )
+
+    assert code_build._SOURCE_ADD_CONSUMER_CONTRACT_PATH not in (
+        materialized.target_files
+    )
+    assert contract_path.read_bytes() == original_contract
+    assert code_build._SOURCE_ADD_REQUIRED_DERIVED_ARTIFACT_PATHS.issubset(
+        materialized.target_files
+    )
+
+
+def test_source_add_materialization_rejects_new_generated_secret(tmp_path):
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        generator_adds_secret=True,
+    )
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="generated artifacts contain secret-shaped material",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
 
 
 def test_source_add_materialization_fails_closed_when_projection_api_differs(
@@ -183,6 +487,25 @@ def test_source_add_materialization_fails_closed_when_projection_api_differs(
     source_context, draft = _source_add_materialization_fixture(
         tmp_path,
         omit_evaluator=missing,
+    )
+    builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
+
+    with pytest.raises(
+        CodeEditPrivateTestError,
+        match="parity projection materialization failed",
+    ) as exc_info:
+        builder.materialize_source_add_derived_artifacts(
+            draft=draft,
+            source_context=source_context,
+        )
+
+    assert exc_info.value.failure_stage == "candidate_derived_artifact_failed"
+
+
+def test_source_add_materialization_fails_closed_on_stale_contract_hash(tmp_path):
+    source_context, draft = _source_add_materialization_fixture(
+        tmp_path,
+        contract_digest="0" * 64,
     )
     builder = code_build.CodeEditCandidateBuilder(_SourceAddMaterializationConfig())
 
@@ -1175,12 +1498,119 @@ def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
     )
     content = messages[-1]["content"]
 
-    assert "add the exact SourceAddRoutingRegistration" in content
+    assert "ensure the exact SourceAddRoutingRegistration" in content
+    assert "preserve it and do not emit a redundant runtime hunk" in content
+    assert "sourcing_model/model_runner.py::_COMMON_SOURCE_ADD_BY_INTENT" in content
     assert "best_for_description" in content
     assert "avoid_when_description" in content
     assert "intent_categories" in content
     assert "hard-coded provider branch" in content
     assert "consumer separately binds and activates" in content
+
+
+def test_source_add_prompts_bind_v8_constructor_derived_manifest_fields():
+    provider_context = {
+        "routerverse_source_incorporation": {
+            "requests": [
+                {
+                    "schema_version": (
+                        "leadpoet.routerverse_source_incorporation.v3"
+                    ),
+                    "provider_id": "community_signals",
+                    "stage": "intent_evidence",
+                    "binding_manifest": {
+                        "schema_version": (
+                            "leadpoet.intent-source-binding-manifest:v1"
+                        ),
+                        "tool_id": "intent.source_add.community_signals",
+                        "provider_id": "community_signals",
+                        "stage": "intent_evidence",
+                        "execution_mode": "invoke",
+                    },
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                }
+            ],
+            "clarifications": [],
+        }
+    }
+    planner_messages = code_editing.build_loop_direction_planner_messages(
+        ticket={
+            "ticket_id": "ticket-source-add-v8",
+            "brief_public_summary": "Register the approved source.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        provider_capability_summary=provider_context,
+    )
+    planner_content = planner_messages[-1]["content"]
+
+    edit_messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={
+            "ticket_id": "ticket-source-add-v8",
+            "brief_public_summary": "Register the approved source.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        source_inspection_context={
+            "read_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "register-community-signals-v8",
+        },
+        max_candidates=1,
+        provider_capability_summary=provider_context,
+    )
+    edit_content = edit_messages[-1]["content"]
+
+    assert "binding_manifest is the approved attestation" in planner_content
+    assert "revision and manifest_sha256 are constructor-derived" in planner_content
+    assert "binding_manifest" in edit_content
+    assert "not constructor keywords" in edit_content
+    assert "Omit revision and manifest_sha256 in v8" in edit_content
+    assert "execution_plan_identity" in edit_content
+
+
+def test_plan_alignment_judge_does_not_require_v8_manifest_metadata_keywords():
+    messages = code_editing.build_plan_alignment_judge_messages(
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "register-community-signals-v8",
+            "required_mechanism": "approved source registration",
+        },
+        draft=_draft(
+            lane="source_routing",
+            plan_path_id="register-community-signals-v8",
+            target_files=("sourcing_model/routing/runtime.py",),
+            unified_diff=(
+                "diff --git a/sourcing_model/routing/runtime.py "
+                "b/sourcing_model/routing/runtime.py\n"
+                "--- a/sourcing_model/routing/runtime.py\n"
+                "+++ b/sourcing_model/routing/runtime.py\n"
+                "@@ -1 +1,2 @@\n"
+                " SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+                "+    SourceAddRoutingRegistration(provider_id='community_signals'),\n"
+            ),
+        ),
+    )
+    content = messages[-1]["content"]
+
+    assert "binding_manifest is an approved request-side attestation" in content
+    assert "Do not fail a v8 registration merely because" in content
+    assert "omits binding_manifest, revision, or manifest_sha256" in content
 
 
 def test_code_edit_prompt_requires_direct_git_parent_and_safe_branch_feedback():

@@ -132,6 +132,25 @@ def build_parser() -> argparse.ArgumentParser:
     resume_scoring.add_argument("--reason", default="maintenance complete")
     resume_scoring.add_argument("--actor-ref", default=default_actor_ref())
 
+    for command, action in (
+        ("pause-source-add", "pause"),
+        ("resume-source-add", "resume"),
+    ):
+        source_add_control = sub.add_parser(
+            command,
+            help=("Pause" if action == "pause" else "Resume")
+            + " SOURCE_ADD work claims",
+        )
+        source_add_control.add_argument(
+            "--reason",
+            required=action == "pause",
+            default="maintenance complete" if action == "resume" else None,
+        )
+        source_add_control.add_argument(
+            "--actor-ref", default=default_actor_ref()
+        )
+        source_add_control.set_defaults(source_add_command=action, apply=True)
+
     resume_restart = sub.add_parser(
         "resume-restart-maintenance",
         help=(
@@ -1572,7 +1591,7 @@ async def _run_source_add_admin(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "probe_endpoints": endpoints,
             "operator_notes": args.operator_notes,
-        }).model_dump(mode="json", exclude_none=True)
+        }).model_dump(mode="json", exclude_none=True, exclude_unset=True)
         if not args.apply:
             return {
                 "ok": True,
@@ -1623,7 +1642,7 @@ async def _run_source_add_admin(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
-    if args.command == "source-add":
+    if args.command in {"source-add", "pause-source-add", "resume-source-add"}:
         return await _run_source_add_admin(args)
     if args.command == "check-deploy-readiness":
         result = build_deploy_readiness(

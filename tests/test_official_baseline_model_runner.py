@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 import concurrent.futures
+from datetime import datetime, timezone
 import hashlib
 import json
 from types import SimpleNamespace
@@ -15,6 +16,9 @@ from gateway.research_lab.common_model_experiment import (
     _bind_durable_provider_result,
 )
 from gateway.research_lab import scoring_worker as scoring_worker_module
+from gateway.research_lab.official_baseline_authority import (
+    OfficialBaselineTerminalUncertainError,
+)
 from gateway.research_lab.official_baseline_model_runner import (
     ArtifactBenchmarkProjection,
     ArtifactProtocolBenchmarkProjector,
@@ -34,7 +38,11 @@ from gateway.research_lab.official_baseline_model_runner import (
 )
 from research_lab.canonical import sha256_json
 from research_lab.common_model_runner_host import HostActionResult
-from research_lab.eval import DockerPrivateModelSpec, PrivateModelArtifactManifest
+from research_lab.eval import (
+    DockerPrivateModelSpec,
+    PrivateModelArtifactManifest,
+    PrivateModelRuntimeError,
+)
 from research_lab.model_runner_protocol import (
     ArtifactRunnerProtocolGeneration,
     ExactModelRunnerRegistration,
@@ -743,10 +751,12 @@ class _Transitions:
         return self.generation
 
     def load_model_transition(self, **identity):
-        return self.values.get(identity["idempotency_key"])
+        return self.values.get(
+            (identity["unit_ref"], identity["idempotency_key"])
+        )
 
     def append_model_transition(self, **value):
-        self.values[value["action"]["idempotency_key"]] = {
+        self.values[(value["unit_ref"], value["action"]["idempotency_key"])] = {
             "action": deepcopy(value["action"]),
             "continuation": deepcopy(value["continuation"]),
             "completion": deepcopy(value["completion"]),
@@ -874,7 +884,9 @@ class _ProtectedAuthority:
     def close_unit(self, *, completion):
         ordered_keys = []
         ordered_hashes = []
-        for stored in self.transitions.values.values():
+        for (unit_ref, _idempotency_key), stored in self.transitions.values.items():
+            if unit_ref != completion["unit_ref"]:
+                continue
             action = stored["action"]
             attempt_key = sha256_json(
                 {
@@ -1075,6 +1087,230 @@ async def test_scoring_worker_accepts_exact_empty_on_retry_zero(monkeypatch):
     assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD in row
 
 
+@pytest.mark.parametrize(
+    "incomplete_marker",
+    (
+        "model_runner_incomplete:run_budget_exhausted",
+        "model_runner_incomplete:required_provider_failure",
+    ),
+)
+@pytest.mark.asyncio
+async def test_scoring_worker_retries_exact_model_incomplete_outcome(
+    monkeypatch,
+    incomplete_marker: str,
+):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(private_baseline_provider_retry_rounds=2)
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    async def no_traces(**_values):
+        return None
+
+    attempt_ordinals = []
+
+    def incomplete_outcome(*_args, **kwargs):
+        attempt_ordinals.append(kwargs.get("attempt_ordinal"))
+        raise PrivateModelRuntimeError(incomplete_marker)
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    worker._record_baseline_icp_traces = no_traces
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        incomplete_outcome,
+    )
+    item = {
+        "icp_ref": "icp-incomplete-budget",
+        "icp_hash": "sha256:" + "1" * 64,
+        "set_id": "set-1",
+        "day_index": 0,
+        "day_rank": 1,
+        "icp": {"outputs": [], "max_companies": 1},
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        row = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=object(),
+            item=item,
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            benchmark_date="2026-08-23",
+            retry_round=1,
+        )
+
+    assert attempt_ordinals == [1]
+    assert row["_retryable"] is True
+    assert row["_nonempty"] is False
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD not in row
+
+
+@pytest.mark.asyncio
+async def test_scoring_worker_retries_terminal_uncertain_with_fresh_attempt(
+    monkeypatch,
+):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(private_baseline_provider_retry_rounds=2)
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    async def no_traces(**_values):
+        return None
+
+    attempt_ordinals = []
+
+    def terminal_uncertain(*_args, **kwargs):
+        attempt_ordinals.append(kwargs.get("attempt_ordinal"))
+        raise OfficialBaselineTerminalUncertainError(
+            "official baseline protected call is terminal uncertain"
+        )
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    worker._record_baseline_icp_traces = no_traces
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        terminal_uncertain,
+    )
+    item = {
+        "icp_ref": "icp-terminal-uncertain",
+        "icp_hash": "sha256:" + "2" * 64,
+        "set_id": "set-1",
+        "day_index": 0,
+        "day_rank": 1,
+        "icp": {"outputs": [], "max_companies": 1},
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        row = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=object(),
+            item=item,
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            benchmark_date="2026-08-27",
+            retry_round=0,
+        )
+
+    assert attempt_ordinals == [0]
+    assert row["_retryable"] is True
+    assert row["_nonempty"] is False
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert row["_runtime_error"].startswith(
+        "OfficialBaselineTerminalUncertainError:"
+    )
+    assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD not in row
+
+
+@pytest.mark.asyncio
+async def test_terminal_uncertain_advances_to_fresh_bounded_attempt(
+    monkeypatch,
+):
+    benchmark_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    runner = runner.with_spec(
+        replace(
+            runner.spec,
+            extra_env={
+                scoring_worker_module.PROVIDER_COST_EVALUATION_SCOPE_ENV: (
+                    "sha256:" + "7" * 64
+                )
+            },
+        )
+    )
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=1,
+        scoring_worker_total_workers=1,
+    )
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    async def no_traces(**_values):
+        return None
+
+    async def maintenance_state():
+        return {"paused": False}
+
+    original_run_icp = ExactOfficialBaselineRunner.run_icp
+    attempt_ordinals = []
+
+    def recover_on_fresh_attempt(self, *_args, **kwargs):
+        attempt_ordinal = kwargs.get("attempt_ordinal")
+        attempt_ordinals.append(attempt_ordinal)
+        if attempt_ordinal == 0:
+            raise OfficialBaselineTerminalUncertainError(
+                "official baseline protected call is terminal uncertain"
+            )
+        return original_run_icp(self, *_args, **kwargs)
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    worker._record_baseline_icp_traces = no_traces
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        recover_on_fresh_attempt,
+    )
+    monkeypatch.setattr(
+        scoring_worker_module,
+        "get_scoring_maintenance_state",
+        maintenance_state,
+    )
+    monkeypatch.setattr(
+        scoring_worker_module,
+        "_apply_provider_cost_baseline_outcome",
+        lambda _row: None,
+    )
+    monkeypatch.setattr(
+        "leadpoet_canonical.production_parity_boundary_v2.configured_rebenchmark_now_v2",
+        lambda *, now=None: benchmark_now,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {
+                "icp_ref": "icp-terminal-uncertain",
+                "icp_hash": "sha256:" + "2" * 64,
+                "set_id": "set-1",
+                "day_index": 0,
+                "day_rank": 1,
+                "icp": {"outputs": [], "max_companies": 1},
+            }
+        ]
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=runner,
+        retry_runner=runner,
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+        benchmark_date=benchmark_now.date().isoformat(),
+    )
+
+    assert attempt_ordinals == [0, 1]
+    assert stats == {"retried": 1, "recovered": 1, "unresolved": 0}
+    assert rows[0]["_retryable"] is False
+    assert rows[0]["diagnostics"]["sourcing_failed"] is False
+    assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD in rows[0]
+
+
 def test_restart_reconstructs_and_does_not_duplicate_provider_call():
     runner, _projector, authority, terminal = _exact_fixture()
     raw = {"requires_action": True, "outputs": [_company()]}
@@ -1086,10 +1322,54 @@ def test_restart_reconstructs_and_does_not_duplicate_provider_call():
         expected_checkpoint=first.checkpoint,
     )
 
+    expected_round_zero_ref = "baseline_icp:" + sha256_json(
+        {
+            "run_sha256": runner.run_sha256,
+            "icp_ref": "icp-restart",
+            "raw_icp_sha256": sha256_json(raw),
+        }
+    ).removeprefix("sha256:")
+    assert first.checkpoint["unit_ref"] == expected_round_zero_ref
     assert second.checkpoint == first.checkpoint
     assert second.replayed_transition_count == 1
     assert authority.dispatcher.provider_calls == 1
     assert len(terminal.records) == 1
+
+    retry = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-restart",
+        target_count=1,
+        attempt_ordinal=1,
+    )
+    retry_after_restart = runner.run_icp(
+        raw_icp=raw,
+        icp_ref="icp-restart",
+        target_count=1,
+        attempt_ordinal=1,
+        expected_checkpoint=retry.checkpoint,
+    )
+
+    assert retry.checkpoint != first.checkpoint
+    assert retry_after_restart.checkpoint == retry.checkpoint
+    assert retry_after_restart.replayed_transition_count == 1
+    assert authority.dispatcher.provider_calls == 2
+    assert len(terminal.records) == 2
+
+
+@pytest.mark.parametrize("attempt_ordinal", (-1, True, 1.0, "1"))
+def test_exact_official_baseline_rejects_invalid_attempt_ordinal(attempt_ordinal):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+
+    with pytest.raises(
+        OfficialBaselineModelError,
+        match="attempt ordinal is invalid",
+    ):
+        runner.run_icp(
+            raw_icp={"outputs": []},
+            icp_ref="icp-invalid-attempt",
+            target_count=1,
+            attempt_ordinal=attempt_ordinal,
+        )
 
 
 def test_current_official_baseline_uses_compiled_dispatch_and_v4_custody():

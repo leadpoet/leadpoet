@@ -80,23 +80,34 @@ def test_free_text_intents_resolve_to_valid_categories():
     ) == "PRODUCT_LAUNCH"
 
 
-def test_llm_provided_category_is_authoritative_over_fallback():
-    """The generated ICP's intent_category comes from the LLM (the output
-    schema requires it) and canonicalize honors it — even when a specific
-    intent's wording contains a keyword the fallback would route elsewhere
-    (e.g. 'platform' would fall back to TECHSTACK)."""
+def test_bonus_product_launch_semantics_outrank_generic_technology_nouns():
+    """Bonus intents use the deterministic fallback, so explicit event
+    semantics must outrank generic words such as ``platform``."""
+    bonus_signal = (
+        "Launched a major platform capability or workflow expansion in the "
+        "last 12 months, per a product page, changelog, or company announcement."
+    )
     icp = {
         "icp_id": "icp_1", "prompt": "test",
         "product_service": "x", "required_attribute": "x-attr",
-        "intent_signal": "Launched a new platform module in the last 12 months",
-        "intent_signals": ["Launched a new platform module in the last 12 months"],
+        "intent_signal": "Announced a Series A funding round in the last 12 months",
+        "intent_signals": [
+            "Announced a Series A funding round in the last 12 months",
+            bonus_signal,
+        ],
         "employee_count": ["51-200"],
-        "intent_category": "PRODUCT_LAUNCH",   # LLM-provided
+        "intent_category": "FUNDING",
     }
     out = canonicalize_generated_icp(icp, industry="Software", sub_industry="B2B SaaS")
-    assert out["intent_category"] == "PRODUCT_LAUNCH"   # LLM wins, not TECHSTACK fallback
-    # And the fallback alone would indeed differ, which is why the LLM value is authoritative:
-    assert intent_category_for_signal(icp["intent_signal"]) == "TECHSTACK"
+    assert out["intent_category"] == "FUNDING"
+    assert out["bonus_intents"] == [
+        {
+            "intent_signal": bonus_signal,
+            "intent_category": "PRODUCT_LAUNCH",
+            "intent_max_age_days": 365,
+        }
+    ]
+    assert intent_category_for_signal("Implemented a new CRM platform") == "TECHSTACK"
 
 
 def test_intent_signal_count_is_unchanged():

@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from io import BytesIO
+from inspect import signature
 
 import pytest
 
@@ -15,6 +16,7 @@ from gateway.research_lab import (
 from gateway.research_lab.common_model_experiment import (
     CommonModelExperimentError,
     CommonModelExperimentRecoveryError,
+    ModelTransitionRepository,
     ProtectedModelActionResult,
 )
 from gateway.research_lab.official_baseline_authority import (
@@ -24,12 +26,14 @@ from gateway.research_lab.official_baseline_authority import (
     OfficialBaselineProtectedAuthorityError,
     OfficialBaselineProtectedTerminal,
     OfficialBaselineReleaseComponents,
+    OfficialBaselineTerminalUncertainError,
     _protected_result_document,
     build_production_official_baseline_exact_dependencies,
 )
 from gateway.research_lab.official_baseline_custody import (
     OfficialBaselineCustodyError,
     S3OfficialBaselineDocumentCustody,
+    S3OfficialBaselineTransitionRepository,
 )
 from gateway.research_lab.official_baseline_model_runner import (
     OFFICIAL_BASELINE_PROVIDER_FRONTIER_SCHEMA_VERSION,
@@ -57,14 +61,17 @@ class _S3:
     def __init__(self):
         self.values = {}
         self.puts = 0
+        self.readers = []
 
     def get_object(self, *, Bucket, Key):
         del Bucket
         if Key not in self.values:
             raise _Missing
         value = self.values[Key]
+        reader = BytesIO(value["Body"])
+        self.readers.append(reader)
         return {
-            "Body": BytesIO(value["Body"]),
+            "Body": reader,
             "Metadata": deepcopy(value["Metadata"]),
             "ServerSideEncryption": value["ServerSideEncryption"],
         }
@@ -79,6 +86,17 @@ class _S3:
             **deepcopy(value),
             "Body": bytes(value["Body"]),
         }
+
+
+class _FailingBody:
+    def __init__(self):
+        self.closed = False
+
+    def read(self):
+        raise RuntimeError("fixture read failure")
+
+    def close(self):
+        self.closed = True
 
 
 def _context(runner) -> OfficialBaselineDependencyContext:
@@ -101,6 +119,100 @@ def _context(runner) -> OfficialBaselineDependencyContext:
         evidence_proxy_capability_sha256="sha256:" + "a" * 64,
         evidence_proxy_ready_provider_ids=("or",),
     )
+
+
+def _custody_for_test(s3) -> S3OfficialBaselineDocumentCustody:
+    return S3OfficialBaselineDocumentCustody(
+        client=s3,
+        bucket="fixture-bucket",
+        prefix="official-baseline",
+        kms_key_id="alias/fixture-encryption",
+    )
+
+
+def test_custody_closes_every_successful_s3_response_body():
+    s3 = _S3()
+    custody = _custody_for_test(s3)
+
+    assert custody._append_document("fixture.json", {"value": "fixture"}) is True
+    assert s3.readers
+    assert all(reader.closed for reader in s3.readers)
+
+
+def test_custody_closes_s3_body_before_rejecting_invalid_encryption():
+    s3 = _S3()
+    body = b'{}'
+    s3.values["fixture.json"] = {
+        "Body": body,
+        "Metadata": {
+            "content-sha256": sha256_bytes(body).removeprefix("sha256:"),
+            "kms-key-id-sha256": sha256_bytes(
+                b"alias/fixture-encryption"
+            ).removeprefix("sha256:"),
+        },
+        "ServerSideEncryption": "AES256",
+    }
+    custody = _custody_for_test(s3)
+
+    with pytest.raises(OfficialBaselineCustodyError, match="SSE-KMS protected"):
+        custody._read_bytes("fixture.json")
+
+    assert s3.readers[-1].closed
+
+
+def test_custody_closes_s3_body_when_stream_read_fails():
+    body = _FailingBody()
+
+    class _ReadFailureS3(_S3):
+        def get_object(self, *, Bucket, Key):
+            del Bucket, Key
+            return {
+                "Body": body,
+                "Metadata": {},
+                "ServerSideEncryption": "aws:kms",
+            }
+
+    custody = _custody_for_test(_ReadFailureS3())
+
+    with pytest.raises(OfficialBaselineCustodyError, match="body read failed"):
+        custody._read_bytes("fixture.json")
+
+    assert body.closed is True
+
+
+def test_production_custody_uses_bounded_concurrent_s3_transport(monkeypatch):
+    import boto3
+
+    captured = {}
+    s3 = _S3()
+
+    def client(service, **kwargs):
+        captured.update(service=service, **kwargs)
+        return s3
+
+    monkeypatch.setenv(
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
+        "s3://fixture-bucket/research-lab/traces",
+    )
+    monkeypatch.setenv(
+        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID",
+        "alias/fixture-encryption",
+    )
+    monkeypatch.setattr(boto3, "client", client)
+
+    custody = official_baseline_authority_module._production_custody()
+    transport = captured["config"]
+
+    assert isinstance(custody, S3OfficialBaselineDocumentCustody)
+    assert captured["service"] == "s3"
+    assert transport.connect_timeout == 5
+    assert transport.read_timeout == 15
+    assert transport.max_pool_connections == 64
+    assert transport.retries == {
+        "mode": "standard",
+        "total_max_attempts": 3,
+    }
+    assert transport.tcp_keepalive is True
 
 
 def test_fresh_daily_attempt_zero_is_a_valid_frozen_context():
@@ -416,7 +528,7 @@ class _Bridge:
             request_body_sha256=sha256_json(action["arguments"]),
             call_cap=0 if verifier else 1,
             credit_cap_microunits=0 if verifier else 100,
-            timeout_ms=5_000,
+            timeout_ms=0 if verifier else 5_000,
             protected_job_ref="protected_job:" + action["idempotency_key"][:16],
             protected_request_sha256=sha256_json(dict(action)),
         )
@@ -621,11 +733,11 @@ def test_unknown_call_is_terminal_uncertain_and_never_redispatched():
         run_identity=run_identity, unit_ref=unit_ref
     )
 
-    with pytest.raises(CommonModelExperimentRecoveryError, match="terminal uncertain"):
+    with pytest.raises(OfficialBaselineTerminalUncertainError, match="terminal uncertain"):
         dispatcher.dispatch_provider_action(
             action=action, variant_id="official_baseline", unit_ref=unit_ref
         )
-    with pytest.raises(CommonModelExperimentRecoveryError, match="terminal uncertain"):
+    with pytest.raises(OfficialBaselineTerminalUncertainError, match="terminal uncertain"):
         dispatcher.dispatch_provider_action(
             action=action, variant_id="official_baseline", unit_ref=unit_ref
         )
@@ -909,6 +1021,7 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
         experiment_hash=sha256_json(run_identity),
         variant_id="official_baseline",
         unit_ref=unit_ref,
+        artifact_key=authority._registration.key,
         action=action,
         continuation=continuation,
         completion=completion,
@@ -925,9 +1038,34 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
         variant_id="official_baseline",
         unit_ref=unit_ref,
         idempotency_key=action["idempotency_key"],
+        artifact_key=authority._registration.key,
     )
     assert loaded["completion"] == completion
     assert repository.expected_frontier_sha256(1)
+
+    with pytest.raises(OfficialBaselineCustodyError, match="identity differs"):
+        repository.load_model_transition(
+            experiment_hash=sha256_json(run_identity),
+            variant_id="official_baseline",
+            unit_ref=unit_ref,
+            idempotency_key=action["idempotency_key"],
+            artifact_key="sha256:" + "0" * 64,
+        )
+    with pytest.raises(OfficialBaselineCustodyError, match="identity differs"):
+        repository.append_model_transition(
+            experiment_hash=sha256_json(run_identity),
+            variant_id="official_baseline",
+            unit_ref=unit_ref,
+            artifact_key="sha256:" + "0" * 64,
+            action=action,
+            continuation=continuation,
+            completion=completion,
+            provider_receipt=result.provider_receipt.to_dict(),
+            protocol_generation_sha256=(
+                authority._registration.protocol_generation.protocol_generation_sha256
+            ),
+            replay_ref=result.replay_ref,
+        )
 
     record_identity = "sha256:" + "2" * 64
     record = {"company_outputs": []}
@@ -945,6 +1083,27 @@ def test_encrypted_transition_replay_repairs_frontier_and_terminal_is_append_onl
             record_identity_sha256=record_identity,
             record={"company_outputs": [{"tampered": True}]},
         )
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "resolve_run_protocol_generation",
+        "load_model_transition",
+        "append_model_transition",
+    ),
+)
+def test_s3_transition_repository_accepts_shared_contract(method_name):
+    contract_parameters = set(
+        signature(getattr(ModelTransitionRepository, method_name)).parameters
+    )
+    implementation_parameters = set(
+        signature(
+            getattr(S3OfficialBaselineTransitionRepository, method_name)
+        ).parameters
+    )
+
+    assert contract_parameters <= implementation_parameters
 
 
 def test_production_factory_is_fail_closed_without_signed_component_handoff(

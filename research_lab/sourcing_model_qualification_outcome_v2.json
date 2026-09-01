@@ -1,6 +1,7 @@
 {
   "protocol_id": "sourcing-model.qualification-outcome",
   "protocol_major": 2,
+  "protocol_minor": 2,
   "entrypoint": "run_icp_outcome",
   "result_schema_version": "sourcing-model.qualification-outcome.v2",
   "route_completion_receipt_schema_version": "sourcing-model.route-completion-receipt.v1",
@@ -71,7 +72,9 @@
   "reconciliation": [
     "attempted=completed+confirmed_empty+retryable_failed+terminal_failed",
     "returned_count=len(companies)",
-    "partial=(completion_state=incomplete and returned_count>0)"
+    "partial=(completion_state=incomplete and returned_count>0)",
+    "provider_route_summary=semantic_routes=host_observed_routes",
+    "branch_control_failure_is_not_a_provider_route"
   ],
   "completion_rules": {
     "complete_nonempty": {
@@ -95,13 +98,15 @@
     "incomplete_retryable": {
       "completion_state": "incomplete",
       "retryable": true,
-      "minimum_retryable_failed": 1,
+      "minimum_retryable_failed_without_branch_control": 1,
+      "retryable_branch_control_alternative": true,
       "minimum_failure_classes_count": 1
     },
     "incomplete_terminal": {
       "completion_state": "incomplete",
       "retryable": false,
-      "minimum_terminal_failed": 1,
+      "minimum_terminal_failed_without_branch_control": 1,
+      "terminal_branch_control_alternative": true,
       "minimum_failure_classes_count": 1
     },
     "unreceipted_empty_allowed": false,
@@ -182,6 +187,51 @@
     "maximum_reverse_dns_segment_characters": 32,
     "additive_optional_extensions_same_major": true,
     "additive_optional_capabilities_same_major": true
+  },
+  "branch_control_failure": {
+    "extension_key": "com.leadpoet.branch-control-failure",
+    "schema_version": "sourcing-model.branch-control-failure.v1",
+    "authority": "sourcing_model",
+    "provider_route_outcome": false,
+    "host_route_counters_unchanged": true,
+    "proof_hash_excludes_only": "proof_sha256",
+    "proof_fields": [
+      "authority",
+      "branch_id_sha256",
+      "branch_number",
+      "failure_class",
+      "match_mode",
+      "phase",
+      "proof_sha256",
+      "reason",
+      "retryable",
+      "schema_version"
+    ],
+    "allowed_match_modes": [
+      "all",
+      "any"
+    ],
+    "maximum_branch_number": 4,
+    "reason_policy": {
+      "required_branch_deadline_exhausted": {
+        "phase": "pre_dispatch",
+        "failure_class": "branch_deadline_exhausted",
+        "retryable": true,
+        "required_branch_status": "skipped"
+      },
+      "required_branch_terminal_control": {
+        "phase": "branch_execution",
+        "allowed_failure_classes": [
+          "budget_blocked",
+          "terminal_auth",
+          "terminal_quota",
+          "tracking_failed",
+          "transport_invariant_failed"
+        ],
+        "retryable": false,
+        "required_branch_status": "failed"
+      }
+    }
   },
   "required_route_outcomes": {
     "extension_key": "com.leadpoet.required-route-outcomes",

@@ -111,6 +111,7 @@ from gateway.research_lab.official_baseline_store import (
     SupabaseOfficialBaselineAttemptStore,
 )
 from gateway.research_lab.official_baseline_authority import (
+    OfficialBaselineTerminalUncertainError,
     build_production_official_baseline_exact_dependencies,
 )
 from gateway.research_lab.official_baseline_release_authorities import (
@@ -1528,6 +1529,18 @@ _BASELINE_WAVE_STALL_GRACE_SECONDS = 180.0
 _BASELINE_WAVE_STALL_EXIT_CODE = 75
 
 
+def _baseline_repo_head_watch_interval_seconds() -> float:
+    """Bounded cadence for preempting work after the model branch advances."""
+
+    try:
+        configured = float(
+            os.getenv("RESEARCH_LAB_BASELINE_REPO_HEAD_WATCH_SECONDS", "30")
+        )
+    except ValueError:
+        configured = 30.0
+    return min(300.0, max(5.0, configured))
+
+
 def _baseline_wave_stall_timeout_seconds(config: Any) -> float:
     """Bound one checkpoint-backed wave beyond its full measured deadline."""
 
@@ -1572,35 +1585,58 @@ def _baseline_wave_watchdog(
     timeout_seconds: float,
     on_timeout: Callable[..., None] | None = None,
 ):
-    """Hard-stop a stalled checkpoint-backed wave without racing disarm."""
+    """Hard-stop a no-progress checkpoint wave without racing disarm."""
 
-    deadline = max(0.001, float(timeout_seconds))
+    stall_timeout = max(0.001, float(timeout_seconds))
     state_lock = threading.Lock()
+    state_changed = threading.Event()
     armed = True
+    last_progress_at = time.monotonic()
 
-    def fire() -> None:
-        nonlocal armed
+    def mark_progress() -> None:
+        nonlocal last_progress_at
         with state_lock:
             if not armed:
                 return
-            armed = False
+            last_progress_at = time.monotonic()
+        state_changed.set()
+
+    def monitor() -> None:
+        nonlocal armed
+        while True:
+            with state_lock:
+                if not armed:
+                    return
+                remaining = stall_timeout - (
+                    time.monotonic() - last_progress_at
+                )
+                if remaining <= 0:
+                    armed = False
+                    break
+            state_changed.wait(timeout=max(0.001, remaining))
+            state_changed.clear()
         callback = on_timeout or _terminate_stalled_baseline_worker
         callback(
             worker_ref=worker_ref,
             phase=phase,
             item_indexes=tuple(int(value) for value in item_indexes),
-            timeout_seconds=deadline,
+            timeout_seconds=stall_timeout,
         )
 
-    timer = threading.Timer(deadline, fire)
-    timer.daemon = True
-    timer.start()
+    monitor_thread = threading.Thread(
+        target=monitor,
+        name="baseline-wave-watchdog",
+        daemon=True,
+    )
+    monitor_thread.start()
     try:
-        yield
+        yield mark_progress
     finally:
         with state_lock:
             armed = False
-        timer.cancel()
+        state_changed.set()
+        if threading.current_thread() is not monitor_thread:
+            monitor_thread.join(timeout=1.0)
 
 
 def _read_own_rss_mb(status_path: str = "/proc/self/status") -> int | None:
@@ -1629,6 +1665,10 @@ _PROVIDER_COST_CAP_ERROR_MARKERS = (
     "provider_cost_cap_blocked",
     "provider cost cap",
     "budget_soft_stop",
+)
+_MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS = (
+    "model_runner_incomplete:run_budget_exhausted",
+    "model_runner_incomplete:required_provider_failure",
 )
 
 
@@ -1659,6 +1699,11 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     provider = str(diagnostics.get("provider") or "unknown")
     if _provider_cost_cap_error_text(error_text):
         return False
+    if any(
+        marker in lowered
+        for marker in _MODEL_RUNNER_RETRYABLE_INCOMPLETE_MARKERS
+    ):
+        return True
     if status in (408, 429) or status >= 500:
         return True
     # Scrapingdog's 400 "Something went wrong or profile not found" is
@@ -2748,6 +2793,91 @@ def _baseline_attempt_ledger_doc(
         "entries": normalized,
     }
     return {**payload, "ledger_hash": canonical_hash(payload)}
+
+
+async def _replay_exact_baseline_checkpoints(
+    *,
+    runner: ExactOfficialBaselineRunner,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    progress_rows: Sequence[Mapping[str, Any]],
+    attempt_ledger: Sequence[Mapping[str, Any]],
+    max_concurrency: int,
+) -> int:
+    """Revalidate independent closed checkpoints without serial replay."""
+
+    items_by_ref = {
+        _benchmark_item_ref_for_progress(item): item
+        for item in benchmark_items
+    }
+    attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in attempt_ledger:
+        if isinstance(entry, Mapping):
+            attempts_by_ref.setdefault(
+                str(entry.get("icp_ref") or ""), []
+            ).append(entry)
+
+    replay_inputs: list[
+        tuple[Mapping[str, Any], str, int, Mapping[str, Any]]
+    ] = []
+    for resumed_row in progress_rows:
+        resumed_ref = _benchmark_item_ref_for_progress(resumed_row)
+        item = items_by_ref.get(resumed_ref)
+        attempts = sorted(
+            attempts_by_ref.get(resumed_ref) or [],
+            key=lambda value: int(value.get("retry_round") or 0),
+        )
+        latest_result = attempts[-1].get("result_row") if attempts else None
+        latest_retry_round = (
+            int(attempts[-1].get("retry_round") or 0)
+            if attempts
+            else 0
+        )
+        checkpoint = (
+            latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
+            if isinstance(latest_result, Mapping)
+            else None
+        )
+        if item is None or not isinstance(checkpoint, Mapping):
+            raise RuntimeError(
+                "official baseline v3 checkpoint is missing its exact model frontier"
+            )
+        replay_inputs.append(
+            (item, resumed_ref, latest_retry_round, checkpoint)
+        )
+
+    if not replay_inputs:
+        return 0
+    semaphore = asyncio.Semaphore(
+        max(1, min(len(replay_inputs), int(max_concurrency or 1)))
+    )
+
+    async def replay_one(
+        item: Mapping[str, Any],
+        resumed_ref: str,
+        retry_round: int,
+        checkpoint: Mapping[str, Any],
+    ) -> None:
+        async with semaphore:
+            await asyncio.to_thread(
+                runner.run_icp,
+                raw_icp=item["icp"],
+                icp_ref=resumed_ref,
+                target_count=_icp_company_goal(item["icp"]) or 1,
+                attempt_ordinal=retry_round,
+                expected_checkpoint=checkpoint,
+            )
+
+    settled = await asyncio.gather(
+        *(
+            replay_one(item, resumed_ref, retry_round, checkpoint)
+            for item, resumed_ref, retry_round, checkpoint in replay_inputs
+        ),
+        return_exceptions=True,
+    )
+    for outcome in settled:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    return len(replay_inputs)
 
 
 def _baseline_distribution_complete(
@@ -4835,6 +4965,57 @@ class PrivateBaselineRepoHeadChanged(RuntimeError):
         )
 
 
+class _PrivateBaselineRepoHeadChangeSignal:
+    """Thread-safe handoff from the async repo watcher to model runner threads."""
+
+    def __init__(self, *, expected_git_sha: str) -> None:
+        self.expected_git_sha = str(expected_git_sha or "").strip()
+        self._changed = threading.Event()
+        self._state_lock = threading.Lock()
+        self._repo_main_sha = ""
+
+    def mark_changed(self, repo_main_sha: str) -> None:
+        normalized = str(repo_main_sha or "").strip()
+        if not normalized:
+            return
+        with self._state_lock:
+            self._repo_main_sha = normalized
+        self._changed.set()
+
+    def repo_main_sha(self) -> str:
+        if not self._changed.is_set():
+            return ""
+        with self._state_lock:
+            return self._repo_main_sha
+
+    def raise_if_changed(self, *, item_index: int, total_icps: int) -> None:
+        repo_main_sha = self.repo_main_sha()
+        if repo_main_sha:
+            raise PrivateBaselineRepoHeadChanged(
+                expected_git_sha=self.expected_git_sha,
+                repo_main_sha=repo_main_sha,
+                item_index=item_index,
+                total_icps=total_icps,
+            )
+
+    def wrap_progress_callback(
+        self,
+        callback: Callable[[], None] | None,
+        *,
+        item_index: int,
+        total_icps: int,
+    ) -> Callable[[], None]:
+        def _progress() -> None:
+            if callback is not None:
+                callback()
+            self.raise_if_changed(
+                item_index=item_index,
+                total_icps=total_icps,
+            )
+
+        return _progress
+
+
 # Known-terminal error classes: validation / malformed-candidate style failures
 # that will fail identically on every retry. Everything else defaults to
 # retryable (bug #10) — the claim-attempt cap remains the loop guard.
@@ -6201,7 +6382,10 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _run_lease_held_recovery_and_preflight(
-        self, maintenance_state: Mapping[str, Any]
+        self,
+        maintenance_state: Mapping[str, Any],
+        *,
+        force_full_fleet_measurement: bool = False,
     ) -> Mapping[str, Any]:
         """Run scoring maintenance under a continuously renewed lease."""
 
@@ -6280,11 +6464,22 @@ class ResearchLabGatewayScoringWorker:
                     maintenance_state=maintenance_state,
                     heartbeat=heartbeat,
                     force_measurement=(
-                        self._is_private_baseline_owner()
-                        and not baseline_full_fleet_proven
+                        force_full_fleet_measurement
+                        or (
+                            self._is_private_baseline_owner()
+                            and not baseline_full_fleet_proven
+                        )
                     ),
                 )
             else:
+                if force_full_fleet_measurement:
+                    return {
+                        "proceed": False,
+                        "reason": (
+                            "provider_preflight_full_fleet_owner_pending"
+                        ),
+                        "verdicts": [],
+                    }
                 if (
                     bool(
                         getattr(
@@ -6500,14 +6695,15 @@ class ResearchLabGatewayScoringWorker:
         total_icps: int,
         start_delay_seconds: float = 0.0,
     ) -> None:
-        """Recycle before a wave whose bound proxy proof is missing or stale.
+        """Refresh before a wave whose bound proxy proof is missing or stale.
 
-        A new baseline-owner process must hold the maintenance lease and force
-        the existing bounded full-fleet preflight before it can enter this
-        scheduler.  Long model waves can outlive those measurements' TTL.  At
-        that settled checkpoint boundary, exit before spending another model
-        attempt; the fresh process repeats the same lease-owned full-fleet
-        measurement and restores only the still-pending attempt rounds.
+        Long model waves can outlive the full-fleet measurement TTL. At the
+        settled checkpoint boundary, first reacquire the maintenance lease and
+        force the same bounded full-fleet preflight used after checkpoint
+        restore. Continue only when that exact refresh proves every required
+        profile fresh. Lease contention, unhealthy providers, an incomplete
+        measurement, or any refresh exception retains the fail-closed process
+        recycle path and its durable checkpoint replay.
         """
 
         del run_start
@@ -6546,15 +6742,114 @@ class ResearchLabGatewayScoringWorker:
         ]
         if not stale_profiles:
             return
+        refresh_status = "not_attempted"
+        refresh_reason = ""
+        try:
+            refresh_state = await get_scoring_maintenance_state()
+            if _operator_scoring_pause_active(refresh_state):
+                raise BaselineMaintenancePause(
+                    completed_icps=completed_icps,
+                    total_icps=total_icps,
+                    maintenance_state=refresh_state,
+                )
+            refreshed = await self._run_lease_held_recovery_and_preflight(
+                refresh_state,
+                force_full_fleet_measurement=True,
+            )
+            refresh_status = (
+                "passed" if bool(refreshed.get("proceed")) else "blocked"
+            )
+            refresh_reason = str(refreshed.get("reason") or "")
+        except BaselineMaintenancePause:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A refresh failure cannot invalidate the settled checkpoint. Keep
+            # the existing process-recycle fallback and expose the exception.
+            refresh_status = "failed"
+            refresh_reason = "provider_preflight_refresh_exception"
+            logger.warning(
+                "research_lab_baseline_wave_preflight_refresh_failed "
+                "worker_ref=%s retry_round=%s profile_count=%s error=%s",
+                self.worker_ref,
+                retry_round,
+                len(stale_profiles),
+                _short_error(exc),
+            )
+
+        refreshed_now = _baseline_preflight_monotonic()
+        refreshed_measurements = dict(
+            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
+        )
+        remaining_stale_profiles = [
+            worker_index
+            for worker_index in profile_indexes
+            if worker_index not in refreshed_measurements
+            or refreshed_now
+            + max(0.0, float(start_delay_seconds))
+            - float(refreshed_measurements[worker_index])
+            >= ttl_seconds
+        ]
+        if refresh_status == "passed" and not remaining_stale_profiles:
+            baseline_context = getattr(self, "_active_baseline_context", None) or {}
+            benchmark_date = str(baseline_context.get("benchmark_date") or "")
+            if benchmark_date:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="wave_preflight_refresh",
+                    status="passed",
+                    benchmark_date=benchmark_date,
+                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
+                    epoch_id=baseline_context.get("evaluation_epoch"),
+                    window_hash=baseline_context.get("rolling_window_hash"),
+                    manifest_hash=baseline_context.get(
+                        "private_model_manifest_hash"
+                    ),
+                    retry_round=retry_round,
+                    row_count=worker_count,
+                    provider_preflight_profile_count=len(profile_indexes),
+                    completed_icp_count=completed_icps,
+                    selected_icp_count=total_icps,
+                )
+            return
+        stale_profiles = remaining_stale_profiles or stale_profiles
         raise BaselineCheckpointRecycle(
             pressure={
                 "reason": "provider_preflight_refresh_required",
                 "provider_preflight_ttl_seconds": round(ttl_seconds, 3),
                 "provider_preflight_profile_count": len(stale_profiles),
+                "provider_preflight_refresh_status": refresh_status,
+                "provider_preflight_refresh_reason": refresh_reason,
             },
             completed_icps=completed_icps,
             total_icps=total_icps,
         )
+
+    def _baseline_full_fleet_preflight_is_fresh(self) -> bool:
+        """Return whether every bound scoring profile has a live proof."""
+
+        ttl_seconds = max(
+            60.0,
+            float(provider_preflight_settings().get("ttl_seconds") or 600.0),
+        )
+        worker_count = max(
+            1,
+            int(getattr(self.config, "scoring_worker_total_workers", 1) or 1),
+        )
+        measurements = dict(
+            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
+        )
+        now = _baseline_preflight_monotonic()
+        for worker_index in range(worker_count):
+            measured_at = measurements.get(worker_index)
+            if measured_at is None:
+                return False
+            try:
+                age_seconds = now - float(measured_at)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if age_seconds < 0 or age_seconds >= ttl_seconds:
+                return False
+        return True
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
         from leadpoet_canonical.production_parity_boundary_v2 import (
@@ -14126,42 +14421,34 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
 
+        exact_checkpoint_replay_count = 0
         if isinstance(runner, ExactOfficialBaselineRunner):
-            items_by_ref = {
-                _benchmark_item_ref_for_progress(item): item
-                for item in window.benchmark_items
-            }
-            attempts_by_ref: dict[str, list[Mapping[str, Any]]] = {}
-            for entry in baseline_progress_attempt_ledger:
-                if isinstance(entry, Mapping):
-                    attempts_by_ref.setdefault(
-                        str(entry.get("icp_ref") or ""), []
-                    ).append(entry)
-            for resumed_row in baseline_progress_rows:
-                resumed_ref = _benchmark_item_ref_for_progress(resumed_row)
-                item = items_by_ref.get(resumed_ref)
-                attempts = sorted(
-                    attempts_by_ref.get(resumed_ref) or [],
-                    key=lambda value: int(value.get("retry_round") or 0),
+            replay_started = time.monotonic()
+            exact_checkpoint_replay_count = (
+                await _replay_exact_baseline_checkpoints(
+                    runner=runner,
+                    benchmark_items=window.benchmark_items,
+                    progress_rows=baseline_progress_rows,
+                    attempt_ledger=baseline_progress_attempt_ledger,
+                    max_concurrency=self.config.private_baseline_concurrency,
                 )
-                latest_result = (
-                    attempts[-1].get("result_row") if attempts else None
-                )
-                checkpoint = (
-                    latest_result.get(_OFFICIAL_BASELINE_CHECKPOINT_FIELD)
-                    if isinstance(latest_result, Mapping)
-                    else None
-                )
-                if item is None or checkpoint is None:
-                    raise RuntimeError(
-                        "official baseline v3 checkpoint is missing its exact model frontier"
-                    )
-                await asyncio.to_thread(
-                    runner.run_icp,
-                    raw_icp=item["icp"],
-                    icp_ref=resumed_ref,
-                    target_count=_icp_company_goal(item["icp"]) or 1,
-                    expected_checkpoint=checkpoint,
+            )
+            if exact_checkpoint_replay_count:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_model_replay",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    row_count=exact_checkpoint_replay_count,
+                    concurrency=min(
+                        exact_checkpoint_replay_count,
+                        max(1, self.config.private_baseline_concurrency),
+                    ),
+                    duration_seconds=time.monotonic() - replay_started,
                 )
 
         if baseline_telemetry_session is not None:
@@ -14478,6 +14765,58 @@ class ResearchLabGatewayScoringWorker:
                     }
                 )
             total_icps = len(window.benchmark_items)
+            if (
+                exact_checkpoint_replay_count
+                and not self._baseline_full_fleet_preflight_is_fresh()
+            ):
+                refresh_state = await get_scoring_maintenance_state()
+                if _operator_scoring_pause_active(refresh_state):
+                    raise BaselineMaintenancePause(
+                        completed_icps=len(baseline_progress_rows),
+                        total_icps=total_icps,
+                        maintenance_state=refresh_state,
+                    )
+                refreshed = await self._run_lease_held_recovery_and_preflight(
+                    refresh_state,
+                    force_full_fleet_measurement=True,
+                )
+                if (
+                    not refreshed.get("proceed")
+                    or not self._baseline_full_fleet_preflight_is_fresh()
+                ):
+                    raise BaselineCheckpointRecycle(
+                        pressure={
+                            "reason": str(
+                                refreshed.get("reason")
+                                or "provider_preflight_refresh_proof_missing"
+                            ),
+                            "provider_preflight_profile_count": max(
+                                1,
+                                int(
+                                    self.config.scoring_worker_total_workers
+                                    or 1
+                                ),
+                            ),
+                        },
+                        completed_icps=len(baseline_progress_rows),
+                        total_icps=total_icps,
+                    )
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_restore_preflight_refresh",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    completed_icp_count=len(baseline_progress_rows),
+                    selected_icp_count=total_icps,
+                    row_count=max(
+                        1,
+                        int(self.config.scoring_worker_total_workers or 1),
+                    ),
+                )
             if batch_execution and not legacy_v1_enabled():
                 _require_v2_baseline_receipt_capacity(total_icps)
             _record_private_baseline_stage(
@@ -15801,6 +16140,43 @@ class ResearchLabGatewayScoringWorker:
             total_icps=total_icps,
         )
 
+    async def _watch_private_baseline_repo_head_change(
+        self,
+        *,
+        expected_git_sha: str,
+        benchmark_date: str,
+        total_icps: int,
+        signal: _PrivateBaselineRepoHeadChangeSignal,
+    ) -> None:
+        """Detect a new signed model release while an ICP wave is in flight."""
+
+        expected = str(expected_git_sha or "").strip()
+        if not expected:
+            return
+        poll_seconds = _baseline_repo_head_watch_interval_seconds()
+        while True:
+            await asyncio.sleep(poll_seconds)
+            try:
+                await self._ensure_private_baseline_repo_head_unchanged(
+                    expected_git_sha=expected,
+                    benchmark_date=benchmark_date,
+                    item_index=0,
+                    total_icps=total_icps,
+                )
+            except PrivateBaselineRepoHeadChanged as exc:
+                signal.mark_changed(exc.repo_main_sha)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep watching after a transient control-plane failure
+                logger.warning(
+                    "research_lab_private_baseline_repo_head_watch_failed worker_ref=%s "
+                    "benchmark_date=%s error=%s",
+                    self.worker_ref,
+                    benchmark_date,
+                    _short_error(exc),
+                )
+
     async def _record_baseline_icp_traces(
         self,
         *,
@@ -15979,6 +16355,7 @@ class ResearchLabGatewayScoringWorker:
         telemetry_session: ScoringTelemetrySession | None = None,
         telemetry_model_role: str = "reference",
         retry_round: int = 0,
+        progress_callback: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
 
@@ -16075,6 +16452,8 @@ class ResearchLabGatewayScoringWorker:
                     raw_icp=item["icp"],
                     icp_ref=label,
                     target_count=_icp_company_goal(item["icp"]) or 1,
+                    attempt_ordinal=retry_round,
+                    progress_callback=progress_callback,
                 )
                 exact_call = functools.partial(
                     contextvars.copy_context().run,
@@ -16125,7 +16504,10 @@ class ResearchLabGatewayScoringWorker:
                 and model_qualification_authority is None
             ):
                 retryable = True
-        except PrivateModelRuntimeError as exc:
+        except (
+            PrivateModelRuntimeError,
+            OfficialBaselineTerminalUncertainError,
+        ) as exc:
             outputs = []
             runtime_error = _short_error(exc)
             runtime_error_class = type(exc).__name__
@@ -16139,6 +16521,13 @@ class ResearchLabGatewayScoringWorker:
                 model_qualification_partial_count = len(
                     tuple(exc.partial_companies)
                 )
+            elif isinstance(exc, OfficialBaselineTerminalUncertainError):
+                # The append-only authority correctly forbids reopening the
+                # unresolved paid-call identity.  The existing bounded retry
+                # round supplies a fresh durable unit/attempt identity, while
+                # exact evidence-proxy replay can still recover the response
+                # without redispatching the physical provider request.
+                retryable = True
             else:
                 # Classify from the full exception text: _short_error
                 # truncates to 300 chars and can drop the status marker the
@@ -16802,11 +17191,32 @@ class ResearchLabGatewayScoringWorker:
             max_workers=max(concurrency, self.config.private_baseline_retry_concurrency),
             thread_name_prefix="baseline-icp",
         )
+        repo_head_change_signal = _PrivateBaselineRepoHeadChangeSignal(
+            expected_git_sha=expected_repo_main_git_sha
+        )
+        repo_head_watch_task = (
+            asyncio.create_task(
+                self._watch_private_baseline_repo_head_change(
+                    expected_git_sha=expected_repo_main_git_sha,
+                    benchmark_date=benchmark_date,
+                    total_icps=total_icps,
+                    signal=repo_head_change_signal,
+                ),
+                name="private-baseline-repo-head-watch",
+            )
+            if str(expected_repo_main_git_sha or "").strip()
+            else None
+        )
         try:
             semaphore = asyncio.Semaphore(concurrency)
             persisted_attempt_indexes: set[int] = set()
 
-            async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
+            async def run_one(
+                item_index: int,
+                item: Mapping[str, Any],
+                *,
+                progress_callback: Callable[[], None] | None = None,
+            ) -> dict[str, Any]:
                 async with semaphore:
                     attempt_runner = _baseline_runner_for_attempt(
                         runner,
@@ -16837,6 +17247,7 @@ class ResearchLabGatewayScoringWorker:
                         telemetry_session=telemetry_session,
                         telemetry_model_role=telemetry_model_role,
                         retry_round=0,
+                        progress_callback=progress_callback,
                     )
                     if await persist_attempt(entry, retry_round=0):
                         persisted_attempt_indexes.add(item_index)
@@ -16896,14 +17307,37 @@ class ResearchLabGatewayScoringWorker:
                     if checkpoint_recycle_enabled
                     else contextlib.nullcontext()
                 )
-                with watchdog:
+                with watchdog as mark_wave_progress:
                     settled = await asyncio.gather(
-                        *(run_one(item_index, item) for item_index, item in wave),
+                        *(
+                            run_one(
+                                item_index,
+                                item,
+                                progress_callback=(
+                                    repo_head_change_signal.wrap_progress_callback(
+                                        mark_wave_progress,
+                                        item_index=item_index,
+                                        total_icps=total_icps,
+                                    )
+                                ),
+                            )
+                            for item_index, item in wave
+                        ),
                         return_exceptions=True,
                     )
                 fatal = [entry for entry in settled if isinstance(entry, BaseException)]
                 if fatal:
                     raise fatal[0]
+                repo_head_change_signal.raise_if_changed(
+                    item_index=wave[-1][0],
+                    total_icps=total_icps,
+                )
+                await self._ensure_private_baseline_repo_head_unchanged(
+                    expected_git_sha=expected_repo_main_git_sha,
+                    benchmark_date=benchmark_date,
+                    item_index=wave[-1][0],
+                    total_icps=total_icps,
+                )
                 for entry in settled:
                     results[entry["_item_index"]] = entry
                 _record_private_baseline_stage(
@@ -17014,7 +17448,11 @@ class ResearchLabGatewayScoringWorker:
                 )
                 retry_persisted_attempt_indexes: set[int] = set()
 
-                async def retry_one(item_index: int) -> dict[str, Any]:
+                async def retry_one(
+                    item_index: int,
+                    *,
+                    progress_callback: Callable[[], None] | None = None,
+                ) -> dict[str, Any]:
                     async with retry_semaphore:
                         backoff_seconds = float(
                             results.get(item_index, {}).get("_retry_backoff_seconds") or 0.0
@@ -17057,6 +17495,7 @@ class ResearchLabGatewayScoringWorker:
                             telemetry_session=telemetry_session,
                             telemetry_model_role=telemetry_model_role,
                             retry_round=round_no,
+                            progress_callback=progress_callback,
                         )
                         if await persist_attempt(entry, retry_round=round_no):
                             retry_persisted_attempt_indexes.add(item_index)
@@ -17110,9 +17549,21 @@ class ResearchLabGatewayScoringWorker:
                         if checkpoint_recycle_enabled
                         else contextlib.nullcontext()
                     )
-                    with watchdog:
+                    with watchdog as mark_wave_progress:
                         retried = await asyncio.gather(
-                            *(retry_one(item_index) for item_index in wave_indexes),
+                            *(
+                                retry_one(
+                                    item_index,
+                                    progress_callback=(
+                                        repo_head_change_signal.wrap_progress_callback(
+                                            mark_wave_progress,
+                                            item_index=item_index,
+                                            total_icps=total_icps,
+                                        )
+                                    ),
+                                )
+                                for item_index in wave_indexes
+                            ),
                             return_exceptions=True,
                         )
                     fatal = [
@@ -17120,6 +17571,16 @@ class ResearchLabGatewayScoringWorker:
                     ]
                     if fatal:
                         raise fatal[0]
+                    repo_head_change_signal.raise_if_changed(
+                        item_index=wave_indexes[-1],
+                        total_icps=total_icps,
+                    )
+                    await self._ensure_private_baseline_repo_head_unchanged(
+                        expected_git_sha=expected_repo_main_git_sha,
+                        benchmark_date=benchmark_date,
+                        item_index=wave_indexes[-1],
+                        total_icps=total_icps,
+                    )
                     recovered = 0
                     for entry in retried:
                         if (
@@ -17221,6 +17682,10 @@ class ResearchLabGatewayScoringWorker:
                 },
             )
         finally:
+            if repo_head_watch_task is not None:
+                repo_head_watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await repo_head_watch_task
             executor.shutdown(wait=False, cancel_futures=True)
 
     async def _reusable_same_day_benchmark(

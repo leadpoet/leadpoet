@@ -811,6 +811,20 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         "execution_receipt_graph": component_execution_graph,
     }
     observed = {}
+    persisted_events = []
+    derived_job_ids = []
+    derive_job_id = authority.derive_autoresearch_job_id_v2
+
+    def capture_job_id(**kwargs):
+        value = derive_job_id(**kwargs)
+        derived_job_ids.append(value)
+        return value
+
+    monkeypatch.setattr(
+        authority,
+        "derive_autoresearch_job_id_v2",
+        capture_job_id,
+    )
 
     monkeypatch.setattr(
         authority,
@@ -853,6 +867,26 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
 
     async def execute(**kwargs):
         observed.update(kwargs)
+        event_doc = {
+            "event_type": "loop_failed",
+            "loop_status": "failed",
+            "elapsed_seconds": 1.0,
+            "node_id": None,
+            "candidate_artifact_hash": None,
+            "candidate_patch_hash": None,
+            "provider_usage": [],
+            "cost_ledger": {},
+            "event_doc": {"stop_reason": "no_eligible_tree_finalist"},
+        }
+        event_hash = sha256_json(event_doc)
+        await kwargs["host_operation_handlers"][authority.HOST_APPEND_EVENT](
+            {
+                "event": event_doc,
+                "event_hash": event_hash,
+                "event_sequence": 0,
+            },
+            {"expected_state_hash": "sha256:" + "c" * 64},
+        )
         policy = TreePolicy(mode="active")
         tree_id = derive_tree_id(
             run_id="run-1",
@@ -941,7 +975,10 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
             component_registry_authority=component_authority,
             active_model_authority=active_authority,
             expected_event_state_hash="sha256:" + "c" * 64,
-            record_loop_event=lambda _event: {},
+            record_loop_event=lambda event, **kwargs: persisted_events.append(
+                {"event": event, **kwargs}
+            )
+            or {},
             code_builder=SimpleNamespace(
                 config=SimpleNamespace(code_edit_build_timeout_seconds=900)
             ),
@@ -956,6 +993,30 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     )
 
     assert result.loop_result.status == "failed"
+    assert len(derived_job_ids) == 1
+    assert len(persisted_events) == 1
+    assert persisted_events[0]["event_operation_id"] == sha256_json(
+        {
+            "schema_version": "research_lab.autoresearch_event_operation.v1",
+            "job_id": derived_job_ids[0],
+            "event_hash": sha256_json(
+                {
+                    "event_type": "loop_failed",
+                    "loop_status": "failed",
+                    "elapsed_seconds": 1.0,
+                    "node_id": None,
+                    "candidate_artifact_hash": None,
+                    "candidate_patch_hash": None,
+                    "provider_usage": [],
+                    "cost_ledger": {},
+                    "event_doc": {
+                        "stop_reason": "no_eligible_tree_finalist"
+                    },
+                }
+            ),
+            "event_sequence": 0,
+        }
+    )
     assert observed["payload"]["provider_outcome_digest"] == outcome_result[
         "provider_outcome_digest"
     ]

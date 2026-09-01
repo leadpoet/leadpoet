@@ -8,12 +8,14 @@ from the network-isolated rehearsal container.
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import builtins
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import http.client
 import importlib
 import importlib.util
 import io
@@ -71,6 +73,12 @@ VALIDATOR_RUNTIME_LOCK_PATH = Path(
 )
 _GATEWAY_RUNTIME_OBJECTS: dict[str, dict[str, Any]] = {}
 _GATEWAY_RUNTIME_OBJECTS_LOCK = threading.Lock()
+REHEARSAL_GATEWAY_BOOT_GENERATION_ENV = (
+    "REHEARSAL_GATEWAY_BOOT_GENERATION"
+)
+_DEFAULT_GATEWAY_BOOT_GENERATION = hashlib.sha256(
+    b"leadpoet-local-gateway-bootstrap-generation-v1"
+).hexdigest()[:32]
 _PRIVATE_MODEL_BUCKET = "leadpoet-private-model-artifacts-493765492819"
 _PRIVATE_MODEL_PREFIX = "research-lab/sourcing-model/"
 _PRIVATE_MODEL_POINTER_KEY = (
@@ -84,6 +92,10 @@ _PRIVATE_MODEL_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_ORIGINAL_HTTP_CONNECTION = http.client.HTTPConnection
+_PRODUCTION_SUPABASE_HOST = "qplwoislplkcegvdmbim.supabase.co"
+_LOCAL_POSTGREST_HOST = "127.0.0.1"
+_LOCAL_POSTGREST_PORT = 54321
 _RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
 _BLOCK_NUMBERS_BY_HASH: dict[str, int] = {}
 _GATEWAY_SECRET_ID = "leadpoet/prod/gateway/env"
@@ -121,6 +133,142 @@ def _initial_gateway_secret_string() -> str:
         _initial_gateway_miner_submissions_state()
     )
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def _candidate_post_accept_leg1_function_authority() -> str:
+    path = SOURCE_ROOT / "gateway/tee/supabase_schema_preflight_v2.py"
+    if not path.is_file():
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "gateway/tee/supabase_schema_preflight_v2.py"
+        )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            == "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
+            for target in node.targets
+        )
+    ]
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", values[0])
+    ):
+        raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
+    return values[0]
+
+
+def _source_add_claim_control_contract() -> dict[str, Any]:
+    try:
+        from gateway_boundary_service import (
+            _source_add_claim_control_contract as load_contract,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "gateway_boundary_service":
+            raise
+        from tests.restart_rehearsal.gateway_boundary_service import (
+            _source_add_claim_control_contract as load_contract,
+        )
+
+    return load_contract()
+
+
+class _LocalSupabaseHTTPSConnection:
+    """Map only the canonical production PostgREST origin to local HTTP."""
+
+    def __init__(self, host: str, port: int, **kwargs: Any):
+        if (
+            host != _PRODUCTION_SUPABASE_HOST
+            or port != 443
+            or set(kwargs) != {"timeout"}
+            or not 1.0 <= float(kwargs["timeout"]) <= 30.0
+        ):
+            raise ValueError("local Supabase HTTPS connection differs")
+        self._connection = _ORIGINAL_HTTP_CONNECTION(
+            _LOCAL_POSTGREST_HOST,
+            _LOCAL_POSTGREST_PORT,
+            timeout=float(kwargs["timeout"]),
+        )
+        self._requested = False
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body: Any = None,
+        headers: Mapping[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        normalized_headers = {
+            str(name).lower(): str(value)
+            for name, value in dict(headers or {}).items()
+        }
+        parsed = urlsplit(url)
+        expected_headers = {
+            "accept",
+            "authorization",
+            "apikey",
+            "connection",
+            "host",
+        }
+        normalized_method = str(method).upper()
+        if body is not None:
+            expected_headers |= {"content-length", "content-type"}
+        if (
+            self._requested
+            or normalized_method not in {"GET", "POST"}
+            or parsed.scheme
+            or parsed.netloc
+            or not parsed.path.startswith("/rest/v1/")
+            or parsed.fragment
+            or encode_chunked
+            or set(normalized_headers) != expected_headers
+            or normalized_headers.get("host") != _PRODUCTION_SUPABASE_HOST
+            or normalized_headers.get("accept") != "application/json"
+            or normalized_headers.get("apikey") != "rehearsal-secret"
+            or normalized_headers.get("authorization")
+            != "Bearer rehearsal-secret"
+            or normalized_headers.get("connection") != "close"
+            or (normalized_method == "GET" and body is not None)
+            or (normalized_method == "POST" and not isinstance(body, bytes))
+            or (
+                body is not None
+                and (
+                    normalized_headers.get("content-type")
+                    != "application/json"
+                    or normalized_headers.get("content-length")
+                    != str(len(body))
+                )
+            )
+        ):
+            raise ValueError("local Supabase HTTPS request differs")
+        self._requested = True
+        _external_event(
+            "supabase_postgrest",
+            "canonical_https_request",
+            method=normalized_method,
+            path=parsed.path,
+        )
+        self._connection.request(
+            normalized_method,
+            url,
+            body=body,
+            headers=dict(headers or {}),
+        )
+
+    def getresponse(self) -> Any:
+        if not self._requested:
+            raise ValueError("local Supabase HTTPS response precedes request")
+        return self._connection.getresponse()
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 def _new_gateway_secret_state() -> dict[str, Any]:
@@ -1213,6 +1361,18 @@ def _local_signing_public_key(role: str) -> str:
     ).hex()
 
 
+def _local_gateway_boot_generation() -> str:
+    """Return one validated token shared by every role in this local boot."""
+
+    value = os.environ.get(
+        REHEARSAL_GATEWAY_BOOT_GENERATION_ENV,
+        _DEFAULT_GATEWAY_BOOT_GENERATION,
+    )
+    if re.fullmatch(r"[0-9a-f]{32}", str(value)) is None:
+        raise ValueError("local gateway boot generation is invalid")
+    return str(value)
+
+
 def _local_boot_identity(role: str, config_hash: str) -> dict[str, Any]:
     from gateway.tee.topology import ROLE_SPECS
     from leadpoet_canonical.attested_v2 import (
@@ -1244,7 +1404,12 @@ def _local_boot_identity(role: str, config_hash: str) -> dict[str, Any]:
         ),
         "config_hash": config_hash,
         "boot_nonce": hashlib.sha256(
-            ("leadpoet-local-boot:" + role).encode()
+            (
+                "leadpoet-local-boot:"
+                + _local_gateway_boot_generation()
+                + ":"
+                + role
+            ).encode()
         ).hexdigest()[:32],
         "signing_pubkey": signing_pubkey,
         "transport_pubkey": transport_pubkey,
@@ -2848,7 +3013,7 @@ class _LocalVsock:
         self._closed = False
 
     def settimeout(self, timeout: float) -> None:
-        if float(timeout) not in {30.0, 120.0}:
+        if float(timeout) not in {30.0, 120.0, 180.0}:
             raise ValueError("local enclave RPC timeout differs")
 
     def connect(self, address: tuple[int, int]) -> None:
@@ -2927,11 +3092,14 @@ class _LocalVsock:
                 raise ValueError(
                     "persistent validator enclave service is unavailable"
                 )
+            tee_service = __import__(
+                "validator_tee.enclave.tee_service",
+                fromlist=["x"],
+            )
             request = json.loads(
-                __import__("validator_tee.enclave.tee_service", fromlist=["x"])
-                ._decode_rpc_payload(
+                tee_service._decode_rpc_payload(
                     body,
-                    logical_limit=64 * 1024 * 1024,
+                    logical_limit=tee_service.MAX_RPC_REQUEST_BYTES,
                 )
             )
             method = str(request.get("command") or "")
@@ -2953,7 +3121,11 @@ class _LocalVsock:
                         "persistent validator enclave response is incomplete"
                     )
                 response_size = int.from_bytes(prefix, "big")
-                if response_size < 2 or response_size > 16 * 1024 * 1024:
+                if (
+                    response_size < 2
+                    or response_size
+                    > tee_service.MAX_RPC_RESPONSE_FRAME_BYTES
+                ):
                     raise ValueError(
                         "persistent validator enclave response size differs"
                     )
@@ -4361,7 +4533,12 @@ def _local_urlopen(
             path=parsed.path,
         )
         return _LocalHTTPResponse(body)
-    if parsed.scheme != "https" or parsed.hostname != "example.invalid":
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname
+        not in {"example.invalid", _PRODUCTION_SUPABASE_HOST}
+        or parsed.port not in {None, 443}
+    ):
         raise ValueError("local PostgREST received an unknown URL")
     headers = {
         str(name).lower(): str(value)
@@ -4444,6 +4621,176 @@ def _local_urlopen(
                     _candidate_hybrid_constraint_definition()
                 ),
             },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_provider_origin_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD provider-origin contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD provider-origin contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_provider_origin_contract.v1"
+                ),
+                "identity_version": "v1",
+                "identity_scope": "normalized_exact_host",
+                "admission_rpc": "research_lab_source_add_admit_v2",
+                "recheck_rpc": (
+                    "research_lab_source_add_requeue_provenance_v2"
+                ),
+                "owner_count": 0,
+                "reserved_count": 0,
+                "coverage_complete": True,
+                "collision_free": True,
+                "submission_trigger_enabled": True,
+                "catalog_trigger_enabled": True,
+                "provision_trigger_enabled": True,
+                "terminal_release_trigger_enabled": True,
+                "append_only_trigger_enabled": True,
+                "row_level_security_enabled": True,
+                "service_role_policy_enabled": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD duplicate-privacy contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD duplicate-privacy contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_duplicate_privacy_contract.v1"
+                ),
+                "admission_rpc": "research_lab_source_add_admit_v3",
+                "admission_signature": (
+                    "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+                ),
+                "compatibility_rpc": "research_lab_source_add_admit_v2",
+                "compatibility_signature": (
+                    "jsonb,text,text,text,text,text,integer,integer,integer"
+                ),
+                "compatibility_cooldown_seconds": 20,
+                "cooldown_parameter_min_seconds": 1,
+                "cooldown_parameter_max_seconds": 3600,
+                "cooldown_clock": "clock_timestamp_after_advisory_locks",
+                "cooldown_source": "durable_miner_provenance_work",
+                "duplicate_precedes_cooldown": True,
+                "lock_order": [
+                    "provider_origin_or_identity",
+                    "hotkey",
+                    "submission_or_work",
+                ],
+                "function_authority_sha256": (
+                    "sha256:26bf34c94725b855f81c2e48b6afbd72"
+                    "d68db36a4aeffb5642494a5da32233e0"
+                ),
+                "functions": {
+                    "admit_v1": True,
+                    "admit_v2_compatibility": True,
+                    "admit_v3": True,
+                    "provider_origin_hash_v1": True,
+                    "provider_origin_host_v1": True,
+                },
+                "permissions": {
+                    "service_role_exists": True,
+                    "v3_service_role_callable": True,
+                    "v2_service_role_callable": True,
+                    "contract_service_role_callable": True,
+                    "anon_callable": False,
+                    "authenticated_callable": False,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD post-accept Leg 1 contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD post-accept Leg 1 contract body differs"
+            )
+        body = json.dumps(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_post_accept_leg1_contract.v1"
+                ),
+                "daily_cap": 10,
+                "leg1_alpha_percent": 1.0,
+                "leg1_reward_epochs": 20,
+                "function_authority_sha256": (
+                    _candidate_post_accept_leg1_function_authority()
+                ),
+                "functions": {
+                    "configure_probe_v2": True,
+                    "finalize_provision_v2": True,
+                    "reject_current_builtin_v2": True,
+                    "reserve_leg1_slot_v2": True,
+                    "finalize_leg1_v2": True,
+                    "finalize_provision_smoke_v2": True,
+                },
+                "triggers": {
+                    "acceptance": True,
+                    "eligible": True,
+                    "leg1_work": True,
+                    "leg1_slot": True,
+                    "leg1_obligation": True,
+                    "leg1_initial_event": True,
+                },
+                "permissions": {
+                    "service_role_exists": True,
+                    "v2_callable": True,
+                    "legacy_not_callable": True,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_claim_control_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD claim-control contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD claim-control contract body differs"
+            )
+        body = json.dumps(
+            _source_add_claim_control_contract(),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -4585,6 +4932,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     boto3.session.Session = _LocalInstanceRoleSession
     boto3.Session = _LocalInstanceRoleSession
     urllib.request.urlopen = _local_urlopen
+    http.client.HTTPSConnection = _LocalSupabaseHTTPSConnection
 
     class _RehearsalSocket(_real_socket):
         """Type-compatible socket factory with a strict AF_VSOCK boundary."""

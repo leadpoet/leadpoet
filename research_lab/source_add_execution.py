@@ -4,8 +4,9 @@ P1.5 (``source_add.py``) defined the contracts without execution. This module
 retains the pure intake and legacy manual-trial helpers. Production intake uses
 atomic database admission, measured provenance, and the V2 functional probe;
 operator-managed credentials never enter through the public miner contract.
-Leg 1 triggers only after a measured functional probe, while Leg 2 still
-requires accepted catalog attribution (``source_add_rewards.py``).
+Leg 1 triggers only after a measured functional probe, passed provisioning
+smoke, and final acceptance, while Leg 2 still requires accepted catalog
+attribution (``source_add_rewards.py``).
 
 Execution boundaries preserved from the plan:
 - adapter code runs only in the sandbox, with no credentials inside and all
@@ -540,9 +541,9 @@ def evaluate_source_add_acceptance(
     """Acceptance = category-scoped yield ≥ floor AND the human gate.
 
     Returns the advanced (or rejected) record plus the catalog entry on
-    acceptance. Catalog acceptance remains the switch that lets improvement
-    loops use this source; Leg 1 is created earlier after a measured functional
-    probe passes.
+    acceptance. This is a disconnected legacy trial helper; the production V2
+    path creates Leg 1 only after its separate provisioning smoke and final
+    acceptance transaction.
     """
 
     if record.stage != SourceAddFunnelStage.TRIAL_COMPLETED.value:

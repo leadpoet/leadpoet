@@ -15,14 +15,23 @@ from pathlib import Path
 import re
 import tempfile
 import threading
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+    RECEIPT_GRAPH_SCHEMA_VERSION,
+    sha256_json,
+    validate_boot_identity,
+)
 from leadpoet_canonical.hotkey_authority_v2 import (
+    validate_chain_signing_profile,
     validate_weight_extrinsic_authorization_v2,
 )
 from leadpoet_canonical.compact_weight_authority_v2 import (
     validate_compact_weight_submission_shape_v2,
+)
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    verify_compact_weight_submission_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
@@ -43,6 +52,7 @@ COMPACT_JOURNAL_SCHEMA_VERSION = (
     "leadpoet.validator_weight_publication_journal.v5"
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _EXTRINSIC_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
 
@@ -423,6 +433,204 @@ def _validate_compact_publication_journal_v2(
         ),
         "extrinsic_signature_results": normalized_signatures,
         "journal_hash": value["journal_hash"],
+    }
+
+
+def publication_journal_release_requirements_v2(
+    journal: Optional[Mapping[str, Any]],
+    *,
+    expected_lineage_id: Optional[str] = None,
+    expected_validator_hotkey: Optional[str] = None,
+    boot_verifier: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+    chain_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return every approved release needed to recover one durable journal.
+
+    The complete journal and its embedded weight authority are validated before
+    any release identity is extracted. When supplied, ``boot_verifier`` is
+    applied once to every distinct validator, upstream, disclosed, and
+    checkpoint-issuer boot identity.
+    """
+
+    if journal is None:
+        return {"journal_hash": None, "required_commits": []}
+    if not isinstance(journal, Mapping):
+        raise WeightPublicationJournalV2Error(
+            "publication journal release requirements are invalid"
+        )
+    lineage_id = (
+        expected_lineage_id if isinstance(expected_lineage_id, str) else ""
+    )
+    validator_hotkey = str(expected_validator_hotkey or "")
+    if not _HASH_RE.fullmatch(lineage_id):
+        raise WeightPublicationJournalV2Error(
+            "publication journal expected lineage is unavailable or invalid"
+        )
+    if (
+        not 1 <= len(validator_hotkey) <= 128
+        or any(character.isspace() for character in validator_hotkey)
+    ):
+        raise WeightPublicationJournalV2Error(
+            "publication journal expected validator hotkey is unavailable or invalid"
+        )
+    if not isinstance(chain_profile, Mapping):
+        raise WeightPublicationJournalV2Error(
+            "publication journal expected chain signing profile is unavailable"
+        )
+    try:
+        profile = validate_chain_signing_profile(chain_profile)
+    except Exception as exc:
+        raise WeightPublicationJournalV2Error(
+            "publication journal expected chain signing profile is invalid"
+        ) from exc
+    expected_chain = str(profile.get("chain_endpoint") or "")
+    if not expected_chain:
+        raise WeightPublicationJournalV2Error(
+            "publication journal expected chain is unavailable"
+        )
+    try:
+        normalized = validate_publication_journal_v2(
+            journal,
+            chain_profile=profile,
+        )
+    except WeightPublicationJournalV2Error:
+        raise
+    except Exception as exc:
+        raise WeightPublicationJournalV2Error(
+            "publication journal release requirements are invalid"
+        ) from exc
+
+    verified_identities: Dict[str, Dict[str, Any]] = {}
+
+    def verify_boot(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+        try:
+            validate_boot_identity(identity)
+            identity_hash = str(identity["boot_identity_hash"])
+            commit = str(identity["commit_sha"])
+            if not _COMMIT_RE.fullmatch(commit):
+                raise ValueError("boot commit is invalid")
+            previous = verified_identities.get(identity_hash)
+            if previous is not None:
+                if previous != dict(identity):
+                    raise ValueError("boot identity conflicts")
+                return dict(previous)
+            if boot_verifier is not None:
+                verified = boot_verifier(identity)
+                if not isinstance(verified, Mapping):
+                    raise ValueError("boot verifier returned no evidence")
+            stored = dict(identity)
+            verified_identities[identity_hash] = stored
+            return dict(stored)
+        except Exception as exc:
+            raise WeightPublicationJournalV2Error(
+                "publication journal release boot is invalid or unapproved"
+            ) from exc
+
+    def collect_boots(value: Any, label: str) -> None:
+        if not isinstance(value, list):
+            raise WeightPublicationJournalV2Error(
+                "publication journal %s boots are invalid" % label
+            )
+        for identity in value:
+            if not isinstance(identity, Mapping):
+                raise WeightPublicationJournalV2Error(
+                    "publication journal %s boot is invalid" % label
+                )
+            verify_boot(identity)
+
+    def collect_proof(value: Any, label: str) -> None:
+        certificate = value.get("certificate") if isinstance(value, Mapping) else None
+        issuer = (
+            certificate.get("issuer_boot_identity")
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        disclosed = (
+            value.get("disclosed_boot_identities")
+            if isinstance(value, Mapping)
+            else None
+        )
+        if not isinstance(issuer, Mapping):
+            raise WeightPublicationJournalV2Error(
+                "publication journal %s checkpoint issuer is invalid" % label
+            )
+        verify_boot(issuer)
+        collect_boots(disclosed, "%s disclosed" % label)
+
+    try:
+        if normalized["schema_version"] == COMPACT_JOURNAL_SCHEMA_VERSION:
+            compact = normalized["compact_submission"]
+            verified_submission = verify_compact_weight_submission_v2(
+                compact,
+                expected_lineage_id=lineage_id,
+                expected_chain=expected_chain,
+                identity_cache=None,
+                boot_verifier=verify_boot,
+            )
+            if verified_submission.get("validator_hotkey") != validator_hotkey:
+                raise WeightPublicationJournalV2Error(
+                    "compact publication journal uses another validator hotkey"
+                )
+            delta = compact.get("validator_receipt_delta")
+            if not isinstance(delta, Mapping):
+                raise WeightPublicationJournalV2Error(
+                    "compact publication validator delta is invalid"
+                )
+            collect_boots(delta.get("boot_identities"), "validator delta")
+            proofs = compact.get("upstream_ancestry_proofs")
+            if not isinstance(proofs, Mapping):
+                raise WeightPublicationJournalV2Error(
+                    "compact publication upstream proofs are invalid"
+                )
+            for category in sorted(proofs):
+                collect_proof(proofs[category], "upstream %s" % category)
+            collect_proof(compact.get("validator_ancestry_proof"), "validator")
+        else:
+            bundle = normalized["published_bundle"]
+            validate_published_weight_bundle_v2(
+                bundle,
+                boot_attestation_verifier=verify_boot,
+                require_boot_attestation_verification=True,
+            )
+            graph = bundle.get("receipt_graph")
+            if not isinstance(graph, Mapping):
+                raise WeightPublicationJournalV2Error(
+                    "publication journal receipt graph is invalid"
+                )
+            graph_schema = graph.get("schema_version")
+            if graph_schema not in {
+                RECEIPT_GRAPH_SCHEMA_VERSION,
+                *CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
+            }:
+                raise WeightPublicationJournalV2Error(
+                    "publication journal receipt graph schema is invalid"
+                )
+            if (
+                graph_schema in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS
+                and graph.get("ancestry_lineage_id") != lineage_id
+            ):
+                raise WeightPublicationJournalV2Error(
+                    "publication journal receipt graph uses another lineage"
+                )
+            if bundle.get("validator_hotkey") != validator_hotkey:
+                raise WeightPublicationJournalV2Error(
+                    "publication journal uses another validator hotkey"
+                )
+            collect_boots(graph.get("boot_identities"), "receipt graph")
+            if graph_schema in CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS:
+                collect_proof(graph.get("ancestry_proof"), "receipt graph")
+    except WeightPublicationJournalV2Error:
+        raise
+    except Exception as exc:
+        raise WeightPublicationJournalV2Error(
+            "publication journal release requirements are invalid"
+        ) from exc
+
+    return {
+        "journal_hash": normalized["journal_hash"],
+        "required_commits": sorted(
+            {identity["commit_sha"] for identity in verified_identities.values()}
+        ),
     }
 
 

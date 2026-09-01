@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import json
 
@@ -7,6 +8,7 @@ import pytest
 
 from gateway.research_lab.official_baseline_authority import (
     PROTECTED_ACTION_AUTHORITY_SHA256,
+    GatewayLocalProtectedActionBridge,
     OfficialBaselineProtectedAuthorityError,
 )
 from gateway.research_lab.official_baseline_custody import (
@@ -26,7 +28,11 @@ from gateway.research_lab.official_baseline_release_authorities import (
     _proxy_base_url,
     protected_action_authority_contract_identity,
 )
+from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+)
 from research_lab.canonical import sha256_bytes, sha256_json
+from research_lab.docker_model_runner_transport import DockerModelRunnerTransport
 from research_lab.model_runner_protocol import ExactModelRunnerRegistration
 
 
@@ -72,6 +78,17 @@ def _custody() -> S3OfficialBaselineDocumentCustody:
 
 def _hash(value) -> str:
     return sha256_json(value).removeprefix("sha256:")
+
+
+def _model_hash(value) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _catalog_row(
@@ -244,7 +261,8 @@ def _provider_fixture():
         },
         "body": {"name": "fixture", "input": {"schema_version": 3}},
         "reconciliation": {
-            "run_id_json_pointer": "/id",
+            "run_id_json_pointer": "/run/id",
+            "run_id_path_encoding_layers": 2,
             "primary_poll": {
                 "method": "GET",
                 "url_template": "https://code.deepline.com/api/v2/runs/{run_id}?full=true",
@@ -303,13 +321,379 @@ def _provider_fixture():
     return action, dispatch, catalog, inventory
 
 
+def _openrouter_provider_fixture():
+    binding = "d" * 64
+    tool_id = "candidate.company_evidence_search"
+    action = {
+        "sequence": 2,
+        "action_type": "execute_candidate_tool",
+        "tool_id": tool_id,
+        "binding_contract_sha256": binding,
+        "response_schema_version": "model-provider-response:v2",
+        "max_response_bytes": 200_000,
+        "idempotency_key": "7" * 64,
+        "action_sha256": "8" * 64,
+        "request_fingerprint_sha256": "9" * 64,
+    }
+    request = {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "static_headers": {"Content-Type": "application/json"},
+        "credential_binding": {
+            "location": "header",
+            "name": "Authorization",
+            "scheme": "Bearer",
+            "source": "OPENROUTER_API_KEY",
+            "persist": False,
+        },
+        "body": {
+            "model": "perplexity/sonar-pro",
+            "messages": [{"role": "user", "content": "fixture"}],
+        },
+    }
+    dispatch_body = {
+        "schema_version": "model-runner-provider-dispatch:v1",
+        "action_sha256": action["action_sha256"],
+        "action_type": action["action_type"],
+        "tool_id": action["tool_id"],
+        "compiler_id": "openrouter.company_evidence:v1",
+        "compiler_contract_sha256": binding,
+        "provider": "openrouter",
+        "request": request,
+        "request_sha256": _hash(request),
+        "response_contract": {
+            "schema_version": "provider-response-contract:v1"
+        },
+        "budgets": {
+            "call_cap": 1,
+            "credit_cap": 0.02,
+            "timeout_seconds": 120.0,
+            "max_results": 100,
+            "max_response_bytes": 200_000,
+        },
+        "idempotency_key": "model-action:" + action["action_sha256"],
+    }
+    dispatch = {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)}
+    catalog = _catalog(
+        _catalog_row(
+            action_type=action["action_type"],
+            tool_id=tool_id,
+            binding=binding,
+            response_schema=action["response_schema_version"],
+        )
+    )
+    inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": tool_id,
+            "status": "supported",
+            "execution_mode": "invoke",
+            "compiler_id": dispatch["compiler_id"],
+            "provider": dispatch["provider"],
+            "compiler_contract_sha256": binding,
+            "timeout_seconds": 120.0,
+        }
+    )
+    return action, dispatch, catalog, inventory
+
+
+def _source_add_provider_fixture():
+    binding = "c" * 64
+    provider_id = "builtwith_trends"
+    tool_id = f"intent.source_add.{provider_id}"
+    action = {
+        "sequence": 3,
+        "action_type": "execute_intent_tool",
+        "tool_id": tool_id,
+        "binding_contract_sha256": binding,
+        "response_schema_version": "model-provider-response:v3",
+        "max_response_bytes": 1_048_576,
+        "idempotency_key": "4" * 64,
+        "action_sha256": "5" * 64,
+        "request_fingerprint_sha256": "6" * 64,
+    }
+    request = {
+        "method": "GET",
+        "path": "/api.json",
+        "static_headers": {"Accept": "application/json"},
+        "query": {"TECH": "Shopify"},
+        "credential_binding": {
+            "location": "source_add_registry",
+            "name": provider_id,
+            "scheme": "v2_envelope",
+            "source": "source_add_registry",
+            "persist": False,
+        },
+    }
+    dispatch_body = {
+        "schema_version": "model-runner-provider-dispatch:v1",
+        "action_sha256": action["action_sha256"],
+        "action_type": action["action_type"],
+        "tool_id": action["tool_id"],
+        "compiler_id": SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+        "compiler_contract_sha256": binding,
+        "provider": provider_id,
+        "request": request,
+        "request_sha256": _hash(request),
+        "response_contract": {"schema_version": "provider-response-contract:v1"},
+        "budgets": {
+            "call_cap": 1,
+            "credit_cap": 0.0,
+            "timeout_seconds": 30.0,
+            "max_results": 1,
+            "max_response_bytes": 1_048_576,
+        },
+        "idempotency_key": "model-action:" + action["action_sha256"],
+    }
+    dispatch = {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)}
+    catalog = _catalog(
+        _catalog_row(
+            action_type=action["action_type"],
+            tool_id=tool_id,
+            binding=binding,
+            response_schema=action["response_schema_version"],
+        )
+    )
+    catalog["bindings"][0]["max_response_bytes"] = 1_048_576
+    catalog = _catalog(*catalog["bindings"])
+    inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": tool_id,
+            "status": "supported",
+            "execution_mode": "invoke",
+            "compiler_id": dispatch["compiler_id"],
+            "provider": dispatch["provider"],
+            "compiler_contract_sha256": binding,
+            "timeout_seconds": 30.0,
+        }
+    )
+    return action, dispatch, catalog, inventory
+
+
+def test_unicode_provider_dispatch_uses_model_wire_canonicalization():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    request = json.loads(json.dumps(dispatch["request"]))
+    request["body"]["messages"][0]["content"] = "M\u00fcnchen"
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["request"] = request
+    dispatch_body["request_sha256"] = _model_hash(request)
+    unicode_dispatch = {
+        **dispatch_body,
+        "dispatch_sha256": _model_hash(dispatch_body),
+    }
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=unicode_dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    preparation = executor.prepare(
+        run_identity={"run": "unicode-provider-request"},
+        unit_ref="baseline_icp:" + "f" * 64,
+        action=action,
+    )
+
+    assert preparation.request_body_sha256 == "sha256:" + _model_hash(request)
+
+
+def _batched_openrouter_provider_fixture():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    members = [
+        {
+            "method": "GET",
+            "url": "https://openrouter.ai/api/v1/models",
+            "query": {"page": page},
+            "segment_id": f"segment-{page}",
+            "request_sha256": str(page) * 64,
+        }
+        for page in (1, 2)
+    ]
+    request = {
+        "method": "BATCH_GET",
+        "url": "https://openrouter.ai/api/v1/models",
+        "static_headers": {"Accept": "application/json"},
+        "credential_binding": dispatch["request"]["credential_binding"],
+        "requests": members,
+    }
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["request"] = request
+    dispatch_body["request_sha256"] = _hash(request)
+    dispatch_body["budgets"] = {**dispatch_body["budgets"], "call_cap": 2}
+    return (
+        action,
+        {**dispatch_body, "dispatch_sha256": _hash(dispatch_body)},
+        catalog,
+        inventory,
+    )
+
+
+def test_non_deepline_lost_response_recovers_only_from_exact_proxy_replay():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (
+                200,
+                {"choices": [{"message": {"content": "[]"}}]},
+                {"X-Research-Lab-Evidence": "hit"},
+            ),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-recovery"},
+        unit_ref="baseline_icp:" + "a" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["replay_only"] for call in proxy.calls] == [False, True]
+    assert terminal.protected_action_result.provider_receipt.call_count == 1
+
+
+def test_non_deepline_replay_miss_remains_uncertain_without_redispatch():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (409, {"error": "replay_miss"}, {}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-replay-miss"},
+        unit_ref="baseline_icp:" + "b" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "uncertain"
+    assert [call["replay_only"] for call in proxy.calls] == [False, True]
+
+
+def test_non_deepline_cached_provider_409_is_known_not_replay_miss():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    proxy = _Proxy(
+        [
+            (
+                409,
+                {"error": "replay_miss"},
+                {"X-Research-Lab-Evidence": "hit"},
+            )
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "openrouter-cached-conflict"},
+        unit_ref="baseline_icp:" + "c" * 64,
+        action=action,
+    )
+
+    terminal = executor.reconcile(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "failed"
+    assert proxy.calls[0]["replay_only"] is True
+
+
+def test_batched_lost_response_reconciles_all_members_without_live_calls():
+    action, dispatch, catalog, inventory = _batched_openrouter_provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [
+            (200, {"data": ["first"]}, {}),
+            OfficialBaselineProtectedAuthorityError("response interrupted"),
+            (200, {"data": ["first"]}, {"X-Research-Lab-Evidence": "hit"}),
+            (200, {"data": ["second"]}, {"X-Research-Lab-Evidence": "hit"}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    bridge = GatewayLocalProtectedActionBridge(
+        custody=custody,
+        executor=executor,
+    )
+    preparation = bridge.prepare(
+        run_identity={"run": "openrouter-batch-recovery"},
+        unit_ref="baseline_icp:" + "d" * 64,
+        action=action,
+    )
+
+    terminal = bridge.execute_prepared(preparation=preparation, action=action)
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["replay_only"] for call in proxy.calls] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert terminal.protected_action_result.provider_receipt.call_count == 2
+
+
 def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     action, dispatch, catalog, inventory = _provider_fixture()
     protocol = _Protocol(dispatch=dispatch, current=True)
     custody = _custody()
     interrupted = _Proxy(
         [
-            (200, {"id": "run-fixture", "status": "running"}, {}),
+            (
+                200,
+                {"run": {"id": "run-fixture", "status": "running"}},
+                {},
+            ),
             OfficialBaselineProtectedAuthorityError("poll interrupted"),
         ]
     )
@@ -400,6 +784,114 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     )
 
 
+def test_deepline_model_owned_run_id_path_encoding_is_applied_exactly():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    run_id = "play/leadpoet-firmographic-company-discovery/run-fixture"
+    proxy = _Proxy(
+        [
+            (200, {"run": {"id": run_id, "status": "running"}}, {}),
+            (
+                200,
+                {
+                    "run": {"id": run_id, "status": "completed"},
+                    "output": {
+                        "schema_version": 3,
+                        "segment_id": "aggregate-fixture",
+                        "rows": [],
+                    },
+                },
+                {},
+            ),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+        sleep=lambda _seconds: None,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "double-encoded"},
+        unit_ref="baseline_icp:" + "6" * 64,
+        action=action,
+    )
+
+    terminal = executor.execute_prepared(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert terminal.state == "known"
+    assert proxy.calls[1]["upstream_url"] == (
+        "https://code.deepline.com/api/v2/runs/"
+        "play%252Fleadpoet-firmographic-company-discovery%252Frun-fixture"
+        "?full=true"
+    )
+
+
+def test_deepline_legacy_artifact_defaults_to_single_path_encoding_layer():
+    assert ArtifactPreparedActionExecutor._deepline_poll_path_component(
+        {
+            "run_id": "play/fixture",
+            "reconciliation": {},
+        }
+    ) == "play%2Ffixture"
+
+
+@pytest.mark.parametrize("layers", [True, 0, 5, "2"])
+def test_deepline_run_id_path_encoding_layers_fail_closed(layers):
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="run id path encoding is invalid",
+    ):
+        ArtifactPreparedActionExecutor._deepline_poll_path_component(
+            {
+                "run_id": "play/fixture",
+                "reconciliation": {
+                    "run_id_path_encoding_layers": layers,
+                },
+            }
+        )
+
+
+def test_deepline_missing_model_owned_run_id_path_fails_closed_before_poll():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    proxy = _Proxy(
+        [(200, {"id": "legacy-top-level", "status": "running"}, {})]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+    )
+    preparation = executor.prepare(
+        run_identity={"run": "missing-nested-id"},
+        unit_ref="baseline_icp:" + "9" * 64,
+        action=action,
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="run id is unavailable",
+    ):
+        executor.execute_prepared(preparation=preparation, action=action)
+
+    assert [call["method"] for call in proxy.calls] == ["POST"]
+    assert custody.load_protected_action_progress(
+        preparation_sha256=preparation.preparation_sha256
+    ) is None
+
+
 def test_deepline_tampered_progress_fails_closed_without_network():
     action, dispatch, catalog, inventory = _provider_fixture()
     protocol = _Protocol(dispatch=dispatch)
@@ -431,23 +923,34 @@ def test_deepline_tampered_progress_fails_closed_without_network():
         executor.reconcile(preparation=preparation, action=action)
 
 
-def test_artifact_verifier_result_is_zero_call_known_terminal():
+@pytest.mark.parametrize(
+    ("action_type", "tool_id", "response_schema"),
+    (
+        ("verify_company", "verifier.company", "company-verifier-result:v2"),
+        ("verify_intent", "verifier.intent", "intent-verifier-response:v1"),
+        ("verify_contact", "verifier.contact", "contact-verifier-response:v1"),
+    ),
+)
+def test_artifact_verifier_result_is_zero_call_known_terminal(
+    action_type, tool_id, response_schema
+):
     binding = "c" * 64
     action = {
         "sequence": 2,
-        "action_type": "verify_company",
-        "tool_id": "verifier.company",
+        "action_type": action_type,
+        "tool_id": tool_id,
         "binding_contract_sha256": binding,
-        "response_schema_version": "company-verifier-result:v2",
+        "response_schema_version": response_schema,
         "max_response_bytes": 200_000,
         "idempotency_key": "6" * 64,
         "action_sha256": "7" * 64,
         "request_fingerprint_sha256": "8" * 64,
     }
     result = {
-        "schema_version": "company-verifier-result:v2",
+        "schema_version": response_schema,
         "accepted": False,
         "reason_code": "company_constraints_not_proven",
+        "evidence_summary": "M\u00fcnchen",
     }
     execution_body = {
         "schema_version": "model-runner-verifier-execution:v1",
@@ -457,11 +960,11 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
         "cost_credits": 0.0,
         "provider_receipt_allowed": False,
         "result": result,
-        "result_sha256": _hash(result),
+        "result_sha256": _model_hash(result),
     }
     execution = {
         **execution_body,
-        "execution_sha256": _hash(execution_body),
+        "execution_sha256": _model_hash(execution_body),
     }
     protocol = _Protocol(verifier=execution)
     catalog = _catalog(
@@ -478,9 +981,11 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
             "tool_id": action["tool_id"],
             "status": "virtual",
             "compiler_contract_sha256": "0" * 64,
-            "timeout_seconds": 30.0,
+            "timeout_seconds": 0.0,
         }
     )
+    model_transport = object.__new__(DockerModelRunnerTransport)
+    model_transport.last_call_execution_latency_ms = lambda: 17
     executor = ArtifactPreparedActionExecutor(
         registration=_registration(protocol),
         catalog=catalog,
@@ -488,12 +993,14 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
         custody=_custody(),
         proxy_url="http://127.0.0.1:8765",
         proxy_client=_Proxy([]),
+        model_transport=model_transport,
     )
     preparation = executor.prepare(
         run_identity={"run": "three"},
         unit_ref="baseline_icp:" + "9" * 64,
         action=action,
     )
+    assert preparation.timeout_ms == 0
 
     terminal = executor.execute_prepared(preparation=preparation, action=action)
 
@@ -504,8 +1011,67 @@ def test_artifact_verifier_result_is_zero_call_known_terminal():
     assert host.provider_response == result
     assert host.calls == 0
     assert host.cost_credits == 0.0
+    assert host.latency_ms == 17.0
     assert terminal.protected_action_result.provider_receipt is None
     assert terminal.provider_request_ref is None
+
+    positive_timeout_inventory = _inventory(
+        {
+            "action_type": action["action_type"],
+            "tool_id": action["tool_id"],
+            "status": "virtual",
+            "compiler_contract_sha256": "0" * 64,
+            "timeout_seconds": 1.0,
+        }
+    )
+    invalid_executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=positive_timeout_inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError, match="budget is invalid"
+    ):
+        invalid_executor.prepare(
+            run_identity={"run": "positive-verifier-timeout"},
+            unit_ref="baseline_icp:" + "a" * 64,
+            action=action,
+        )
+
+
+def test_paid_provider_zero_timeout_fails_closed():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    dispatch_body = {
+        key: value for key, value in dispatch.items() if key != "dispatch_sha256"
+    }
+    dispatch_body["budgets"] = {
+        **dispatch_body["budgets"],
+        "timeout_seconds": 0.0,
+    }
+    zero_timeout_dispatch = {
+        **dispatch_body,
+        "dispatch_sha256": _hash(dispatch_body),
+    }
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=zero_timeout_dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=_Proxy([]),
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError, match="budget is invalid"
+    ):
+        executor.prepare(
+            run_identity={"run": "zero-provider-timeout"},
+            unit_ref="baseline_icp:" + "b" * 64,
+            action=action,
+        )
 
 
 def test_catalog_hash_and_order_tampering_fail_closed():
@@ -601,6 +1167,31 @@ def test_host_availability_requires_artifact_provider_and_reviewed_proxy_route()
     ) == {tool_id: False}
 
 
+def test_host_availability_requires_exact_ready_source_add_transport():
+    _action, _dispatch, catalog, inventory = _source_add_provider_fixture()
+    tool_id = "intent.source_add.builtwith_trends"
+
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=inventory,
+        ready_provider_ids=("builtwith_trends",),
+    ) == {tool_id: True}
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=inventory,
+        ready_provider_ids=(),
+    ) == {tool_id: False}
+
+    wrong_entry = dict(inventory["entries"][0])
+    wrong_entry["compiler_id"] = "source_add.unreviewed:v1"
+    wrong_inventory = _inventory(wrong_entry)
+    assert _official_host_availability(
+        catalog=catalog,
+        inventory=wrong_inventory,
+        ready_provider_ids=("builtwith_trends",),
+    ) == {tool_id: False}
+
+
 @pytest.mark.parametrize(
     "value",
     (
@@ -672,7 +1263,10 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
         provider="exa",
         method="POST",
         upstream_url="https://api.exa.ai/search",
-        static_headers={"Content-Type": "application/json"},
+        static_headers={
+            "Content-Type": "application/json",
+            "X-Research-Lab-Request-Timeout-Ms": "999999",
+        },
         body={"query": "redacted fixture"},
         query=None,
         timeout_seconds=10,
@@ -687,6 +1281,7 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
     lowered_headers = {key.casefold(): value for key, value in captured["headers"].items()}
     assert "authorization" not in lowered_headers
     assert "x-api-key" not in lowered_headers
+    assert lowered_headers["x-research-lab-request-timeout-ms"] == "9500"
     assert captured["closed"] is True
 
     with pytest.raises(
@@ -704,3 +1299,243 @@ def test_exa_transport_uses_only_reviewed_evidence_proxy_route():
             max_response_bytes=10_000,
             cost_scope="official-baseline-fixture",
         )
+
+
+def test_source_add_transport_uses_only_registry_proxy_route_without_secret():
+    captured = {}
+
+    class _Response:
+        status = 200
+        headers = {}
+
+        def read(self, _limit):
+            return b'{"Tech":{"name":"Shopify"}}'
+
+        def close(self):
+            captured["closed"] = True
+
+    def opener(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=opener
+    )
+    status, body, _headers = client.request(
+        provider="builtwith_trends",
+        method="GET",
+        upstream_url="",
+        source_add_path="/api.json",
+        static_headers={"Accept": "application/json"},
+        body=None,
+        query={"TECH": "Shopify"},
+        timeout_seconds=10,
+        max_response_bytes=1_048_576,
+        cost_scope="official-baseline-source-add-fixture",
+    )
+
+    assert status == 200
+    assert body == {"Tech": {"name": "Shopify"}}
+    assert captured["url"] == (
+        "http://127.0.0.1:8765/builtwith_trends/api.json?TECH=Shopify"
+    )
+    lowered_headers = {
+        key.casefold(): value for key, value in captured["headers"].items()
+    }
+    assert "authorization" not in lowered_headers
+    assert "x-api-key" not in lowered_headers
+    assert captured["body"] is None
+    assert captured["closed"] is True
+
+
+@pytest.mark.parametrize(
+    ("upstream_url", "path"),
+    (
+        ("https://api.builtwith.com", "/api.json"),
+        ("", "//api.json"),
+        ("", "/api.json?TECH=Shopify"),
+        ("", "/../api.json"),
+        ("", "/"),
+    ),
+)
+def test_source_add_proxy_path_rejects_host_or_path_drift(upstream_url, path):
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=lambda *_args, **_kwargs: None
+    )
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="SOURCE_ADD proxy path is invalid",
+    ):
+        client._proxied_url(
+            provider="builtwith_trends",
+            upstream_url=upstream_url,
+            source_add_path=path,
+        )
+
+
+def test_source_add_dispatch_requires_exact_registry_credential_and_request():
+    action, dispatch, catalog, inventory = _source_add_provider_fixture()
+
+    def executor(candidate_dispatch):
+        return ArtifactPreparedActionExecutor(
+            registration=_registration(_Protocol(dispatch=candidate_dispatch)),
+            catalog=catalog,
+            inventory=inventory,
+            custody=_custody(),
+            proxy_url="http://127.0.0.1:8765",
+        )
+
+    assert executor(dispatch)._provider_dispatch(action) == dispatch
+
+    invalid_requests = []
+    for mutate in (
+        lambda request: request.update(method="POST"),
+        lambda request: request.update(url="https://api.builtwith.com/api.json"),
+        lambda request: request.update(body={"TECH": "Shopify"}),
+        lambda request: request["credential_binding"].update(
+            source="BUILTWITH_API_KEY"
+        ),
+        lambda request: request["query"].update(api_key="redacted"),
+    ):
+        request = json.loads(json.dumps(dispatch["request"]))
+        mutate(request)
+        invalid_requests.append(request)
+
+    for request in invalid_requests:
+        body = {
+            key: value
+            for key, value in dispatch.items()
+            if key != "dispatch_sha256"
+        }
+        body["request"] = request
+        body["request_sha256"] = _hash(request)
+        candidate = {**body, "dispatch_sha256": _hash(body)}
+        with pytest.raises(
+            OfficialBaselineProtectedAuthorityError,
+            match="credential binding differs",
+        ):
+            executor(candidate)._provider_dispatch(action)
+
+
+def test_official_proxy_replay_only_header_is_host_owned():
+    captured_headers = []
+
+    class _Response:
+        status = 200
+        headers = {"X-Research-Lab-Evidence": "hit"}
+
+        def read(self, _limit):
+            return b'{"results":[]}'
+
+        def close(self):
+            pass
+
+    def opener(request, *, timeout):
+        del timeout
+        captured_headers.append(
+            {key.casefold(): value for key, value in request.header_items()}
+        )
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765", opener=opener
+    )
+    common = {
+        "provider": "exa",
+        "method": "POST",
+        "upstream_url": "https://api.exa.ai/search",
+        "static_headers": {
+            "Content-Type": "application/json",
+            "X-Research-Lab-Replay-Only": "1",
+        },
+        "body": {"query": "redacted fixture"},
+        "query": None,
+        "timeout_seconds": 10,
+        "max_response_bytes": 10_000,
+        "cost_scope": "official-baseline-fixture",
+    }
+
+    client.request(**common, replay_only=False)
+    client.request(**common, replay_only=True)
+
+    assert "x-research-lab-replay-only" not in captured_headers[0]
+    assert captured_headers[1]["x-research-lab-replay-only"] == "1"
+
+
+def test_official_proxy_pending_response_enters_protected_reconciliation():
+    captured = {}
+
+    class _Response:
+        status = 409
+        headers = {"X-Research-Lab-Evidence": "request_pending"}
+
+        def read(self, _limit):
+            return b'{"error":"request_pending"}'
+
+        def close(self):
+            captured["closed"] = True
+
+    def opener(request, *, timeout):
+        captured["headers"] = {
+            key.casefold(): value for key, value in request.header_items()
+        }
+        captured["timeout"] = timeout
+        return _Response()
+
+    client = _GatewayEvidenceProxyClient(
+        proxy_url="http://127.0.0.1:8765",
+        opener=opener,
+    )
+
+    with pytest.raises(
+        OfficialBaselineProtectedAuthorityError,
+        match="remains pending reconciliation",
+    ):
+        client.request(
+            provider="exa",
+            method="POST",
+            upstream_url="https://api.exa.ai/search",
+            static_headers={},
+            body={"query": "redacted fixture"},
+            query=None,
+            timeout_seconds=120,
+            max_response_bytes=10_000,
+            cost_scope="official-baseline-fixture",
+        )
+
+    assert captured["headers"]["x-research-lab-request-timeout-ms"] == "115000"
+    assert captured["timeout"] == 120
+    assert captured["closed"] is True
+
+
+def test_provider_request_ref_is_scoped_to_the_protected_attempt():
+    action, dispatch, catalog, inventory = _openrouter_provider_fixture()
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(_Protocol(dispatch=dispatch)),
+        catalog=catalog,
+        inventory=inventory,
+        custody=_custody(),
+        proxy_url="http://127.0.0.1:8765",
+    )
+    run_identity = {"schema_version": "fixture-run:v1", "run": "retry"}
+    first = executor.prepare(
+        run_identity=run_identity,
+        unit_ref="baseline_icp:" + "a" * 64,
+        action=action,
+    )
+    retry = executor.prepare(
+        run_identity=run_identity,
+        unit_ref="baseline_icp:" + "b" * 64,
+        action=action,
+    )
+
+    first_ref = executor._request_ref(first, dispatch)
+    retry_ref = executor._request_ref(retry, dispatch)
+
+    assert first_ref.startswith("provider_request_v2:")
+    assert retry_ref.startswith("provider_request_v2:")
+    assert first_ref != retry_ref
+    assert executor._request_ref(first, dispatch) == first_ref

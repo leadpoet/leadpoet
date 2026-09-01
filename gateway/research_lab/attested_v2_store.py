@@ -16,6 +16,7 @@ from gateway.research_lab.store import (
     _is_transient_store_error,
     call_rpc,
     insert_row,
+    insert_rows,
     select_all,
     select_many,
     select_one,
@@ -25,6 +26,7 @@ from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSIONS,
     COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     RECEIPT_GRAPH_SCHEMA_VERSION,
+    build_checkpointed_receipt_graph,
     build_receipt_graph,
     compact_checkpointed_receipt_graph,
     merkle_root,
@@ -120,6 +122,7 @@ _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
 _EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
+_EXACT_INSERT_BATCH_ROWS = 100
 _DUPLICATE_READBACK_ATTEMPTS = 4
 _DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
 _ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0)
@@ -133,6 +136,9 @@ _RECEIPT_IDEMPOTENCY_FIELDS_V2 = (
     "config_hash",
 )
 _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
+    # Per-boot identity and signer fields intentionally differ after an
+    # enclave restart; each receipt and the stored graph are verified
+    # independently before semantic reuse.
     "schema_version",
     "role",
     "purpose",
@@ -144,7 +150,6 @@ _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
     "build_manifest_hash",
     "dependency_lock_hash",
     "config_hash",
-    "boot_identity_hash",
     "input_root",
     "output_root",
     "transport_root",
@@ -153,7 +158,6 @@ _MODEL_COMPATIBILITY_IMMUTABLE_RECEIPT_FIELDS_V2 = (
     "parent_receipt_hashes",
     "status",
     "failure_code",
-    "enclave_pubkey",
 )
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
@@ -308,6 +312,177 @@ async def _insert_exact(
         return dict(stored)
 
     raise AssertionError("exact insert retry loop exhausted unexpectedly")
+
+
+def _exact_batch_row_key(
+    table: str,
+    row: Mapping[str, Any],
+    *,
+    key_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    key = tuple(str(row.get(field) or "") for field in key_fields)
+    if not key_fields or len(set(key_fields)) != len(key_fields) or not all(key):
+        raise AttestedV2StoreError(
+            "%s exact batch row key is invalid" % table
+        )
+    return key
+
+
+async def _read_exact_batch_rows(
+    table: str,
+    *,
+    expected_by_key: Mapping[tuple[str, ...], Mapping[str, Any]],
+    key_fields: tuple[str, ...],
+) -> set[tuple[str, ...]]:
+    """Reconcile one ambiguous batch through exact per-key durable reads."""
+
+    existing: set[tuple[str, ...]] = set()
+    for key, expected in expected_by_key.items():
+        stored = await select_one(
+            table,
+            filters=tuple(zip(key_fields, key)),
+        )
+        if stored is None:
+            continue
+        _assert_stored_row(table, stored, expected)
+        existing.add(key)
+    return existing
+
+
+async def _insert_exact_batch(
+    table: str,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+) -> None:
+    """Insert one independent row batch with exact ambiguous-outcome recovery."""
+
+    expected_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for value in rows:
+        row = dict(value)
+        key = _exact_batch_row_key(table, row, key_fields=key_fields)
+        if key in expected_by_key:
+            raise AttestedV2StoreError(
+                "%s exact batch row key is duplicated" % table
+            )
+        expected_by_key[key] = row
+    if not expected_by_key:
+        return
+
+    pending = dict(expected_by_key)
+    last_error: BaseException | None = None
+    last_error_kind = ""
+    for attempt in range(_EXACT_INSERT_ATTEMPTS):
+        try:
+            stored_rows = await insert_rows(table, pending.values())
+        except Exception as exc:
+            duplicate = _is_duplicate_error(exc)
+            transient = _is_transient_store_error(exc)
+            if not duplicate and not transient:
+                raise
+            last_error = exc
+            last_error_kind = "duplicate" if duplicate else "transient"
+        else:
+            observed: set[tuple[str, ...]] = set()
+            for stored in stored_rows:
+                if not isinstance(stored, Mapping):
+                    raise AttestedV2StoreError(
+                        "%s exact batch insert returned an invalid row" % table
+                    )
+                key = _exact_batch_row_key(
+                    table,
+                    stored,
+                    key_fields=key_fields,
+                )
+                expected = pending.get(key)
+                if expected is None or key in observed:
+                    raise AttestedV2StoreError(
+                        "%s exact batch insert returned an unexpected row" % table
+                    )
+                _assert_stored_row(table, stored, expected)
+                observed.add(key)
+            if observed == set(pending):
+                return
+            last_error = AttestedV2StoreError(
+                "%s exact batch insert response is incomplete" % table
+            )
+            last_error_kind = "ambiguous_response"
+
+        existing = await _read_exact_batch_rows(
+            table,
+            expected_by_key=pending,
+            key_fields=key_fields,
+        )
+        pending = {
+            key: row for key, row in pending.items() if key not in existing
+        }
+        if not pending:
+            return
+        if attempt == _EXACT_INSERT_ATTEMPTS - 1:
+            if last_error_kind == "duplicate":
+                raise AttestedV2StoreError(
+                    "%s batch duplicate could not be reloaded after bounded retry"
+                    % table
+                ) from last_error
+            assert last_error is not None
+            raise last_error
+
+        if last_error_kind == "duplicate":
+            backoff = _DUPLICATE_READBACK_BACKOFF_SECONDS[
+                min(attempt, len(_DUPLICATE_READBACK_BACKOFF_SECONDS) - 1)
+            ]
+        else:
+            backoff = _EXACT_INSERT_BACKOFF_SECONDS[
+                min(attempt, len(_EXACT_INSERT_BACKOFF_SECONDS) - 1)
+            ]
+        logger.warning(
+            "exact_batch_insert_retry table=%s attempt=%s/%s kind=%s "
+            "remaining_rows=%s",
+            table,
+            attempt + 1,
+            _EXACT_INSERT_ATTEMPTS,
+            last_error_kind,
+            len(pending),
+        )
+        await asyncio.sleep(backoff)
+
+    raise AssertionError("exact batch insert retry loop exhausted unexpectedly")
+
+
+async def _insert_exact_rows(
+    table: str,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    key_fields: tuple[str, ...],
+) -> None:
+    """Persist independent rows in bounded batches without weakening readback."""
+
+    normalized = [dict(row) for row in rows]
+    seen: set[tuple[str, ...]] = set()
+    for row in normalized:
+        key = _exact_batch_row_key(table, row, key_fields=key_fields)
+        if key in seen:
+            raise AttestedV2StoreError(
+                "%s exact row key is duplicated" % table
+            )
+        seen.add(key)
+    for offset in range(0, len(normalized), _EXACT_INSERT_BATCH_ROWS):
+        batch = normalized[offset : offset + _EXACT_INSERT_BATCH_ROWS]
+        if len(batch) == 1:
+            row = batch[0]
+            await _insert_exact(
+                table,
+                row,
+                key_filters=tuple(
+                    (field, row[field]) for field in key_fields
+                ),
+            )
+            continue
+        await _insert_exact_batch(
+            table,
+            batch,
+            key_fields=key_fields,
+        )
 
 
 def _attestation_document(identity: Mapping[str, Any]) -> tuple[str, str]:
@@ -862,14 +1037,15 @@ async def persist_receipt_graph_v2(
             row,
             key_filters=(("boot_identity_hash", row["boot_identity_hash"]),),
         )
-    for row in transport_rows:
-        if row["attempt_hash"] in existing_attempts:
-            continue
-        await _insert_exact(
-            TRANSPORT_TABLE,
-            row,
-            key_filters=(("attempt_hash", row["attempt_hash"]),),
-        )
+    await _insert_exact_rows(
+        TRANSPORT_TABLE,
+        (
+            row
+            for row in transport_rows
+            if row["attempt_hash"] not in existing_attempts
+        ),
+        key_fields=("attempt_hash",),
+    )
     for row in receipt_rows:
         if row["receipt_hash"] in existing_receipts:
             continue
@@ -890,18 +1066,16 @@ async def persist_receipt_graph_v2(
                 ("parent_receipt_hash", row["parent_receipt_hash"]),
             ),
         )
-    for row in receipt_transport_rows:
-        key = (row["receipt_hash"], row["attempt_hash"])
-        if key in existing_receipt_transports:
-            continue
-        await _insert_exact(
-            RECEIPT_TRANSPORT_TABLE,
-            row,
-            key_filters=(
-                ("receipt_hash", row["receipt_hash"]),
-                ("attempt_hash", row["attempt_hash"]),
-            ),
-        )
+    await _insert_exact_rows(
+        RECEIPT_TRANSPORT_TABLE,
+        (
+            row
+            for row in receipt_transport_rows
+            if (row["receipt_hash"], row["attempt_hash"])
+            not in existing_receipt_transports
+        ),
+        key_fields=("receipt_hash", "attempt_hash"),
+    )
     for row in host_operation_rows:
         key = (row["request_hash"],)
         if key in existing_host_operations:
@@ -2003,6 +2177,147 @@ async def load_receipt_graph_v2(
     return graphs[root_hash]
 
 
+async def _rehydrate_compact_execution_graph_v2(
+    graph: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore only one compact replay root's signed local sidecars.
+
+    Durable checkpoint documents intentionally omit transport and host-operation
+    sidecars. Exact execution-result replay still needs those direct records for
+    semantic source-evidence validation. Load only rows linked to this receipt,
+    then validate the reconstructed local delta against the existing signed
+    checkpoint certificate. Historical ancestry remains compact and is never
+    recursively expanded here.
+    """
+
+    if (
+        graph.get("schema_version")
+        != COMPACT_CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        return dict(graph)
+    receipt_hash = str(receipt.get("receipt_hash") or "").lower()
+    if (
+        not _HASH_RE.fullmatch(receipt_hash)
+        or graph.get("root_receipt_hash") != receipt_hash
+    ):
+        raise AttestedV2StoreError(
+            "compact execution replay root receipt differs"
+        )
+
+    link_rows = await _select_by_values(
+        RECEIPT_TRANSPORT_TABLE,
+        field="receipt_hash",
+        values=(receipt_hash,),
+        key_fields=("receipt_hash", "attempt_hash"),
+    )
+    attempt_hashes: set[str] = set()
+    for row in link_rows:
+        attempt_hash = str(row.get("attempt_hash") or "").lower()
+        expected = {
+            "receipt_hash": receipt_hash,
+            "attempt_hash": attempt_hash,
+        }
+        if (
+            row.get("receipt_hash") != receipt_hash
+            or not _HASH_RE.fullmatch(attempt_hash)
+            or attempt_hash in attempt_hashes
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay transport link is invalid"
+            )
+        _assert_stored_row(RECEIPT_TRANSPORT_TABLE, row, expected)
+        attempt_hashes.add(attempt_hash)
+
+    attempt_rows = await _select_by_values(
+        TRANSPORT_TABLE,
+        field="attempt_hash",
+        values=attempt_hashes,
+        key_fields=("attempt_hash",),
+    )
+    attempts: dict[str, dict[str, Any]] = {}
+    for row in attempt_rows:
+        document = row.get("attempt_doc")
+        if not isinstance(document, Mapping):
+            raise AttestedV2StoreError(
+                "compact execution replay transport document is missing"
+            )
+        attempt = dict(document)
+        attempt_hash = str(attempt.get("attempt_hash") or "").lower()
+        if (
+            attempt_hash not in attempt_hashes
+            or attempt_hash in attempts
+            or attempt.get("job_id") != receipt.get("job_id")
+            or attempt.get("purpose") != receipt.get("purpose")
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay transport scope differs"
+            )
+        validate_transport_attempt(attempt)
+        _assert_stored_row(
+            TRANSPORT_TABLE,
+            row,
+            transport_storage_row(attempt),
+        )
+        attempts[attempt_hash] = attempt
+    if set(attempts) != attempt_hashes:
+        raise AttestedV2StoreError(
+            "compact execution replay is missing a transport attempt"
+        )
+
+    host_rows = await _select_by_values(
+        HOST_OPERATION_TABLE,
+        field="receipt_hash",
+        values=(receipt_hash,),
+        key_fields=("request_hash",),
+    )
+    host_operations: dict[str, dict[str, Any]] = {}
+    for row in host_rows:
+        request = row.get("request_doc")
+        terminal = row.get("terminal_doc")
+        if not isinstance(request, Mapping) or not isinstance(terminal, Mapping):
+            raise AttestedV2StoreError(
+                "compact execution replay host operation is missing"
+            )
+        record = {"request": dict(request), "terminal": dict(terminal)}
+        request_hash = str(request.get("request_hash") or "").lower()
+        if (
+            not _HASH_RE.fullmatch(request_hash)
+            or request_hash in host_operations
+            or request.get("job_id") != receipt.get("job_id")
+            or request.get("purpose") != receipt.get("purpose")
+        ):
+            raise AttestedV2StoreError(
+                "compact execution replay host-operation scope differs"
+            )
+        validate_host_operation_record(record)
+        _assert_stored_row(
+            HOST_OPERATION_TABLE,
+            row,
+            host_operation_storage_row(record, receipt_hash=receipt_hash),
+        )
+        host_operations[request_hash] = record
+
+    try:
+        hydrated = build_checkpointed_receipt_graph(
+            root_receipt_hash=receipt_hash,
+            boot_identities=graph["boot_identities"],
+            receipts=graph["receipts"],
+            transport_attempts=[attempts[key] for key in sorted(attempts)],
+            host_operations=[
+                host_operations[key] for key in sorted(host_operations)
+            ],
+            ancestry_lineage_id=str(graph["ancestry_lineage_id"]),
+            ancestry_proof=graph["ancestry_proof"],
+        )
+    except Exception as exc:
+        raise AttestedV2StoreError(
+            "compact execution replay local evidence differs"
+        ) from exc
+    return dict(hydrated)
+
+
 def _execution_result_projection_v2(
     *,
     operation: str,
@@ -2352,6 +2667,10 @@ async def load_execution_result_v2(
         raise AttestedV2StoreError(
             "replayable execution result is incomplete"
         )
+    graph = await _rehydrate_compact_execution_graph_v2(
+        graph,
+        receipt=receipt,
+    )
     expected = _execution_result_storage_row_v2(
         operation=normalized_operation,
         result=result,

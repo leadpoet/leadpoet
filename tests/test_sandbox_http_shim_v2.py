@@ -140,6 +140,62 @@ def test_absent_hook_is_legacy_safe_but_v2_fails_closed(monkeypatch) -> None:
         shim._qualification_route_transport_headers()
 
 
+def test_route_tracking_failure_remains_terminal_and_reason_is_hash_only(
+    monkeypatch,
+) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    class TrackingFailure(RuntimeError):
+        qualification_failure_class = "tracking_failed"
+
+    failure = TrackingFailure(
+        "confirmed-empty qualification route binding is stale"
+    )
+
+    def transport_headers():
+        raise failure
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+
+    with pytest.raises(
+        shim.SandboxQualificationRouteTrackingError
+    ) as raised:
+        shim._qualification_route_transport_headers()
+
+    expected_hash = (
+        "sha256:"
+        "e52443596eeefaa49367f3ac9b6132c9a259dcbd85217c2cb7a137796c165a07"
+    )
+    assert raised.value.qualification_failure_class == "tracking_failed"
+    assert raised.value.qualification_tracking_reason_sha256 == expected_hash
+    assert str(raised.value) == (
+        "qualification route transport hook failed "
+        f"reason_sha256={expected_hash}"
+    )
+    assert raised.value.__cause__ is failure
+    assert str(failure) not in str(raised.value)
+
+
+def test_nontracking_route_hook_failure_remains_generic(monkeypatch) -> None:
+    import gateway.tee.sandbox_http_shim_v2 as shim
+
+    failure = RuntimeError("private provider detail")
+
+    def transport_headers():
+        raise failure
+
+    _install_qualification_route_module(monkeypatch, transport_headers)
+
+    with pytest.raises(shim.SandboxHTTPShimV2Error) as raised:
+        shim._qualification_route_transport_headers()
+
+    assert type(raised.value) is shim.SandboxHTTPShimV2Error
+    assert str(raised.value) == "qualification route transport hook failed"
+    assert not hasattr(raised.value, "qualification_failure_class")
+    assert raised.value.__cause__ is failure
+    assert str(failure) not in str(raised.value)
+
+
 def test_live_socket_waits_for_measured_operation_completion(monkeypatch) -> None:
     import gateway.tee.sandbox_http_shim_v2 as shim
 
@@ -680,3 +736,105 @@ def test_all_supported_http_clients_preserve_attested_transport_failure() -> Non
         "httpx",
         "aiohttp",
     }
+
+
+@pytest.mark.parametrize("client_name", ("httpx", "aiohttp"))
+def test_async_client_cancellation_waits_for_started_transport(
+    client_name: str,
+) -> None:
+    script = textwrap.dedent(
+        f"""
+        import asyncio
+        import json
+        import os
+        import sys
+        import threading
+        from types import ModuleType
+
+        import aiohttp
+        import httpx
+
+        import gateway.tee.sandbox_http_shim_v2 as shim
+
+        client_name = {client_name!r}
+        transport_started = threading.Event()
+        release_transport = threading.Event()
+        transport_finished = threading.Event()
+        route_active = {{"value": True}}
+        observations = []
+
+        package = ModuleType("sourcing_model")
+        package.__path__ = []
+        route_module = ModuleType("sourcing_model.qualification_route")
+
+        def transport_headers():
+            transport_started.set()
+            assert release_transport.wait(5)
+            observations.append(route_active["value"])
+            if not route_active["value"]:
+                raise RuntimeError("route binding already closed")
+            return {{
+                "X-Leadpoet-Qualification-Route-Commitment": "a" * 64,
+            }}
+
+        route_module.transport_headers = transport_headers
+        package.qualification_route = route_module
+        sys.modules["sourcing_model"] = package
+        sys.modules["sourcing_model.qualification_route"] = route_module
+        os.environ[shim.QUALIFICATION_PROTOCOL_V2_ENV] = "1"
+        os.environ[shim.SOCKET_ENV] = "/tmp/provider.sock"
+        shim._snapshot_terminal = lambda **_kwargs: None
+        shim._cached_terminal = lambda **_kwargs: None
+
+        def execute_broker_request(**_kwargs):
+            transport_finished.set()
+            return {{
+                "terminal_status": "authenticated_response",
+                "http_status": 200,
+                "headers": {{"content-type": "application/json"}},
+                "body_b64": "e30=",
+            }}
+
+        shim._execute_broker_request = execute_broker_request
+        shim.install()
+
+        async def request():
+            if client_name == "httpx":
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://provider.example/search")
+                return
+            async with aiohttp.ClientSession() as session:
+                await session.get("https://provider.example/search")
+
+        async def exercise():
+            task = asyncio.create_task(request())
+            assert await asyncio.to_thread(transport_started.wait, 2)
+            asyncio.get_running_loop().call_later(
+                0.05,
+                release_transport.set,
+            )
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            route_active["value"] = False
+            assert await asyncio.to_thread(transport_finished.wait, 2)
+
+        asyncio.run(exercise())
+        assert observations == [True], observations
+        print(json.dumps(observations))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        env=dict(os.environ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == [True]

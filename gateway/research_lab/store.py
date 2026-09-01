@@ -41,6 +41,8 @@ _TRANSIENT_ERROR_SIGNATURES = (
     "connection aborted",
     "connection refused",
     "server disconnected",
+    "unexpected eof",
+    "unexpected_eof",
     "timed out",
     "timeout",
 )
@@ -176,6 +178,22 @@ async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     if not data:
         raise RuntimeError(f"{table}: insert returned no rows")
     return dict(data[0])
+
+
+async def insert_rows(
+    table: str, rows: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Insert one nonempty PostgREST batch and return its row representations."""
+
+    payload = [dict(row) for row in rows]
+    if not payload:
+        raise ValueError(f"{table}: batch insert requires at least one row")
+
+    def _call() -> Any:
+        return get_write_client().table(table).insert(payload).execute()
+
+    response = await asyncio.to_thread(_call)
+    return [dict(row) for row in (getattr(response, "data", None) or [])]
 
 
 async def call_rpc(function_name: str, params: Mapping[str, Any]) -> Any:
@@ -1307,6 +1325,125 @@ async def create_auto_research_loop_event(
         },
         event_id=event_id,
     )
+
+
+async def ensure_auto_research_loop_event(
+    *,
+    event_id: str,
+    run_id: str,
+    ticket_id: str,
+    event_type: str,
+    loop_status: str,
+    worker_ref: str,
+    receipt_id: str | None = None,
+    node_id: str | None = None,
+    elapsed_seconds: float = 0.0,
+    candidate_artifact_hash: str | None = None,
+    candidate_patch_hash: str | None = None,
+    provider_usage: list[dict[str, Any]] | None = None,
+    cost_ledger: dict[str, Any] | None = None,
+    event_doc: dict[str, Any] | None = None,
+    attempts: int = 3,
+) -> dict[str, Any]:
+    """Persist one V2 loop event exactly once across ambiguous responses."""
+
+    try:
+        UUID(str(event_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("loop event_id must be a UUID") from exc
+    if attempts < 1:
+        raise ValueError("loop event attempts must be positive")
+
+    expected = {
+        "run_id": run_id,
+        "ticket_id": ticket_id,
+        "receipt_id": receipt_id,
+        "event_type": event_type,
+        "loop_status": loop_status,
+        "node_id": node_id,
+        "worker_ref": worker_ref,
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "candidate_artifact_hash": candidate_artifact_hash,
+        "candidate_patch_hash": candidate_patch_hash,
+        "provider_usage": provider_usage or [],
+        "cost_ledger": cost_ledger or {},
+        "event_doc": event_doc or {},
+    }
+
+    def _validate(row: Mapping[str, Any]) -> dict[str, Any]:
+        mismatched: list[str] = []
+        if str(row.get("event_id") or "") != event_id:
+            mismatched.append("event_id")
+        if str(row.get("schema_version") or "") != "1.0":
+            mismatched.append("schema_version")
+        for field, value in expected.items():
+            actual = row.get(field)
+            if field == "elapsed_seconds":
+                try:
+                    actual = round(float(actual), 3)
+                except (TypeError, ValueError):
+                    mismatched.append(field)
+                    continue
+            if actual != value:
+                mismatched.append(field)
+        seq = row.get("seq")
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            mismatched.append("seq")
+        elif row.get("anchored_hash") != canonical_hash({**expected, "seq": seq}):
+            mismatched.append("anchored_hash")
+        if mismatched:
+            raise RuntimeError(
+                "loop event idempotency collision for fields: "
+                + ",".join(sorted(set(mismatched)))
+            )
+        return dict(row)
+
+    async def _existing() -> dict[str, Any] | None:
+        row = await select_one(
+            "research_lab_auto_research_loop_events",
+            filters=(("event_id", event_id),),
+        )
+        return _validate(row) if row else None
+
+    existing = await _existing()
+    if existing:
+        return existing
+
+    for attempt in range(1, attempts + 1):
+        try:
+            row = await create_auto_research_loop_event(
+                event_id=event_id,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                receipt_id=receipt_id,
+                event_type=event_type,
+                loop_status=loop_status,
+                worker_ref=worker_ref,
+                node_id=node_id,
+                elapsed_seconds=elapsed_seconds,
+                candidate_artifact_hash=candidate_artifact_hash,
+                candidate_patch_hash=candidate_patch_hash,
+                provider_usage=provider_usage,
+                cost_ledger=cost_ledger,
+                event_doc=event_doc,
+            )
+            return _validate(row)
+        except Exception as exc:  # noqa: BLE001 - reconciled and classified below
+            recovered = await _existing()
+            if recovered:
+                return recovered
+            if attempt >= attempts or not _is_transient_store_error(exc):
+                raise
+            logger.warning(
+                "transient_loop_event_write_retry event_id=%s attempt=%s/%s type=%s",
+                event_id,
+                attempt,
+                attempts,
+                type(exc).__name__,
+            )
+            await asyncio.sleep(0.25 * attempt)
+
+    raise RuntimeError("loop event persistence exhausted without a result")
 
 
 async def ensure_auto_research_loop_transition_event(

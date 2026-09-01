@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -419,9 +420,21 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_control",
-        ("singleton", "paused", "reason", "actor_ref", "updated_at"),
+        (
+            "singleton",
+            "paused",
+            "reason",
+            "actor_ref",
+            "updated_at",
+            "restart_guard_commitment",
+            "restart_guard_owner_commitment",
+            "restart_guard_generation",
+            "restart_guard_expires_at",
+            "restart_guard_acquired_at",
+            "restart_guard_actor_ref",
+        ),
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
@@ -521,6 +534,19 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "source_identity_hash",
             "submission_id",
             "adapter_id",
+            "reservation_status",
+            "seq",
+        ),
+    ),
+    (
+        "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_provider_origin_current",
+        (
+            "origin_version",
+            "provider_origin_hash",
+            "submission_id",
+            "adapter_id",
+            "miner_hotkey",
             "reservation_status",
             "seq",
         ),
@@ -1005,7 +1031,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_begin_provider_execution",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_claim_work",
     ),
     (
@@ -1013,40 +1039,88 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_finish_work",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_configure_probe",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_configure_probe_v2",
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_requeue_provenance",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "scripts/172-research-lab-source-add-claim-control.sql",
         "research_lab_source_add_set_paused",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_reserve_leg1_slot",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_reserve_leg1_slot_v2",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_leg1",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_leg1_v2",
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_enqueue_provision_smoke",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_provision",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_provision_v2",
     ),
     (
-        "scripts/96-research-lab-source-add-functional-workflow.sql",
-        "research_lab_source_add_finalize_provision_smoke",
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_reject_current_builtin_v2",
     ),
     (
         "scripts/145-research-lab-source-add-admission-control.sql",
         "research_lab_source_add_admission_control_contract_v1",
+    ),
+    (
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_finalize_provision_smoke_v2",
+    ),
+    (
+        "scripts/169-research-lab-source-add-post-accept-leg1.sql",
+        "research_lab_source_add_post_accept_leg1_contract_v1",
+    ),
+    (
+        "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_admit_v2",
+    ),
+    (
+        "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_requeue_provenance_v2",
+    ),
+    (
+        "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "research_lab_source_add_provider_origin_contract_v1",
+    ),
+    (
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql",
+        "research_lab_source_add_admit_v3",
+    ),
+    (
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql",
+        "research_lab_source_add_duplicate_privacy_contract_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_acquire_restart_guard_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_restart_quiescence_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_restart_guard_state_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_release_restart_guard_v1",
+    ),
+    (
+        "scripts/172-research-lab-source-add-claim-control.sql",
+        "research_lab_source_add_claim_control_contract_v1",
     ),
     (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
@@ -1164,8 +1238,12 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_official_baseline_register_run_v1",
     ),
     (
-        "scripts/164-research-lab-official-baseline-action-authority.sql",
+        "scripts/166-research-lab-zero-call-verifier-timeout.sql",
         "research_lab_official_baseline_reserve_action_v1",
+    ),
+    (
+        "scripts/168-research-lab-legacy-provider-terminal-custody.sql",
+        "research_lab_official_baseline_request_scope_v3",
     ),
     (
         "scripts/164-research-lab-official-baseline-action-authority.sql",
@@ -1256,6 +1334,44 @@ class SupabaseSchemaPreflightV2Error(RuntimeError):
 
 
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
+
+
+def _source_add_leg1_release_environment_policy_v1(
+    parent_environment: Mapping[str, str],
+) -> Dict[str, Any]:
+    expected = {
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("1.0"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT": Decimal("0.0"),
+        "RESEARCH_LAB_REWARD_EPOCHS": Decimal("20"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("10"),
+    }
+    observed: dict[str, Decimal] = {}
+    for name, default in expected.items():
+        raw = str(parent_environment.get(name, str(default))).strip()
+        try:
+            value = Decimal(raw)
+        except (InvalidOperation, ValueError) as exc:
+            raise SupabaseSchemaPreflightV2Error(
+                "SOURCE_ADD Leg 1 release environment is invalid"
+            ) from exc
+        if not value.is_finite() or value != default:
+            raise SupabaseSchemaPreflightV2Error(
+                "SOURCE_ADD Leg 1 release environment differs"
+            )
+        observed[name] = value
+    return {
+        "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
+        "leg1_alpha_percent": float(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT"]
+        ),
+        "leg2_alpha_percent": float(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT"]
+        ),
+        "reward_epochs": int(observed["RESEARCH_LAB_REWARD_EPOCHS"]),
+        "daily_cap": int(
+            observed["RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY"]
+        ),
+    }
 
 
 def _verify_compact_weight_settlement_contract_v1(
@@ -1428,6 +1544,460 @@ def _verify_candidate_hybrid_purpose_contract_v1(
     }
 
 
+SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
+)
+
+
+def _verify_source_add_duplicate_privacy_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_duplicate_privacy_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
+            "scripts/171-research-lab-source-add-duplicate-privacy.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract is unavailable; apply "
+            "scripts/171-research-lab-source-add-duplicate-privacy.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_duplicate_privacy_contract.v1",
+        "admission_rpc": "research_lab_source_add_admit_v3",
+        "admission_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer,integer"
+        ),
+        "compatibility_rpc": "research_lab_source_add_admit_v2",
+        "compatibility_signature": (
+            "jsonb,text,text,text,text,text,integer,integer,integer"
+        ),
+        "compatibility_cooldown_seconds": 20,
+        "cooldown_parameter_min_seconds": 1,
+        "cooldown_parameter_max_seconds": 3600,
+        "cooldown_clock": "clock_timestamp_after_advisory_locks",
+        "cooldown_source": "durable_miner_provenance_work",
+        "duplicate_precedes_cooldown": True,
+        "lock_order": [
+            "provider_origin_or_identity",
+            "hotkey",
+            "submission_or_work",
+        ],
+        "function_authority_sha256": (
+            SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admit_v1": True,
+            "admit_v2_compatibility": True,
+            "admit_v3": True,
+            "provider_origin_hash_v1": True,
+            "provider_origin_host_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v3_service_role_callable": True,
+            "v2_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD duplicate-privacy contract differs"
+        )
+    return dict(contract)
+
+
+SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:890a1e42b6dd28eb1c8515c3b8c33d31a9974058fbd2c43393bb0880c0ca21e6"
+)
+
+
+def _verify_source_add_claim_control_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_claim_control_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract is unavailable; apply "
+            "scripts/172-research-lab-source-add-claim-control.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract is unavailable; apply "
+            "scripts/172-research-lab-source-add-claim-control.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v1",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v1"
+        ),
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v1"
+        ),
+        "guard_state_signature": "",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v1"
+        ),
+        "release_guard_signature": "text,text,bigint,text",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+        ],
+        "guard_id_format": "^source_add_restart_guard:[0-9a-f]{64}$",
+        "guard_commitment": "sha256_utf8_guard_id",
+        "owner_id_format": "^source_add_restart_owner:[0-9a-f]{64}$",
+        "owner_commitment": "sha256_utf8_owner_id",
+        "owner_generation_commitment": (
+            "sha256_utf8_owner_commitment_colon_decimal_generation"
+        ),
+        "guard_lease_min_seconds": 60,
+        "guard_lease_max_seconds": 14400,
+        "active_guard_replay_extends_lease": True,
+        "acquire_compare_and_swap": "expected_generation",
+        "different_owner_takeover_increments_generation": True,
+        "expired_reacquire_increments_generation": True,
+        "generation_retained_after_release": True,
+        "resume_requires_guard_clear": True,
+        "expired_guard_recovery": (
+            "explicit_reacquire_then_exact_release"
+        ),
+        "release_keeps_paused": True,
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text,text,bigint",
+        "restart_quiescence_schema_version": (
+            "leadpoet.source_add_restart_quiescence.v1"
+        ),
+        "restart_quiescence_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_matches",
+            "owner_matches",
+            "generation_matches",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "leased_work_count",
+            "quiescent",
+        ],
+        "lock_before_paused_read": True,
+        "leased_scope": "all_leased_regardless_of_expiry",
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "function_authority_sha256": (
+            SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "restart_guard_state_v1": True,
+            "restart_quiescence_v1": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "acquire_guard_service_role_callable": True,
+            "claim_service_role_callable": True,
+            "pause_service_role_callable": True,
+            "quiescence_service_role_callable": True,
+            "release_guard_service_role_callable": True,
+            "guard_state_service_role_callable": True,
+            "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD claim-control contract differs"
+        )
+    return dict(contract)
+
+
+def _verify_source_add_provider_origin_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_provider_origin_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract is unavailable; apply "
+            "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract is unavailable; apply "
+            "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract response is invalid"
+        ) from exc
+    expected_keys = {
+        "schema_version",
+        "identity_version",
+        "identity_scope",
+        "admission_rpc",
+        "recheck_rpc",
+        "owner_count",
+        "reserved_count",
+        "coverage_complete",
+        "collision_free",
+        "submission_trigger_enabled",
+        "catalog_trigger_enabled",
+        "provision_trigger_enabled",
+        "terminal_release_trigger_enabled",
+        "append_only_trigger_enabled",
+        "row_level_security_enabled",
+        "service_role_policy_enabled",
+    }
+    if not isinstance(contract, Mapping) or set(contract) != expected_keys:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract response is invalid"
+        )
+    owner_count = contract.get("owner_count")
+    reserved_count = contract.get("reserved_count")
+    required_true = expected_keys - {
+        "schema_version",
+        "identity_version",
+        "identity_scope",
+        "admission_rpc",
+        "recheck_rpc",
+        "owner_count",
+        "reserved_count",
+    }
+    if (
+        contract.get("schema_version")
+        != "leadpoet.source_add_provider_origin_contract.v1"
+        or contract.get("identity_version") != "v1"
+        or contract.get("identity_scope") != "normalized_exact_host"
+        or contract.get("admission_rpc") != "research_lab_source_add_admit_v2"
+        or contract.get("recheck_rpc")
+        != "research_lab_source_add_requeue_provenance_v2"
+        or type(owner_count) is not int
+        or type(reserved_count) is not int
+        or owner_count < 0
+        or reserved_count < 0
+        or owner_count != reserved_count
+        or any(contract.get(field) is not True for field in required_true)
+    ):
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provider-origin contract differs"
+        )
+    # Keep the provider-origin verification as the one protected preflight
+    # seam while binding the v3 route's exact implementation, compatibility
+    # wrapper, policy, signatures, and ACLs in migration 170.
+    _verify_source_add_duplicate_privacy_contract_v1(
+        headers=headers,
+        supabase_url=supabase_url,
+        opener=opener,
+        timeout_seconds=timeout_seconds,
+    )
+    return dict(contract)
+
+
+SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:80592287bb9dfed4bdc86b056f53ba71da2fb62d7ee82074c94a878c550eb83b"
+)
+
+
+def _verify_source_add_post_accept_leg1_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_post_accept_leg1_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
+            "scripts/169-research-lab-source-add-post-accept-leg1.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
+            "scripts/169-research-lab-source-add-post-accept-leg1.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
+        "daily_cap": 10,
+        "leg1_alpha_percent": 1.0,
+        "leg1_reward_epochs": 20,
+        "function_authority_sha256": (
+            SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "configure_probe_v2": True,
+            "finalize_provision_v2": True,
+            "reject_current_builtin_v2": True,
+            "reserve_leg1_slot_v2": True,
+            "finalize_leg1_v2": True,
+            "finalize_provision_smoke_v2": True,
+        },
+        "triggers": {
+            "acceptance": True,
+            "eligible": True,
+            "leg1_work": True,
+            "leg1_slot": True,
+            "leg1_obligation": True,
+            "leg1_initial_event": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "v2_callable": True,
+            "legacy_not_callable": True,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD post-accept Leg 1 contract differs"
+        )
+    return dict(contract)
+
+
 def _verify_chain_realized_activation_v1(
     parent_environment: Mapping[str, str],
     *,
@@ -1547,6 +2117,9 @@ def verify_required_supabase_v2_schema(
     chain_realized_activation_authority: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     required_rpcs = _required_supabase_v2_rpcs(parent_environment)
+    source_add_leg1_release_policy = (
+        _source_add_leg1_release_environment_policy_v1(parent_environment)
+    )
     routing_model_transition_v2_required = (
         _routing_model_transition_v2_required(parent_environment)
     )
@@ -1668,17 +2241,41 @@ def verify_required_supabase_v2_schema(
             timeout_seconds=timeout_seconds,
         )
     )
+    source_add_provider_origin_contract = (
+        _verify_source_add_provider_origin_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    source_add_post_accept_leg1_contract = (
+        _verify_source_add_post_accept_leg1_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    source_add_claim_control_contract = (
+        _verify_source_add_claim_control_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(required_rpcs)
-        + 3,
+        + 6,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(required_rpcs),
         "routing_model_transition_v2_required": (
             routing_model_transition_v2_required
         ),
-        "data_probe_count": 3,
+        "data_probe_count": 6,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation_http_probe_count": (
             1 if activation_source == "postgrest" else 0
@@ -1691,5 +2288,15 @@ def verify_required_supabase_v2_schema(
         "candidate_hybrid_purpose_contract": (
             candidate_hybrid_purpose_contract
         ),
+        "source_add_provider_origin_contract": (
+            source_add_provider_origin_contract
+        ),
+        "source_add_post_accept_leg1_contract": (
+            source_add_post_accept_leg1_contract
+        ),
+        "source_add_claim_control_contract": (
+            source_add_claim_control_contract
+        ),
+        "source_add_leg1_release_policy": source_add_leg1_release_policy,
         "migration_files": sorted(migrations),
     }

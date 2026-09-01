@@ -57,7 +57,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
     assert script.count(
-        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &"
+        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &"
     ) == 2
 
 
@@ -150,4 +150,10 @@ def test_attestation_builds_share_the_same_host_docker_lock() -> None:
     )
     assert pcr0_builder.count(
         "async with _docker_operation_lock_scope()"
-    ) == 2
+    ) == 1
+    assert (
+        "async with _docker_operation_lock_scope(\n"
+        "                opportunistic=commit_hash not in required_commit_hashes,\n"
+        "            ):"
+        in pcr0_builder
+    )

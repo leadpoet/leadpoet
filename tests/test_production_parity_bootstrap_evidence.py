@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 
@@ -19,7 +21,17 @@ RUN_ID = "pp-32241272808-1"
 BASE_SHA = "a" * 40
 CANDIDATE_SHA = "b" * 40
 BUCKET = "leadpoet-parity-493765492819-0123456789abcdef"
-CANDIDATE_BUNDLE_BYTES = b"candidate-bundle"
+CANDIDATE_BUNDLE_HEADER = (
+    b"# v2 git bundle\n" + CANDIDATE_SHA.encode("ascii") + b" HEAD\n\n"
+)
+CANDIDATE_BUNDLE_BYTES = CANDIDATE_BUNDLE_HEADER + b"PACKfixture"
+EXTRA_HEAD_BUNDLE_BYTES = (
+    b"# v2 git bundle\n"
+    + CANDIDATE_SHA.encode("ascii")
+    + b" HEAD\n"
+    + BASE_SHA.encode("ascii")
+    + b" refs/heads/main\n\nPACKfixture"
+)
 CANDIDATE_BUNDLE_SHA256 = hashlib.sha256(CANDIDATE_BUNDLE_BYTES).hexdigest()
 CANDIDATE_BUNDLE_SIZE_BYTES = str(len(CANDIDATE_BUNDLE_BYTES))
 
@@ -37,12 +49,16 @@ def _output(tmp_path: Path) -> Path:
         ("candidate-bundle-metadata", "CommandFailed"),
         ("candidate-bundle-file-integrity", "CommandFailed"),
         ("candidate-bundle-head", "CommandFailed"),
+        ("candidate-git-runtime", "CommandFailed"),
+        ("candidate-repository-directory", "CommandFailed"),
         ("candidate-bundle-verify", "CommandFailed"),
         ("candidate-repository-init", "CommandFailed"),
+        ("candidate-repository-structure", "CommandFailed"),
         ("candidate-bundle-fetch", "CommandFailed"),
         ("candidate-checkout", "CommandFailed"),
         ("candidate-remote-rebind", "CommandFailed"),
         ("canonical-origin-fetch", "CommandFailed"),
+        ("host-python-bootstrap", "CommandFailed"),
         ("host-python-import", "HostImportFailed"),
         ("host-entrypoint", "HostEntrypointFailed"),
         ("evidence-upload", "EvidenceUploadFailed"),
@@ -102,6 +118,10 @@ def test_bootstrap_ssm_failure_codes_are_unique_fixed_and_bounded() -> None:
         (52, "host-python-import", "HostImportFailed"),
         (53, "host-entrypoint", "HostEntrypointFailed"),
         (54, "evidence-upload", "EvidenceUploadFailed"),
+        (55, "candidate-git-runtime", "CommandFailed"),
+        (56, "candidate-repository-directory", "CommandFailed"),
+        (57, "candidate-repository-structure", "CommandFailed"),
+        (58, "host-python-bootstrap", "CommandFailed"),
     )
     codes = [code for code, _stage, _category in values]
     assert len(codes) == len(set(codes))
@@ -331,7 +351,7 @@ def test_terminal_poller_projects_authoritative_bootstrap_response_code(
 
 @pytest.mark.parametrize(
     "response_code",
-    [-1, 0, 1, 39, 55, 255, None, "40", True, 40.0, {}, []],
+    [-1, 0, 1, 39, 59, 255, None, "40", True, 40.0, {}, []],
 )
 def test_terminal_poller_falls_back_for_not_started_malformed_or_unknown_code(
     tmp_path: Path,
@@ -505,7 +525,11 @@ def test_terminal_upload_never_replaces_existing_s3_evidence(
     )
 
 
-def _rendered_ssm_command(tmp_path: Path) -> str:
+def _rendered_ssm_command(
+    tmp_path: Path,
+    *,
+    candidate_bundle_bytes: bytes = CANDIDATE_BUNDLE_BYTES,
+) -> str:
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = Path(__file__).parents[1] / ".github/workflows/physical-v2-staging.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -514,6 +538,22 @@ def _rendered_ssm_command(tmp_path: Path) -> str:
         step for step in steps if step.get("name") == "Start candidate production paths"
     )["run"]
     controller = execute.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    candidate_bundle_sha256 = hashlib.sha256(
+        candidate_bundle_bytes
+    ).hexdigest()
+    candidate_bundle_size_bytes = str(len(candidate_bundle_bytes))
+    candidate_bundle_binding_bytes = (
+        json.dumps(
+            {
+                "candidate-sha": CANDIDATE_SHA,
+                "bundle-sha256": candidate_bundle_sha256,
+                "bundle-size-bytes": candidate_bundle_size_bytes,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
     replacements = {
         "${{ steps.inputs.outputs.run_id }}": RUN_ID,
         "${{ steps.inputs.outputs.base }}": BASE_SHA,
@@ -523,10 +563,16 @@ def _rendered_ssm_command(tmp_path: Path) -> str:
         ),
         "${{ steps.stack.outputs.artifact_bucket }}": BUCKET,
         "${{ steps.candidate_bundle.outputs.sha256 }}": (
-            CANDIDATE_BUNDLE_SHA256
+            candidate_bundle_sha256
         ),
         "${{ steps.candidate_bundle.outputs.size_bytes }}": (
-            CANDIDATE_BUNDLE_SIZE_BYTES
+            candidate_bundle_size_bytes
+        ),
+        "${{ steps.candidate_bundle.outputs.binding_sha256 }}": (
+            hashlib.sha256(candidate_bundle_binding_bytes).hexdigest()
+        ),
+        "${{ steps.candidate_bundle.outputs.binding_size_bytes }}": (
+            str(len(candidate_bundle_binding_bytes))
         ),
     }
     for source, replacement in replacements.items():
@@ -593,12 +639,16 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
         "failure_stage=candidate-bundle-metadata",
         "failure_stage=candidate-bundle-file-integrity",
         "failure_stage=candidate-bundle-head",
-        "failure_stage=candidate-bundle-verify",
+        "failure_stage=candidate-repository-directory",
+        "failure_stage=candidate-git-runtime",
         "failure_stage=candidate-repository-init",
+        "failure_stage=candidate-repository-structure",
+        "failure_stage=candidate-bundle-verify",
         "failure_stage=candidate-bundle-fetch",
         "failure_stage=candidate-checkout",
         "failure_stage=candidate-remote-rebind",
         "failure_stage=canonical-origin-fetch",
+        "failure_stage=host-python-bootstrap",
         "failure_stage=host-python-import",
         "failure_stage=host-entrypoint",
     ]
@@ -606,15 +656,44 @@ def test_full_workflow_traps_and_uploads_every_bootstrap_stage() -> None:
     assert offsets == sorted(offsets)
     assert "evidence=/run/leadpoet-production-parity/full-evidence.json" in execute
     assert "scripts/run_production_parity_full_host.py --help" in execute
+    assert "scripts/resolve_production_parity_controller_requirements.py" in execute
+    assert 'PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1' in execute
+    assert "python3.11-pip" in execute
+    assert "python3.11-pip-wheel" not in execute
+    assert '"$host_python" -m ensurepip --upgrade' not in execute
+    assert '"$host_python" -m pip check' in execute
     provisioner = (
         Path(__file__).parents[1] / "scripts/provision_production_parity_staging.py"
     ).read_text(encoding="utf-8")
     assert "install -d -m 0700 /run/leadpoet-production-parity" in provisioner
+    bootstrap = execute.index("failure_stage=host-python-bootstrap")
+    runtime_package = execute.index(
+        "host_bootstrap_step=runtime-package",
+        bootstrap,
+    )
+    package_install = execute.index("python3.11-pip", runtime_package)
+    venv = execute.index(
+        '/usr/bin/python3.11 -I -m venv "$host_venv"',
+        package_install,
+    )
+    bootstrap_pip = execute.index('"$host_python" -m pip --version', venv)
+    install = execute.index('"$host_python" -m pip install', venv)
+    import_stage = execute.index("failure_stage=host-python-import", install)
+    verified_import = execute.index(
+        "scripts/run_production_parity_full_host.py --help", import_stage
+    )
     assert (
-        execute.index("failure_stage=host-python-import")
-        < execute.index("scripts/run_production_parity_full_host.py --help")
+        bootstrap
+        < runtime_package
+        < package_install
+        < venv
+        < bootstrap_pip
+        < install
+        < import_stage
+        < verified_import
         < execute.index('evidence="$authoritative_evidence"')
     )
+    assert "/home/ec2-user/venv311/bin/python3" not in execute
     for number in range(1, 6):
         script = by_name[f"Poll candidate window {number}"]["run"]
         for argument in (
@@ -651,10 +730,15 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
     assert "git bundle verify" in script
     assert "bundle_size_bytes=" in script
     assert "bundle_sha256=" in script
-    assert "bundle-sha256=$bundle_sha256" in script
-    assert "bundle-size-bytes=$bundle_size_bytes" in script
-    assert "candidate-sha=$CANDIDATE_SHA" in script
-    assert 'printf \'sha256=%s\\nsize_bytes=%s\\n\'' in script
+    assert 'bundle_binding="$PARITY_TEMP/candidate-bundle-binding.json"' in script
+    assert '"bundle-sha256": sys.argv[3]' in script
+    assert '"bundle-size-bytes": sys.argv[4]' in script
+    assert '"candidate-sha": sys.argv[2]' in script
+    assert "binding_size_bytes=" in script
+    assert "binding_sha256=" in script
+    assert "candidate-bundle-binding.json" in script
+    assert script.count("aws s3 cp") == 2
+    assert "binding_sha256=%s\\nbinding_size_bytes=%s\\n" in script
     assert "--all" not in script
 
     execute = next(
@@ -662,22 +746,76 @@ def test_full_workflow_candidate_bundle_is_exact_and_metadata_bound() -> None:
         for step in steps
         if step.get("name") == "Start candidate production paths"
     )["run"]
-    assert "MAX_METADATA_BYTES = 4096" in execute
-    assert "object_pairs_hook=exact_object" in execute
+    assert "candidate_bundle_binding_sha256=" in execute
+    assert "candidate_bundle_binding_size_bytes=" in execute
     metadata_stage = execute.split(
         "failure_stage=candidate-bundle-metadata", 1
     )[1].split("failure_stage=candidate-bundle-file-integrity", 1)[0]
     download_stage = execute.split(
         "failure_stage=candidate-bundle-download", 1
     )[1].split("failure_stage=candidate-bundle-metadata", 1)[0]
-    assert "aws s3api get-object" in download_stage
-    assert "--query Metadata" in download_stage
-    assert "--output json" in download_stage
+    assert download_stage.count("aws s3api get-object") == 1
+    assert "candidate-bundle-binding.json" not in download_stage
     assert '"$candidate_bundle"' in download_stage
+    assert "--query Metadata" not in download_stage
     assert "head-object" not in execute
-    assert 'printf \'%s\' "$candidate_bundle_metadata"' in metadata_stage
+    assert "aws s3api get-object" in metadata_stage
+    assert "candidate-bundle-binding.json" in metadata_stage
+    assert '"$candidate_bundle_binding" >/dev/null 2>&1' in metadata_stage
+    assert "sha256sum" in metadata_stage
+    assert "stat -c '%s'" in metadata_stage
+    assert "/dev/fd/3" not in metadata_stage
+    assert "/usr/bin/python3.11 -c" not in metadata_stage
+    assert "candidate_bundle_binding=" in execute
     assert "--output text" not in metadata_stage
-    assert "unset candidate_bundle_metadata" in metadata_stage
+    assert "aws s3 cp" not in metadata_stage
+    head_stage = execute.split(
+        "failure_stage=candidate-bundle-head", 1
+    )[1].split("failure_stage=candidate-bundle-verify", 1)[0]
+    assert 'LC_ALL=C head -n 3 -- "$candidate_bundle"' in head_stage
+    assert "'# v2 git bundle'" in head_stage
+    assert "git bundle list-heads" not in head_stage
+    directory_stage = execute.split(
+        "failure_stage=candidate-repository-directory", 1
+    )[1].split("if [ -x /usr/bin/git ]", 1)[0]
+    assert 'mkdir -m 0700 -- "$candidate_repo" "$candidate_git_home"' in (
+        directory_stage
+    )
+    assert 'test -d "$candidate_repo"' in directory_stage
+    assert 'test ! -L "$candidate_repo"' in directory_stage
+    assert 'test -d "$candidate_git_home"' in directory_stage
+    assert 'test ! -L "$candidate_git_home"' in directory_stage
+    git_runtime_stage = execute.split(
+        "failure_stage=candidate-git-runtime", 1
+    )[1].split("failure_stage=candidate-repository-init", 1)[0]
+    assert 'test -x "$candidate_git_bin"' in git_runtime_stage
+    assert "candidate_git --version" not in git_runtime_stage
+    assert "sudo -n /usr/bin/dnf -q -y install git-core" in execute
+    init_stage = execute.split(
+        "failure_stage=candidate-repository-init", 1
+    )[1].split("failure_stage=candidate-repository-structure", 1)[0]
+    assert 'candidate_git -C "$candidate_repo" init' in init_stage
+    structure_stage = execute.split(
+        "failure_stage=candidate-repository-structure", 1
+    )[1].split("failure_stage=candidate-bundle-verify", 1)[0]
+    assert 'test -d "$candidate_repo/.git"' in structure_stage
+    assert 'test ! -L "$candidate_repo/.git"' in structure_stage
+    assert 'git init "$candidate_repo"' not in init_stage
+    assert "candidate_git()" in execute
+    assert "/usr/bin/env -i" in execute
+    assert "PATH=/usr/bin:/bin" in execute
+    assert "LC_ALL=C" in execute
+    assert 'HOME="$candidate_git_home"' in execute
+    assert "GIT_CONFIG_NOSYSTEM=1" in execute
+    assert "GIT_TERMINAL_PROMPT=0" in execute
+    assert '"$candidate_git_bin" -c init.templateDir=' in execute
+    verify_stage = execute.split(
+        "failure_stage=candidate-bundle-verify", 1
+    )[1].split("failure_stage=candidate-bundle-fetch", 1)[0]
+    assert 'candidate_git -C "$candidate_repo" fetch --no-tags' in verify_stage
+    assert '"$candidate_bundle" HEAD' in verify_stage
+    assert "bundle verify" not in verify_stage
+    assert "git init --bare" not in execute
 
 
 def test_rendered_ssm_bootstrap_is_valid_and_bounded(tmp_path: Path) -> None:
@@ -703,20 +841,36 @@ def _run_rendered_ssm(
     upload_fails: bool = False,
     early_parent_target: Path | None = None,
     bundle_bytes: bytes = CANDIDATE_BUNDLE_BYTES,
-    bundle_heads: str | None = None,
+    bound_bundle_bytes: bytes | None = None,
     bundle_verify_fails: bool = False,
     bundle_as_symlink: bool = False,
     metadata_candidate_sha: str = CANDIDATE_SHA,
-    metadata_bundle_sha256: str = CANDIDATE_BUNDLE_SHA256,
-    metadata_bundle_size_bytes: str = CANDIDATE_BUNDLE_SIZE_BYTES,
+    metadata_bundle_sha256: str | None = None,
+    metadata_bundle_size_bytes: str | None = None,
     metadata_raw_json: str | None = None,
+    docker_preinstalled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    command = _rendered_ssm_command(tmp_path / "render")
+    controller_bundle_bytes = (
+        CANDIDATE_BUNDLE_BYTES
+        if bound_bundle_bytes is None
+        else bound_bundle_bytes
+    )
+    command = _rendered_ssm_command(
+        tmp_path / "render",
+        candidate_bundle_bytes=controller_bundle_bytes,
+    )
+    if metadata_bundle_sha256 is None:
+        metadata_bundle_sha256 = hashlib.sha256(
+            controller_bundle_bytes
+        ).hexdigest()
+    if metadata_bundle_size_bytes is None:
+        metadata_bundle_size_bytes = str(len(controller_bundle_bytes))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     capture = tmp_path / "uploaded-evidence.json"
     aws_calls = tmp_path / "aws-calls.jsonl"
     git_calls = tmp_path / "git-calls.jsonl"
+    host_python_calls = tmp_path / "host-python-calls.jsonl"
     aws_stub = fake_bin / "aws"
     aws_stub.write_text(
         """#!/usr/bin/env python3
@@ -731,15 +885,20 @@ with open(os.environ["AWS_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 if arguments[:2] == ["s3api", "get-object"]:
     destination = Path(arguments[-1])
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
-    if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
-        symlink_target = destination.with_name(destination.name + ".payload")
-        symlink_target.write_bytes(payload)
-        destination.symlink_to(symlink_target)
+    key = arguments[arguments.index("--key") + 1]
+    if key.endswith("/candidate.bundle"):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = bytes.fromhex(os.environ["BUNDLE_HEX"])
+        if os.environ.get("BUNDLE_AS_SYMLINK") == "1":
+            symlink_target = destination.with_name(destination.name + ".payload")
+            symlink_target.write_bytes(payload)
+            destination.symlink_to(symlink_target)
+        else:
+            destination.write_bytes(payload)
+    elif key.endswith("/candidate-bundle-binding.json"):
+        destination.write_text(os.environ["METADATA_RAW_JSON"], encoding="utf-8")
     else:
-        destination.write_bytes(payload)
-    sys.stdout.write(os.environ["METADATA_RAW_JSON"])
+        raise SystemExit(2)
 elif arguments[:2] == ["s3api", "put-object"]:
     if os.environ.get("FAIL_EVIDENCE_UPLOAD") == "1":
         raise SystemExit(73)
@@ -762,22 +921,44 @@ arguments = sys.argv[1:]
 with open(os.environ["GIT_CALLS"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments, separators=(",", ":")) + "\\n")
 
-if arguments[:2] == ["bundle", "list-heads"]:
-    print(os.environ["BUNDLE_HEADS"])
-elif arguments[:2] == ["init", "--bare"]:
-    Path(arguments[2]).mkdir(parents=True, exist_ok=False)
+if arguments[:2] == ["-c", "init.templateDir="]:
+    arguments = arguments[2:]
+
+if arguments[:1] == ["--version"]:
+    print("git version test")
 elif arguments[:1] == ["init"]:
     Path(arguments[1]).mkdir(parents=True, exist_ok=False)
 elif arguments[:1] == ["-C"]:
     operation = arguments[2:]
-    if operation[:2] == ["bundle", "verify"]:
-        if os.environ.get("FAIL_BUNDLE_VERIFY") == "1":
+    if operation[:1] == ["init"]:
+        Path(arguments[1], ".git").mkdir(parents=False, exist_ok=False)
+    elif operation[:1] == ["fetch"]:
+        if (
+            os.environ.get("FAIL_BUNDLE_VERIFY") == "1"
+            and any(value.endswith("/candidate.bundle") for value in operation)
+        ):
             raise SystemExit(74)
     elif operation[:2] == ["remote", "get-url"]:
         print("https://github.com/leadpoet/leadpoet.git")
     elif operation[:1] == ["rev-parse"]:
         print(os.environ["CANDIDATE_SHA"])
-    elif operation[:1] in (["fetch"], ["checkout"], ["remote"]):
+    elif operation[:1] == ["checkout"]:
+        repo = Path(arguments[1])
+        scripts = repo / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (repo / "requirements.txt").write_text(
+            "bittensor==10.5.0\\nboto3>=1.40.0\\n"
+            "cryptography>=41.0.7\\nhttpx>=0.27.0\\nsupabase>=2.0.0\\n",
+            encoding="utf-8",
+        )
+        (scripts / "resolve_production_parity_controller_requirements.py").write_text(
+            "from pathlib import Path\\n"
+            "import sys\\n"
+            "output = Path(sys.argv[sys.argv.index('--output') + 1])\\n"
+            "output.write_text('boto3>=1.40.0\\\\n', encoding='utf-8')\\n",
+            encoding="utf-8",
+        )
+    elif operation[:1] == ["remote"]:
         pass
     else:
         raise SystemExit(3)
@@ -790,16 +971,47 @@ else:
     sudo_stub.write_text(
         """#!/bin/sh
 set -eu
+if [ "${1:-}" = "-n" ]; then
+  shift
+fi
 operation="$1"
 shift
 case "$operation" in
   mkdir) exec mkdir "$@" ;;
   chown) exit 0 ;;
+  */dnf) exec "$operation" "$@" ;;
+  */docker|*/systemctl) exec "$operation" "$@" ;;
   *) exit 2 ;;
 esac
 """,
         encoding="utf-8",
     )
+    dnf_stub = fake_bin / "dnf"
+    dnf_stub.write_text(
+        """#!/bin/sh
+set -eu
+case " $* " in
+  *" docker "*)
+    cp "$DOCKER_STUB_TEMPLATE" "$DOCKER_STUB_PATH"
+    chmod 700 "$DOCKER_STUB_PATH"
+    ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    docker_template = fake_bin / "docker-template"
+    docker_template.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker_stub = fake_bin / "docker"
+    if docker_preinstalled:
+        shutil.copyfile(docker_template, docker_stub)
+    rpm_stub = fake_bin / "rpm"
+    rpm_stub.write_text(
+        "#!/bin/sh\nprintf '%s\\n' docker-25.0.13-test\n",
+        encoding="utf-8",
+    )
+    systemctl_stub = fake_bin / "systemctl"
+    systemctl_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     stat_stub = fake_bin / "stat"
     stat_stub.write_text(
         """#!/usr/bin/env python3
@@ -825,10 +1037,20 @@ print(hashlib.sha256(value).hexdigest(), sys.argv[-1])
     host_python = fake_bin / "host-python"
     host_python.write_text(
         """#!/usr/bin/env python3
+import json
+import os
 from pathlib import Path
 import sys
 
-if "--help" not in sys.argv:
+with open(os.environ["HOST_PYTHON_CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:], separators=(",", ":")) + "\\n")
+if sys.argv[1:2] == ["-I"]:
+    print("3.11")
+elif sys.argv[1:3] == ["-m", "pip"] or sys.argv[1:3] == ["-m", "ensurepip"]:
+    pass
+elif "--help" in sys.argv:
+    pass
+else:
     output = Path(sys.argv[sys.argv.index("--output") + 1])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('{"status":"passed","authority":"host"}\\n')
@@ -839,11 +1061,17 @@ if "--help" not in sys.argv:
         aws_stub,
         git_stub,
         sudo_stub,
+        dnf_stub,
+        docker_template,
+        rpm_stub,
+        systemctl_stub,
         stat_stub,
         sha256sum_stub,
         host_python,
     ):
         executable.chmod(0o700)
+    if docker_preinstalled:
+        docker_stub.chmod(0o700)
 
     early_root = tmp_path / "missing-early-parent"
     work_root = tmp_path / "work"
@@ -855,8 +1083,26 @@ if "--help" not in sys.argv:
         f"/opt/leadpoet-production-parity/{RUN_ID}", str(work_root)
     )
     command = command.replace(
-        "/home/ec2-user/venv311/bin/python3", str(host_python)
+        'host_python="$host_venv/bin/python3"',
+        f"host_python={shlex.quote(str(host_python))}",
     )
+    venv_command = (
+        f'{sys.executable} -I -m venv "$host_venv"'
+    )
+    assert command.count(venv_command) == 1
+    command = command.replace(
+        venv_command, 'mkdir -m 0700 -- "$host_venv"', 1
+    )
+    command = command.replace(
+        f'test "$(readlink -f -- "$host_python")" = {sys.executable}',
+        f'test "$(readlink -f -- "$host_python")" = {host_python.resolve()}',
+    )
+    command = command.replace("/usr/bin/git", str(git_stub))
+    command = command.replace("/usr/bin/dnf", str(dnf_stub))
+    command = command.replace("/usr/bin/docker", str(docker_stub))
+    command = command.replace("/usr/bin/rpm", str(rpm_stub))
+    command = command.replace("/usr/bin/systemctl", str(systemctl_stub))
+    command = command.replace("/usr/bin/env -i", "/usr/bin/env")
     if stage is not None:
         assert category is not None
         if stage == "bootstrap-environment":
@@ -872,13 +1118,17 @@ if "--help" not in sys.argv:
     else:
         early_root.symlink_to(early_parent_target, target_is_directory=True)
     if metadata_raw_json is None:
-        metadata_raw_json = json.dumps(
-            {
-                "candidate-sha": metadata_candidate_sha,
-                "bundle-sha256": metadata_bundle_sha256,
-                "bundle-size-bytes": metadata_bundle_size_bytes,
-            },
-            separators=(",", ":"),
+        metadata_raw_json = (
+            json.dumps(
+                {
+                    "candidate-sha": metadata_candidate_sha,
+                    "bundle-sha256": metadata_bundle_sha256,
+                    "bundle-size-bytes": metadata_bundle_size_bytes,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
         )
     environment = {
         **os.environ,
@@ -888,11 +1138,13 @@ if "--help" not in sys.argv:
         "CANDIDATE_SHA": CANDIDATE_SHA,
         "BUNDLE_HEX": bundle_bytes.hex(),
         "BUNDLE_AS_SYMLINK": "1" if bundle_as_symlink else "0",
-        "BUNDLE_HEADS": bundle_heads or f"{CANDIDATE_SHA} HEAD",
         "FAIL_BUNDLE_VERIFY": "1" if bundle_verify_fails else "0",
         "FAIL_EVIDENCE_UPLOAD": "1" if upload_fails else "0",
         "GIT_CALLS": str(git_calls),
+        "HOST_PYTHON_CALLS": str(host_python_calls),
         "METADATA_RAW_JSON": metadata_raw_json,
+        "DOCKER_STUB_TEMPLATE": str(docker_template),
+        "DOCKER_STUB_PATH": str(docker_stub),
         "PROVIDER_SECRET": "must-never-enter-evidence",
     }
     result = subprocess.run(
@@ -908,7 +1160,11 @@ if "--help" not in sys.argv:
 
 @pytest.mark.parametrize(
     ("response_code", "stage", "category"),
-    evidence.BOOTSTRAP_SSM_FAILURE_CODES[:-1],
+    tuple(
+        item
+        for item in evidence.BOOTSTRAP_SSM_FAILURE_CODES
+        if item[1] != "evidence-upload"
+    ),
 )
 def test_rendered_ssm_maps_and_uploads_each_exact_failure_stage(
     tmp_path: Path,
@@ -951,11 +1207,46 @@ def test_rendered_ssm_preserves_success_and_uploads_host_evidence(
         "authority": "host",
     }
     assert not (tmp_path / "work" / "candidate.bundle").exists()
+    assert not list((tmp_path / "work").glob("candidate-bundle-binding.*"))
     assert result.stdout == ""
     assert result.stderr == ""
 
 
-def test_rendered_ssm_downloads_body_and_metadata_in_one_get(
+def test_rendered_ssm_installs_missing_container_runtime(tmp_path: Path) -> None:
+    result, capture = _run_rendered_ssm(
+        tmp_path,
+        docker_preinstalled=False,
+    )
+
+    assert result.returncode == 0
+    assert (tmp_path / "bin" / "docker").is_file()
+    assert json.loads(capture.read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_rendered_ssm_builds_isolated_candidate_controller_before_entrypoint(
+    tmp_path: Path,
+) -> None:
+    result, capture = _run_rendered_ssm(tmp_path)
+
+    assert result.returncode == 0
+    assert json.loads(capture.read_text(encoding="utf-8")) == {
+        "status": "passed",
+        "authority": "host",
+    }
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "host-python-calls.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert sum("--help" in call for call in calls) == 1
+    assert any(call[:3] == ["-m", "pip", "install"] for call in calls)
+    assert any(call[:3] == ["-m", "pip", "check"] for call in calls)
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_rendered_ssm_downloads_bundle_and_checks_exact_binding_bytes(
     tmp_path: Path,
 ) -> None:
     result, _capture = _run_rendered_ssm(tmp_path)
@@ -968,10 +1259,21 @@ def test_rendered_ssm_downloads_body_and_metadata_in_one_get(
         ).splitlines()
     ]
     reads = [call for call in calls if call[:2] == ["s3api", "get-object"]]
-    assert len(reads) == 1
-    assert reads[0][reads[0].index("--query") + 1] == "Metadata"
+    assert len(reads) == 2
+    assert reads[0][reads[0].index("--key") + 1].endswith(
+        "/candidate.bundle"
+    )
     assert reads[0][-1] == str(tmp_path / "work" / "candidate.bundle")
+    assert reads[1][reads[1].index("--key") + 1].endswith(
+        "/candidate-bundle-binding.json"
+    )
+    assert reads[1][-1] == str(
+        tmp_path / "work" / "candidate-bundle-binding.json"
+    )
+    assert "--region" in reads[1]
+    assert all("--query" not in call for call in reads)
     assert not any(call[:2] == ["s3api", "head-object"] for call in calls)
+    assert not any(call[:2] == ["s3", "cp"] for call in calls)
 
 
 def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
@@ -982,7 +1284,6 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
     assert result.returncode == 0
     work = tmp_path / "work"
     bundle = str(work / "candidate.bundle")
-    verifier = str(work / "candidate-bundle-verifier.git")
     repo = str(work / "repo")
     calls = [
         json.loads(line)
@@ -990,11 +1291,10 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
             encoding="utf-8"
         ).splitlines()
     ]
-    assert calls == [
-        ["bundle", "list-heads", bundle],
-        ["init", "--bare", verifier],
-        ["-C", verifier, "bundle", "verify", bundle],
-        ["init", repo],
+    assert all(call[:2] == ["-c", "init.templateDir="] for call in calls)
+    normalized_calls = [call[2:] for call in calls]
+    assert normalized_calls == [
+        ["-C", repo, "init"],
         ["-C", repo, "fetch", "--no-tags", bundle, "HEAD"],
         ["-C", repo, "rev-parse", "FETCH_HEAD"],
         ["-C", repo, "checkout", "--detach", CANDIDATE_SHA],
@@ -1018,7 +1318,7 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ],
         ["-C", repo, "rev-parse", "origin/main"],
     ]
-    assert all("clone" not in call for call in calls)
+    assert all("clone" not in call for call in normalized_calls)
 
 
 @pytest.mark.parametrize(
@@ -1075,7 +1375,12 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
         ),
         ({"metadata_raw_json": "[]"}, 43, "candidate-bundle-metadata"),
         (
-            {"bundle_bytes": b"candidate-bundlf"},
+            {
+                "bundle_bytes": (
+                    CANDIDATE_BUNDLE_BYTES[:-1]
+                    + bytes([CANDIDATE_BUNDLE_BYTES[-1] ^ 1])
+                )
+            },
             44,
             "candidate-bundle-file-integrity",
         ),
@@ -1090,7 +1395,10 @@ def test_rendered_ssm_uses_explicit_exact_candidate_git_sequence(
             "candidate-bundle-file-integrity",
         ),
         (
-            {"bundle_heads": f"{CANDIDATE_SHA} HEAD\n{BASE_SHA} refs/heads/main"},
+            {
+                "bundle_bytes": EXTRA_HEAD_BUNDLE_BYTES,
+                "bound_bundle_bytes": EXTRA_HEAD_BUNDLE_BYTES,
+            },
             45,
             "candidate-bundle-head",
         ),
@@ -1126,7 +1434,10 @@ def test_rendered_ssm_rejects_each_bundle_integrity_violation(
     assert retained["error_type"] == "CommandFailed"
     assert "must-never-enter-evidence" not in capture.read_text(encoding="utf-8")
     assert not (tmp_path / "work" / "candidate.bundle").exists()
-    assert not (tmp_path / "work" / "repo").exists()
+    if overrides.get("bundle_verify_fails"):
+        assert (tmp_path / "work" / "repo").is_dir()
+    else:
+        assert not (tmp_path / "work" / "repo").exists()
     aws_calls = [
         json.loads(line)
         for line in (tmp_path / "aws-calls.jsonl").read_text(

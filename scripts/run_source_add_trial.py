@@ -76,7 +76,7 @@ def main() -> int:
     parser.add_argument("--acceptance-floor", type=float,
                         default=float(os.getenv("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD") or 0.10))
     parser.add_argument("--registry-provider-id", default="", help="evidence-proxy registry id once the source is provisioned")
-    parser.add_argument("--start-epoch", type=int, default=0, help="deprecated; Leg 1 is issued by the measured functional workflow")
+    parser.add_argument("--start-epoch", type=int, default=0, help="deprecated; Leg 1 is issued by the post-acceptance V2 workflow")
     parser.add_argument("--persist", action="store_true", help="write submission/catalog rows to Supabase")
     args = parser.parse_args()
 

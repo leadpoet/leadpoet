@@ -261,7 +261,11 @@ def normalize_autoresearch_maintenance_state(row: Mapping[str, Any] | None) -> d
         "event_type": row.get("current_event_type") or row.get("event_type"),
         "reason": row.get("current_reason") or row.get("reason"),
         "actor_ref": row.get("actor_ref"),
-        "event_seq": row.get("current_event_seq") or row.get("seq"),
+        "event_seq": (
+            row.get("current_event_seq")
+            if row.get("current_event_seq") is not None
+            else row.get("seq")
+        ),
         "event_hash": row.get("current_event_hash") or row.get("anchored_hash"),
         "status_at": row.get("current_status_at") or row.get("created_at"),
         "event_doc": dict(event_doc),
@@ -284,7 +288,11 @@ def normalize_scoring_maintenance_state(row: Mapping[str, Any] | None) -> dict[s
         "event_type": row.get("current_event_type") or row.get("event_type"),
         "reason": row.get("current_reason") or row.get("reason"),
         "actor_ref": row.get("actor_ref"),
-        "event_seq": row.get("current_event_seq") or row.get("seq"),
+        "event_seq": (
+            row.get("current_event_seq")
+            if row.get("current_event_seq") is not None
+            else row.get("seq")
+        ),
         "event_hash": row.get("current_event_hash") or row.get("anchored_hash"),
         "status_at": row.get("current_status_at") or row.get("created_at"),
         "event_doc": dict(event_doc),

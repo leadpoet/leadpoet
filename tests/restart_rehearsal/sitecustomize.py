@@ -8,12 +8,14 @@ from the network-isolated rehearsal container.
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import builtins
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import http.client
 import importlib
 import importlib.util
 import io
@@ -90,6 +92,10 @@ _PRIVATE_MODEL_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_ORIGINAL_HTTP_CONNECTION = http.client.HTTPConnection
+_PRODUCTION_SUPABASE_HOST = "qplwoislplkcegvdmbim.supabase.co"
+_LOCAL_POSTGREST_HOST = "127.0.0.1"
+_LOCAL_POSTGREST_PORT = 54321
 _RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
 _BLOCK_NUMBERS_BY_HASH: dict[str, int] = {}
 _GATEWAY_SECRET_ID = "leadpoet/prod/gateway/env"
@@ -127,6 +133,127 @@ def _initial_gateway_secret_string() -> str:
         _initial_gateway_miner_submissions_state()
     )
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def _candidate_post_accept_leg1_function_authority() -> str:
+    path = SOURCE_ROOT / "gateway/tee/supabase_schema_preflight_v2.py"
+    if not path.is_file():
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "gateway/tee/supabase_schema_preflight_v2.py"
+        )
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            == "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
+            for target in node.targets
+        )
+    ]
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", values[0])
+    ):
+        raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
+    return values[0]
+
+
+class _LocalSupabaseHTTPSConnection:
+    """Map only the canonical production PostgREST origin to local HTTP."""
+
+    def __init__(self, host: str, port: int, **kwargs: Any):
+        if (
+            host != _PRODUCTION_SUPABASE_HOST
+            or port != 443
+            or set(kwargs) != {"timeout"}
+            or not 1.0 <= float(kwargs["timeout"]) <= 30.0
+        ):
+            raise ValueError("local Supabase HTTPS connection differs")
+        self._connection = _ORIGINAL_HTTP_CONNECTION(
+            _LOCAL_POSTGREST_HOST,
+            _LOCAL_POSTGREST_PORT,
+            timeout=float(kwargs["timeout"]),
+        )
+        self._requested = False
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        body: Any = None,
+        headers: Mapping[str, str] | None = None,
+        *,
+        encode_chunked: bool = False,
+    ) -> None:
+        normalized_headers = {
+            str(name).lower(): str(value)
+            for name, value in dict(headers or {}).items()
+        }
+        parsed = urlsplit(url)
+        expected_headers = {
+            "accept",
+            "authorization",
+            "apikey",
+            "connection",
+            "host",
+        }
+        normalized_method = str(method).upper()
+        if body is not None:
+            expected_headers |= {"content-length", "content-type"}
+        if (
+            self._requested
+            or normalized_method not in {"GET", "POST"}
+            or parsed.scheme
+            or parsed.netloc
+            or not parsed.path.startswith("/rest/v1/")
+            or parsed.fragment
+            or encode_chunked
+            or set(normalized_headers) != expected_headers
+            or normalized_headers.get("host") != _PRODUCTION_SUPABASE_HOST
+            or normalized_headers.get("accept") != "application/json"
+            or normalized_headers.get("apikey") != "rehearsal-secret"
+            or normalized_headers.get("authorization")
+            != "Bearer rehearsal-secret"
+            or normalized_headers.get("connection") != "close"
+            or (normalized_method == "GET" and body is not None)
+            or (normalized_method == "POST" and not isinstance(body, bytes))
+            or (
+                body is not None
+                and (
+                    normalized_headers.get("content-type")
+                    != "application/json"
+                    or normalized_headers.get("content-length")
+                    != str(len(body))
+                )
+            )
+        ):
+            raise ValueError("local Supabase HTTPS request differs")
+        self._requested = True
+        _external_event(
+            "supabase_postgrest",
+            "canonical_https_request",
+            method=normalized_method,
+            path=parsed.path,
+        )
+        self._connection.request(
+            normalized_method,
+            url,
+            body=body,
+            headers=dict(headers or {}),
+        )
+
+    def getresponse(self) -> Any:
+        if not self._requested:
+            raise ValueError("local Supabase HTTPS response precedes request")
+        return self._connection.getresponse()
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 def _new_gateway_secret_state() -> dict[str, Any]:
@@ -4391,7 +4518,12 @@ def _local_urlopen(
             path=parsed.path,
         )
         return _LocalHTTPResponse(body)
-    if parsed.scheme != "https" or parsed.hostname != "example.invalid":
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname
+        not in {"example.invalid", _PRODUCTION_SUPABASE_HOST}
+        or parsed.port not in {None, 443}
+    ):
         raise ValueError("local PostgREST received an unknown URL")
     headers = {
         str(name).lower(): str(value)
@@ -4601,8 +4733,7 @@ def _local_urlopen(
                 "leg1_alpha_percent": 1.0,
                 "leg1_reward_epochs": 20,
                 "function_authority_sha256": (
-                    "sha256:035b4dc17bc8e8b63524df2c123892aa"
-                    "3ddaf0a01d08c69fc2d756921e8e96be"
+                    _candidate_post_accept_leg1_function_authority()
                 ),
                 "functions": {
                     "configure_probe_v2": True,
@@ -4767,6 +4898,7 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     boto3.session.Session = _LocalInstanceRoleSession
     boto3.Session = _LocalInstanceRoleSession
     urllib.request.urlopen = _local_urlopen
+    http.client.HTTPSConnection = _LocalSupabaseHTTPSConnection
 
     class _RehearsalSocket(_real_socket):
         """Type-compatible socket factory with a strict AF_VSOCK boundary."""

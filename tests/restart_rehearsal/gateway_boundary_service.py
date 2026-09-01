@@ -82,6 +82,27 @@ JSON_FILTER_TOKEN_RE = re.compile(
 )
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SOURCE_ADD_GUARD_ID_RE = re.compile(
+    r"^source_add_restart_guard:[0-9a-f]{64}$"
+)
+SOURCE_ADD_OWNER_ID_RE = re.compile(
+    r"^source_add_restart_owner:[0-9a-f]{64}$"
+)
+SOURCE_ADD_CONTROL_COLUMNS = frozenset(
+    {
+        "singleton",
+        "paused",
+        "reason",
+        "actor_ref",
+        "updated_at",
+        "restart_guard_commitment",
+        "restart_guard_owner_commitment",
+        "restart_guard_generation",
+        "restart_guard_expires_at",
+        "restart_guard_acquired_at",
+        "restart_guard_actor_ref",
+    }
+)
 SENSITIVE_DOCUMENT_RE = re.compile(
     r"(sk-or-|sb_secret|service_role|openrouter_api_key|raw_secret|"
     r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
@@ -125,6 +146,31 @@ def _candidate_hybrid_constraint_definition() -> str:
             % (role, encoded_purposes)
         )
     return "CHECK (%s)" % " OR ".join(clauses)
+
+
+def _candidate_post_accept_leg1_function_authority(
+    source_root: Path,
+) -> str:
+    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            == "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
+            for target in node.targets
+        )
+    ]
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or not HASH_RE.fullmatch(values[0])
+    ):
+        raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
+    return values[0]
 
 
 def _filter_scalar(raw: str, existing: Any) -> Any:
@@ -1002,6 +1048,9 @@ class LocalPostgRESTState:
         )
         self.durable_state_path = durable_state_path
         self.durable_schema_sha = durable_schema_sha
+        self.source_add_post_accept_leg1_function_authority = (
+            _candidate_post_accept_leg1_function_authority(source_root)
+        )
         self.durable_revision = 0
         self._provider_outcome_locks: dict[
             tuple[str, str], threading.Lock
@@ -1101,11 +1150,431 @@ class LocalPostgRESTState:
                     "source_finalized_block": source_finalized_block,
                 }
             ]
+        durable_state_existed = bool(
+            self.durable_state_path is not None
+            and self.durable_state_path.exists()
+        )
         self._restore_durable_state()
+        source_add_control_initialized = self._initialize_source_add_control()
+        self._validate_source_add_control()
         self.cutover_state = list(self.rows.get(state_table, []))
         self.events = state_root / "local-postgrest-events.jsonl"
         with self.lock:
-            self._write_durable_state_locked()
+            self._write_durable_state_locked(
+                mutated=(
+                    durable_state_existed and source_add_control_initialized
+                )
+            )
+
+    def _initialize_source_add_control(self) -> bool:
+        table = "research_lab_source_add_control"
+        if table not in self.rows or self.rows[table]:
+            return False
+        if set(self.relation_columns.get(table, ())) != set(
+            SOURCE_ADD_CONTROL_COLUMNS
+        ):
+            raise ValueError("SOURCE_ADD control migration contract differs")
+        self.rows[table] = [
+            {
+                "singleton": True,
+                "paused": True,
+                "reason": "migration_96_disabled_by_default",
+                "actor_ref": "operator:migration",
+                "updated_at": "1970-01-01T00:00:00+00:00",
+                "restart_guard_commitment": "",
+                "restart_guard_owner_commitment": "",
+                "restart_guard_generation": 0,
+                "restart_guard_expires_at": None,
+                "restart_guard_acquired_at": None,
+                "restart_guard_actor_ref": "",
+            }
+        ]
+        return True
+
+    @staticmethod
+    def _source_add_timestamp(value: Any, *, label: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(
+                str(value or "").replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(label) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(label)
+        return parsed.astimezone(timezone.utc)
+
+    def _validate_source_add_control(self) -> None:
+        table = "research_lab_source_add_control"
+        if table not in self.rows:
+            return
+        rows = self.rows[table]
+        if (
+            set(self.relation_columns.get(table, ()))
+            != set(SOURCE_ADD_CONTROL_COLUMNS)
+            or len(rows) != 1
+            or set(rows[0]) != set(SOURCE_ADD_CONTROL_COLUMNS)
+        ):
+            raise ValueError("SOURCE_ADD control migration contract differs")
+        row = rows[0]
+        generation = row["restart_guard_generation"]
+        commitment = row["restart_guard_commitment"]
+        owner_commitment = row["restart_guard_owner_commitment"]
+        expires_at = row["restart_guard_expires_at"]
+        acquired_at = row["restart_guard_acquired_at"]
+        guard_actor = row["restart_guard_actor_ref"]
+        if (
+            row["singleton"] is not True
+            or not isinstance(row["paused"], bool)
+            or not isinstance(row["reason"], str)
+            or not isinstance(row["actor_ref"], str)
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+            or not isinstance(commitment, str)
+            or not isinstance(owner_commitment, str)
+            or not isinstance(guard_actor, str)
+        ):
+            raise ValueError("SOURCE_ADD control row is invalid")
+        self._source_add_timestamp(
+            row["updated_at"], label="SOURCE_ADD control timestamp is invalid"
+        )
+        inactive = (
+            commitment == ""
+            and owner_commitment == ""
+            and expires_at is None
+            and acquired_at is None
+            and guard_actor == ""
+        )
+        active_shape = (
+            HASH_RE.fullmatch(commitment) is not None
+            and HASH_RE.fullmatch(owner_commitment) is not None
+            and generation > 0
+            and expires_at is not None
+            and acquired_at is not None
+            and guard_actor != ""
+        )
+        if not (inactive or active_shape):
+            raise ValueError("SOURCE_ADD restart guard row is invalid")
+        if active_shape:
+            self._source_add_timestamp(
+                expires_at, label="SOURCE_ADD guard expiry is invalid"
+            )
+            self._source_add_timestamp(
+                acquired_at, label="SOURCE_ADD guard acquisition is invalid"
+            )
+
+    @staticmethod
+    def _source_add_commitment(value: str) -> str:
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _source_add_owner_generation_commitment(
+        cls, owner_commitment: str, generation: int
+    ) -> str:
+        if not owner_commitment:
+            return ""
+        return cls._source_add_commitment(
+            f"{owner_commitment}:{generation}"
+        )
+
+    def source_add_restart_guard_state(
+        self, body: Any, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        if body not in ({}, None):
+            raise ValueError("SOURCE_ADD restart guard state body is invalid")
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        with self.lock:
+            self._validate_source_add_control()
+            row = self.rows["research_lab_source_add_control"][0]
+            expires_at = row["restart_guard_expires_at"]
+            guard_active = bool(
+                row["restart_guard_commitment"]
+                and expires_at is not None
+                and self._source_add_timestamp(
+                    expires_at, label="SOURCE_ADD guard expiry is invalid"
+                )
+                > observed_now
+            )
+            return {
+                "schema_version": "leadpoet.source_add_restart_guard_state.v1",
+                "paused": row["paused"],
+                "guard_active": guard_active,
+                "guard_commitment": row["restart_guard_commitment"],
+                "owner_commitment": row[
+                    "restart_guard_owner_commitment"
+                ],
+                "guard_generation": row["restart_guard_generation"],
+                "owner_generation_commitment": (
+                    self._source_add_owner_generation_commitment(
+                        row["restart_guard_owner_commitment"],
+                        row["restart_guard_generation"],
+                    )
+                ),
+                "guard_expires_at": expires_at,
+            }
+
+    def acquire_source_add_restart_guard(
+        self, body: Any, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "p_actor_ref",
+            "p_expected_generation",
+            "p_guard_id",
+            "p_lease_seconds",
+            "p_owner_id",
+        }
+        if not isinstance(body, dict) or set(body) != expected_keys:
+            raise ValueError("SOURCE_ADD restart guard input is invalid")
+        guard_id = body["p_guard_id"]
+        owner_id = body["p_owner_id"]
+        expected_generation = body["p_expected_generation"]
+        lease_seconds = body["p_lease_seconds"]
+        actor_ref = body["p_actor_ref"]
+        if (
+            not isinstance(guard_id, str)
+            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
+            or not isinstance(owner_id, str)
+            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
+            or not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation < 0
+            or not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or not 60 <= lease_seconds <= 14400
+            or not isinstance(actor_ref, str)
+            or not actor_ref.strip()
+        ):
+            raise ValueError("SOURCE_ADD restart guard input is invalid")
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        guard_commitment = self._source_add_commitment(guard_id)
+        owner_commitment = self._source_add_commitment(owner_id)
+        with self.lock:
+            self._validate_source_add_control()
+            row = self.rows["research_lab_source_add_control"][0]
+            generation = row["restart_guard_generation"]
+            if generation != expected_generation:
+                raise ValueError("SOURCE_ADD restart guard generation differs")
+            current_expiry = (
+                self._source_add_timestamp(
+                    row["restart_guard_expires_at"],
+                    label="SOURCE_ADD guard expiry is invalid",
+                )
+                if row["restart_guard_expires_at"] is not None
+                else None
+            )
+            currently_active = bool(
+                row["restart_guard_commitment"]
+                and current_expiry is not None
+                and current_expiry > observed_now
+            )
+            if (
+                currently_active
+                and row["restart_guard_commitment"] != guard_commitment
+            ):
+                raise ValueError("SOURCE_ADD restart guard is already active")
+            replay = bool(
+                currently_active
+                and row["restart_guard_commitment"] == guard_commitment
+                and row["restart_guard_owner_commitment"] == owner_commitment
+            )
+            requested_expiry = observed_now + timedelta(seconds=lease_seconds)
+            if replay:
+                expires_at = max(current_expiry, requested_expiry)
+                row["restart_guard_expires_at"] = expires_at.isoformat()
+            else:
+                if generation == 9223372036854775807:
+                    raise ValueError(
+                        "SOURCE_ADD restart guard generation is exhausted"
+                    )
+                generation += 1
+                expires_at = requested_expiry
+                encoded_now = observed_now.isoformat()
+                row.update(
+                    {
+                        "paused": True,
+                        "reason": "canonical_restart_guard",
+                        "actor_ref": actor_ref[:200],
+                        "updated_at": encoded_now,
+                        "restart_guard_commitment": guard_commitment,
+                        "restart_guard_owner_commitment": owner_commitment,
+                        "restart_guard_generation": generation,
+                        "restart_guard_expires_at": expires_at.isoformat(),
+                        "restart_guard_acquired_at": encoded_now,
+                        "restart_guard_actor_ref": actor_ref[:200],
+                    }
+                )
+            self._write_durable_state_locked(mutated=True)
+            return {
+                "schema_version": "leadpoet.source_add_restart_guard.v1",
+                "paused": True,
+                "guard_active": True,
+                "guard_commitment": guard_commitment,
+                "owner_commitment": owner_commitment,
+                "guard_generation": generation,
+                "owner_generation_commitment": (
+                    self._source_add_owner_generation_commitment(
+                        owner_commitment, generation
+                    )
+                ),
+                "guard_expires_at": expires_at.isoformat(),
+            }
+
+    def source_add_restart_quiescence(
+        self, body: Any, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        expected_keys = {"p_guard_generation", "p_guard_id", "p_owner_id"}
+        if not isinstance(body, dict) or set(body) != expected_keys:
+            raise ValueError(
+                "SOURCE_ADD restart quiescence guard input is invalid"
+            )
+        guard_id = body["p_guard_id"]
+        owner_id = body["p_owner_id"]
+        generation = body["p_guard_generation"]
+        if (
+            not isinstance(guard_id, str)
+            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
+            or not isinstance(owner_id, str)
+            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation <= 0
+        ):
+            raise ValueError(
+                "SOURCE_ADD restart quiescence guard input is invalid"
+            )
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        expected_guard = self._source_add_commitment(guard_id)
+        expected_owner = self._source_add_commitment(owner_id)
+        with self.lock:
+            self._validate_source_add_control()
+            row = self.rows["research_lab_source_add_control"][0]
+            if "research_lab_source_add_work_items" not in self.rows:
+                raise ValueError("SOURCE_ADD work migration contract differs")
+            expires_at = row["restart_guard_expires_at"]
+            guard_active = bool(
+                row["restart_guard_commitment"]
+                and expires_at is not None
+                and self._source_add_timestamp(
+                    expires_at, label="SOURCE_ADD guard expiry is invalid"
+                )
+                > observed_now
+            )
+            guard_matches = row["restart_guard_commitment"] == expected_guard
+            owner_matches = (
+                row["restart_guard_owner_commitment"] == expected_owner
+            )
+            generation_matches = row["restart_guard_generation"] == generation
+            leased = sum(
+                1
+                for work in self.rows["research_lab_source_add_work_items"]
+                if work.get("work_status") == "leased"
+            )
+            owner_generation = self._source_add_owner_generation_commitment(
+                row["restart_guard_owner_commitment"],
+                row["restart_guard_generation"],
+            )
+            return {
+                "schema_version": "leadpoet.source_add_restart_quiescence.v1",
+                "paused": row["paused"],
+                "guard_active": guard_active,
+                "guard_matches": guard_matches,
+                "owner_matches": owner_matches,
+                "generation_matches": generation_matches,
+                "guard_commitment": row["restart_guard_commitment"],
+                "owner_commitment": row[
+                    "restart_guard_owner_commitment"
+                ],
+                "guard_generation": row["restart_guard_generation"],
+                "owner_generation_commitment": owner_generation,
+                "guard_expires_at": expires_at,
+                "leased_work_count": leased,
+                "quiescent": bool(
+                    row["paused"]
+                    and guard_active
+                    and guard_matches
+                    and owner_matches
+                    and generation_matches
+                    and leased == 0
+                ),
+            }
+
+    def release_source_add_restart_guard(
+        self, body: Any, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "p_actor_ref",
+            "p_guard_generation",
+            "p_guard_id",
+            "p_owner_id",
+        }
+        if not isinstance(body, dict) or set(body) != expected_keys:
+            raise ValueError("SOURCE_ADD restart guard release input is invalid")
+        guard_id = body["p_guard_id"]
+        owner_id = body["p_owner_id"]
+        generation = body["p_guard_generation"]
+        actor_ref = body["p_actor_ref"]
+        if (
+            not isinstance(guard_id, str)
+            or SOURCE_ADD_GUARD_ID_RE.fullmatch(guard_id) is None
+            or not isinstance(owner_id, str)
+            or SOURCE_ADD_OWNER_ID_RE.fullmatch(owner_id) is None
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation <= 0
+            or not isinstance(actor_ref, str)
+            or not actor_ref.strip()
+        ):
+            raise ValueError("SOURCE_ADD restart guard release input is invalid")
+        guard_commitment = self._source_add_commitment(guard_id)
+        owner_commitment = self._source_add_commitment(owner_id)
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        with self.lock:
+            self._validate_source_add_control()
+            row = self.rows["research_lab_source_add_control"][0]
+            if (
+                not row["restart_guard_commitment"]
+                or row["restart_guard_commitment"] != guard_commitment
+                or row["restart_guard_owner_commitment"] != owner_commitment
+                or row["restart_guard_generation"] != generation
+            ):
+                raise ValueError(
+                    "SOURCE_ADD restart guard owner or generation does not match"
+                )
+            owner_generation = self._source_add_owner_generation_commitment(
+                owner_commitment, generation
+            )
+            row.update(
+                {
+                    "paused": True,
+                    "reason": "canonical_restart_guard_released_paused",
+                    "actor_ref": actor_ref[:200],
+                    "updated_at": observed_now.isoformat(),
+                    "restart_guard_commitment": "",
+                    "restart_guard_owner_commitment": "",
+                    "restart_guard_expires_at": None,
+                    "restart_guard_acquired_at": None,
+                    "restart_guard_actor_ref": "",
+                }
+            )
+            self._write_durable_state_locked(mutated=True)
+            return {
+                "schema_version": (
+                    "leadpoet.source_add_restart_guard_release.v1"
+                ),
+                "released": True,
+                "paused": True,
+                "guard_active": False,
+                "guard_generation": generation,
+                "owner_generation_commitment": owner_generation,
+            }
 
     def _restore_durable_state(self) -> None:
         path = self.durable_state_path
@@ -2985,6 +3454,28 @@ class Handler(BaseHTTPRequestHandler):
             elif name == "research_lab_source_add_claim_work":
                 # The exact fixture intentionally has no source-add work.
                 response = []
+            elif name == "research_lab_source_add_restart_guard_state_v1":
+                response = self.server.state.source_add_restart_guard_state(
+                    body
+                )
+            elif name == (
+                "research_lab_source_add_acquire_restart_guard_v1"
+            ):
+                response = self.server.state.acquire_source_add_restart_guard(
+                    body
+                )
+            elif name == (
+                "research_lab_source_add_restart_quiescence_v1"
+            ):
+                response = self.server.state.source_add_restart_quiescence(
+                    body
+                )
+            elif name == (
+                "research_lab_source_add_release_restart_guard_v1"
+            ):
+                response = self.server.state.release_source_add_restart_guard(
+                    body
+                )
             elif name == "research_lab_acquire_maintenance_lease":
                 response = self.server.state.acquire_maintenance_lease(body)
                 self.server.state.record(
@@ -3222,8 +3713,7 @@ class Handler(BaseHTTPRequestHandler):
                     "leg1_alpha_percent": 1.0,
                     "leg1_reward_epochs": 20,
                     "function_authority_sha256": (
-                        "sha256:035b4dc17bc8e8b63524df2c123892aa"
-                        "3ddaf0a01d08c69fc2d756921e8e96be"
+                        self.server.state.source_add_post_accept_leg1_function_authority
                     ),
                     "functions": {
                         "configure_probe_v2": True,

@@ -43,8 +43,6 @@ from artifact_identity import (
     normalized_image_id,
     pcr0 as artifact_pcr0,
 )
-
-
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
 STATE_PATH = STATE_ROOT / "state.json"
 EVENT_PATH = STATE_ROOT / "events.jsonl"
@@ -56,6 +54,7 @@ REAL_GIT = "/usr/bin/git"
 _PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
 PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
+PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 PCR0_CACHE_PROVENANCE = "validator_pcr0_cache_v1"
@@ -501,7 +500,7 @@ def _gateway_secret() -> dict[str, str]:
         "BITTENSOR_NETUID": "71",
         "GITHUB_REPO_URL": "/srv/origin.git",
         "GITHUB_BRANCH": "main",
-        "SUPABASE_URL": "http://127.0.0.1:54321",
+        "SUPABASE_URL": PRODUCTION_SUPABASE_ORIGIN,
         "SUPABASE_ANON_KEY": "rehearsal-public",
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",

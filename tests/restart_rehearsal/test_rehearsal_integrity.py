@@ -272,8 +272,7 @@ def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
         "leg1_alpha_percent": 1.0,
         "leg1_reward_epochs": 20,
         "function_authority_sha256": (
-            "sha256:035b4dc17bc8e8b63524df2c123892aa"
-            "3ddaf0a01d08c69fc2d756921e8e96be"
+            rehearsal_sitecustomize._candidate_post_accept_leg1_function_authority()
         ),
         "functions": {
             "configure_probe_v2": True,
@@ -381,7 +380,7 @@ def test_local_schema_adapter_returns_full_source_add_leg1_contract(
     )
     request = urllib.request.Request(
         (
-            "https://example.invalid/rest/v1/rpc/"
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
             "research_lab_source_add_post_accept_leg1_contract_v1"
         ),
         data=b"{}",
@@ -425,8 +424,12 @@ def test_gateway_cli_secret_matches_initial_durable_secret(
         lambda: "false",
     )
 
-    assert contract_adapter._current_gateway_secret() == json.loads(
+    current = contract_adapter._current_gateway_secret()
+    assert current == json.loads(
         rehearsal_sitecustomize._initial_gateway_secret_string()
+    )
+    assert current["SUPABASE_URL"] == (
+        "https://qplwoislplkcegvdmbim.supabase.co"
     )
 
 

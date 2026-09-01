@@ -11,6 +11,7 @@ import pytest
 from tests.restart_rehearsal.gateway_boundary_service import (
     Handler,
     LocalPostgRESTState,
+    SOURCE_ADD_CONTROL_COLUMNS,
     _candidate_hybrid_constraint_definition,
     _matches_filter,
     _source_add_claim_control_contract,
@@ -78,6 +79,76 @@ def test_postgrest_boundary_implements_claim_control_contract() -> None:
     assert "response = _source_add_claim_control_contract()" in (
         inspect.getsource(Handler._dispatch)
     )
+
+
+def test_postgrest_boundary_persists_source_add_restart_guard(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    durable_path = tmp_path / "durable.json"
+    columns = {
+        "research_lab_source_add_control": SOURCE_ADD_CONTROL_COLUMNS,
+        "research_lab_source_add_work_items": frozenset({"work_status"}),
+    }
+
+    def new_state() -> LocalPostgRESTState:
+        return LocalPostgRESTState(
+            state_root=state_root,
+            fixture={},
+            source_root=ROOT,
+            tables=set(columns),
+            rpcs={
+                "research_lab_source_add_restart_guard_state_v1",
+                "research_lab_source_add_acquire_restart_guard_v1",
+                "research_lab_source_add_restart_quiescence_v1",
+                "research_lab_source_add_release_restart_guard_v1",
+            },
+            relation_columns=columns,
+            durable_state_path=durable_path,
+            durable_schema_sha="3" * 40,
+        )
+
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    guard_id = "source_add_restart_guard:" + "a" * 64
+    owner_id = "source_add_restart_owner:" + "b" * 64
+    state = new_state()
+    assert state.source_add_restart_guard_state({}, now=now)[
+        "guard_generation"
+    ] == 0
+    acquired = state.acquire_source_add_restart_guard(
+        {
+            "p_actor_ref": "gateway-restart:" + "c" * 64,
+            "p_expected_generation": 0,
+            "p_guard_id": guard_id,
+            "p_lease_seconds": 300,
+            "p_owner_id": owner_id,
+        },
+        now=now,
+    )
+    assert acquired["guard_generation"] == 1
+    assert new_state().source_add_restart_quiescence(
+        {
+            "p_guard_generation": 1,
+            "p_guard_id": guard_id,
+            "p_owner_id": owner_id,
+        },
+        now=now,
+    )["quiescent"] is True
+    released = new_state().release_source_add_restart_guard(
+        {
+            "p_actor_ref": "gateway-restart:" + "c" * 64,
+            "p_guard_generation": 1,
+            "p_guard_id": guard_id,
+            "p_owner_id": owner_id,
+        },
+        now=now,
+    )
+    assert released["released"] is True
+    final = new_state().source_add_restart_guard_state({}, now=now)
+    assert final["paused"] is True
+    assert final["guard_active"] is False
+    assert final["guard_generation"] == 1
 
 
 def test_candidate_hybrid_contract_is_derived_from_candidate_roles() -> None:

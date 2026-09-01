@@ -196,7 +196,7 @@ def test_lifespan_starts_and_cleans_source_add_outside_worker_startup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_add_route_and_status_bypass_only_failed_worker_gate() -> None:
+async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate() -> None:
     source_ready = _load_function(
         "_gateway_source_add_dispatcher_ready",
         FastAPI=object,
@@ -229,10 +229,10 @@ async def test_source_add_route_and_status_bypass_only_failed_worker_gate() -> N
     application = SimpleNamespace(
         state=SimpleNamespace(source_add_dispatcher_task=dispatcher_task)
     )
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     async def call_next(request):
-        calls.append(request.url.path)
+        calls.append((request.method, request.url.path))
         return "allowed"
 
     def request(method: str, path: str):
@@ -242,27 +242,64 @@ async def test_source_add_route_and_status_bypass_only_failed_worker_gate() -> N
             app=application,
         )
 
-    assert (
-        await middleware(
-            request("POST", "/research-lab/source-adapters"),
-            call_next,
-        )
-        == "allowed"
-    )
-    assert (
-        await middleware(request("GET", "/research-lab/status"), call_next)
-        == "allowed"
-    )
-    blocked = await middleware(request("POST", "/validate"), call_next)
-    assert blocked.status_code == 503
-    assert calls == [
-        "/research-lab/source-adapters",
-        "/research-lab/status",
+    allowed = [
+        ("POST", "/research-lab/source-adapters"),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/credential-recipient",
+        ),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/configure-test",
+        ),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/provision",
+        ),
+        ("GET", "/research-lab/status"),
+        ("GET", "/research-lab/allocations/attested/24124"),
     ]
+    for method, path in allowed:
+        assert await middleware(request(method, path), call_next) == "allowed"
+    assert calls == allowed
+
+    blocked = [
+        ("GET", "/research-lab/source-adapters"),
+        ("POST", "/research-lab/source-adapters/credential-recipient"),
+        (
+            "GET",
+            "/research-lab/admin/source-adapters/submission-1/configure-test",
+        ),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/recheck-provenance",
+        ),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/future-action",
+        ),
+        (
+            "POST",
+            "/research-lab/admin/source-adapters/submission-1/provision/extra",
+        ),
+        ("GET", "/research-lab/allocations/live/24124"),
+        ("POST", "/research-lab/allocations/attested/24124"),
+        ("GET", "/research-lab/allocations/attested/-1"),
+        ("GET", "/research-lab/allocations/attested/\u0661"),
+        ("GET", "/research-lab/allocations/attested/24124/extra"),
+        ("POST", "/validate"),
+    ]
+    for method, path in blocked:
+        response = await middleware(request(method, path), call_next)
+        assert response.status_code == 503, (method, path)
+    assert calls == allowed
 
     dispatcher_task.set_result(None)
-    blocked_source = await middleware(
-        request("POST", "/research-lab/source-adapters"),
-        call_next,
-    )
-    assert blocked_source.status_code == 503
+    for method, path in allowed[:4]:
+        response = await middleware(request(method, path), call_next)
+        assert response.status_code == 503, (method, path)
+
+    independent_reads = allowed[4:]
+    for method, path in independent_reads:
+        assert await middleware(request(method, path), call_next) == "allowed"
+    assert calls == allowed + independent_reads

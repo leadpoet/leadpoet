@@ -2888,13 +2888,303 @@ def _baseline_distribution_complete(
         _benchmark_item_ref_for_progress(item) for item in benchmark_items
     }
     observed_refs = {
-        _benchmark_item_ref_for_progress(item) for item in rows
+        _benchmark_item_ref_for_progress(item)
+        for item in rows
+        if _baseline_summary_checkpointable(item)
     }
     return bool(
         expected_refs
         and len(expected_refs) == len(benchmark_items)
+        and len(rows) == len(benchmark_items)
         and observed_refs == expected_refs
     )
+
+
+def _baseline_progress_generation_identity(
+    doc: Mapping[str, Any],
+) -> tuple[str, ...]:
+    return tuple(
+        str(doc.get(field) or "")
+        for field in (
+            "schema_version",
+            "artifact_type",
+            "benchmark_date",
+            "rolling_window_hash",
+            "private_model_artifact_hash",
+            "gateway_runtime_commit_sha",
+            "scoring_configuration_hash",
+            "repo_git_sha",
+            "manifest_hash",
+        )
+    )
+
+
+def _read_baseline_progress_document(
+    client: Any,
+    bucket: str,
+    object_key: str,
+    *,
+    version_id: str | None = None,
+) -> dict[str, Any] | None:
+    request: dict[str, Any] = {"Bucket": bucket, "Key": object_key}
+    if version_id is not None:
+        request["VersionId"] = version_id
+    try:
+        body = client.get_object(**request)["Body"].read()
+        value = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        logger.debug(
+            "research_lab_baseline_progress_read_failed versioned=%s error=%s",
+            version_id is not None,
+            _short_error(exc),
+        )
+        return None
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+def _recover_invalidated_retry_extension_checkpoint(
+    client: Any,
+    bucket: str,
+    object_key: str,
+    *,
+    latest_doc: Mapping[str, Any],
+    current_gateway_runtime_commit_sha: str,
+    current_scoring_configuration_hash: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Select one marker-linked active version for an exact retry extension.
+
+    A former all-zero guard could invalidate an otherwise resumable generation
+    after every ICP ref had been visited even when some results were unresolved.
+    S3 versioning preserves that active generation. Recovery is deliberately
+    narrow: it is available only on a new runtime with an exact one-round retry
+    extension, the invalidation marker must immediately hash-bind the prior
+    active result set, and every newer generation must contain zero completed
+    rows. No object is copied, deleted, or rewritten here.
+    """
+
+    latest = dict(latest_doc)
+    latest_status = str(latest.get("checkpoint_status") or "")
+    latest_rows = latest.get("per_icp_results")
+    if (
+        latest_status not in {"active", "invalidated"}
+        or latest.get("completed_icp_count") != 0
+        or latest_rows != []
+    ):
+        return latest, None
+    checkpoint_runtime = str(
+        latest.get("gateway_runtime_commit_sha") or ""
+    ).strip().lower()
+    checkpoint_config = str(
+        latest.get("scoring_configuration_hash") or ""
+    ).strip().lower()
+    extension = _compatible_baseline_retry_extension(
+        checkpoint_configuration_hash=checkpoint_config,
+        current_configuration_hash=current_scoring_configuration_hash,
+    )
+    if (
+        extension is None
+        or checkpoint_runtime == current_gateway_runtime_commit_sha
+        or not callable(getattr(client, "list_object_versions", None))
+    ):
+        return latest, None
+
+    try:
+        listing = client.list_object_versions(
+            Bucket=bucket,
+            Prefix=object_key,
+            MaxKeys=1000,
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_baseline_progress_history_rejected "
+            "reason=version_listing_failed error=%s",
+            _short_error(exc),
+        )
+        return latest, None
+    if not isinstance(listing, Mapping):
+        return latest, None
+    if any(
+        isinstance(marker, Mapping) and marker.get("Key") == object_key
+        for marker in listing.get("DeleteMarkers") or []
+    ):
+        logger.warning(
+            "research_lab_baseline_progress_history_rejected "
+            "reason=delete_marker_present"
+        )
+        return latest, None
+    versions = [
+        dict(version)
+        for version in listing.get("Versions") or []
+        if isinstance(version, Mapping)
+        and version.get("Key") == object_key
+        and isinstance(version.get("VersionId"), str)
+        and version.get("VersionId")
+    ]
+    if not versions or not bool(versions[0].get("IsLatest")):
+        return latest, None
+
+    latest_version = _read_baseline_progress_document(
+        client,
+        bucket,
+        object_key,
+        version_id=str(versions[0]["VersionId"]),
+    )
+    if latest_version is None or canonical_hash(latest_version) != canonical_hash(
+        latest
+    ):
+        return latest, None
+
+    generation_identity = _baseline_progress_generation_identity(latest)
+    invalidation_doc: dict[str, Any] | None = None
+    invalidation_index = -1
+    for index, version in enumerate(versions):
+        version_doc = (
+            latest_version
+            if index == 0
+            else _read_baseline_progress_document(
+                client,
+                bucket,
+                object_key,
+                version_id=str(version["VersionId"]),
+            )
+        )
+        if version_doc is None:
+            return latest, None
+        status = str(version_doc.get("checkpoint_status") or "")
+        if status == "invalidated":
+            invalidation_doc = version_doc
+            invalidation_index = index
+            break
+        if (
+            status != "active"
+            or version_doc.get("completed_icp_count") != 0
+            or version_doc.get("per_icp_results") != []
+            or _baseline_progress_generation_identity(version_doc)
+            != generation_identity
+        ):
+            return latest, None
+    if invalidation_doc is None or invalidation_index + 1 >= len(versions):
+        return latest, None
+    if (
+        str(invalidation_doc.get("invalidation_reason") or "")
+        != "globally_all_zero"
+        or invalidation_doc.get("completed_icp_count") != 0
+        or invalidation_doc.get("per_icp_results") != []
+        or _baseline_progress_generation_identity(invalidation_doc)
+        != generation_identity
+    ):
+        return latest, None
+    rejected_count = invalidation_doc.get("rejected_icp_count")
+    rejected_hash = str(invalidation_doc.get("rejected_results_hash") or "")
+    if (
+        not isinstance(rejected_count, int)
+        or isinstance(rejected_count, bool)
+        or rejected_count <= 0
+        or not _SHA256_RE.fullmatch(rejected_hash)
+    ):
+        return latest, None
+
+    prior_version = versions[invalidation_index + 1]
+    prior_doc = _read_baseline_progress_document(
+        client,
+        bucket,
+        object_key,
+        version_id=str(prior_version["VersionId"]),
+    )
+    if (
+        prior_doc is None
+        or str(prior_doc.get("checkpoint_status") or "") != "active"
+        or _baseline_progress_generation_identity(prior_doc)
+        != generation_identity
+    ):
+        return latest, None
+    prior_rows = prior_doc.get("per_icp_results")
+    safe_prior_rows = (
+        [
+            _baseline_progress_public_row(row)
+            for row in prior_rows
+            if isinstance(row, Mapping)
+            and _baseline_summary_checkpointable(row)
+        ]
+        if isinstance(prior_rows, list)
+        else []
+    )
+    try:
+        prior_attempts = _normalize_baseline_attempt_ledger(
+            prior_doc.get("attempt_ledger")
+        )
+    except ValueError as exc:
+        logger.warning(
+            "research_lab_baseline_progress_history_rejected "
+            "reason=prior_attempt_ledger_invalid error=%s",
+            _short_error(exc),
+        )
+        return latest, None
+    item_index_by_ref: dict[str, int] = {}
+    for attempt in prior_attempts:
+        ref = str(attempt.get("icp_ref") or "")
+        item_index = int(attempt.get("item_index") or 0)
+        if not ref or item_index <= 0 or (
+            ref in item_index_by_ref
+            and item_index_by_ref[ref] != item_index
+        ):
+            return latest, None
+        item_index_by_ref[ref] = item_index
+    if any(
+        _benchmark_item_ref_for_progress(row) not in item_index_by_ref
+        for row in safe_prior_rows
+    ):
+        return latest, None
+    marker_ordered_rows = sorted(
+        safe_prior_rows,
+        key=lambda row: item_index_by_ref[
+            _benchmark_item_ref_for_progress(row)
+        ],
+    )
+    if (
+        not isinstance(prior_rows, list)
+        or len(safe_prior_rows) != len(prior_rows)
+        or prior_doc.get("completed_icp_count") != len(prior_rows)
+        or len(prior_rows) != rejected_count
+        or canonical_hash(marker_ordered_rows) != rejected_hash
+    ):
+        return latest, None
+
+    final_latest = _read_baseline_progress_document(
+        client,
+        bucket,
+        object_key,
+    )
+    if (
+        final_latest is None
+        or canonical_hash(final_latest) != canonical_hash(latest)
+    ):
+        logger.warning(
+            "research_lab_baseline_progress_history_rejected "
+            "reason=latest_changed_during_recovery"
+        )
+        return latest, None
+
+    recovery = {
+        "schema_version": "research_lab_baseline_checkpoint_version_recovery.v1",
+        "selected_checkpoint_hash": canonical_hash(prior_doc),
+        "invalidation_checkpoint_hash": canonical_hash(invalidation_doc),
+        "superseded_zero_generation_count": invalidation_index,
+        "recovered_completed_icp_count": len(prior_rows),
+        "prior_retry_rounds": extension[0],
+        "current_retry_rounds": extension[1],
+        "producer_gateway_runtime_commit_sha": checkpoint_runtime,
+        "current_gateway_runtime_commit_sha": current_gateway_runtime_commit_sha,
+    }
+    logger.warning(
+        "research_lab_baseline_progress_recovered_from_version_history "
+        "completed=%s superseded_zero_generations=%s checkpoint=%s marker=%s",
+        len(prior_rows),
+        invalidation_index,
+        recovery["selected_checkpoint_hash"],
+        recovery["invalidation_checkpoint_hash"],
+    )
+    return prior_doc, recovery
 
 
 def _load_baseline_scoring_progress(
@@ -2913,6 +3203,7 @@ def _load_baseline_scoring_progress(
     producer_runtime_commits_out: set[str] | None = None,
     provider_cost_base_scope_out: list[str] | None = None,
     retry_budget_extension_out: list[dict[str, Any]] | None = None,
+    checkpoint_version_recovery_out: list[dict[str, Any]] | None = None,
     scoring_contract_hash_value: str = "",
     benchmark_items: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
@@ -2946,13 +3237,18 @@ def _load_baseline_scoring_progress(
             return []
         expected_items_by_ref[ref] = (index, str(item.get("icp_hash") or ""))
 
-    try:
-        body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
-        doc = json.loads(body.decode("utf-8"))
-    except Exception:
+    client = boto3.client("s3")
+    doc = _read_baseline_progress_document(client, bucket, object_key)
+    if doc is None:
         return []
-    if not isinstance(doc, Mapping):
-        return []
+    doc, version_recovery = _recover_invalidated_retry_extension_checkpoint(
+        client,
+        bucket,
+        object_key,
+        latest_doc=doc,
+        current_gateway_runtime_commit_sha=expected_runtime_commit,
+        current_scoring_configuration_hash=expected_scoring_config_hash,
+    )
     checkpoint_schema_version = str(doc.get("schema_version") or "")
     if checkpoint_schema_version not in {
         _BASELINE_SCORING_PROGRESS_SCHEMA_VERSION,
@@ -3325,6 +3621,11 @@ def _load_baseline_scoring_progress(
                 ),
             }
         )
+    if (
+        checkpoint_version_recovery_out is not None
+        and version_recovery is not None
+    ):
+        checkpoint_version_recovery_out.append(version_recovery)
     return reusable_rows
 
 
@@ -14269,6 +14570,7 @@ class ResearchLabGatewayScoringWorker:
         baseline_progress_producer_runtime_commits: set[str] = set()
         baseline_progress_provider_cost_scope_values: list[str] = []
         baseline_progress_retry_budget_extensions: list[dict[str, Any]] = []
+        baseline_progress_version_recoveries: list[dict[str, Any]] = []
         baseline_progress_provider_cost_base_scope = str(
             (runner.spec.extra_env or {}).get(PROVIDER_COST_EVALUATION_SCOPE_ENV)
             or ""
@@ -14314,6 +14616,9 @@ class ResearchLabGatewayScoringWorker:
                 retry_budget_extension_out=(
                     baseline_progress_retry_budget_extensions
                 ),
+                checkpoint_version_recovery_out=(
+                    baseline_progress_version_recoveries
+                ),
                 scoring_contract_hash_value=(
                     baseline_progress_scoring_contract_hash
                 ),
@@ -14323,6 +14628,40 @@ class ResearchLabGatewayScoringWorker:
             if len(baseline_progress_retry_budget_extensions) > 1:
                 raise RuntimeError(
                     "baseline checkpoint retry-budget extension is ambiguous"
+                )
+            if len(baseline_progress_version_recoveries) > 1:
+                raise RuntimeError(
+                    "baseline checkpoint version recovery is ambiguous"
+                )
+            if baseline_progress_version_recoveries:
+                version_recovery = baseline_progress_version_recoveries[0]
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="checkpoint_version_recovery",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    selected_checkpoint_hash=version_recovery[
+                        "selected_checkpoint_hash"
+                    ],
+                    invalidation_checkpoint_hash=version_recovery[
+                        "invalidation_checkpoint_hash"
+                    ],
+                    superseded_zero_generation_count=version_recovery[
+                        "superseded_zero_generation_count"
+                    ],
+                    completed_icp_count=version_recovery[
+                        "recovered_completed_icp_count"
+                    ],
+                    producer_gateway_runtime_commit_sha=version_recovery[
+                        "producer_gateway_runtime_commit_sha"
+                    ],
+                    current_gateway_runtime_commit_sha=version_recovery[
+                        "current_gateway_runtime_commit_sha"
+                    ],
                 )
             if baseline_progress_retry_budget_extensions:
                 retry_extension = baseline_progress_retry_budget_extensions[0]

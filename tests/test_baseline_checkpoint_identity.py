@@ -46,6 +46,57 @@ def _s3_stub(doc):
     return stub
 
 
+def _versioned_s3_stub():
+    versions = []
+    s3 = mock.Mock()
+
+    def put_object(**kwargs):
+        version_id = f"version-{len(versions) + 1}"
+        versions.insert(
+            0,
+            {
+                "VersionId": version_id,
+                "Body": bytes(kwargs["Body"]),
+            },
+        )
+        return {"VersionId": version_id}
+
+    def get_object(**kwargs):
+        version_id = kwargs.get("VersionId")
+        selected = next(
+            (
+                version
+                for version in versions
+                if version_id is None or version["VersionId"] == version_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise KeyError("missing version")
+        body = mock.Mock()
+        body.read.return_value = selected["Body"]
+        return {"Body": body, "VersionId": selected["VersionId"]}
+
+    def list_object_versions(**kwargs):
+        return {
+            "Versions": [
+                {
+                    "Key": kwargs["Prefix"],
+                    "VersionId": version["VersionId"],
+                    "IsLatest": index == 0,
+                }
+                for index, version in enumerate(versions)
+            ]
+        }
+
+    s3.put_object.side_effect = put_object
+    s3.get_object.side_effect = get_object
+    s3.list_object_versions.side_effect = list_object_versions
+    stub = types.ModuleType("boto3")
+    stub.client = lambda *args, **kwargs: s3
+    return stub, s3, versions
+
+
 def _doc(**over):
     base = {
         "schema_version": "2.0",
@@ -486,6 +537,235 @@ def test_complete_distribution_requires_every_unique_icp():
         [{"icp_ref": "icp-1"}, {"icp_ref": "icp-1"}],
         benchmark_items,
     )
+    assert not sw._baseline_distribution_complete(
+        [
+            {"icp_ref": "icp-1"},
+            {
+                "icp_ref": "icp-2",
+                "diagnostics": {"sourcing_failed": True},
+            },
+        ],
+        benchmark_items,
+    )
+
+
+def test_retry_extension_recovers_marker_linked_checkpoint_version_history():
+    stub, _s3, versions = _versioned_s3_stub()
+    clean_environment = {
+        name: None for name in scoring_executor.SCORING_RUNTIME_ENV_NAMES
+    }
+    prior_values = dict(clean_environment)
+    current_values = dict(clean_environment)
+    current_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "2"
+    prior_hash = scoring_executor.configuration_hash(prior_values)
+    current_hash = scoring_executor.configuration_hash(current_values)
+    current_environment = {
+        name: value for name, value in current_values.items() if value is not None
+    }
+    public_rows = [
+        {"icp_ref": "icp-1", "icp_hash": "hash-1", "score": 0.0},
+        {"icp_ref": "icp-2", "icp_hash": "hash-2", "score": 0.0},
+    ]
+    attempt_rows = []
+    for item_index, row in enumerate(public_rows, start=1):
+        attempt_rows.append(
+            sw._baseline_attempt_ledger_entry(
+                {
+                    **row,
+                    "_item_index": item_index,
+                    "_retryable": False,
+                    "_nonempty": False,
+                    "_runtime_error": "",
+                    "_retry_backoff_seconds": 0.0,
+                    sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+                },
+                retry_round=0,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+            )
+        )
+    for retry_round in (0, 1):
+        attempt_rows.append(
+            sw._baseline_attempt_ledger_entry(
+                {
+                    "icp_ref": "icp-3",
+                    "icp_hash": "hash-3",
+                    "score": 0.0,
+                    "company_count": 0,
+                    "diagnostics": {
+                        "sourcing_failed": True,
+                        "runtime_error": {"category": "runtime_provider_error"},
+                    },
+                    "_item_index": 3,
+                    "_retryable": True,
+                    "_nonempty": False,
+                    "_runtime_error": "provider_failure",
+                    "_retry_backoff_seconds": 0.0,
+                    sw._BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD: [],
+                },
+                retry_round=retry_round,
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+            )
+        )
+
+    with (
+        mock.patch.dict(sys.modules, {"boto3": stub}),
+        mock.patch.dict(os.environ, current_environment, clear=True),
+    ):
+        sw._store_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            # Completion order is deliberately reversed. The marker hashes
+            # benchmark/item order, as the production all-zero guard did.
+            rows=list(reversed(public_rows)),
+            attested_parent_receipt_hashes=[PARENT_RECEIPT_HASH],
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger=attempt_rows,
+        )
+        prior_doc = json.loads(versions[0]["Body"])
+        sw._invalidate_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            rows=public_rows,
+            reason="globally_all_zero",
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+        )
+        invalidation_doc = json.loads(versions[0]["Body"])
+        for _ in range(2):
+            sw._store_baseline_scoring_progress(
+                "bucket",
+                "key",
+                benchmark_date="2026-07-15",
+                window_hash="sha256:w1",
+                private_model_artifact_hash="sha256:a1",
+                gateway_runtime_commit_sha=RUNTIME_SHA,
+                scoring_configuration_hash_value=prior_hash,
+                rows=[],
+                attested_parent_receipt_hashes=[],
+                repo_git_sha=MODEL_REPO_SHA,
+                manifest_hash=MODEL_MANIFEST_HASH,
+            )
+
+        restored_attempts = []
+        retry_extensions = []
+        version_recoveries = []
+        loaded = sw._load_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            scoring_configuration_hash_value=current_hash,
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+            attempt_ledger_out=restored_attempts,
+            retry_budget_extension_out=retry_extensions,
+            checkpoint_version_recovery_out=version_recoveries,
+            benchmark_items=[
+                {"icp_ref": "icp-1", "icp_hash": "hash-1"},
+                {"icp_ref": "icp-2", "icp_hash": "hash-2"},
+                {"icp_ref": "icp-3", "icp_hash": "hash-3"},
+            ],
+        )
+
+    assert loaded == list(reversed(public_rows))
+    assert len(restored_attempts) == 4
+    assert retry_extensions[0]["exhausted_retryable_icp_count"] == 1
+    assert version_recoveries == [
+        {
+            "schema_version": "research_lab_baseline_checkpoint_version_recovery.v1",
+            "selected_checkpoint_hash": sw.canonical_hash(prior_doc),
+            "invalidation_checkpoint_hash": sw.canonical_hash(invalidation_doc),
+            "superseded_zero_generation_count": 2,
+            "recovered_completed_icp_count": 2,
+            "prior_retry_rounds": 1,
+            "current_retry_rounds": 2,
+            "producer_gateway_runtime_commit_sha": RUNTIME_SHA,
+            "current_gateway_runtime_commit_sha": OTHER_RUNTIME_SHA,
+        }
+    ]
+
+
+def test_retry_extension_rejects_unbound_checkpoint_version_history():
+    stub, s3, versions = _versioned_s3_stub()
+    clean_environment = {
+        name: None for name in scoring_executor.SCORING_RUNTIME_ENV_NAMES
+    }
+    prior_hash = scoring_executor.configuration_hash(clean_environment)
+    current_values = dict(clean_environment)
+    current_values["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] = "2"
+    current_hash = scoring_executor.configuration_hash(current_values)
+    current_environment = {
+        name: value for name, value in current_values.items() if value is not None
+    }
+    with (
+        mock.patch.dict(sys.modules, {"boto3": stub}),
+        mock.patch.dict(os.environ, current_environment, clear=True),
+    ):
+        sw._store_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            rows=[{"icp_ref": "icp-1", "score": 0.0}],
+            attested_parent_receipt_hashes=[PARENT_RECEIPT_HASH],
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+        )
+        # A marker for a different result set must never authorize recovery.
+        sw._invalidate_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            rows=[{"icp_ref": "icp-1", "score": 1.0}],
+            reason="globally_all_zero",
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+        )
+        sw._store_baseline_scoring_progress(
+            "bucket",
+            "key",
+            benchmark_date="2026-07-15",
+            window_hash="sha256:w1",
+            private_model_artifact_hash="sha256:a1",
+            gateway_runtime_commit_sha=RUNTIME_SHA,
+            scoring_configuration_hash_value=prior_hash,
+            rows=[],
+            attested_parent_receipt_hashes=[],
+            repo_git_sha=MODEL_REPO_SHA,
+            manifest_hash=MODEL_MANIFEST_HASH,
+        )
+        latest_doc = json.loads(versions[0]["Body"])
+        selected, recovery = sw._recover_invalidated_retry_extension_checkpoint(
+            s3,
+            "bucket",
+            "key",
+            latest_doc=latest_doc,
+            current_gateway_runtime_commit_sha=OTHER_RUNTIME_SHA,
+            current_scoring_configuration_hash=current_hash,
+        )
+
+    assert selected == latest_doc
+    assert recovery is None
 
 
 def test_globally_all_zero_invalidation_is_durable_and_non_reusable():

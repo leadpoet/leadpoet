@@ -2398,6 +2398,36 @@ acquire_gateway_restart_lock() {
   exec 8>&-
 }
 
+reconcile_gateway_rebenchmark_retry_runtime() {
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - \
+    "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+from gateway.tee.update_gateway_rebenchmark_retry_secret import (
+    reconcile_gateway_rebenchmark_runtime_environment_file,
+)
+
+result = reconcile_gateway_rebenchmark_runtime_environment_file(
+    runtime_environment_path=Path(sys.argv[1]),
+    authoritative_environment_path=Path(sys.argv[2]),
+)
+print(
+    "Reconciled secret-authoritative rebenchmark retry controls: "
+    "managed=%d present=%d absent=%d"
+    % (
+        result["managed_name_count"],
+        result["present_name_count"],
+        result["absent_name_count"],
+    )
+)
+PY
+  # Absence in the durable secret restores the model-compatible defaults.
+  # Clear inherited controller values before any reconciled clone is sourced.
+  unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS
+  unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY
+}
+
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
   mkdir -p \
     "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" \
@@ -2430,6 +2460,9 @@ elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
   fi
   . "$DOCKER_LOCK_HELPER"
   leadpoet_ensure_post_activation_docker_operation_lock_v2
+  # The N-1 controller prepared this clone. Reconcile it again from the
+  # durable secret with the activated candidate before any runtime relaunch.
+  reconcile_gateway_rebenchmark_retry_runtime
 else
   echo "ERROR: unsupported GATEWAY_RESTART_PHASE=$GATEWAY_RESTART_PHASE" >&2
   exit 1
@@ -2992,6 +3025,11 @@ if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   printf 'export LEADPOET_RESTART_START_PATH=%q\n' \
     "$GATEWAY_RESTART_START_PATH" >> "$ENV_CLONE"
 fi
+
+# Reconcile after every authoritative overlay has been assembled and before
+# the first environment load. The activated candidate repeats this operation
+# to repair a clone prepared by its N-1 controller.
+reconcile_gateway_rebenchmark_retry_runtime
 
 grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   echo "ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY"

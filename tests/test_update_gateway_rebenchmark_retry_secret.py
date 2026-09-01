@@ -13,6 +13,8 @@ from gateway.tee.scoring_executor import (
 from gateway.tee.update_gateway_rebenchmark_retry_secret import (
     GatewayRebenchmarkRetryUpdateError,
     _parse_shell_environment,
+    reconcile_gateway_rebenchmark_runtime_environment,
+    reconcile_gateway_rebenchmark_runtime_environment_file,
     update_gateway_rebenchmark_concurrency_secret,
     update_gateway_rebenchmark_retry_secret,
 )
@@ -85,6 +87,80 @@ class FakeSecretsClient:
 )
 def test_shell_parser_matches_restart_hydration_data_semantics(record, expected):
     assert _parse_shell_environment(record + "\n")["DUMMY"] == expected
+
+
+def test_runtime_reconciliation_removes_stale_retry_defaults():
+    runtime = (
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n"
+    )
+
+    reconciled = reconcile_gateway_rebenchmark_runtime_environment(
+        runtime,
+        authoritative_environment="export UNRELATED=preserved\n",
+    )
+
+    assert _parse_shell_environment(reconciled) == {"UNRELATED": "preserved"}
+
+
+def test_runtime_reconciliation_uses_explicit_authoritative_retry_values():
+    runtime = (
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=1\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n"
+    )
+    authority = json.dumps(
+        {
+            "UNRELATED": "preserved",
+            "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS": "2",
+            "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY": "1",
+        }
+    )
+
+    reconciled = reconcile_gateway_rebenchmark_runtime_environment(
+        runtime,
+        authoritative_environment=authority,
+    )
+    parsed = _parse_shell_environment(reconciled)
+
+    assert parsed["UNRELATED"] == "preserved"
+    assert parsed["RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS"] == "2"
+    assert parsed["RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY"] == "1"
+    assert reconciled.count(
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS="
+    ) == 1
+    assert reconciled.count("RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=") == 1
+
+
+def test_runtime_file_reconciliation_is_atomic_and_owner_only(tmp_path):
+    runtime_path = tmp_path / "runtime.env"
+    authority_path = tmp_path / "authority.env"
+    runtime_path.write_text(
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
+        encoding="utf-8",
+    )
+    authority_path.write_text("export UNRELATED=preserved\n", encoding="utf-8")
+
+    result = reconcile_gateway_rebenchmark_runtime_environment_file(
+        runtime_environment_path=runtime_path,
+        authoritative_environment_path=authority_path,
+    )
+
+    assert result == {
+        "status": "reconciled",
+        "managed_name_count": 2,
+        "present_name_count": 0,
+        "absent_name_count": 2,
+    }
+    assert _parse_shell_environment(runtime_path.read_text(encoding="utf-8")) == {
+        "UNRELATED": "preserved"
+    }
+    assert runtime_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_updates_absent_defaults_and_preserves_unrelated_shell_values(tmp_path):

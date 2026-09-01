@@ -87,13 +87,14 @@ The current sourcing model and sealed benchmark are not published in full. Keepi
 
 #### Submit API Source
 
-Choose **Submit API Source** in the miner menu and enter:
+Choose **Submit API Source** in the miner menu. The miner will ask for:
 
 - The source/API name and source kind.
 - Its HTTPS API base URL and public documentation URL.
-- The authentication type, rate-limit notes, and at least one endpoint example (method, relative path, purpose, and example query or JSON body).
+- The authentication type and rate-limit notes.
+- At least one endpoint example: `GET` or `POST`, a relative path, what it does, and an example query or JSON body.
 
-Do not submit API keys or other secrets. The gateway reviews the source and tests the API; an operator adds any required credential after submission.
+Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.
 
 #### Auto Research
 

@@ -81,7 +81,7 @@ def _allocation_authority_outcome(
 class TestLeg1:
     def test_creation_defaults_match_spec(self):
         record = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:1", start_epoch=100)
-        assert record.alpha_percent == 1.0
+        assert record.alpha_percent == 0.2
         assert record.reward_epochs == 20
         assert record.leg == 1
         assert record.reward_kind == REWARD_KIND_SOURCE_ACCEPTANCE
@@ -237,16 +237,16 @@ class TestAllocationRails:
         entries = allocation["source_add_allocations"]
         assert len(entries) == 2
         by_kind = {entry.get("reward_kind"): entry for entry in entries}
-        assert by_kind[REWARD_KIND_SOURCE_ACCEPTANCE]["paid_alpha_percent"] == pytest.approx(1.0)
+        assert by_kind[REWARD_KIND_SOURCE_ACCEPTANCE]["paid_alpha_percent"] == pytest.approx(0.2)
         assert by_kind[REWARD_KIND_SOURCE_IMPLEMENTATION]["paid_alpha_percent"] == pytest.approx(5.0)
         assert all(
             entry["source_add_reward_id"] == entry["source_id"]
             for entry in entries
         )
-        assert allocation["source_add_alpha_percent"] == pytest.approx(6.0)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.0)
+        assert allocation["source_add_alpha_percent"] == pytest.approx(5.2)
+        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.8)
         assert allocation["champion_allocations"] == []
-        assert allocation["unallocated_percent"] == pytest.approx(24.0)
+        assert allocation["unallocated_percent"] == pytest.approx(24.8)
 
     def test_source_add_exhausts_cap_before_existing_allocator(self):
         leg2 = create_leg2_reward(
@@ -322,12 +322,12 @@ class TestAllocationRails:
         )
         expected_existing = allocate_research_lab_epoch(
             105,
-            {**self.POLICY, "research_lab_emission_percent": 24.0},
+            {**self.POLICY, "research_lab_emission_percent": 24.8},
             [],
             [champion],
         )
-        assert allocation["source_add_alpha_percent"] == pytest.approx(6.0)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.0)
+        assert allocation["source_add_alpha_percent"] == pytest.approx(5.2)
+        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(24.8)
         for key in (
             "reimbursement_allocations",
             "champion_allocations",
@@ -338,19 +338,19 @@ class TestAllocationRails:
             "unallocated_percent",
         ):
             assert allocation[key] == expected_existing[key]
-        assert allocation["champion_alpha_percent"] == pytest.approx(24.0)
+        assert allocation["champion_alpha_percent"] == pytest.approx(24.8)
         assert allocation["unallocated_percent"] == pytest.approx(0.0)
         by_source = {e["source_id"]: e for e in allocation["champion_allocations"]}
-        assert by_source["champion:1"]["paid_alpha_percent"] == pytest.approx(24.0)
+        assert by_source["champion:1"]["paid_alpha_percent"] == pytest.approx(24.8)
         assert allocation["queued_champion_allocations"] == []
         classic = [e for e in allocation["champion_allocations"] if e["source_id"] == "champion:1"]
         assert classic and "reward_kind" not in classic[0]
 
     @pytest.mark.parametrize(
         ("configured_cap", "expected_remaining"),
-        [(30.0, 28.0), (41.0, 39.0)],
+        [(30.0, 29.6), (41.0, 40.6)],
     )
-    def test_two_source_acceptance_rewards_reduce_configured_cap_by_two_points(
+    def test_two_source_acceptance_rewards_reduce_configured_cap_by_point_four(
         self,
         configured_cap,
         expected_remaining,
@@ -384,7 +384,7 @@ class TestAllocationRails:
         )
 
         assert allocation["lab_cap_percent"] == pytest.approx(configured_cap)
-        assert allocation["source_add_alpha_percent"] == pytest.approx(2.0)
+        assert allocation["source_add_alpha_percent"] == pytest.approx(0.4)
         assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(expected_remaining)
         assert allocation["reimbursement_allocations"] == expected_existing["reimbursement_allocations"]
         assert allocation["reimbursement_alpha_percent"] == expected_existing["reimbursement_alpha_percent"]
@@ -425,7 +425,7 @@ class TestAllocationRails:
 
         allocation = allocate_research_lab_epoch(
             105,
-            {**self.POLICY, "research_lab_emission_percent": 1.0},
+            {**self.POLICY, "research_lab_emission_percent": 0.2},
             [],
             [],
             active_source_add_obligations=[newer, older],
@@ -441,7 +441,7 @@ class TestAllocationRails:
         assert [
             row["paid_alpha_percent"]
             for row in allocation["source_add_allocations"]
-        ] == pytest.approx([1.0, 0.0])
+        ] == pytest.approx([0.2, 0.0])
 
     def test_combined_champion_and_reimbursement_sections_match_legacy_reduced_cap(self):
         source = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:a", start_epoch=100)
@@ -474,7 +474,7 @@ class TestAllocationRails:
         )
         expected_existing = allocate_research_lab_epoch(
             105,
-            {**self.POLICY, "research_lab_emission_percent": 29.0},
+            {**self.POLICY, "research_lab_emission_percent": 29.8},
             [reimbursement],
             [champion],
         )
@@ -620,8 +620,8 @@ class TestAllocationRails:
         )
 
         allocation = outcome.result["allocation"]
-        assert allocation["source_add_alpha_percent"] == pytest.approx(1.0)
-        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(29.0)
+        assert allocation["source_add_alpha_percent"] == pytest.approx(0.2)
+        assert allocation["champion_reimbursement_cap_percent"] == pytest.approx(29.8)
         assert outcome.evidence_roots == {"allocation": allocation["allocation_hash"]}
 
     @pytest.mark.asyncio
@@ -662,7 +662,7 @@ class TestAllocationRails:
 
         assert bundle["source_state"]["source_add_obligations"] == [source_obligation]
         assert bundle["source_state"]["champion_obligations"] == []
-        assert bundle["allocation_doc"]["source_add_alpha_percent"] == pytest.approx(1.0)
+        assert bundle["allocation_doc"]["source_add_alpha_percent"] == pytest.approx(0.2)
         assert bundle["allocation_doc"]["champion_allocations"] == []
 
     @pytest.mark.asyncio

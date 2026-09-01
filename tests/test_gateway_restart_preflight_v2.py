@@ -700,20 +700,23 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
 
 def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
     contract = {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
-        "daily_cap": 10,
-        "leg1_alpha_percent": 1.0,
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v2",
+        "daily_cap": 50,
+        "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
         "function_authority_sha256": (
-            "sha256:80592287bb9dfed4bdc86b056f53ba71"
-            "da2fb62d7ee82074c94a878c550eb83b"
+            "sha256:6c09aa3c6b82b3fe666c6739c4f71a51"
+            "ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
         ),
         "functions": {
             "configure_probe_v2": True,
             "finalize_provision_v2": True,
             "reject_current_builtin_v2": True,
+            "post_accept_contract_v1": True,
             "reserve_leg1_slot_v2": True,
             "finalize_leg1_v2": True,
+            "reserve_leg1_slot_v3": True,
+            "finalize_leg1_v3": True,
             "finalize_provision_smoke_v2": True,
         },
         "triggers": {
@@ -726,7 +729,8 @@ def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
         },
         "permissions": {
             "service_role_exists": True,
-            "v2_callable": True,
+            "candidate_callable": True,
+            "rollback_v2_callable": True,
             "legacy_not_callable": True,
         },
     }
@@ -776,7 +780,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -849,10 +853,10 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     )
     assert result["source_add_leg1_release_policy"] == {
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
-        "leg1_alpha_percent": 1.0,
+        "leg1_alpha_percent": 0.2,
         "leg2_alpha_percent": 0.0,
         "reward_epochs": 20,
-        "daily_cap": 10,
+        "daily_cap": 50,
     }
     assert len(requests) == result["table_probe_count"] + 8
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
@@ -905,7 +909,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         request
         for request in table_requests
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
         )
     ]
     claim_control_contract_requests = [
@@ -969,6 +973,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
         "scripts/171-research-lab-source-add-duplicate-privacy.sql",
         "scripts/172-research-lab-source-add-claim-control.sql",
+        "scripts/173-research-lab-source-add-leg1-release-policy.sql",
     }.issubset(set(result["migration_files"]))
     assert (
         "scripts/163-research-lab-model-transition-artifact-custody.sql"
@@ -1030,7 +1035,7 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1137,7 +1142,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1308,8 +1313,11 @@ def test_source_add_claim_control_contract_rejects_drift(overrides) -> None:
         ("functions", "configure_probe_v2"),
         ("functions", "finalize_provision_v2"),
         ("functions", "reject_current_builtin_v2"),
+        ("functions", "post_accept_contract_v1"),
         ("functions", "reserve_leg1_slot_v2"),
         ("functions", "finalize_leg1_v2"),
+        ("functions", "reserve_leg1_slot_v3"),
+        ("functions", "finalize_leg1_v3"),
         ("functions", "finalize_provision_smoke_v2"),
         ("triggers", "acceptance"),
         ("triggers", "eligible"),
@@ -1318,7 +1326,8 @@ def test_source_add_claim_control_contract_rejects_drift(overrides) -> None:
         ("triggers", "leg1_obligation"),
         ("triggers", "leg1_initial_event"),
         ("permissions", "service_role_exists"),
-        ("permissions", "v2_callable"),
+        ("permissions", "candidate_callable"),
+        ("permissions", "rollback_v2_callable"),
         ("permissions", "legacy_not_callable"),
     ),
 )
@@ -1337,7 +1346,7 @@ def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
         schema_preflight.SupabaseSchemaPreflightV2Error,
         match="SOURCE_ADD post-accept Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v1(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v2(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,
@@ -1358,7 +1367,7 @@ def test_source_add_post_accept_leg1_contract_rejects_function_authority_drift(
         schema_preflight.SupabaseSchemaPreflightV2Error,
         match="SOURCE_ADD post-accept Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v1(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v2(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,

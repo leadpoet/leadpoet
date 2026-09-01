@@ -4728,7 +4728,7 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
-        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v1"
+        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
     ):
         if str(getattr(request, "method", None) or "GET").upper() != "POST":
             raise ValueError(
@@ -4742,10 +4742,10 @@ def _local_urlopen(
         body = json.dumps(
             {
                 "schema_version": (
-                    "leadpoet.source_add_post_accept_leg1_contract.v1"
+                    "leadpoet.source_add_post_accept_leg1_contract.v2"
                 ),
-                "daily_cap": 10,
-                "leg1_alpha_percent": 1.0,
+                "daily_cap": 50,
+                "leg1_alpha_percent": 0.2,
                 "leg1_reward_epochs": 20,
                 "function_authority_sha256": (
                     _candidate_post_accept_leg1_function_authority()
@@ -4754,8 +4754,11 @@ def _local_urlopen(
                     "configure_probe_v2": True,
                     "finalize_provision_v2": True,
                     "reject_current_builtin_v2": True,
+                    "post_accept_contract_v1": True,
                     "reserve_leg1_slot_v2": True,
                     "finalize_leg1_v2": True,
+                    "reserve_leg1_slot_v3": True,
+                    "finalize_leg1_v3": True,
                     "finalize_provision_smoke_v2": True,
                 },
                 "triggers": {
@@ -4768,7 +4771,8 @@ def _local_urlopen(
                 },
                 "permissions": {
                     "service_role_exists": True,
-                    "v2_callable": True,
+                    "candidate_callable": True,
+                    "rollback_v2_callable": True,
                     "legacy_not_callable": True,
                 },
             },

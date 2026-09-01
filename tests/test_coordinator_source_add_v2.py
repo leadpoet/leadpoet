@@ -737,7 +737,7 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "miner_ref": "miner-hotkey",
             "start_epoch": 11,
             "existing_rewards": [],
-            "alpha_percent": 1.0,
+            "alpha_percent": 0.2,
             "reward_epochs": 20,
             "functional_probe_result": functional,
             "provisioning_smoke_result": smoke,

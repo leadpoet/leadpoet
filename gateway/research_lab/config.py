@@ -856,14 +856,14 @@ class ResearchLabGatewayConfig:
     source_add_credential_kms_key_id: str = ""
     source_add_sandbox_image: str = "python:3.11-slim"
     source_add_trial_timeout_seconds: int = 300
-    source_add_leg1_alpha_percent: float = 1.0
+    source_add_leg1_alpha_percent: float = 0.2
     # Leg 2 is opt-in. Zero leaves post-acceptance Leg 1 rewards enabled.
     source_add_leg2_alpha_percent: float = 0.0
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
     source_add_max_per_day_per_hotkey: int = 5
     source_add_max_per_30d_per_hotkey: int = 10
-    source_add_leg1_max_per_utc_day: int = 10
+    source_add_leg1_max_per_utc_day: int = 50
     stale_parent_rebase_enabled: bool = True
     stale_parent_rebase_repair_enabled: bool = True
     stale_parent_rebase_repair_model: str = STALE_PARENT_REBASE_REPAIR_MODEL_ID
@@ -1516,7 +1516,7 @@ class ResearchLabGatewayConfig:
                 30, _int("RESEARCH_LAB_SOURCE_ADD_TRIAL_TIMEOUT_SECONDS", 300)
             ),
             source_add_leg1_alpha_percent=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 1.0)
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 0.2)
             ),
             source_add_leg2_alpha_percent=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", 0.0)
@@ -1534,7 +1534,7 @@ class ResearchLabGatewayConfig:
                 1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_30D_PER_HOTKEY", 10)
             ),
             source_add_leg1_max_per_utc_day=max(
-                1, _int("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", 10)
+                1, _int("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", 50)
             ),
             stale_parent_rebase_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_ENABLED", "true"),
             stale_parent_rebase_repair_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_ENABLED", "true"),

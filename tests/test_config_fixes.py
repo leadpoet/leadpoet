@@ -205,7 +205,7 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert config.source_add_dispatcher_enabled is True
     assert config.source_add_functional_probes_enabled is True
     assert config.source_add_functional_rewards_enabled is True
-    assert config.source_add_leg1_alpha_percent == 1.0
+    assert config.source_add_leg1_alpha_percent == 0.2
     assert config.source_add_leg2_alpha_percent == 0.0
     assert config.source_add_max_per_day_per_hotkey == 5
     assert not hasattr(config, "source_add_leg2_expiry_months")
@@ -218,10 +218,11 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert status["source_add"]["dispatcher_enabled"] is True
     assert status["source_add"]["functional_probes_enabled"] is True
     assert status["source_add"]["functional_rewards_enabled"] is True
-    assert status["source_add"]["leg1_alpha_percent"] == 1.0
+    assert status["source_add"]["leg1_alpha_percent"] == 0.2
     assert status["source_add"]["leg2_alpha_percent"] == 0.0
     assert status["source_add"]["reward_epochs"] == 20
     assert status["source_add"]["max_per_day_per_hotkey"] == 5
+    assert status["source_add"]["leg1_max_per_utc_day"] == 50
 
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_ENABLED", "false")
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "false")

@@ -9,7 +9,7 @@ import pytest
 
 from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256,
-    SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256,
 )
 from tests.test_source_add_duplicate_privacy_postgres import (
     MIGRATIONS as PRE_CLAIM_CONTROL_MIGRATIONS,
@@ -208,7 +208,7 @@ def test_contract_renewal_acl_and_migration_idempotency(database) -> None:
             )
             post_accept_contract = cursor.fetchone()[0]
             assert post_accept_contract["function_authority_sha256"] == (
-                SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
+                SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256
             )
             cursor.execute(
                 "SELECT public.research_lab_source_add_claim_control_contract_v1()"

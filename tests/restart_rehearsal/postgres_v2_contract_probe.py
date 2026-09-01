@@ -291,6 +291,9 @@ SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION = (
 SOURCE_ADD_CLAIM_CONTROL_MIGRATION = (
     "172-research-lab-source-add-claim-control.sql"
 )
+SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION = (
+    "173-research-lab-source-add-leg1-release-policy.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -363,6 +366,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
     SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
     SOURCE_ADD_CLAIM_CONTROL_MIGRATION,
+    SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -407,6 +411,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_169_source_add_provider_origin_contract_valid",
     "post_170_source_add_duplicate_privacy_valid",
     "post_172_source_add_claim_control_valid",
+    "post_173_source_add_leg1_release_policy_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6254,6 +6259,59 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-172 SOURCE_ADD claim-control contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION
+        )
+        applied.append(SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION)
+        source_add_leg1_release_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_leg1_release_contract != {
+            "schema_version": (
+                "leadpoet.source_add_post_accept_leg1_contract.v2"
+            ),
+            "daily_cap": 50,
+            "leg1_alpha_percent": 0.2,
+            "leg1_reward_epochs": 20,
+            "function_authority_sha256": (
+                "sha256:6c09aa3c6b82b3fe666c6739c4f71a51"
+                "ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+            ),
+            "functions": {
+                "configure_probe_v2": True,
+                "finalize_provision_v2": True,
+                "reject_current_builtin_v2": True,
+                "post_accept_contract_v1": True,
+                "reserve_leg1_slot_v2": True,
+                "finalize_leg1_v2": True,
+                "reserve_leg1_slot_v3": True,
+                "finalize_leg1_v3": True,
+                "finalize_provision_smoke_v2": True,
+            },
+            "triggers": {
+                "acceptance": True,
+                "eligible": True,
+                "leg1_work": True,
+                "leg1_slot": True,
+                "leg1_obligation": True,
+                "leg1_initial_event": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "candidate_callable": True,
+                "rollback_v2_callable": True,
+                "legacy_not_callable": True,
+            },
+        }:
+            raise PostgresContractProbeError(
+                "post-173 SOURCE_ADD Leg 1 release contract differs"
             )
         rehearsal_guard_id = "source_add_restart_guard:" + "d" * 64
         rehearsal_guard_commitment = "sha256:" + hashlib.sha256(

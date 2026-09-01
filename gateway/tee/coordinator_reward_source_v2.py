@@ -98,7 +98,7 @@ class CoordinatorRewardSourceV2:
             else "source_add_leg2_alpha_percent"
         )
         expected_alpha = float(
-            getattr(config, alpha_attr, 1.0 if kind == "source_add_leg1" else 5.0)
+            getattr(config, alpha_attr, 0.2 if kind == "source_add_leg1" else 5.0)
         )
         if expected_alpha <= 0.0:
             raise CoordinatorRewardSourceV2Error(

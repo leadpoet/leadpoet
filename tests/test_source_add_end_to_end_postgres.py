@@ -853,7 +853,16 @@ def _finalize_seed_smoke_to_leg1(cursor, *, case: dict, seed: int) -> dict:
     }
 
 
-def _create_seed_leg1_reward(cursor, *, case: dict, seed: int) -> dict:
+def _create_seed_leg1_reward(
+    cursor,
+    *,
+    case: dict,
+    seed: int,
+    alpha_percent: float = 1.0,
+    economics_rpc_version: int = 2,
+) -> dict:
+    if economics_rpc_version not in (2, 3):
+        raise ValueError("unsupported SOURCE_ADD economics RPC version")
     case = _finalize_seed_smoke_to_leg1(cursor, case=case, seed=seed)
     claimed = _scalar(
         cursor,
@@ -863,8 +872,8 @@ def _create_seed_leg1_reward(cursor, *, case: dict, seed: int) -> dict:
     assert claimed["work_id"] == case["reward_work_id"]
     slot = _scalar(
         cursor,
-        """
-        SELECT public.research_lab_source_add_reserve_leg1_slot_v2(
+        f"""
+        SELECT public.research_lab_source_add_reserve_leg1_slot_v{economics_rpc_version}(
             %s, %s, %s::UUID, 100, 300
         )
         """,
@@ -900,7 +909,7 @@ def _create_seed_leg1_reward(cursor, *, case: dict, seed: int) -> dict:
     reward_payload = {
         "reward_ref": reward_ref,
         "reward_kind": "source_acceptance",
-        "alpha_percent": 1.0,
+        "alpha_percent": alpha_percent,
         "reward_epochs": 20,
         "start_epoch": 10_000 + (seed & 0xFFFF),
         "state": "active",
@@ -942,8 +951,8 @@ def _create_seed_leg1_reward(cursor, *, case: dict, seed: int) -> dict:
     )
     result = _scalar(
         cursor,
-        """
-        SELECT public.research_lab_source_add_finalize_leg1_v2(
+        f"""
+        SELECT public.research_lab_source_add_finalize_leg1_v{economics_rpc_version}(
             %s, %s, %s::UUID, %s::UUID, 100, %s::JSONB, %s::JSONB
         )
         """,

@@ -835,7 +835,7 @@ async def _process_leg1_reward(
     if not isinstance(intent, Mapping):
         raise SourceAddWorkflowError("SOURCE_ADD reward intent is missing")
     slot = await _rpc(
-        "research_lab_source_add_reserve_leg1_slot_v2",
+        "research_lab_source_add_reserve_leg1_slot_v3",
         {
             "p_intent_id": intent_id,
             "p_work_id": str(work["work_id"]),
@@ -1053,7 +1053,7 @@ async def _process_leg1_reward(
     ):
         raise SourceAddWorkflowError("SOURCE_ADD reward decision receipt is invalid")
     finalized = await _rpc(
-        "research_lab_source_add_finalize_leg1_v2",
+        "research_lab_source_add_finalize_leg1_v3",
         {
             "p_intent_id": intent_id,
             "p_work_id": str(work["work_id"]),

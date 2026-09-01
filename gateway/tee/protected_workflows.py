@@ -72,9 +72,10 @@ PROTECTED_SYMBOLS = {
         "main",
     ),
     "gateway/tee/supabase_schema_preflight_v2.py": (
+        "SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256",
         "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256",
         "_source_add_leg1_release_environment_policy_v1",
-        "_verify_source_add_post_accept_leg1_contract_v1",
+        "_verify_source_add_post_accept_leg1_contract_v2",
         "SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256",
         "_verify_source_add_claim_control_contract_v1",
         "verify_required_supabase_v2_schema",
@@ -882,6 +883,7 @@ PROTECTED_SYMBOLS = {
         "summarize_provider_cost_trace_entries",
     ),
     "research_lab/source_add_rewards.py": (
+        "DEFAULT_LEG1_ALPHA_PERCENT",
         "SourceAddRewardRecord",
         "validate_source_add_reward_record",
         "create_leg1_reward",

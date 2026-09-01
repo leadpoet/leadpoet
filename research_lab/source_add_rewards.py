@@ -3,7 +3,7 @@
 Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
 emission streams within a separate, first-priority SOURCE_ADD allocation:
 
-- **Leg 1 — finally accepted source submission**: 1% of miner emissions ×
+- **Leg 1 — finally accepted source submission**: 0.2% of miner emissions ×
   ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created only after a measured V2
   functional probe and the final provisioning smoke both pass. Flat, one per
   adapter, ever.
@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 from .canonical import sha256_json
 
 # §3.4 config defaults (env-tunable; these are the launch values).
-DEFAULT_LEG1_ALPHA_PERCENT = 1.0
+DEFAULT_LEG1_ALPHA_PERCENT = 0.2
 DEFAULT_LEG2_ALPHA_PERCENT = 5.0
 DEFAULT_REWARD_EPOCHS = 20
 

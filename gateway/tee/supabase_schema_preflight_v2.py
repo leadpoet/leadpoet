@@ -1055,8 +1055,16 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_reserve_leg1_slot_v2",
     ),
     (
+        "scripts/173-research-lab-source-add-leg1-release-policy.sql",
+        "research_lab_source_add_reserve_leg1_slot_v3",
+    ),
+    (
         "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_finalize_leg1_v2",
+    ),
+    (
+        "scripts/173-research-lab-source-add-leg1-release-policy.sql",
+        "research_lab_source_add_finalize_leg1_v3",
     ),
     (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
@@ -1081,6 +1089,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "research_lab_source_add_post_accept_leg1_contract_v1",
+    ),
+    (
+        "scripts/173-research-lab-source-add-leg1-release-policy.sql",
+        "research_lab_source_add_post_accept_leg1_contract_v2",
     ),
     (
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
@@ -1340,10 +1352,10 @@ def _source_add_leg1_release_environment_policy_v1(
     parent_environment: Mapping[str, str],
 ) -> Dict[str, Any]:
     expected = {
-        "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("1.0"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT": Decimal("0.2"),
         "RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT": Decimal("0.0"),
         "RESEARCH_LAB_REWARD_EPOCHS": Decimal("20"),
-        "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("10"),
+        "RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY": Decimal("50"),
     }
     observed: dict[str, Decimal] = {}
     for name, default in expected.items():
@@ -1914,12 +1926,16 @@ def _verify_source_add_provider_origin_contract_v1(
     return dict(contract)
 
 
-SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
+SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:80592287bb9dfed4bdc86b056f53ba71da2fb62d7ee82074c94a878c550eb83b"
 )
 
+SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:6c09aa3c6b82b3fe666c6739c4f71a51ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+)
 
-def _verify_source_add_post_accept_leg1_contract_v1(
+
+def _verify_source_add_post_accept_leg1_contract_v2(
     *,
     headers: Mapping[str, str],
     supabase_url: str,
@@ -1929,7 +1945,7 @@ def _verify_source_add_post_accept_leg1_contract_v1(
     request = Request(
         (
             f"{supabase_url}/rest/v1/rpc/"
-            "research_lab_source_add_post_accept_leg1_contract_v1"
+            "research_lab_source_add_post_accept_leg1_contract_v2"
         ),
         data=b"{}",
         headers={**headers, "Content-Type": "application/json"},
@@ -1942,7 +1958,7 @@ def _verify_source_add_post_accept_leg1_contract_v1(
     except HTTPError as exc:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
-            "scripts/169-research-lab-source-add-post-accept-leg1.sql "
+            "scripts/173-research-lab-source-add-leg1-release-policy.sql "
             f"before restart (HTTP {exc.code})"
         ) from exc
     except Exception as exc:
@@ -1952,7 +1968,7 @@ def _verify_source_add_post_accept_leg1_contract_v1(
     if status < 200 or status >= 300:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD post-accept Leg 1 contract is unavailable; apply "
-            "scripts/169-research-lab-source-add-post-accept-leg1.sql "
+            "scripts/173-research-lab-source-add-leg1-release-policy.sql "
             f"before restart (HTTP {status})"
         )
     try:
@@ -1962,9 +1978,9 @@ def _verify_source_add_post_accept_leg1_contract_v1(
             "SOURCE_ADD post-accept Leg 1 contract response is invalid"
         ) from exc
     expected = {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v1",
-        "daily_cap": 10,
-        "leg1_alpha_percent": 1.0,
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v2",
+        "daily_cap": 50,
+        "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
         "function_authority_sha256": (
             SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256
@@ -1973,8 +1989,11 @@ def _verify_source_add_post_accept_leg1_contract_v1(
             "configure_probe_v2": True,
             "finalize_provision_v2": True,
             "reject_current_builtin_v2": True,
+            "post_accept_contract_v1": True,
             "reserve_leg1_slot_v2": True,
             "finalize_leg1_v2": True,
+            "reserve_leg1_slot_v3": True,
+            "finalize_leg1_v3": True,
             "finalize_provision_smoke_v2": True,
         },
         "triggers": {
@@ -1987,7 +2006,8 @@ def _verify_source_add_post_accept_leg1_contract_v1(
         },
         "permissions": {
             "service_role_exists": True,
-            "v2_callable": True,
+            "candidate_callable": True,
+            "rollback_v2_callable": True,
             "legacy_not_callable": True,
         },
     }
@@ -2250,7 +2270,7 @@ def verify_required_supabase_v2_schema(
         )
     )
     source_add_post_accept_leg1_contract = (
-        _verify_source_add_post_accept_leg1_contract_v1(
+        _verify_source_add_post_accept_leg1_contract_v2(
             headers=headers,
             supabase_url=supabase_url,
             opener=opener,

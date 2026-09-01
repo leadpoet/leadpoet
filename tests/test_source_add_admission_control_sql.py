@@ -125,6 +125,16 @@ def test_restart_preflight_requires_complete_source_add_v2_schema():
         function
         for declared_migration, function in REQUIRED_SUPABASE_V2_RPCS
         if declared_migration
+        == "scripts/173-research-lab-source-add-leg1-release-policy.sql"
+    } == {
+        "research_lab_source_add_reserve_leg1_slot_v3",
+        "research_lab_source_add_finalize_leg1_v3",
+        "research_lab_source_add_post_accept_leg1_contract_v2",
+    }
+    assert {
+        function
+        for declared_migration, function in REQUIRED_SUPABASE_V2_RPCS
+        if declared_migration
         == "scripts/172-research-lab-source-add-claim-control.sql"
     } == {
         "research_lab_source_add_claim_work",

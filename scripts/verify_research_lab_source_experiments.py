@@ -227,7 +227,7 @@ def verify_w6_rewards() -> str:
     )
 
     leg1 = create_leg1_reward(adapter_id="adapter:verify-1", miner_ref="hk-verify", start_epoch=10)
-    _assert(leg1.alpha_percent == 1.0 and validate_source_add_reward_record(leg1) == [], "W6 leg-1")
+    _assert(leg1.alpha_percent == 0.2 and validate_source_add_reward_record(leg1) == [], "W6 leg-1")
     evidence = {
         "llm_judge_passed": True,
         "llm_verdict": "helped",

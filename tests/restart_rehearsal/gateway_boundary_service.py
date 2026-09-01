@@ -573,6 +573,7 @@ def _migration_schema_contract(
             "170-research-lab-source-add-provider-origin-uniqueness.sql",
             "171-research-lab-source-add-duplicate-privacy.sql",
             "172-research-lab-source-add-claim-control.sql",
+            "173-research-lab-source-add-leg1-release-policy.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -684,6 +685,9 @@ def _migration_schema_contract(
         "research_lab_source_add_provider_origin_contract_v1",
         "research_lab_source_add_duplicate_privacy_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v1",
+        "research_lab_source_add_post_accept_leg1_contract_v2",
+        "research_lab_source_add_reserve_leg1_slot_v3",
+        "research_lab_source_add_finalize_leg1_v3",
         "research_lab_routing_exact_model_transition_contract_v1",
         "research_lab_routing_exact_model_transition_contract_v2",
         "research_lab_routing_load_model_transition_v2",
@@ -3699,7 +3703,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 }
             elif name == (
-                "research_lab_source_add_post_accept_leg1_contract_v1"
+                "research_lab_source_add_post_accept_leg1_contract_v2"
             ):
                 if body not in ({}, None):
                     raise ValueError(
@@ -3707,10 +3711,10 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 response = {
                     "schema_version": (
-                        "leadpoet.source_add_post_accept_leg1_contract.v1"
+                        "leadpoet.source_add_post_accept_leg1_contract.v2"
                     ),
-                    "daily_cap": 10,
-                    "leg1_alpha_percent": 1.0,
+                    "daily_cap": 50,
+                    "leg1_alpha_percent": 0.2,
                     "leg1_reward_epochs": 20,
                     "function_authority_sha256": (
                         self.server.state.source_add_post_accept_leg1_function_authority
@@ -3719,8 +3723,11 @@ class Handler(BaseHTTPRequestHandler):
                         "configure_probe_v2": True,
                         "finalize_provision_v2": True,
                         "reject_current_builtin_v2": True,
+                        "post_accept_contract_v1": True,
                         "reserve_leg1_slot_v2": True,
                         "finalize_leg1_v2": True,
+                        "reserve_leg1_slot_v3": True,
+                        "finalize_leg1_v3": True,
                         "finalize_provision_smoke_v2": True,
                     },
                     "triggers": {
@@ -3733,7 +3740,8 @@ class Handler(BaseHTTPRequestHandler):
                     },
                     "permissions": {
                         "service_role_exists": True,
-                        "v2_callable": True,
+                        "candidate_callable": True,
+                        "rollback_v2_callable": True,
                         "legacy_not_callable": True,
                     },
                 }

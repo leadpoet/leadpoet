@@ -33,8 +33,8 @@ def _config(**overrides):
         "source_add_rewards_enabled": True,
         "source_add_functional_rewards_enabled": True,
         "source_add_functional_probes_enabled": True,
-        "source_add_leg1_alpha_percent": 1.0,
-        "source_add_leg1_max_per_utc_day": 10,
+        "source_add_leg1_alpha_percent": 0.2,
+        "source_add_leg1_max_per_utc_day": 50,
         "source_add_probe_timeout_seconds": 45,
         "source_add_probe_max_attempts": 5,
         "source_add_work_lease_seconds": 180,
@@ -672,7 +672,7 @@ async def test_leg1_fifo_wait_is_returned_without_reward_side_effects(monkeypatc
         return {"intent_id": work["job_doc"]["intent_id"]}
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_reserve_leg1_slot_v2"
+        assert name == "research_lab_source_add_reserve_leg1_slot_v3"
         assert params["p_work_id"] == work["work_id"]
         assert params["p_work_lease_token"] == work["lease_token"]
         return {"status": "fifo_wait", "available_at": "2026-08-31T00:00:00Z"}
@@ -793,12 +793,12 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
         raise AssertionError(table)
 
     async def fake_rpc(name, params):
-        if name == "research_lab_source_add_reserve_leg1_slot_v2":
+        if name == "research_lab_source_add_reserve_leg1_slot_v3":
             return {
                 "status": "reserved",
                 "slot_lease_token": "22222222-2222-2222-2222-222222222222",
             }
-        if name == "research_lab_source_add_finalize_leg1_v2":
+        if name == "research_lab_source_add_finalize_leg1_v3":
             finalized_payload.update(params)
             return {
                 "status": finalize_status["value"],
@@ -896,6 +896,8 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
     assert finalized_payload["p_reward"]["decision_receipt_hash"] == decision_receipt
     assert finalized_payload["p_reward"]["decision_artifact_hash"] == decision_artifacts[0]
     assert finalized_payload["p_reward"]["start_epoch"] == 701
+    assert finalized_payload["p_reward"]["alpha_percent"] == pytest.approx(0.2)
+    assert finalized_payload["p_daily_cap"] == 50
     assert tuple(
         graph["root_receipt_hash"] for graph in authorize_payload["parent_graphs"]
     ) == (functional_receipt, smoke_receipt)

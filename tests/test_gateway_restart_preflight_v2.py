@@ -705,8 +705,8 @@ def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
         "leg1_alpha_percent": 1.0,
         "leg1_reward_epochs": 20,
         "function_authority_sha256": (
-            "sha256:035b4dc17bc8e8b63524df2c123892aa"
-            "3ddaf0a01d08c69fc2d756921e8e96be"
+            "sha256:80592287bb9dfed4bdc86b056f53ba71"
+            "da2fb62d7ee82074c94a878c550eb83b"
         ),
         "functions": {
             "configure_probe_v2": True,

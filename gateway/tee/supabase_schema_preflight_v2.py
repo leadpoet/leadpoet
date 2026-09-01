@@ -1915,7 +1915,7 @@ def _verify_source_add_provider_origin_contract_v1(
 
 
 SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
-    "sha256:035b4dc17bc8e8b63524df2c123892aa3ddaf0a01d08c69fc2d756921e8e96be"
+    "sha256:80592287bb9dfed4bdc86b056f53ba71da2fb62d7ee82074c94a878c550eb83b"
 )
 
 

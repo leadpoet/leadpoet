@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "c74fd458ce63d539f2b373a63ec017e00410066a",
+  "baseline_commit": "b232f56a396dd034a303e326b3f9186e2bd43ff0",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2937,7 +2937,7 @@
       "symbol": "_process_functional_probe"
     },
     {
-      "ast_sha256": "sha256:640f26fe70105a380045c3300017fddf0afa0e1e88e9c1a7f42f75821467bc3e",
+      "ast_sha256": "sha256:0031ef8b820d8acd3a95ddb0ee6db454582dc591d3af5bc3578a7259176713c3",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_leg1_reward"
     },
@@ -3402,7 +3402,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:1e8155c51726c21181475b4c7fd258b761bb1bca9b46e83a7dd64c8a77b8b065",
+      "ast_sha256": "sha256:b2a1502de159a235249f774e605e934f76d9ba418779fe6eb32d72da1b84b2f7",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -5922,12 +5922,17 @@
       "symbol": "SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:9af082a67e92e86320efc151f0b7a8a469881ba6f1a6057485bc13bc2668806e",
+      "ast_sha256": "sha256:2dc97839079a48948efbab97425b84782580cb029cddbf1b3001570e9c076025",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:4827e05ccfbff8f5fba2dabd1ea05db424f592fc5e668dccb2bc6cfab1522037",
+      "ast_sha256": "sha256:78bc6a8222bedb66026bd906f9c290477636188afa91d5f2335f3da6dd2a533b",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256"
+    },
+    {
+      "ast_sha256": "sha256:b90d2cb937a0a6c63f3c4f1e9b9a87efd78f10f88a3f46b21949cea6dfab3ebe",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_source_add_leg1_release_environment_policy_v1"
     },
@@ -5937,12 +5942,12 @@
       "symbol": "_verify_source_add_claim_control_contract_v1"
     },
     {
-      "ast_sha256": "sha256:5aea0e70420d46a5a053b724983450b1ce4e42d26169aa4ef71697afadf25c1f",
+      "ast_sha256": "sha256:6497d7412a0d48b013c7e136d651a3d0569351155f4843e7df660f4d4c90e08d",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "_verify_source_add_post_accept_leg1_contract_v1"
+      "symbol": "_verify_source_add_post_accept_leg1_contract_v2"
     },
     {
-      "ast_sha256": "sha256:322e7d54ceb139477e545b2028b8519f65a9e597b42ea0edc3c9e670123343ea",
+      "ast_sha256": "sha256:61302f575156b796e1d77e35a0e64b0fbf8081347dc137783ab177a1eac0b149",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -7842,6 +7847,11 @@
       "symbol": "_validate_runner_role_contract"
     },
     {
+      "ast_sha256": "sha256:6f1323ff83d8b159ae5731e80cead701e53d2fef79d52584553688014462840c",
+      "path": "research_lab/source_add_rewards.py",
+      "symbol": "DEFAULT_LEG1_ALPHA_PERCENT"
+    },
+    {
       "ast_sha256": "sha256:119f3deac9b6d085a998f2bae38a3e5465bcfcd576ec2ba5c48dc81c3de093b0",
       "path": "research_lab/source_add_rewards.py",
       "symbol": "SourceAddRewardRecord"
@@ -8597,7 +8607,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:a97bdb24660c952df2f25d7c0efd740e58b61923b335e10ef523cb9aabd4b765",
-  "protected_source_commit": "c74fd458ce63d539f2b373a63ec017e00410066a",
+  "manifest_hash": "sha256:67b3aec816cb0208d3bfa34f15d8e45065df8f56b06e411cbc85c5f1ba64be01",
+  "protected_source_commit": "b232f56a396dd034a303e326b3f9186e2bd43ff0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

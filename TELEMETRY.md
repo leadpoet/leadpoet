@@ -23,16 +23,75 @@ request path. Every other health, liveness or readiness route is traced
 normally — `/health/v2-authority`, `/health/routing-experiments`,
 `/attest/health`, `/attestation/health` and the
 `/attestation/deploy-readiness` readiness probe all export spans.
-`/attestation/deploy-readiness` is probe traffic and, whenever its caller is
-running, one of the highest-volume routes on the gateway, so it dominates any
-unfiltered aggregate; exclude it before reading request counts as user traffic.
-Exclude it from latency aggregates too, and in both directions: it answers in
-about three milliseconds, so its arrival or departure moves an all-route p95 by
-more than a real slowdown does. It stopped dead at 21:24 UTC on 2026-08-24 and
-has emitted nothing since; the 149% jump in the gateway's aggregate p95 that
-followed was that absence, not a regression. `/health/v2-authority` is
-low-volume by comparison but a recurring source of 5xx, so it is worth keeping
-in error queries.
+
+The match is on `scope["path"]`, an exact concrete-path comparison, so the
+suppression works — and that is the problem. **`/health` emits no spans at
+all.** It is the one route that keeps answering while the worker-authority
+gate is rejecting everything else, so suppressing it removes the only
+positive liveness evidence exactly when it is needed. There is no way to tell
+"gateway up, gate closed" from "gateway down" out of this telemetry.
+`/health/v2-authority` is not suppressed and does emit, which is why it ends
+up standing in for liveness below.
+
+`/attestation/deploy-readiness` is probe traffic, and its volume is set
+entirely by whether its caller is running — so it moves aggregates in both
+directions and should be excluded before reading request counts as user
+traffic. It answers in about three milliseconds, so its arrival or departure
+moves an all-route p95 by more than a real slowdown does; the 149% jump in the
+gateway's aggregate p95 after 2026-08-24 was its absence, not a regression.
+
+Its 2/min poller stopped at 21:24 UTC on 2026-08-24. It is **no longer a
+high-volume route**: measured 2026-09-01, the trailing 7 days hold **4 spans**
+(one on 08-27, one on 08-31, two on 09-01), ranking it **29th** by volume —
+against roughly 2,400-2,900 spans/day while the poller ran. Treat any figure
+describing it as a top-three route as pre-08-24 history.
+
+**`/_unmatched` is not a route, and it is most of the 5xx.** The route label
+comes from `scope["route"]`, which Starlette only populates *after* routing
+resolves. Every rejection that happens *before* routing therefore lands under
+the fixed `/_unmatched` literal with its real path discarded — the
+worker-authority 503 gate, the body-size 413, the priority-middleware
+load-shed 503, and the fail-closed 503s a booting gateway returns.
+
+Measured 2026-09-01 over the trailing 7 days: `/_unmatched` carries **4,250 of
+the gateway's 5,326 5xx spans — 80% of every error in the store** — across
+4,760 spans total.
+
+The consequence is that **you cannot tell which endpoint was rejected**, and
+there is no workaround. The concrete path is not merely unexported, it is
+unexportable: the fail-closed validator requires the attribute set to be
+*exactly* the four attributes above, so a span carrying `http.target` or
+`url.path` would be dropped whole rather than exported. Confirmed against the
+store — the only attribute keys present on an `/_unmatched` span are
+`duration_ms` and the three `http.*` keys.
+
+So any per-route error monitor has two options and both are bad: ignore
+`/_unmatched` and be blind to 80% of errors, or include it and be swamped by a
+bucket that names nothing. Report `/_unmatched` as its own series, never
+folded into a route breakdown.
+
+**`/health/v2-authority`'s error rate is structural, not a fault.** Over the
+trailing 7 days the route reads a **47.8% 5xx rate** (1,011 of 2,115). That
+number is an artifact of the restart script and must never be read as an error
+rate: `gw_restart.sh` polls `GET /health/v2-authority` every 5.00 seconds while
+waiting for a gateway process it has just stopped, so each restart contributes
+roughly 17 503s from a booting server. Verified hour by hour on 2026-09-01
+(UTC):
+
+| hours | requests | 5xx |
+|---|---|---|
+| 01:00, 02:00, 03:00 — each contains a restart poll | 24, 25, 37 | 16, 17, 16 |
+| 04:00-06:00 — sustained load, no restart | 177, 161, 162 | **0, 0, 0** |
+| 00:00, 08:00, 09:00 — idle | 3, 1, 1 | 0, 0, 0 |
+
+Three and a half hours at ~170 requests/hour produced zero 5xx. The route is
+not broken; it is being polled through boot. Exclude it from any service-wide
+error rate.
+
+**Useful side effect: it is a reliable restart oracle.** Because that poll is
+fixed at 5.00 seconds, **8 or more `/health/v2-authority` spans inside one
+minute means `gw_restart.sh` ran.** This deployment emits no deploy event, so
+this is the most direct first-hand evidence of a rollout available.
 
 **`duration_ms` above is an attribute name, not a column name.** The middleware
 sets it as a float count of milliseconds, and it does arrive. But the span's
@@ -51,8 +110,10 @@ when the response code is `>= 500`, so a 4xx response leaves the status
 `Unset` and counting errors from the span status drops every rejection — the
 only 4xx signal is the `http.response.status_code` attribute.
 `StatusCode.OK` is never set, so a `status != Ok` test matches every span:
-over the trailing 7 days the gateway's spans are 439,148 `Unset` (11,692 of
-them 4xx), 2,003 `Error`, and 0 `Ok`.
+over the trailing 7 days (measured 2026-09-01) the gateway's spans are
+403,959 `Unset` (11,204 of them 4xx), 5,326 `Error`, and 0 `Ok`. The `Error`
+count has more than doubled since 2026-08-29 (2,003); see the `/_unmatched`
+and `/health/v2-authority` notes below before reading that as a regression.
 
 **A route label does not mean the gateway implements that method.** The span
 name is `<METHOD> <route template>`, and the template is resolved from the
@@ -62,11 +123,22 @@ still emits a span carrying the real template, so `POST /some/route` in the
 span stream is not evidence that a POST handler exists. The fail-closed
 validator does not catch this either: its allowlist is built from
 `route.path` for every entry in `app.routes` and carries no methods at all.
-Over the trailing 7 days there are 22 such spans — `POST /` (19),
-`OPTIONS /` (2) and one `GET /research-lab/loop-diagnostics` — and because
+Over the trailing 7 days there are 24 such spans — `POST /` (19),
+`OPTIONS /` (4) and one `GET /research-lab/loop-diagnostics` — and because
 span status marks 5xx only, every one of them scores as a success in any
 status-based panel. Read the `http.response.status_code` attribute before
 concluding a route serves a method.
+
+**A 500 may be a client disconnect that never reached a handler.** The
+middleware initialises `status_code = 500` and only overwrites it when it
+observes an `http.response.start` message. A client that disconnects before
+the response starts is therefore recorded as a server error that never
+happened. The store is consistent with this: over the trailing 7 days
+**5,324 of the 5,326 5xx spans are 503**, and the only two 500s are both on
+`/fulfillment/results/{request_id}` with durations of 10.0s and 12.0s — long
+enough to be a caller timing out rather than a handler failing. Two spans is
+thin evidence on its own; the code path is what makes it worth knowing. Treat
+an isolated long-duration 500 as an unproven server error until corroborated.
 
 **A missing span is not proof of a missing request.** Export goes through a
 fail-closed complete-envelope validator: a span that does not match the
@@ -192,10 +264,22 @@ Deployments API use, and no deploy commit status.
 
 **Consequence for telemetry:** the CI/CD event stream is empty. Zero rows have
 ever been ingested with `onepatch_source = 'cicd'` — re-confirmed over a 30-day
-window on 2026-08-30. Every rung of the usual deploy-signal ladder
+window on 2026-09-01. Every rung of the usual deploy-signal ladder
 (`deployment_status`, commit `status`, `workflow_job`, `workflow_run`) is
 unreachable here, so no deploy-anchored alerting, and no post-deploy soak, can
 be built.
+
+**Where the repo-activity stream lives.** In `otel.logs`, not `otel.spans` —
+`scope_name = 'onepatch.github'` (665 rows over 30 days; `otel.spans` holds
+zero). Querying spans for it returns an empty result that looks like "no
+pushes".
+
+**The `onepatch_source` tag changed mid-history.** Repo-activity rows landed
+with `onepatch_source = ''` until **2026-08-25 20:26:47 UTC** and with
+`onepatch_source = 'github'` from **2026-08-26 05:40:11 UTC** onward. A query
+filtering on `onepatch_source = 'github'` silently drops the 423 rows before
+that switchover and returns a truncated history with no error. Filter on
+`scope_name = 'onepatch.github'` instead, which is stable across the boundary.
 
 **Best reachable proxy, and it is only a proxy.** A push to `main` in the
 repo-activity log stream:

@@ -1391,6 +1391,7 @@ PROTECTED_SYMBOLS = {
         "_release_source_add_restart_guard",
         "_require_source_add_paused",
         "_require_runtime_source_add_closed",
+        "_require_pre_activation_runtime_source_add_closed",
         "_require_pre_hydration_runtime_source_add_closed",
         "_candidate_root",
         "_require_fixed_bootstrap_authority",

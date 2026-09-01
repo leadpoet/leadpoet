@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "41372efa388dbc942b56a21972b927df58222b7b",
+  "baseline_commit": "c74fd458ce63d539f2b373a63ec017e00410066a",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2587,7 +2587,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._construct_official_baseline_exact_dependencies"
     },
     {
-      "ast_sha256": "sha256:9f262d1a5a7a8fb52a3e13b3dc8329169bab033734cac0c2136e1c3ee3931164",
+      "ast_sha256": "sha256:45421f56d647e7dee0bdfbcfad05b564e24d2be77ad08b22b7b2094d40900c95",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._enforce_baseline_wave_preflight_freshness"
     },
@@ -2602,7 +2602,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline"
     },
     {
-      "ast_sha256": "sha256:06379e0367df4077b3790e39da9d467d14ee24d379dc5408b400520608aafc29",
+      "ast_sha256": "sha256:dbda72e764179e8656785819fbeb5553b83e55f37bb9b2f320eb8764bb48e6c1",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline_impl"
     },
@@ -2635,6 +2635,11 @@
       "ast_sha256": "sha256:b8f913f0b685a93b6db487eab452e3dc9e61ce14327a66a69524175a5cff0b8b",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._start_official_baseline_proxy_for_release"
+    },
+    {
+      "ast_sha256": "sha256:c17a7140297c0162bd2859b0daadb8f4881527f5ea28f5032434475af0bad7d5",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_BASELINE_CHECKPOINT_REPLAY_MAX_CONCURRENCY"
     },
     {
       "ast_sha256": "sha256:5bb2828f34073825b6e8787811a890628a76c45bee78158a2dc19c7bdbb3762e",
@@ -2675,6 +2680,11 @@
       "ast_sha256": "sha256:04c29859db794e6faf035fdecd4cefc1fa7780dd6e46b9c89d8bc1e0b3a5bd75",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_baseline_attempt_reason_code"
+    },
+    {
+      "ast_sha256": "sha256:e32532c5fa3a74b969ca4354bef34ccdf4b7d000ab7175456ccb7934bb3e3f5d",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_checkpoint_replay_concurrency"
     },
     {
       "ast_sha256": "sha256:7e4e840730c3584c20186cc794382fc2a59cbcf6a7726cbb45b2c90890bdc0a1",
@@ -8587,7 +8597,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:abee8627da1eef77198c08696267538dcc8389d016ebb890f9ea610f9bab84ed",
-  "protected_source_commit": "41372efa388dbc942b56a21972b927df58222b7b",
+  "manifest_hash": "sha256:a97bdb24660c952df2f25d7c0efd740e58b61923b335e10ef523cb9aabd4b765",
+  "protected_source_commit": "c74fd458ce63d539f2b373a63ec017e00410066a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -35,6 +35,9 @@ ACTIVE_SCHEDULE_STATUSES = {"scheduled"}
 ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
 SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
+_SOURCE_ADD_CHAIN_QUANTIZATION_TOLERANCE_PERCENT = Decimal("100") / Decimal(
+    "65535"
+)
 POSTGREST_IN_FILTER_CHUNK = 50
 LATEST_NATIVE_COMPUTE_AUTHORITY_TABLE = (
     "research_lab_finalized_allocation_epochs_v2"
@@ -1030,9 +1033,46 @@ def _source_add_paid_alpha_to_date_from_snapshots(
             )
             if not source_id.startswith("source_add_reward:"):
                 continue
-            paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + _decimal(
-                allocation.get("paid_alpha_percent") or 0
-            )
+            paid = _decimal(allocation.get("paid_alpha_percent") or 0)
+            # The exact chain-realized bundle remains payment authority. A
+            # sub-u16 rounding deficit fulfills this scheduled epoch; any
+            # larger shortfall remains due and enters normal replay.
+            if allocation_doc.get("source") == "chain_realized_obligation_credits":
+                if allocation_doc.get("authority_type") != "chain_realized_emission_v1":
+                    raise ValueError(
+                        "SOURCE_ADD chain settlement authority is invalid"
+                    )
+                scheduled = _decimal(
+                    allocation.get("base_desired_alpha_percent") or 0
+                )
+                attributed = _decimal(
+                    allocation.get("lab_attributed_alpha_percent") or 0
+                )
+                observed = _decimal(
+                    allocation.get("observed_chain_alpha_percent") or 0
+                )
+                if (
+                    not all(
+                        amount.is_finite()
+                        for amount in (paid, scheduled, attributed, observed)
+                    )
+                    or paid <= 0
+                    or scheduled <= 0
+                    or paid != min(attributed, scheduled)
+                    or attributed > observed
+                ):
+                    raise ValueError(
+                        "SOURCE_ADD chain settlement credit is invalid"
+                    )
+                if (
+                    paid <= scheduled
+                    and scheduled - paid
+                    <= _SOURCE_ADD_CHAIN_QUANTIZATION_TOLERANCE_PERCENT
+                ):
+                    paid = scheduled
+            paid_by_reward[source_id] = paid_by_reward.get(
+                source_id, Decimal("0")
+            ) + paid
     return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 
 

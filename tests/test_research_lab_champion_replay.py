@@ -169,6 +169,7 @@ def test_source_add_replay_counts_only_first_class_snapshot_sections():
                             "source_id": "source_add_reward:legacy",
                             "reward_kind": "source_acceptance",
                             "paid_alpha_percent": 1.0,
+                            "base_desired_alpha_percent": 5.0,
                         },
                         {
                             "source_id": "source_add_reward:new",
@@ -183,6 +184,110 @@ def test_source_add_replay_counts_only_first_class_snapshot_sections():
 
     assert paid["source_add_reward:legacy"] == pytest.approx(1.0)
     assert paid["source_add_reward:new"] == pytest.approx(5.0)
+
+
+def test_source_add_chain_quantization_retires_the_nominal_epoch_schedule():
+    reward_ref = "source_add_reward:quantized"
+    snapshot_rows = [
+        {
+            "allocation_doc": {
+                "source": "chain_realized_obligation_credits",
+                "authority_type": "chain_realized_emission_v1",
+                "source_add_allocations": [
+                    {
+                        "source_id": reward_ref,
+                        "source_add_reward_id": reward_ref,
+                        "paid_alpha_percent": "0.199494411111",
+                        "base_desired_alpha_percent": "0.2",
+                        "lab_attributed_alpha_percent": "0.199494411111",
+                        "observed_chain_alpha_percent": "0.199494411111",
+                    }
+                ],
+            }
+        }
+        for _epoch in range(20)
+    ]
+
+    paid = _source_add_paid_alpha_to_date_from_snapshots(snapshot_rows)
+
+    assert paid[reward_ref] == pytest.approx(4.0)
+    assert (
+        _champion_replay_obligation(
+            {
+                "champion_reward_id": reward_ref,
+                "start_epoch": 100,
+                "epoch_count": 20,
+                "desired_alpha_percent": 0.2,
+            },
+            paid_by_reward=paid,
+            epoch=120,
+        )
+        is None
+    )
+
+
+def test_source_add_chain_underpayment_remains_due_after_nominal_window():
+    reward_ref = "source_add_reward:underpaid"
+    paid = _source_add_paid_alpha_to_date_from_snapshots(
+        [
+            {
+                "allocation_doc": {
+                    "source": "chain_realized_obligation_credits",
+                    "authority_type": "chain_realized_emission_v1",
+                    "source_add_allocations": [
+                        {
+                            "source_id": reward_ref,
+                            "paid_alpha_percent": "0.19",
+                            "base_desired_alpha_percent": "0.2",
+                            "lab_attributed_alpha_percent": "0.19",
+                            "observed_chain_alpha_percent": "0.19",
+                        }
+                    ],
+                }
+            }
+            for _epoch in range(20)
+        ]
+    )
+
+    replay = _champion_replay_obligation(
+        {
+            "champion_reward_id": reward_ref,
+            "start_epoch": 100,
+            "epoch_count": 20,
+            "desired_alpha_percent": 0.2,
+        },
+        paid_by_reward=paid,
+        epoch=120,
+    )
+
+    assert paid[reward_ref] == pytest.approx(3.8)
+    assert replay is not None
+    assert replay["remaining_alpha_percent"] == pytest.approx(0.2)
+
+
+def test_source_add_chain_credit_mismatch_fails_closed():
+    with pytest.raises(
+        ValueError, match="SOURCE_ADD chain settlement credit is invalid"
+    ):
+        _source_add_paid_alpha_to_date_from_snapshots(
+            [
+                {
+                    "allocation_doc": {
+                        "source": "chain_realized_obligation_credits",
+                        "authority_type": "chain_realized_emission_v1",
+                        "source_add_allocations": [
+                            {
+                                "source_id": "source_add_reward:invalid",
+                                "paid_alpha_percent": "0.19",
+                                "base_desired_alpha_percent": "0.2",
+                                "lab_attributed_alpha_percent": "0.2",
+                                "observed_chain_alpha_percent": "0.2",
+                            }
+                        ],
+                    }
+                }
+            ]
+        )
 
 
 def test_source_add_replay_does_not_settle_legacy_champion_rail_rows():

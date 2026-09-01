@@ -504,6 +504,25 @@ def _source_add_dispatcher_runtime_ready(request: Request) -> bool:
         return False
 
 
+def _research_lab_worker_authority_ready(request: Request) -> bool:
+    """Project the general worker-authority gate used by gateway middleware."""
+
+    task = getattr(request.app.state, "research_lab_worker_startup_task", None)
+    try:
+        return bool(
+            task is not None
+            and task.done()
+            and not task.cancelled()
+            and task.exception() is None
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_worker_authority_status_unavailable type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 @router.get("/status")
 async def research_lab_status(request: Request) -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
@@ -549,6 +568,7 @@ async def research_lab_status(request: Request) -> dict[str, object]:
         if key in source_add_control
     }
     dispatcher_runtime_ready = _source_add_dispatcher_runtime_ready(request)
+    worker_authority_ready = _research_lab_worker_authority_ready(request)
     source_add_public["effective_dispatcher_enabled"] = bool(
         config.source_add_enabled
         and config.source_add_dispatcher_enabled
@@ -562,8 +582,7 @@ async def research_lab_status(request: Request) -> dict[str, object]:
         config.api_enabled
         and config.production_writes_enabled
         and config.source_add_enabled
-        and config.source_add_dispatcher_enabled
-        and dispatcher_runtime_ready
+        and (worker_authority_ready or dispatcher_runtime_ready)
         and not source_add_control.get("paused", True)
     )
     return {

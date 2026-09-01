@@ -24,13 +24,25 @@ def _async_value(value):
     return _inner
 
 
-def _status_request(*, dispatcher_ready: bool = True):
+def _status_request(
+    *,
+    dispatcher_ready: bool = True,
+    worker_authority_ready: bool = True,
+):
     from types import SimpleNamespace
 
-    task = SimpleNamespace(done=lambda: not dispatcher_ready)
+    dispatcher_task = SimpleNamespace(done=lambda: not dispatcher_ready)
+    worker_task = SimpleNamespace(
+        done=lambda: worker_authority_ready,
+        cancelled=lambda: False,
+        exception=lambda: None,
+    )
     return SimpleNamespace(
         app=SimpleNamespace(
-            state=SimpleNamespace(source_add_dispatcher_task=task)
+            state=SimpleNamespace(
+                source_add_dispatcher_task=dispatcher_task,
+                research_lab_worker_startup_task=worker_task,
+            )
         )
     )
 
@@ -101,8 +113,9 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
         ("production_writes_enabled", False, False),
         ("miner_submissions_enabled", False, True),
         ("source_add_enabled", False, False),
-        ("source_add_dispatcher_enabled", False, False),
-        ("source_add_dispatcher_ready", False, False),
+        ("source_add_dispatcher_enabled", False, True),
+        ("source_add_dispatcher_ready", False, True),
+        ("worker_authority_ready", False, True),
         ("autoresearch_paused", True, True),
         ("source_add_paused", True, False),
     ),
@@ -122,6 +135,7 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
         "source_add_enabled": True,
         "source_add_dispatcher_enabled": True,
         "source_add_dispatcher_ready": True,
+        "worker_authority_ready": True,
         "autoresearch_paused": False,
         "source_add_paused": False,
     }
@@ -168,11 +182,61 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
 
     status = await api.research_lab_status(
         _status_request(
-            dispatcher_ready=values["source_add_dispatcher_ready"]
+            dispatcher_ready=values["source_add_dispatcher_ready"],
+            worker_authority_ready=values["worker_authority_ready"],
         )
     )
 
     assert status["source_add"]["intake_enabled"] is expected
+
+
+@pytest.mark.asyncio
+async def test_public_status_source_add_intake_fails_closed_without_any_authority(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(
+        api_enabled=True,
+        production_writes_enabled=True,
+        miner_submissions_enabled=False,
+        source_add_enabled=True,
+        source_add_dispatcher_enabled=True,
+        reports_enabled=False,
+        public_status=lambda: {
+            "source_add": {"enabled": True, "dispatcher_enabled": True}
+        },
+    )
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(lambda: config),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_autoresearch_maintenance_state",
+        _async_value({"paused": True}),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        _async_value({"paused": False}),
+    )
+    monkeypatch.setattr(
+        api,
+        "private_repo_head_alignment_status",
+        _async_value({"status": "aligned"}),
+    )
+
+    status = await api.research_lab_status(
+        _status_request(
+            dispatcher_ready=False,
+            worker_authority_ready=False,
+        )
+    )
+
+    assert status["source_add"]["effective_dispatcher_enabled"] is False
+    assert status["source_add"]["intake_enabled"] is False
 
 
 @pytest.mark.asyncio

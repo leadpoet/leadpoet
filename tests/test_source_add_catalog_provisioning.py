@@ -416,11 +416,11 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
         await api.submit_research_lab_source_adapter(payload)
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "Already submitted"
+    assert exc_info.value.detail == "Submission failed"
     assert JSONResponse(
         status_code=exc_info.value.status_code,
         content={"detail": exc_info.value.detail},
-    ).body == b'{"detail":"Already submitted"}'
+    ).body == b'{"detail":"Submission failed"}'
 
 
 @pytest.mark.asyncio
@@ -576,11 +576,11 @@ async def test_current_builtin_provider_is_rejected_generically_before_admission
         await api.submit_research_lab_source_adapter(payload)
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "Already submitted"
+    assert exc_info.value.detail == "Submission failed"
     assert JSONResponse(
         status_code=exc_info.value.status_code,
         content={"detail": exc_info.value.detail},
-    ).body == b'{"detail":"Already submitted"}'
+    ).body == b'{"detail":"Submission failed"}'
 
 
 @pytest.mark.asyncio

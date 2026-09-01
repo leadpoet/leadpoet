@@ -129,6 +129,7 @@ from .promotion import private_repo_head_alignment_status
 from .daily_baseline_readiness import autoresearch_daily_baseline_readiness
 from .source_add_catalog import (
     ALREADY_SUBMITTED_DETAIL,
+    SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
     PROVISION_STATUS_APPROVED_PENDING,
     PROVISION_STATUS_DISABLED,
     PROVISION_STATUS_ELIGIBLE,
@@ -772,7 +773,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             detail="SOURCE_ADD workflow temporarily unavailable",
         ) from exc
     if current_model_uses_api:
-        raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
+        raise HTTPException(
+            status_code=409,
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
+        )
     declared_domains = (
         payload.manifest.get("declared_base_domains")
         if isinstance(payload.manifest, Mapping)
@@ -857,7 +861,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     )
     status = str(admitted.get("status") or "")
     if status == "duplicate":
-        raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
+        raise HTTPException(
+            status_code=409,
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
+        )
     if status == "route_cooldown":
         try:
             cooldown_seconds = int(admitted.get("cooldown_seconds") or 0)

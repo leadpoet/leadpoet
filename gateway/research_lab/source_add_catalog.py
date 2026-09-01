@@ -27,6 +27,7 @@ PROVISION_STATUSES = {
 }
 
 ALREADY_SUBMITTED_DETAIL = "Already submitted"
+SOURCE_ADD_SUBMISSION_FAILED_DETAIL = "Submission failed"
 _SECRET_RE = re.compile(r"(?i)(sk-or-|sb_secret|service_role|raw_secret|password|api[_-]?key\s*=)")
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _TRUTHY = {"1", "true", "yes", "on"}

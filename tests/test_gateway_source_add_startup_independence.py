@@ -214,6 +214,7 @@ def test_lifespan_starts_and_cleans_source_add_outside_worker_startup() -> None:
 
 @pytest.mark.asyncio
 async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate() -> None:
+    worker_authority = {"ready": False}
     source_ready = _load_function(
         "_gateway_source_add_dispatcher_ready",
         FastAPI=object,
@@ -227,7 +228,9 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
     middleware = _load_function(
         "require_worker_authority_after_liveness",
         Request=object,
-        _gateway_worker_startup_ready=lambda _application: False,
+        _gateway_worker_startup_ready=lambda _application: worker_authority[
+            "ready"
+        ],
         _gateway_source_add_dispatcher_ready=source_ready,
         _WORKER_STARTUP_DIAGNOSTIC_PATHS=frozenset(
             {
@@ -312,6 +315,11 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
     assert calls == allowed
 
     dispatcher_task.set_result(None)
+    for method, path in allowed[:4]:
+        response = await middleware(request(method, path), call_next)
+        assert response.status_code == 503, (method, path)
+
+    worker_authority["ready"] = True
     for method, path in allowed[:4]:
         response = await middleware(request(method, path), call_next)
         assert response.status_code == 503, (method, path)

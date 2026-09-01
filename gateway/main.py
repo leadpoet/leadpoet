@@ -814,12 +814,15 @@ async def require_worker_authority_after_liveness(
         and path_parts[4]
         and path_parts[5] in {"credential-recipient", "configure-test", "provision"}
     )
-    source_add_independently_ready = bool(
+    source_add_request = bool(
         request.method == "POST"
         and (
             request.url.path in _SOURCE_ADD_INDEPENDENT_PATHS
             or source_add_admin_request
         )
+    )
+    source_add_independently_ready = bool(
+        source_add_request
         and _gateway_source_add_dispatcher_ready(request.app)
     )
     allocation_epoch = path_parts[4] if len(path_parts) == 5 else ""
@@ -830,6 +833,11 @@ async def require_worker_authority_after_liveness(
         and allocation_epoch.isascii()
         and allocation_epoch.isdigit()
     )
+    if source_add_request and not source_add_independently_ready:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "SOURCE_ADD dispatcher authority is not ready"},
+        )
     if not worker_authority_ready and (
         request.url.path not in _WORKER_STARTUP_DIAGNOSTIC_PATHS
         and not source_add_independently_ready

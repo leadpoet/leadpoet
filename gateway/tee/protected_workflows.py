@@ -1219,6 +1219,8 @@ PROTECTED_SYMBOLS = {
         "_parse_environment",
         "_render_environment",
         "_bounded_first_pass_concurrency",
+        "reconcile_gateway_rebenchmark_runtime_environment",
+        "reconcile_gateway_rebenchmark_runtime_environment_file",
         "update_gateway_rebenchmark_retry_secret",
         "update_gateway_rebenchmark_concurrency_secret",
     ),

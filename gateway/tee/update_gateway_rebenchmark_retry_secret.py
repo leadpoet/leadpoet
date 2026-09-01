@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
+import tempfile
 from typing import Any, Mapping
 import uuid
 
@@ -220,6 +222,188 @@ def _configuration_hash(environment: Mapping[str, str]) -> str:
     return scoring_configuration_hash(
         {name: environment.get(name) for name in SCORING_RUNTIME_ENV_NAMES}
     )
+
+
+def reconcile_gateway_rebenchmark_runtime_environment(
+    runtime_environment: str,
+    *,
+    authoritative_environment: str,
+) -> str:
+    """Make retry overrides in a cloned runtime match the durable secret.
+
+    A missing retry setting is meaningful: it restores the production default.
+    The restart controller also clones the live process environment, so simply
+    appending a secret that omits a previously explicit setting cannot remove
+    that stale value.  Reconcile these two controls before the clone is sourced.
+    """
+
+    runtime_values, runtime_format = _parse_environment(
+        runtime_environment,
+        target_names=frozenset(),
+    )
+    if runtime_format != "shell":
+        raise GatewayRebenchmarkRetryUpdateError(
+            "cloned gateway runtime environment must use shell records"
+        )
+    authoritative_values, _ = _parse_environment(
+        authoritative_environment,
+        target_names=_TARGET_NAMES,
+    )
+    target_values = {
+        name: authoritative_values[name]
+        for name in _TARGET_NAMES
+        if name in authoritative_values
+    }
+    reconciled = _render_environment(
+        runtime_environment,
+        document_format="shell",
+        values=target_values,
+        target_names=_TARGET_NAMES,
+    )
+    reconciled_values, _ = _parse_environment(
+        reconciled,
+        target_names=_TARGET_NAMES,
+    )
+    before_unrelated = {
+        name: value
+        for name, value in runtime_values.items()
+        if name not in _TARGET_NAMES
+    }
+    after_unrelated = {
+        name: value
+        for name, value in reconciled_values.items()
+        if name not in _TARGET_NAMES
+    }
+    if before_unrelated != after_unrelated:
+        raise GatewayRebenchmarkRetryUpdateError(
+            "runtime retry reconciliation changes unrelated environment values"
+        )
+    observed_targets = {
+        name: reconciled_values[name]
+        for name in _TARGET_NAMES
+        if name in reconciled_values
+    }
+    if observed_targets != target_values:
+        raise GatewayRebenchmarkRetryUpdateError(
+            "runtime retry reconciliation differs from durable configuration"
+        )
+    return reconciled
+
+
+def reconcile_gateway_rebenchmark_runtime_environment_file(
+    *,
+    runtime_environment_path: Path,
+    authoritative_environment_path: Path,
+) -> dict[str, Any]:
+    """Atomically reconcile one owner-controlled restart environment clone."""
+
+    runtime_path = Path(runtime_environment_path)
+    authority_path = Path(authoritative_environment_path)
+
+    def _regular_owner_file(path: Path, *, label: str) -> os.stat_result:
+        try:
+            observed = path.lstat()
+        except OSError as exc:
+            raise GatewayRebenchmarkRetryUpdateError(
+                f"{label} is unavailable"
+            ) from exc
+        if not stat.S_ISREG(observed.st_mode) or observed.st_uid != os.geteuid():
+            raise GatewayRebenchmarkRetryUpdateError(
+                f"{label} is not an owner-controlled regular file"
+            )
+        if observed.st_size > 2 * 1024 * 1024:
+            raise GatewayRebenchmarkRetryUpdateError(
+                f"{label} exceeds the bounded size"
+            )
+        return observed
+
+    def _same_file_identity(path: Path, expected: os.stat_result) -> bool:
+        try:
+            observed = path.lstat()
+        except OSError:
+            return False
+        return (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mode,
+            observed.st_uid,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        ) == (
+            expected.st_dev,
+            expected.st_ino,
+            expected.st_mode,
+            expected.st_uid,
+            expected.st_size,
+            expected.st_mtime_ns,
+            expected.st_ctime_ns,
+        )
+
+    runtime_identity = _regular_owner_file(
+        runtime_path,
+        label="cloned gateway runtime environment",
+    )
+    authority_identity = _regular_owner_file(
+        authority_path,
+        label="durable gateway environment cache",
+    )
+    try:
+        runtime_raw = runtime_path.read_text(encoding="utf-8")
+        authority_raw = authority_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise GatewayRebenchmarkRetryUpdateError(
+            "gateway retry environment could not be read"
+        ) from exc
+    if not _same_file_identity(
+        runtime_path,
+        runtime_identity,
+    ) or not _same_file_identity(authority_path, authority_identity):
+        raise GatewayRebenchmarkRetryUpdateError(
+            "gateway retry environment changed during reconciliation"
+        )
+
+    reconciled = reconcile_gateway_rebenchmark_runtime_environment(
+        runtime_raw,
+        authoritative_environment=authority_raw,
+    )
+    authoritative_values, _ = _parse_environment(
+        authority_raw,
+        target_names=_TARGET_NAMES,
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{runtime_path.name}.retry-reconcile.",
+        dir=str(runtime_path.parent),
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(reconciled)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not _same_file_identity(
+            runtime_path,
+            runtime_identity,
+        ) or not _same_file_identity(authority_path, authority_identity):
+            raise GatewayRebenchmarkRetryUpdateError(
+                "gateway retry environment changed before reconciliation commit"
+            )
+        os.replace(temporary_name, runtime_path)
+        directory_descriptor = os.open(runtime_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
+
+    present_count = len(_TARGET_NAMES & set(authoritative_values))
+    return {
+        "status": "reconciled",
+        "managed_name_count": len(_TARGET_NAMES),
+        "present_name_count": present_count,
+        "absent_name_count": len(_TARGET_NAMES) - present_count,
+    }
 
 
 def update_gateway_rebenchmark_retry_secret(

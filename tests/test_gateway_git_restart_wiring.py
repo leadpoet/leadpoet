@@ -204,6 +204,39 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
     )
 
 
+def test_gateway_restart_reconciles_retry_defaults_across_candidate_reexec() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function_start = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime() {"
+    )
+    prepare_overlay = script.index('cat "$ENV_SECRET" >> "$ENV_CLONE"')
+    prepare_reconcile = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime",
+        prepare_overlay,
+    )
+    post_activate = script.index(
+        'elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then'
+    )
+    post_activate_reconcile = script.index(
+        "reconcile_gateway_rebenchmark_retry_runtime",
+        post_activate,
+    )
+    candidate_runtime = script.index(
+        'echo "Loading gateway runtime env for AWS/ECR checks"'
+    )
+
+    assert function_start < post_activate
+    assert prepare_overlay < prepare_reconcile
+    assert post_activate < post_activate_reconcile < candidate_runtime
+    assert (
+        "reconcile_gateway_rebenchmark_runtime_environment_file" in script
+    )
+    assert (
+        "unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" in script
+    )
+    assert "unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" in script
+
+
 def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))

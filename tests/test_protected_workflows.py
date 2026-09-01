@@ -160,6 +160,17 @@ def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 
+def test_rebenchmark_runtime_retry_reconciliation_is_protected():
+    assert {
+        "reconcile_gateway_rebenchmark_runtime_environment",
+        "reconcile_gateway_rebenchmark_runtime_environment_file",
+    } <= set(
+        PROTECTED_SYMBOLS[
+            "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+        ]
+    )
+
+
 def test_private_artifact_signature_boundary_is_protected():
     assert {
         "_REVIEWED_CONSUMER_MANIFEST_PAIRS",

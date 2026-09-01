@@ -1704,6 +1704,19 @@ class ArtifactPreparedActionExecutor:
                     timeout_seconds=min(remaining, 30.0),
                 )
             if not 200 <= status < 300:
+                # A poll transport/concurrency failure is not the terminal
+                # state of the already-authorized Deepline run. Preserve its
+                # durable run ID and keep reconciling within the action bound;
+                # if the bound expires, return terminal uncertainty so a
+                # restart reattaches instead of recording a false adapter
+                # failure and reposting paid work.
+                if status == 429 or 500 <= status < 600:
+                    if self._clock() >= deadline:
+                        break
+                    self._sleep(
+                        min(1.0, max(0.0, deadline - self._clock()))
+                    )
+                    continue
                 return status, body
             state = self._deepline_status(body)
             if state in _DEEPLINE_TERMINAL_STATUSES:

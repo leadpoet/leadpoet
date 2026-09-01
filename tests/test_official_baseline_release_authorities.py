@@ -784,6 +784,85 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     )
 
 
+def test_deepline_transient_poll_failure_remains_uncertain_and_reattachable():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    now = [0.0]
+    proxy = _Proxy(
+        [
+            (
+                200,
+                {"run": {"id": "run-fixture", "status": "running"}},
+                {},
+            ),
+            (502, {"error": "upstream unreachable"}, {}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+        clock=lambda: now[0],
+        sleep=lambda _seconds: now.__setitem__(0, 900.0),
+    )
+    preparation = executor.prepare(
+        run_identity={"schema_version": "fixture-run:v1", "run": "transient"},
+        unit_ref="baseline_icp:" + "e" * 64,
+        action=action,
+    )
+
+    uncertain = executor.execute_prepared(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert uncertain.state == "uncertain"
+    assert [call["method"] for call in proxy.calls] == ["POST", "GET"]
+    assert custody.load_protected_action_progress(
+        preparation_sha256=preparation.preparation_sha256
+    )["run_id"] == "run-fixture"
+
+    restarted_proxy = _Proxy(
+        [
+            (
+                200,
+                {
+                    "id": "run-fixture",
+                    "status": "completed",
+                    "output": {
+                        "schema_version": 3,
+                        "segment_id": "aggregate-fixture",
+                        "rows": [],
+                    },
+                },
+                {},
+            )
+        ]
+    )
+    restarted = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=restarted_proxy,
+        sleep=lambda _seconds: None,
+    )
+
+    terminal = restarted.reconcile(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["method"] for call in restarted_proxy.calls] == ["GET"]
+
+
 def test_deepline_model_owned_run_id_path_encoding_is_applied_exactly():
     action, dispatch, catalog, inventory = _provider_fixture()
     protocol = _Protocol(dispatch=dispatch, current=True)

@@ -627,6 +627,7 @@ _BASELINE_ATTEMPT_LEDGER_SCHEMA_VERSION = (
     "research_lab_private_baseline_attempt_ledger.v1"
 )
 _BASELINE_CHECKPOINT_RUNTIME_HISTORY_LIMIT = 128
+_BASELINE_CHECKPOINT_REPLAY_MAX_CONCURRENCY = 4
 _FULL_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BASELINE_ATTEMPT_RECEIPT_HASHES_FIELD = "_attested_parent_receipt_hashes"
@@ -634,6 +635,15 @@ _MODEL_QUALIFICATION_AUTHORITY_FIELD = "_model_qualification_authority"
 _MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD = "_model_qualification_partial_count"
 _OFFICIAL_BASELINE_CHECKPOINT_FIELD = "_official_baseline_checkpoint"
 _V2_BASELINE_RECEIPTS_PER_COMPLETED_ICP = 2
+
+
+def _baseline_checkpoint_replay_concurrency(completed_icps: int) -> int:
+    """Bound deterministic checkpoint replay independently of provider work."""
+
+    return min(
+        _BASELINE_CHECKPOINT_REPLAY_MAX_CONCURRENCY,
+        max(1, int(completed_icps or 0)),
+    )
 
 
 def _private_baseline_uses_batch_execution(
@@ -7008,9 +7018,20 @@ class ResearchLabGatewayScoringWorker:
         """
 
         del run_start
+        preflight_settings = provider_preflight_settings()
         ttl_seconds = max(
             60.0,
-            float(provider_preflight_settings().get("ttl_seconds") or 600.0),
+            float(preflight_settings.get("ttl_seconds") or 600.0),
+        )
+        refresh_attempt_limit = max(
+            1,
+            min(
+                3,
+                int(
+                    preflight_settings.get("failure_streak_threshold")
+                    or 3
+                ),
+            ),
         )
         worker_count = max(
             1,
@@ -7045,73 +7066,117 @@ class ResearchLabGatewayScoringWorker:
             return
         refresh_status = "not_attempted"
         refresh_reason = ""
-        try:
-            refresh_state = await get_scoring_maintenance_state()
-            if _operator_scoring_pause_active(refresh_state):
-                raise BaselineMaintenancePause(
-                    completed_icps=completed_icps,
-                    total_icps=total_icps,
-                    maintenance_state=refresh_state,
+        refresh_attempt_count = 0
+        refresh_pause_worthy = False
+        remaining_stale_profiles = list(stale_profiles)
+        for refresh_attempt_count in range(1, refresh_attempt_limit + 1):
+            try:
+                refresh_state = await get_scoring_maintenance_state()
+                if _operator_scoring_pause_active(refresh_state):
+                    raise BaselineMaintenancePause(
+                        completed_icps=completed_icps,
+                        total_icps=total_icps,
+                        maintenance_state=refresh_state,
+                    )
+                refreshed = await self._run_lease_held_recovery_and_preflight(
+                    refresh_state,
+                    force_full_fleet_measurement=True,
                 )
-            refreshed = await self._run_lease_held_recovery_and_preflight(
-                refresh_state,
-                force_full_fleet_measurement=True,
+                refresh_status = (
+                    "passed" if bool(refreshed.get("proceed")) else "blocked"
+                )
+                refresh_reason = str(refreshed.get("reason") or "")
+                refresh_pause_worthy = bool(refreshed.get("pause_worthy"))
+            except BaselineMaintenancePause:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # A refresh failure cannot invalidate the settled checkpoint.
+                # Preserve the process-recycle fallback and expose the error.
+                refresh_status = "failed"
+                refresh_reason = "provider_preflight_refresh_exception"
+                logger.warning(
+                    "research_lab_baseline_wave_preflight_refresh_failed "
+                    "worker_ref=%s retry_round=%s profile_count=%s "
+                    "attempt=%s error=%s",
+                    self.worker_ref,
+                    retry_round,
+                    len(stale_profiles),
+                    refresh_attempt_count,
+                    _short_error(exc),
+                )
+                break
+
+            refreshed_now = _baseline_preflight_monotonic()
+            refreshed_measurements = dict(
+                getattr(
+                    self,
+                    "_baseline_profile_preflight_monotonic_at",
+                    {},
+                )
+                or {}
             )
-            refresh_status = (
-                "passed" if bool(refreshed.get("proceed")) else "blocked"
+            remaining_stale_profiles = [
+                worker_index
+                for worker_index in profile_indexes
+                if worker_index not in refreshed_measurements
+                or refreshed_now
+                + max(0.0, float(start_delay_seconds))
+                - float(refreshed_measurements[worker_index])
+                >= ttl_seconds
+            ]
+            if refresh_status == "passed" and not remaining_stale_profiles:
+                baseline_context = (
+                    getattr(self, "_active_baseline_context", None) or {}
+                )
+                benchmark_date = str(
+                    baseline_context.get("benchmark_date") or ""
+                )
+                if benchmark_date:
+                    _record_private_baseline_stage(
+                        worker_ref=self.worker_ref,
+                        stage="wave_preflight_refresh",
+                        status="passed",
+                        benchmark_date=benchmark_date,
+                        benchmark_attempt=baseline_context.get(
+                            "benchmark_attempt"
+                        ),
+                        epoch_id=baseline_context.get("evaluation_epoch"),
+                        window_hash=baseline_context.get(
+                            "rolling_window_hash"
+                        ),
+                        manifest_hash=baseline_context.get(
+                            "private_model_manifest_hash"
+                        ),
+                        retry_round=retry_round,
+                        row_count=worker_count,
+                        provider_preflight_profile_count=len(profile_indexes),
+                        provider_preflight_refresh_attempt_count=(
+                            refresh_attempt_count
+                        ),
+                        completed_icp_count=completed_icps,
+                        selected_icp_count=total_icps,
+                    )
+                return
+
+            retry_transient_refresh = (
+                refresh_status == "blocked"
+                and refresh_reason == "provider_preflight_unhealthy"
+                and not refresh_pause_worthy
+                and refresh_attempt_count < refresh_attempt_limit
             )
-            refresh_reason = str(refreshed.get("reason") or "")
-        except BaselineMaintenancePause:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            # A refresh failure cannot invalidate the settled checkpoint. Keep
-            # the existing process-recycle fallback and expose the exception.
-            refresh_status = "failed"
-            refresh_reason = "provider_preflight_refresh_exception"
+            if not retry_transient_refresh:
+                break
             logger.warning(
-                "research_lab_baseline_wave_preflight_refresh_failed "
-                "worker_ref=%s retry_round=%s profile_count=%s error=%s",
+                "research_lab_baseline_wave_preflight_refresh_retrying "
+                "worker_ref=%s retry_round=%s profile_count=%s "
+                "attempt=%s attempt_limit=%s",
                 self.worker_ref,
                 retry_round,
                 len(stale_profiles),
-                _short_error(exc),
+                refresh_attempt_count,
+                refresh_attempt_limit,
             )
-
-        refreshed_now = _baseline_preflight_monotonic()
-        refreshed_measurements = dict(
-            getattr(self, "_baseline_profile_preflight_monotonic_at", {}) or {}
-        )
-        remaining_stale_profiles = [
-            worker_index
-            for worker_index in profile_indexes
-            if worker_index not in refreshed_measurements
-            or refreshed_now
-            + max(0.0, float(start_delay_seconds))
-            - float(refreshed_measurements[worker_index])
-            >= ttl_seconds
-        ]
-        if refresh_status == "passed" and not remaining_stale_profiles:
-            baseline_context = getattr(self, "_active_baseline_context", None) or {}
-            benchmark_date = str(baseline_context.get("benchmark_date") or "")
-            if benchmark_date:
-                _record_private_baseline_stage(
-                    worker_ref=self.worker_ref,
-                    stage="wave_preflight_refresh",
-                    status="passed",
-                    benchmark_date=benchmark_date,
-                    benchmark_attempt=baseline_context.get("benchmark_attempt"),
-                    epoch_id=baseline_context.get("evaluation_epoch"),
-                    window_hash=baseline_context.get("rolling_window_hash"),
-                    manifest_hash=baseline_context.get(
-                        "private_model_manifest_hash"
-                    ),
-                    retry_round=retry_round,
-                    row_count=worker_count,
-                    provider_preflight_profile_count=len(profile_indexes),
-                    completed_icp_count=completed_icps,
-                    selected_icp_count=total_icps,
-                )
-            return
+            await asyncio.sleep(min(10.0, 2.0 * refresh_attempt_count))
         stale_profiles = remaining_stale_profiles or stale_profiles
         raise BaselineCheckpointRecycle(
             pressure={
@@ -7120,6 +7185,12 @@ class ResearchLabGatewayScoringWorker:
                 "provider_preflight_profile_count": len(stale_profiles),
                 "provider_preflight_refresh_status": refresh_status,
                 "provider_preflight_refresh_reason": refresh_reason,
+                "provider_preflight_refresh_attempt_count": (
+                    refresh_attempt_count
+                ),
+                "provider_preflight_refresh_attempt_limit": (
+                    refresh_attempt_limit
+                ),
             },
             completed_icps=completed_icps,
             total_icps=total_icps,
@@ -14763,13 +14834,18 @@ class ResearchLabGatewayScoringWorker:
         exact_checkpoint_replay_count = 0
         if isinstance(runner, ExactOfficialBaselineRunner):
             replay_started = time.monotonic()
+            checkpoint_replay_concurrency = (
+                _baseline_checkpoint_replay_concurrency(
+                    len(baseline_progress_rows)
+                )
+            )
             exact_checkpoint_replay_count = (
                 await _replay_exact_baseline_checkpoints(
                     runner=runner,
                     benchmark_items=window.benchmark_items,
                     progress_rows=baseline_progress_rows,
                     attempt_ledger=baseline_progress_attempt_ledger,
-                    max_concurrency=self.config.private_baseline_concurrency,
+                    max_concurrency=checkpoint_replay_concurrency,
                 )
             )
             if exact_checkpoint_replay_count:
@@ -14785,7 +14861,7 @@ class ResearchLabGatewayScoringWorker:
                     row_count=exact_checkpoint_replay_count,
                     concurrency=min(
                         exact_checkpoint_replay_count,
-                        max(1, self.config.private_baseline_concurrency),
+                        checkpoint_replay_concurrency,
                     ),
                     duration_seconds=time.monotonic() - replay_started,
                 )

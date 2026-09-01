@@ -2624,6 +2624,69 @@ async def test_baseline_wave_stale_exact_profiles_refresh_full_fleet(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_baseline_wave_transient_refresh_retries_in_process(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(scoring_worker_total_workers=25)
+    worker._baseline_profile_preflight_monotonic_at = {4: 100.0}
+    refresh_calls: list[dict[str, object]] = []
+    sleeps: list[float] = []
+    monotonic = iter((701.0, 702.0, 703.0))
+    monkeypatch.setattr(sw, "_baseline_preflight_monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(
+        sw,
+        "provider_preflight_settings",
+        lambda: {"ttl_seconds": 600.0, "failure_streak_threshold": 3},
+    )
+
+    async def maintenance_state():
+        return {"paused": False, "reason": ""}
+
+    async def refresh(_state, **kwargs):  # noqa: ANN001, ANN003
+        refresh_calls.append(dict(kwargs))
+        if len(refresh_calls) == 1:
+            worker._baseline_profile_preflight_monotonic_at = {}
+            return {
+                "proceed": False,
+                "reason": "provider_preflight_unhealthy",
+                "pause_worthy": False,
+            }
+        worker._baseline_profile_preflight_monotonic_at = {
+            worker_index: 703.0 for worker_index in range(25)
+        }
+        return {
+            "proceed": True,
+            "reason": "healthy",
+            "pause_worthy": False,
+        }
+
+    async def no_sleep(seconds):  # noqa: ANN001
+        sleeps.append(float(seconds))
+
+    monkeypatch.setattr(sw, "get_scoring_maintenance_state", maintenance_state)
+    monkeypatch.setattr(
+        worker,
+        "_run_lease_held_recovery_and_preflight",
+        refresh,
+    )
+    monkeypatch.setattr(sw.asyncio, "sleep", no_sleep)
+
+    await worker._enforce_baseline_wave_preflight_freshness(
+        run_start=0.0,
+        item_indexes=(4,),
+        retry_round=1,
+        completed_icps=15,
+        total_icps=40,
+    )
+
+    assert refresh_calls == [
+        {"force_full_fleet_measurement": True},
+        {"force_full_fleet_measurement": True},
+    ]
+    assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
 async def test_baseline_wave_failed_refresh_pauses_and_recycles(monkeypatch):
     worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
     worker.worker_ref = "baseline-worker"
@@ -2636,7 +2699,7 @@ async def test_baseline_wave_failed_refresh_pauses_and_recycles(monkeypatch):
     monkeypatch.setattr(
         sw,
         "provider_preflight_settings",
-        lambda: {"ttl_seconds": 600.0},
+        lambda: {"ttl_seconds": 600.0, "failure_streak_threshold": 3},
     )
 
     async def lease_acquired(**_kwargs):
@@ -2669,7 +2732,11 @@ async def test_baseline_wave_failed_refresh_pauses_and_recycles(monkeypatch):
                 "reason": sw.PREFLIGHT_REASON_PREFIX + "exa=transport_failure",
             }
         )
-        return {"proceed": False, "reason": "provider_preflight_unhealthy"}
+        return {
+            "proceed": False,
+            "reason": "provider_preflight_unhealthy",
+            "pause_worthy": True,
+        }
 
     async def no_recovery_work():
         return None
@@ -2711,9 +2778,18 @@ async def test_baseline_wave_failed_refresh_pauses_and_recycles(monkeypatch):
     assert raised.value.pressure["provider_preflight_refresh_reason"] == (
         "provider_preflight_unhealthy"
     )
+    assert raised.value.pressure["provider_preflight_refresh_attempt_count"] == 1
+    assert raised.value.pressure["provider_preflight_refresh_attempt_limit"] == 3
     assert len(full_fleet_calls) == 1
     assert full_fleet_calls[0]["force_measurement"] is True
     assert state["paused"] is True
+
+
+def test_checkpoint_replay_concurrency_is_decoupled_from_provider_concurrency():
+    assert sw._BASELINE_CHECKPOINT_REPLAY_MAX_CONCURRENCY == 4
+    assert sw._baseline_checkpoint_replay_concurrency(0) == 1
+    assert sw._baseline_checkpoint_replay_concurrency(2) == 2
+    assert sw._baseline_checkpoint_replay_concurrency(15) == 4
 
 
 @pytest.mark.asyncio

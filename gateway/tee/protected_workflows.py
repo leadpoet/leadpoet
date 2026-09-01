@@ -1170,6 +1170,8 @@ PROTECTED_SYMBOLS = {
         "_MODEL_QUALIFICATION_AUTHORITY_FIELD",
         "_MODEL_QUALIFICATION_PARTIAL_COUNT_FIELD",
         "_OFFICIAL_BASELINE_CHECKPOINT_FIELD",
+        "_BASELINE_CHECKPOINT_REPLAY_MAX_CONCURRENCY",
+        "_baseline_checkpoint_replay_concurrency",
         "_baseline_attempt_reason_code",
         "_baseline_attempt_checkpoint_row",
         "_compatible_baseline_retry_extension",

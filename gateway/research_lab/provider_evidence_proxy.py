@@ -812,6 +812,160 @@ class SdConcurrencyGate:
 _SD_GATE = SdConcurrencyGate()
 
 
+class DeeplineConcurrencyGate:
+    """Bound concurrent Deepline play runs at the shared evidence proxy.
+
+    A Deepline play remains active after its start request returns and until a
+    later run poll reports a terminal status. Limiting only individual HTTP
+    requests would therefore still allow a burst of long-lived plays to
+    overload the provider. This gate holds one slot across that whole
+    lifecycle. Polls never queue, so an admitted run can always make progress;
+    excess play starts receive a transient 429 after a bounded wait.
+
+    The exact model artifact continues to own which play to start, how to poll
+    it, and how to interpret the result. This class only enforces the
+    host-owned provider concurrency limit.
+    """
+
+    _TERMINAL = {"completed", "failed", "cancelled"}
+    _START_PREFIX = "/api/v2/plays"
+    _POLL_PREFIXES = ("/api/v2/runs/", "/api/v2/plays/run/")
+
+    def __init__(self) -> None:
+        self.run_limit = max(
+            1,
+            int(os.getenv("DEEPLINE_MAX_CONCURRENCY", "1")),
+        )
+        self._run_sem = threading.BoundedSemaphore(self.run_limit)
+        self._wait_seconds = float(
+            os.getenv("DEEPLINE_GATE_WAIT_SECONDS", "45")
+        )
+        # Keep abandoned slots past the protected action's ordinary timeout.
+        # This prevents a timed-out caller from immediately creating another
+        # provider-side run while the first may still be active upstream.
+        self._run_ttl = float(
+            os.getenv("DEEPLINE_RUN_TTL_SECONDS", "2100")
+        )
+        self._unbound_starts: list[float] = []
+        self._active_runs: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def _poll_run_ref(cls, path: str) -> str:
+        clean = (path or "").split("?", 1)[0]
+        for prefix in cls._POLL_PREFIXES:
+            if clean.startswith(prefix):
+                return clean[len(prefix) :].split("/", 1)[0]
+        return ""
+
+    def _release_slot(self) -> None:
+        try:
+            self._run_sem.release()
+        except ValueError:
+            pass
+
+    def _reap_expired_runs(self) -> None:
+        now = time.time()
+        with self._lock:
+            stale_refs = [
+                run_ref
+                for run_ref, started in self._active_runs.items()
+                if now - started > self._run_ttl
+            ]
+            for run_ref in stale_refs:
+                self._active_runs.pop(run_ref, None)
+            live_unbound = [
+                started
+                for started in self._unbound_starts
+                if now - started <= self._run_ttl
+            ]
+            stale_unbound_count = (
+                len(self._unbound_starts) - len(live_unbound)
+            )
+            self._unbound_starts = live_unbound
+        stale_count = len(stale_refs) + stale_unbound_count
+        for _ in range(stale_count):
+            self._release_slot()
+        if stale_count:
+            print(
+                "deepline_gate_run_ttl_release count=%d" % stale_count,
+                flush=True,
+            )
+
+    def acquire(
+        self,
+        provider: str,
+        method: str,
+        path: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[str, bool]:
+        """Return ``(kind, acquired)``; polls and other providers are free."""
+
+        clean = (path or "").split("?", 1)[0].rstrip("/")
+        if (
+            provider != "deepline"
+            or method.upper() != "POST"
+            or not clean.startswith(self._START_PREFIX)
+        ):
+            return "", True
+        self._reap_expired_runs()
+        wait_seconds = self._wait_seconds
+        if timeout_seconds is not None:
+            wait_seconds = min(
+                wait_seconds,
+                max(0.0, float(timeout_seconds)),
+            )
+        return "deepline_run", self._run_sem.acquire(timeout=wait_seconds)
+
+    def release_on_failure(self, kind: str) -> None:
+        if kind == "deepline_run":
+            self._release_slot()
+
+    def finish(
+        self,
+        kind: str,
+        *,
+        status: int,
+        body: bytes,
+    ) -> None:
+        """Hold a successful nonterminal start; release every other start."""
+
+        if kind != "deepline_run":
+            return
+        run_status = (
+            _deepline_status_from_response(body)
+            if 200 <= int(status or 0) < 300
+            else ""
+        )
+        if 200 <= int(status or 0) < 300 and run_status not in self._TERMINAL:
+            with self._lock:
+                self._unbound_starts.append(time.time())
+            return
+        self._release_slot()
+
+    def observe_run_poll(self, path: str, *, status: int, body: bytes) -> None:
+        """Bind an admitted start to its poll path and release on terminal."""
+
+        if not 200 <= int(status or 0) < 300:
+            return
+        run_ref = self._poll_run_ref(path)
+        if not run_ref:
+            return
+        run_status = _deepline_status_from_response(body)
+        release = False
+        with self._lock:
+            if run_ref not in self._active_runs and self._unbound_starts:
+                self._active_runs[run_ref] = self._unbound_starts.pop(0)
+            if run_status in self._TERMINAL:
+                release = self._active_runs.pop(run_ref, None) is not None
+        if release:
+            self._release_slot()
+
+
+_DEEPLINE_GATE = DeeplineConcurrencyGate()
+
+
 class ProviderUsageLedger:
     """Per-call usage ledger + per-day live-call counters.
 
@@ -1709,10 +1863,32 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             "transient": True}).encode("utf-8"),
             )
             return
+        deepline_gate_kind, deepline_gate_ok = _DEEPLINE_GATE.acquire(
+            entry.id,
+            self.command,
+            rest,
+            timeout_seconds=self._remaining_request_seconds(request_deadline),
+        )
+        if not deepline_gate_ok:
+            _EXA_GATE.release_on_failure(gate_kind)
+            _SD_GATE.release(sd_gate_kind)
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._respond(
+                429,
+                json.dumps(
+                    {
+                        "error": "deepline concurrency gate wait timeout",
+                        "transient": True,
+                    }
+                ).encode("utf-8"),
+            )
+            return
         upstream_timeout = self._remaining_request_seconds(request_deadline)
         if upstream_timeout <= 0:
             _EXA_GATE.release_on_failure(gate_kind)
             _SD_GATE.release(sd_gate_kind)
+            _DEEPLINE_GATE.release_on_failure(deepline_gate_kind)
             self.store.release_lead(fingerprint)
             self._ledger_row(
                 entry,
@@ -1746,6 +1922,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             # waiting caller can retry rather than block on us.
             _EXA_GATE.release_on_failure(gate_kind)
             _SD_GATE.release(sd_gate_kind)
+            _DEEPLINE_GATE.release_on_failure(deepline_gate_kind)
             if is_leader:
                 self.store.release_lead(fingerprint)
             event = cost_ledger.record_live_event(
@@ -1778,6 +1955,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         _EXA_GATE.finish(gate_kind, path=rest, status=status, body=body)
         _EXA_GATE.observe_agent_poll(rest, body)
         _SD_GATE.release(sd_gate_kind)
+        _DEEPLINE_GATE.finish(
+            deepline_gate_kind,
+            status=status,
+            body=body,
+        )
+        _DEEPLINE_GATE.observe_run_poll(
+            rest,
+            status=status,
+            body=body,
+        )
 
         recordable = _response_is_recordable(entry.id, upstream_url, status, body)
         evidence_label = "recorded" if recordable else "live_unrecorded"

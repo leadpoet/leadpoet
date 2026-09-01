@@ -11,7 +11,10 @@ import json
 import os
 from unittest import mock
 
-from gateway.research_lab.provider_evidence_proxy import ExaConcurrencyGate
+from gateway.research_lab.provider_evidence_proxy import (
+    DeeplineConcurrencyGate,
+    ExaConcurrencyGate,
+)
 
 
 def _gate(agent=2, search=3, wait="0.05"):
@@ -137,3 +140,113 @@ def test_sd_gate_limits_and_releases():
     _, ok2 = g.acquire("sd", "/scrape?url=c")
     assert ok2
     g.release("")  # ungated kind is a no-op, never over-releases
+
+
+def _deepline_gate(limit=1, wait="0.05"):
+    with mock.patch.dict(os.environ, {
+        "DEEPLINE_MAX_CONCURRENCY": str(limit),
+        "DEEPLINE_GATE_WAIT_SECONDS": wait,
+        "DEEPLINE_RUN_TTL_SECONDS": "9999",
+    }):
+        return DeeplineConcurrencyGate()
+
+
+def _deepline_body(status="running"):
+    return json.dumps({"run": {"status": status}}).encode()
+
+
+def test_deepline_gate_holds_play_slot_until_primary_terminal_poll():
+    g = _deepline_gate()
+    kind, ok = g.acquire(
+        "deepline",
+        "POST",
+        "/api/v2/plays/firmographic/execute",
+    )
+    assert (kind, ok) == ("deepline_run", True)
+    g.finish(kind, status=202, body=_deepline_body())
+
+    _, blocked = g.acquire(
+        "deepline",
+        "POST",
+        "/api/v2/plays/firmographic/execute",
+    )
+    assert not blocked
+    assert g.acquire(
+        "deepline",
+        "GET",
+        "/api/v2/runs/run%252Ffixture?full=true",
+    ) == ("", True)
+
+    g.observe_run_poll(
+        "/api/v2/runs/run%252Ffixture?full=true",
+        status=200,
+        body=_deepline_body("running"),
+    )
+    g.observe_run_poll(
+        "/api/v2/runs/run%252Ffixture?full=true",
+        status=200,
+        body=_deepline_body("completed"),
+    )
+    _, admitted = g.acquire(
+        "deepline",
+        "POST",
+        "/api/v2/plays/firmographic/execute",
+    )
+    assert admitted
+
+
+def test_deepline_gate_releases_from_fallback_terminal_poll_once():
+    g = _deepline_gate()
+    kind, ok = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert ok
+    g.finish(kind, status=200, body=_deepline_body())
+    fallback = "/api/v2/plays/run/run%252Ffixture?full=true"
+    g.observe_run_poll(
+        fallback,
+        status=200,
+        body=_deepline_body("failed"),
+    )
+    # A duplicate terminal poll is a no-op and cannot over-release the bound.
+    g.observe_run_poll(
+        fallback,
+        status=200,
+        body=_deepline_body("failed"),
+    )
+    _, first = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    _, second = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert first and not second
+
+
+def test_deepline_failed_or_immediately_terminal_start_releases_slot():
+    g = _deepline_gate()
+    kind, ok = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert ok
+    g.finish(kind, status=429, body=b"{}")
+    kind, ok = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert ok
+    g.finish(kind, status=200, body=_deepline_body("completed"))
+    _, admitted = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert admitted
+
+
+def test_deepline_ttl_reaps_unbound_and_bound_slots():
+    g = _deepline_gate()
+    kind, ok = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert ok
+    g.finish(kind, status=202, body=_deepline_body())
+    g._run_ttl = -1.0
+    _, admitted = g.acquire("deepline", "POST", "/api/v2/plays/execute")
+    assert admitted
+
+    g.finish("deepline_run", status=202, body=_deepline_body())
+    g.observe_run_poll(
+        "/api/v2/runs/run-bound",
+        status=200,
+        body=_deepline_body("running"),
+    )
+    _, admitted_after_bound_reap = g.acquire(
+        "deepline",
+        "POST",
+        "/api/v2/plays/execute",
+    )
+    assert admitted_after_bound_reap

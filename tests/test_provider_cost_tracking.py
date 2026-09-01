@@ -1010,8 +1010,16 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
         upstream.server_close()
 
 
-def test_evidence_proxy_tracks_deepline_private_model_play_run():
+def test_evidence_proxy_tracks_deepline_private_model_play_run(monkeypatch):
     _FakeDeeplineProvider.seen_auth_headers = []
+    monkeypatch.setenv("DEEPLINE_MAX_CONCURRENCY", "1")
+    monkeypatch.setenv("DEEPLINE_GATE_WAIT_SECONDS", "0.01")
+    monkeypatch.setenv("DEEPLINE_RUN_TTL_SECONDS", "9999")
+    monkeypatch.setattr(
+        provider_evidence_proxy,
+        "_DEEPLINE_GATE",
+        provider_evidence_proxy.DeeplineConcurrencyGate(),
+    )
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeDeeplineProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
@@ -1057,6 +1065,29 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert event["credits"] == 0
         assert event["tracking_failed"] is False
 
+        blocked_req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/plays/run",
+            data=json.dumps(
+                {"name": "company-domain-firmographics", "input": {"domain": "blocked.example"}}
+            ).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "deepline-blocked-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "1.00",
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as blocked_error:
+            urllib.request.urlopen(blocked_req, timeout=5)
+        assert blocked_error.value.code == 429
+        assert json.loads(blocked_error.value.read()) == {
+            "error": "deepline concurrency gate wait timeout",
+            "transient": True,
+        }
+        assert _FakeDeeplineProvider.seen_auth_headers == [
+            "Bearer redacted-test-key"
+        ]
+
         poll_req = urllib.request.Request(
             f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/runs/run_deepline_123",
             headers={
@@ -1096,6 +1127,13 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert billing_event["cost_usd"] == 0.002
         assert billing_event["cost_source"] == "deepline_response_credits"
         assert billing_event["tracking_failed"] is False
+
+        with urllib.request.urlopen(blocked_req, timeout=5):
+            pass
+        assert _FakeDeeplineProvider.seen_auth_headers == [
+            "Bearer redacted-test-key",
+            "Bearer redacted-test-key",
+        ]
     finally:
         if proxy is not None:
             proxy.shutdown()

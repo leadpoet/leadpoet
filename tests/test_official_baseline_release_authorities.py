@@ -784,7 +784,7 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
     )
 
 
-def test_deepline_transient_poll_failure_remains_uncertain_and_reattachable():
+def test_deepline_transient_poll_failure_remains_pending_and_reattachable():
     action, dispatch, catalog, inventory = _provider_fixture()
     protocol = _Protocol(dispatch=dispatch, current=True)
     custody = _custody()
@@ -815,12 +815,13 @@ def test_deepline_transient_poll_failure_remains_uncertain_and_reattachable():
         action=action,
     )
 
-    uncertain = executor.execute_prepared(
+    pending = executor.execute_prepared(
         preparation=preparation,
         action=action,
     )
 
-    assert uncertain.state == "uncertain"
+    assert pending.state == "pending"
+    assert pending.uncertainty_sha256 is None
     assert [call["method"] for call in proxy.calls] == ["POST", "GET"]
     assert custody.load_protected_action_progress(
         preparation_sha256=preparation.preparation_sha256

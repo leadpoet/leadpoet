@@ -1808,7 +1808,7 @@ class ArtifactPreparedActionExecutor:
                     started=started,
                 )
             if terminal is None:
-                return self._uncertain(request_ref)
+                return self._pending(request_ref)
             status, body = terminal
         elif request.get("method") == "BATCH_GET":
             terminal = self._batch_request(
@@ -1848,6 +1848,19 @@ class ArtifactPreparedActionExecutor:
             body=body,
             calls=calls,
             started=started,
+        )
+
+    @staticmethod
+    def _pending(provider_request_ref: str) -> OfficialBaselineProtectedTerminal:
+        return OfficialBaselineProtectedTerminal(
+            state="pending",
+            protected_action_result=None,
+            protected_result_sha256=None,
+            protected_terminal_receipt_ref=None,
+            protected_terminal_receipt_sha256=None,
+            provider_request_ref=provider_request_ref,
+            model_provider_response_sha256=None,
+            uncertainty_sha256=None,
         )
 
     @staticmethod

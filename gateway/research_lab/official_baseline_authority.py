@@ -31,6 +31,7 @@ from gateway.research_lab.official_baseline_model_runner import (
     OfficialBaselineDependencyContext,
     OfficialBaselineExactDependencies,
     OfficialBaselineModelError,
+    OfficialBaselineProviderPendingError,
 )
 from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
@@ -131,7 +132,7 @@ class OfficialBaselineProtectedPreparation:
 
 @dataclass(frozen=True)
 class OfficialBaselineProtectedTerminal:
-    """Known or uncertain protected job readback; never caller-fabricated."""
+    """Known, pending, or uncertain job readback; never caller-fabricated."""
 
     state: str
     protected_action_result: ProtectedModelActionResult | None
@@ -580,6 +581,8 @@ class GatewayLocalProtectedActionBridge:
             )
         if recovered.state == "known":
             return self._persist_known(preparation, recovered)
+        if recovered.state == "pending":
+            return recovered
         return self._uncertain(
             preparation,
             provider_request_ref=recovered.provider_request_ref,
@@ -607,6 +610,8 @@ class GatewayLocalProtectedActionBridge:
             return self.reconcile(preparation=preparation, action=action)
         if terminal.state == "known":
             return self._persist_known(preparation, terminal)
+        if terminal.state == "pending":
+            return terminal
         return self._uncertain(
             preparation,
             provider_request_ref=terminal.provider_request_ref,
@@ -770,6 +775,7 @@ class _ReservedOfficialBaselineDispatcher:
         ) or terminal.state not in {
             "not_started",
             "known",
+            "pending",
             "uncertain",
         }:
             raise OfficialBaselineProtectedAuthorityError(
@@ -790,6 +796,23 @@ class _ReservedOfficialBaselineDispatcher:
             ):
                 raise OfficialBaselineProtectedAuthorityError(
                     "official baseline authoritative absence contains custody"
+                )
+            return terminal
+        if terminal.state == "pending":
+            if (
+                terminal.protected_action_result is not None
+                or terminal.protected_result_sha256 is not None
+                or terminal.protected_terminal_receipt_ref is not None
+                or terminal.protected_terminal_receipt_sha256 is not None
+                or terminal.model_provider_response_sha256 is not None
+                or terminal.uncertainty_sha256 is not None
+                or _SAFE_REF_RE.fullmatch(
+                    str(terminal.provider_request_ref or "")
+                )
+                is None
+            ):
+                raise OfficialBaselineProtectedAuthorityError(
+                    "official baseline protected pending state is invalid"
                 )
             return terminal
         if terminal.state == "uncertain":
@@ -1054,6 +1077,10 @@ class _ReservedOfficialBaselineDispatcher:
                 terminal=terminal,
                 preparation=preparation,
             )
+        if terminal.state == "pending":
+            raise OfficialBaselineProviderPendingError(
+                "official baseline provider run is still pending"
+            )
         if terminal.state == "uncertain":
             self._persist_uncertain(
                 identity=identity,
@@ -1111,6 +1138,10 @@ class _ReservedOfficialBaselineDispatcher:
                 identity=identity,
                 terminal=terminal,
                 preparation=preparation,
+            )
+        if terminal.state == "pending":
+            raise OfficialBaselineProviderPendingError(
+                "official baseline provider run is still pending"
             )
         if terminal.state == "uncertain":
             self._persist_uncertain(

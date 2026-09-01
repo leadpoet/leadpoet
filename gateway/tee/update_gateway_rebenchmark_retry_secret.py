@@ -3,10 +3,10 @@
 The retry operation remains intentionally fixed: it can only move provider
 retry rounds from its default 1 (absent) or explicit 1 to explicit 2, and retry
 concurrency from its default 2 (absent) or explicit 2 to explicit 1.  The
-first-pass concurrency operation accepts an exact expected old value and a
-bounded new value.  Both operations preserve every unrelated secret field,
-verify the exact persisted version, and restore the prior version if readback
-fails.
+concurrency operation accepts an exact expected old value and a bounded new
+value for either the first-pass or retry worker pool.  All operations preserve
+every unrelated secret field, verify the exact persisted version, and restore
+the prior version if readback fails.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ _TARGET_VALUES = {
 _TARGET_NAMES = frozenset(_TARGET_VALUES)
 _FIRST_PASS_CONCURRENCY_ENV = "RESEARCH_LAB_BENCHMARK_CONCURRENCY"
 _MAX_FIRST_PASS_CONCURRENCY = 64
+_MAX_RETRY_CONCURRENCY = 64
 _ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -571,16 +572,21 @@ def update_gateway_rebenchmark_retry_secret(
     }
 
 
-def _bounded_first_pass_concurrency(value: Any, *, label: str) -> int:
+def _bounded_rebenchmark_concurrency(
+    value: Any,
+    *,
+    label: str,
+    maximum: int,
+) -> int:
     if isinstance(value, bool):
         raise GatewayRebenchmarkRetryUpdateError(f"{label} is invalid")
     try:
         normalized = int(value)
     except (TypeError, ValueError, OverflowError) as exc:
         raise GatewayRebenchmarkRetryUpdateError(f"{label} is invalid") from exc
-    if not 1 <= normalized <= _MAX_FIRST_PASS_CONCURRENCY:
+    if not 1 <= normalized <= maximum:
         raise GatewayRebenchmarkRetryUpdateError(
-            f"{label} must be between 1 and {_MAX_FIRST_PASS_CONCURRENCY}"
+            f"{label} must be between 1 and {maximum}"
         )
     return normalized
 
@@ -591,12 +597,13 @@ def update_gateway_rebenchmark_concurrency_secret(
     expected_prior_scoring_configuration_hash: str,
     expected_current_concurrency: int,
     target_concurrency: int,
+    retry_concurrency: bool = False,
     apply: bool = False,
     secret_id: str = DEFAULT_SECRET_ID,
     backup_directory: Path = DEFAULT_BACKUP_DIRECTORY,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Verify or apply one exact, bounded first-pass concurrency change."""
+    """Verify or apply one exact, bounded rebenchmark concurrency change."""
 
     expected_prior_hash = str(
         expected_prior_scoring_configuration_hash or ""
@@ -605,15 +612,39 @@ def update_gateway_rebenchmark_concurrency_secret(
         raise GatewayRebenchmarkRetryUpdateError(
             "expected prior scoring configuration hash is invalid"
         )
-    expected_concurrency = _bounded_first_pass_concurrency(
+    concurrency_env = (
+        _RETRY_CONCURRENCY_ENV
+        if retry_concurrency
+        else _FIRST_PASS_CONCURRENCY_ENV
+    )
+    default_concurrency = 2 if retry_concurrency else 1
+    maximum_concurrency = (
+        _MAX_RETRY_CONCURRENCY
+        if retry_concurrency
+        else _MAX_FIRST_PASS_CONCURRENCY
+    )
+    concurrency_label = "retry" if retry_concurrency else "first-pass"
+    prior_result_name = (
+        "prior_retry_concurrency"
+        if retry_concurrency
+        else "prior_first_pass_concurrency"
+    )
+    current_result_name = (
+        "current_retry_concurrency"
+        if retry_concurrency
+        else "current_first_pass_concurrency"
+    )
+    expected_concurrency = _bounded_rebenchmark_concurrency(
         expected_current_concurrency,
-        label="expected current first-pass concurrency",
+        label=f"expected current {concurrency_label} concurrency",
+        maximum=maximum_concurrency,
     )
-    target = _bounded_first_pass_concurrency(
+    target = _bounded_rebenchmark_concurrency(
         target_concurrency,
-        label="target first-pass concurrency",
+        label=f"target {concurrency_label} concurrency",
+        maximum=maximum_concurrency,
     )
-    target_names = frozenset({_FIRST_PASS_CONCURRENCY_ENV})
+    target_names = frozenset({concurrency_env})
 
     initial_response = secrets_client.get_secret_value(SecretId=secret_id)
     initial_version = str(initial_response.get("VersionId") or "")
@@ -626,26 +657,30 @@ def update_gateway_rebenchmark_concurrency_secret(
         initial_secret,
         target_names=target_names,
     )
-    raw_current = environment.get(_FIRST_PASS_CONCURRENCY_ENV)
+    raw_current = environment.get(concurrency_env)
     try:
-        current_concurrency = int(raw_current) if raw_current is not None else 1
+        current_concurrency = (
+            int(raw_current)
+            if raw_current is not None
+            else default_concurrency
+        )
     except (TypeError, ValueError, OverflowError) as exc:
         raise GatewayRebenchmarkRetryUpdateError(
-            "gateway first-pass concurrency is invalid"
+            f"gateway {concurrency_label} concurrency is invalid"
         ) from exc
-    if not 1 <= current_concurrency <= _MAX_FIRST_PASS_CONCURRENCY:
+    if not 1 <= current_concurrency <= maximum_concurrency:
         raise GatewayRebenchmarkRetryUpdateError(
-            "gateway first-pass concurrency is outside the supported bound"
+            f"gateway {concurrency_label} concurrency is outside the supported bound"
         )
 
     if current_concurrency == target:
         prior_candidates: list[str] = []
         explicit_prior = dict(environment)
-        explicit_prior[_FIRST_PASS_CONCURRENCY_ENV] = str(expected_concurrency)
+        explicit_prior[concurrency_env] = str(expected_concurrency)
         prior_candidates.append(_configuration_hash(explicit_prior))
-        if expected_concurrency == 1:
+        if expected_concurrency == default_concurrency:
             default_prior = dict(environment)
-            default_prior.pop(_FIRST_PASS_CONCURRENCY_ENV, None)
+            default_prior.pop(concurrency_env, None)
             prior_candidates.append(_configuration_hash(default_prior))
         if expected_prior_hash not in prior_candidates:
             raise GatewayRebenchmarkRetryUpdateError(
@@ -655,13 +690,13 @@ def update_gateway_rebenchmark_concurrency_secret(
         return {
             "status": "already_applied",
             "secret_id": secret_id,
-            "prior_first_pass_concurrency": expected_concurrency,
-            "current_first_pass_concurrency": target,
+            prior_result_name: expected_concurrency,
+            current_result_name: target,
             "scoring_configuration_hash": _configuration_hash(environment),
         }
     if current_concurrency != expected_concurrency:
         raise GatewayRebenchmarkRetryUpdateError(
-            "gateway first-pass concurrency does not match the expected old value"
+            f"gateway {concurrency_label} concurrency does not match the expected old value"
         )
 
     prior_scoring_hash = _configuration_hash(environment)
@@ -673,7 +708,7 @@ def update_gateway_rebenchmark_concurrency_secret(
     candidate_secret = _render_environment(
         initial_secret,
         document_format=document_format,
-        values={_FIRST_PASS_CONCURRENCY_ENV: str(target)},
+        values={concurrency_env: str(target)},
         target_names=target_names,
     )
     candidate_environment, _ = _parse_environment(
@@ -694,7 +729,7 @@ def update_gateway_rebenchmark_concurrency_secret(
         raise GatewayRebenchmarkRetryUpdateError(
             "candidate gateway secret changes unrelated environment values"
         )
-    if candidate_environment.get(_FIRST_PASS_CONCURRENCY_ENV) != str(target):
+    if candidate_environment.get(concurrency_env) != str(target):
         raise GatewayRebenchmarkRetryUpdateError(
             "candidate gateway secret did not preserve the target concurrency"
         )
@@ -704,8 +739,8 @@ def update_gateway_rebenchmark_concurrency_secret(
         return {
             "status": "verified",
             "secret_id": secret_id,
-            "prior_first_pass_concurrency": expected_concurrency,
-            "current_first_pass_concurrency": target,
+            prior_result_name: expected_concurrency,
+            current_result_name: target,
             "prior_scoring_configuration_hash": prior_scoring_hash,
             "current_scoring_configuration_hash": current_scoring_hash,
         }
@@ -714,7 +749,11 @@ def update_gateway_rebenchmark_concurrency_secret(
         initial_secret,
         backup_directory=backup_directory,
         now=now or datetime.now(timezone.utc),
-        operation_label="rebenchmark-concurrency",
+        operation_label=(
+            "rebenchmark-retry-concurrency"
+            if retry_concurrency
+            else "rebenchmark-concurrency"
+        ),
     )
     current_response = secrets_client.get_secret_value(SecretId=secret_id)
     if (
@@ -764,8 +803,8 @@ def update_gateway_rebenchmark_concurrency_secret(
         "status": "updated",
         "secret_id": secret_id,
         "backup_path": str(backup_path),
-        "prior_first_pass_concurrency": expected_concurrency,
-        "current_first_pass_concurrency": target,
+        prior_result_name: expected_concurrency,
+        current_result_name: target,
         "prior_scoring_configuration_hash": prior_scoring_hash,
         "current_scoring_configuration_hash": current_scoring_hash,
     }
@@ -810,16 +849,54 @@ def main() -> int:
             "the fixed retry extension."
         ),
     )
+    parser.add_argument(
+        "--expected-current-retry-concurrency",
+        type=int,
+        help=(
+            "Exact current retry concurrency for a bounded concurrency change."
+        ),
+    )
+    parser.add_argument(
+        "--target-retry-concurrency",
+        type=int,
+        help=(
+            "Bounded retry concurrency to persist instead of applying the "
+            "fixed retry extension."
+        ),
+    )
     args = parser.parse_args()
 
     import boto3
 
     secrets_client = boto3.client("secretsmanager", region_name="us-east-1")
-    if args.target_first_pass_concurrency is not None:
+    first_pass_change_requested = any(
+        value is not None
+        for value in (
+            args.expected_current_first_pass_concurrency,
+            args.target_first_pass_concurrency,
+        )
+    )
+    retry_change_requested = any(
+        value is not None
+        for value in (
+            args.expected_current_retry_concurrency,
+            args.target_retry_concurrency,
+        )
+    )
+    if first_pass_change_requested and retry_change_requested:
+        parser.error(
+            "first-pass and retry concurrency changes are mutually exclusive"
+        )
+    if first_pass_change_requested:
         if args.expected_current_first_pass_concurrency is None:
             parser.error(
                 "--expected-current-first-pass-concurrency is required with "
                 "--target-first-pass-concurrency"
+            )
+        if args.target_first_pass_concurrency is None:
+            parser.error(
+                "--target-first-pass-concurrency is required with "
+                "--expected-current-first-pass-concurrency"
             )
         result = update_gateway_rebenchmark_concurrency_secret(
             secrets_client=secrets_client,
@@ -834,12 +911,32 @@ def main() -> int:
             secret_id=str(args.secret_id),
             backup_directory=args.backup_directory,
         )
-    else:
-        if args.expected_current_first_pass_concurrency is not None:
+    elif retry_change_requested:
+        if args.expected_current_retry_concurrency is None:
             parser.error(
-                "--expected-current-first-pass-concurrency requires "
-                "--target-first-pass-concurrency"
+                "--expected-current-retry-concurrency is required with "
+                "--target-retry-concurrency"
             )
+        if args.target_retry_concurrency is None:
+            parser.error(
+                "--target-retry-concurrency is required with "
+                "--expected-current-retry-concurrency"
+            )
+        result = update_gateway_rebenchmark_concurrency_secret(
+            secrets_client=secrets_client,
+            expected_prior_scoring_configuration_hash=str(
+                args.expected_prior_scoring_configuration_hash
+            ),
+            expected_current_concurrency=(
+                args.expected_current_retry_concurrency
+            ),
+            target_concurrency=args.target_retry_concurrency,
+            retry_concurrency=True,
+            apply=bool(args.apply),
+            secret_id=str(args.secret_id),
+            backup_directory=args.backup_directory,
+        )
+    else:
         result = update_gateway_rebenchmark_retry_secret(
             secrets_client=secrets_client,
             expected_prior_scoring_configuration_hash=str(
@@ -849,14 +946,30 @@ def main() -> int:
             secret_id=str(args.secret_id),
             backup_directory=args.backup_directory,
         )
-    if "current_first_pass_concurrency" in result:
+    if (
+        "current_first_pass_concurrency" in result
+        or "current_retry_concurrency" in result
+    ):
+        retry_change = "current_retry_concurrency" in result
+        label = "retry" if retry_change else "first-pass"
+        prior_name = (
+            "prior_retry_concurrency"
+            if retry_change
+            else "prior_first_pass_concurrency"
+        )
+        current_name = (
+            "current_retry_concurrency"
+            if retry_change
+            else "current_first_pass_concurrency"
+        )
         print(
-            "Gateway rebenchmark first-pass concurrency %s; "
+            "Gateway rebenchmark %s concurrency %s; "
             "prior=%s current=%s scoring_configuration_hash=%s%s"
             % (
+                label,
                 result["status"],
-                result["prior_first_pass_concurrency"],
-                result["current_first_pass_concurrency"],
+                result[prior_name],
+                result[current_name],
                 result.get("current_scoring_configuration_hash")
                 or result["scoring_configuration_hash"],
                 (

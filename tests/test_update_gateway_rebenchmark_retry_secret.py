@@ -612,6 +612,59 @@ def test_concurrency_update_is_idempotent_against_prior_hash(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_retry_concurrency_update_is_exact_and_scoring_identity_neutral(
+    tmp_path,
+):
+    original = (
+        "UNRELATED='preserve me'\n"
+        "RESEARCH_LAB_BENCHMARK_CONCURRENCY=5\n"
+        "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n"
+    )
+    client = FakeSecretsClient(original)
+    prior_hash = _scoring_hash(retry_rounds="2")
+
+    verified = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=prior_hash,
+        expected_current_concurrency=1,
+        target_concurrency=2,
+        retry_concurrency=True,
+        backup_directory=tmp_path,
+    )
+
+    assert verified == {
+        "status": "verified",
+        "secret_id": "leadpoet/prod/gateway/env",
+        "prior_retry_concurrency": 1,
+        "current_retry_concurrency": 2,
+        "prior_scoring_configuration_hash": prior_hash,
+        "current_scoring_configuration_hash": prior_hash,
+    }
+    assert client.put_calls == []
+
+    updated = update_gateway_rebenchmark_concurrency_secret(
+        secrets_client=client,
+        expected_prior_scoring_configuration_hash=prior_hash,
+        expected_current_concurrency=1,
+        target_concurrency=2,
+        retry_concurrency=True,
+        apply=True,
+        backup_directory=tmp_path,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    persisted = client.versions[client.current]
+    assert "UNRELATED='preserve me'" in persisted
+    assert "RESEARCH_LAB_BENCHMARK_CONCURRENCY=5" in persisted
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2" in persisted
+    assert persisted.count("RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=") == 1
+    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=2" in persisted
+    assert updated["prior_scoring_configuration_hash"] == prior_hash
+    assert updated["current_scoring_configuration_hash"] == prior_hash
+    assert Path(updated["backup_path"]).read_text(encoding="utf-8") == original
+
+
 @pytest.mark.parametrize(
     ("expected_current", "target"),
     [(0, 20), (5, 0), (5, 65), (True, 20)],

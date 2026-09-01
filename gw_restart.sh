@@ -24,6 +24,7 @@ GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-us
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
 GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
 GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
+GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="${GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER:-}"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
 GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
@@ -419,10 +420,15 @@ fi
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
   if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
       || [ "$GATEWAY_MINER_MAINTENANCE_PROOF_FD" != "190" ] \
-      || [ ! -r "/proc/$$/fd/190" ]; then
+      || [ ! -r "/proc/$$/fd/190" ] \
+      || [ "$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" != "/proc/self/fd/195" ] \
+      || [ ! -r "/proc/$$/fd/195" ]; then
     echo "ERROR: miner-maintenance invocation proof descriptor is invalid" >&2
     exit 2
   fi
+elif [ -n "$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" ]; then
+  echo "ERROR: retry reconciliation helper lacks miner-maintenance authority" >&2
+  exit 2
 fi
 if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
   if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
@@ -655,6 +661,7 @@ start_gateway_offline_artifact_prepare() {
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -684,7 +691,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
     >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
@@ -807,6 +814,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
     GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
+    GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
     GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
@@ -993,6 +1001,7 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
   process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
   rm -f -- "$process_group_marker"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -1022,7 +1031,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
     >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
@@ -2399,28 +2408,62 @@ acquire_gateway_restart_lock() {
 }
 
 reconcile_gateway_rebenchmark_retry_runtime() {
-  local reconciliation_root
+  local reconciliation_helper reconciliation_root
   reconciliation_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
-  if [ ! -r "$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py" ] \
-      || [ -L "$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py" ]; then
+  reconciliation_helper="$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+  if [ -n "${GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER:-}" ]; then
+    reconciliation_helper="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER"
+  fi
+  if [ ! -r "$reconciliation_helper" ]; then
+    echo "ERROR: exact retry reconciliation authority is unavailable" >&2
+    return 1
+  fi
+  if [ "$reconciliation_helper" != "/proc/self/fd/195" ] \
+      && [ -L "$reconciliation_helper" ]; then
     echo "ERROR: exact retry reconciliation authority is unavailable" >&2
     return 1
   fi
   (
-    cd "$reconciliation_root"
-    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$reconciliation_root" \
-      "$GATEWAY_PYTHON_BIN" - \
-      "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
-import sys
+    cd /
+    PYTHONDONTWRITEBYTECODE=1 "$GATEWAY_PYTHON_BIN" -I -S - \
+      "$reconciliation_helper" "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
+import fcntl
+import os
 from pathlib import Path
+import stat
+import sys
 
-from gateway.tee.update_gateway_rebenchmark_retry_secret import (
-    reconcile_gateway_rebenchmark_runtime_environment_file,
+helper_path = sys.argv[1]
+if helper_path == "/proc/self/fd/195":
+    metadata = os.fstat(195)
+    required_seals = sum(
+        int(getattr(fcntl, name))
+        for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o400
+        or not 2 <= metadata.st_size <= 4 * 1024 * 1024
+        or int(fcntl.fcntl(195, fcntl.F_GET_SEALS)) & required_seals
+        != required_seals
+    ):
+        raise SystemExit("sealed retry reconciliation helper is invalid")
+source = Path(helper_path).read_bytes()
+if not 2 <= len(source) <= 4 * 1024 * 1024:
+    raise SystemExit("retry reconciliation helper size is invalid")
+namespace = dict(
+    __name__="_leadpoet_retry_reconciliation_helper",
+    __file__=helper_path,
+    __package__=None,
 )
+exec(compile(source, helper_path, "exec"), namespace)
+reconcile = namespace.get("reconcile_gateway_rebenchmark_runtime_environment_file")
+if not callable(reconcile):
+    raise SystemExit("retry reconciliation helper contract is unavailable")
 
-result = reconcile_gateway_rebenchmark_runtime_environment_file(
-    runtime_environment_path=Path(sys.argv[1]),
-    authoritative_environment_path=Path(sys.argv[2]),
+result = reconcile(
+    runtime_environment_path=Path(sys.argv[2]),
+    authoritative_environment_path=Path(sys.argv[3]),
 )
 print(
     "Reconciled secret-authoritative rebenchmark retry controls: "
@@ -2594,6 +2637,7 @@ restart_only_keys = {
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
@@ -2754,6 +2798,7 @@ skip_keys = {
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -2915,6 +2960,7 @@ skip_keys = {
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
+    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -3583,6 +3629,7 @@ exec env \
   GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
   GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
+  GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
@@ -3852,6 +3899,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -3868,7 +3916,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -3880,6 +3928,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -3896,7 +3945,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -4078,6 +4127,7 @@ leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
 env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+  -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -4093,7 +4143,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
-  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
+  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""
@@ -4191,8 +4241,9 @@ GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  exec 190>&- 191>&- 192>&- 193>&- 194>&-
+  exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
   unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
+  unset GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER
   unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
   unset GATEWAY_HOST_MEMORY_GUARD_PATH
 fi

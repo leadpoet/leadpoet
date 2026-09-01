@@ -301,6 +301,64 @@ def test_gateway_retry_reconciliation_uses_candidate_authority_over_n_minus_one(
     assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
 
 
+def test_gateway_retry_reconciliation_survives_bootstrap_authority_teardown(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script,
+        "reconcile_gateway_rebenchmark_retry_runtime",
+    )
+    old_root = tmp_path / "n-minus-one"
+    legacy_module = (
+        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
+    )
+    legacy_module.parent.mkdir(parents=True)
+    legacy_module.write_text("# no reconciliation contract\n", encoding="utf-8")
+    runtime = tmp_path / "runtime.env"
+    authority = tmp_path / "authority.env"
+    runtime.write_text(
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
+        encoding="utf-8",
+    )
+    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
+    helper = ROOT / "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+    harness = tmp_path / "sealed-candidate-reconcile.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -Eeuo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
+        "GATEWAY_RESTART_AUTHORITY_ROOT=\n"
+        "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="
+        f"{shlex.quote(str(helper))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
+        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
+        f"{function}\n"
+        "reconcile_gateway_rebenchmark_retry_runtime\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    reconciled = runtime.read_text(encoding="utf-8")
+    assert "export UNRELATED=preserved" in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
+    assert "managed=2 present=0 absent=2" in completed.stdout
+
+
 def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))
@@ -2302,7 +2360,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -2327,7 +2385,7 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
         '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &'
+        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script

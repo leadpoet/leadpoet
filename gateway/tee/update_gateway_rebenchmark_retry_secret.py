@@ -23,12 +23,6 @@ import tempfile
 from typing import Any, Mapping
 import uuid
 
-from gateway.tee.scoring_executor import (
-    SCORING_RUNTIME_ENV_NAMES,
-    configuration_hash as scoring_configuration_hash,
-)
-
-
 DEFAULT_SECRET_ID = "leadpoet/prod/gateway/env"
 DEFAULT_BACKUP_DIRECTORY = Path(
     "/home/ec2-user/.config/leadpoet/env-backups"
@@ -219,6 +213,15 @@ def _restore_prior_secret(
 
 
 def _configuration_hash(environment: Mapping[str, str]) -> str:
+    # Runtime-clone reconciliation executes this module from a sealed
+    # candidate-owned file descriptor before the candidate checkout is active.
+    # Keep that narrow path stdlib-only; secret mutations load scoring identity
+    # lazily from the exact active checkout when they actually need it.
+    from gateway.tee.scoring_executor import (
+        SCORING_RUNTIME_ENV_NAMES,
+        configuration_hash as scoring_configuration_hash,
+    )
+
     return scoring_configuration_hash(
         {name: environment.get(name) for name in SCORING_RUNTIME_ENV_NAMES}
     )

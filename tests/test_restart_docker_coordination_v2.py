@@ -57,7 +57,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
     assert script.count(
-        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &"
+        "7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &"
     ) == 2
 
 

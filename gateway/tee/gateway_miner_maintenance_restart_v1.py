@@ -75,7 +75,7 @@ from scripts.gateway_git_deploy import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v2"
+SCHEMA_VERSION = "leadpoet.gateway_miner_maintenance_restart.v3"
 DEFAULT_RELEASE_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 DEFAULT_RELEASE_PREFIX = "attested-v2/releases"
 CANONICAL_GATEWAY_RESTART_LOCK_PATH = Path(
@@ -85,11 +85,18 @@ CANONICAL_GATEWAY_ENV_PATH = Path(
     "/home/ec2-user/.config/leadpoet/gateway.env"
 )
 PROOF_FD_ENV_NAME = "GATEWAY_MINER_MAINTENANCE_PROOF_FD"
+RETRY_RECONCILIATION_HELPER_ENV_NAME = (
+    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER"
+)
 PROOF_FD_NUMBER = 190
 CONTROLLER_WRAPPER_FD_NUMBER = 191
 CONTROLLER_GIT_HELPER_FD_NUMBER = 192
 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER = 193
 CONTROLLER_MEMORY_GUARD_FD_NUMBER = 194
+RETRY_RECONCILIATION_HELPER_FD_NUMBER = 195
+RETRY_RECONCILIATION_HELPER_PATH = (
+    "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
+)
 MAX_PROOF_BYTES = 32 * 1024
 MAX_RELEASE_CHANNEL_BYTES = 4 * 1024 * 1024
 MAX_RUNTIME_STATUS_BYTES = 256 * 1024
@@ -174,6 +181,7 @@ _RESTART_AUTHORITY_NAMES = frozenset(
         "GATEWAY_GIT_HELPER",
         "GATEWAY_EXACT_COMMIT_HELPER",
         "GATEWAY_HOST_MEMORY_GUARD_PATH",
+        RETRY_RECONCILIATION_HELPER_ENV_NAME,
     }
 )
 _PROOF_FIELDS = frozenset(
@@ -182,6 +190,7 @@ _PROOF_FIELDS = frozenset(
         "candidate_commit",
         "candidate_tree_hash",
         "candidate_blob_manifest_sha256",
+        "candidate_retry_reconciliation_helper_sha256",
         "pre_hydration_runtime_commit",
         "n_minus_one_controller_commit",
         "release_channel_hash",
@@ -3038,6 +3047,15 @@ def _validate_candidate_identity(
         host_restart_is_open_fd=host_restart_is_open_fd,
         reconcile_host_wrapper=reconcile_host_wrapper,
     )
+    retry_reconciliation_helper = _run_git_bytes(
+        repository,
+        "show",
+        f"{commit}:{RETRY_RECONCILIATION_HELPER_PATH}",
+    )
+    if not 2 <= len(retry_reconciliation_helper) <= 4 * 1024 * 1024:
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate retry reconciliation helper size is invalid"
+        )
     _require_unmodified_git_object_authority(repository)
     return {
         **tree_evidence,
@@ -3046,6 +3064,11 @@ def _validate_candidate_identity(
             controller_bundle["controller_commit"]
         ),
         "controller_bundle": controller_bundle,
+        "retry_reconciliation_helper": {
+            "payload": retry_reconciliation_helper,
+            "commitment": "sha256:"
+            + hashlib.sha256(retry_reconciliation_helper).hexdigest(),
+        },
     }
 
 
@@ -3072,6 +3095,9 @@ def _proof_body(
         "candidate_tree_hash": str(tree_evidence["tree_hash"]),
         "candidate_blob_manifest_sha256": "sha256:"
         + str(tree_evidence["blob_manifest_sha256"]),
+        "candidate_retry_reconciliation_helper_sha256": str(
+            tree_evidence["retry_reconciliation_helper"]["commitment"]
+        ),
         "pre_hydration_runtime_commit": str(tree_evidence["previous_sha"]),
         "n_minus_one_controller_commit": str(
             tree_evidence["n_minus_one_controller_commit"]
@@ -3148,6 +3174,7 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
     }
     commitment_fields = (
         "candidate_blob_manifest_sha256",
+        "candidate_retry_reconciliation_helper_sha256",
         "release_channel_hash",
         "release_channel_object_sha256",
         "gateway_release_hash",
@@ -3229,6 +3256,7 @@ def _require_reserved_memfd_numbers_available() -> None:
         CONTROLLER_GIT_HELPER_FD_NUMBER,
         CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
         CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+        RETRY_RECONCILIATION_HELPER_FD_NUMBER,
     ):
         try:
             os.fstat(descriptor)
@@ -3595,6 +3623,10 @@ def _verify_proof_against_state(
         if (
             validated["candidate_blob_manifest_sha256"]
             != "sha256:" + str(tree_evidence["blob_manifest_sha256"])
+            or validated["candidate_retry_reconciliation_helper_sha256"]
+            != str(
+                tree_evidence["retry_reconciliation_helper"]["commitment"]
+            )
             or validated["pre_hydration_runtime_commit"]
             != str(tree_evidence["previous_sha"])
             or validated["n_minus_one_controller_commit"]
@@ -4195,6 +4227,32 @@ def _install_controller_bundle_memfds(
         )
 
 
+def _install_retry_reconciliation_helper_memfd(
+    tree_evidence: Mapping[str, Any],
+) -> None:
+    helper = tree_evidence.get("retry_reconciliation_helper")
+    if not isinstance(helper, Mapping):
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate retry reconciliation helper is incomplete"
+        )
+    payload = helper.get("payload")
+    commitment = helper.get("commitment")
+    if (
+        not isinstance(payload, bytes)
+        or commitment
+        != "sha256:" + hashlib.sha256(payload).hexdigest()
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "candidate retry reconciliation helper differs from its commitment"
+        )
+    _seal_payload_at_fd_number(
+        payload=payload,
+        fd_number=RETRY_RECONCILIATION_HELPER_FD_NUMBER,
+        name="leadpoet-retry-reconciliation-helper",
+        max_bytes=4 * 1024 * 1024,
+    )
+
+
 def bootstrap_gateway_miner_maintenance_restart(
     *,
     repo_root: Path,
@@ -4286,6 +4344,7 @@ def bootstrap_gateway_miner_maintenance_restart(
         )
         _require_pre_activation_runtime_source_add_closed()
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
+        _install_retry_reconciliation_helper_memfd(final_tree)
         controller_fds_open = True
         for descriptor in (
             PROOF_FD_NUMBER,
@@ -4293,6 +4352,7 @@ def bootstrap_gateway_miner_maintenance_restart(
             CONTROLLER_GIT_HELPER_FD_NUMBER,
             CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
             CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+            RETRY_RECONCILIATION_HELPER_FD_NUMBER,
         ):
             os.set_inheritable(descriptor, True)
         _require_canonical_restart_lock_fd()
@@ -4310,6 +4370,9 @@ def bootstrap_gateway_miner_maintenance_restart(
                 ),
                 "GATEWAY_HOST_MEMORY_GUARD_PATH": (
                     f"/proc/self/fd/{CONTROLLER_MEMORY_GUARD_FD_NUMBER}"
+                ),
+                RETRY_RECONCILIATION_HELPER_ENV_NAME: (
+                    f"/proc/self/fd/{RETRY_RECONCILIATION_HELPER_FD_NUMBER}"
                 ),
                 "LEADPOET_GATEWAY_ENV_SECRET_ID": GATEWAY_SECRET_ID,
                 "GATEWAY_V2_RELEASE_BUCKET": DEFAULT_RELEASE_BUCKET,
@@ -4354,6 +4417,7 @@ def bootstrap_gateway_miner_maintenance_restart(
                 CONTROLLER_GIT_HELPER_FD_NUMBER,
                 CONTROLLER_EXACT_COMMIT_HELPER_FD_NUMBER,
                 CONTROLLER_MEMORY_GUARD_FD_NUMBER,
+                RETRY_RECONCILIATION_HELPER_FD_NUMBER,
             ):
                 try:
                     os.close(descriptor)

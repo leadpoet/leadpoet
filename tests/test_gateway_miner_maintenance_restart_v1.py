@@ -801,6 +801,17 @@ def _controller_bundle(
     }
 
 
+def _retry_reconciliation_helper() -> dict[str, object]:
+    payload = (
+        b"def reconcile_gateway_rebenchmark_runtime_environment_file(**_kwargs):\n"
+        b"    return {'status': 'reconciled'}\n"
+    )
+    return {
+        "payload": payload,
+        "commitment": "sha256:" + hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def _release_evidence(
     commit: str = CANDIDATE_COMMIT,
     release_hash: str = RELEASE_HASH,
@@ -845,6 +856,7 @@ def _prepare(
             "previous_sha": controller_commit,
             "n_minus_one_controller_commit": controller_commit,
             "controller_bundle": _controller_bundle(controller_commit),
+            "retry_reconciliation_helper": _retry_reconciliation_helper(),
         },
     )
     monkeypatch.setattr(maintenance, "_verify_protected_source", lambda: None)
@@ -3343,6 +3355,46 @@ def test_sealed_invocation_proof_survives_exec_and_rejects_writes(
     or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
     reason="Linux sealed memfd behavior",
 )
+def test_candidate_retry_reconciliation_helper_is_sealed_for_controller_exec():
+    helper = _retry_reconciliation_helper()
+    try:
+        os.close(maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER)
+    except OSError:
+        pass
+    try:
+        maintenance._install_retry_reconciliation_helper_memfd(
+            {"retry_reconciliation_helper": helper}
+        )
+        descriptor = maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        assert os.read(descriptor, 4 * 1024 * 1024) == helper["payload"]
+        required_seals = sum(
+            int(getattr(maintenance.fcntl, name))
+            for name in (
+                "F_SEAL_WRITE",
+                "F_SEAL_GROW",
+                "F_SEAL_SHRINK",
+                "F_SEAL_SEAL",
+            )
+        )
+        assert (
+            int(maintenance.fcntl.fcntl(descriptor, maintenance.fcntl.F_GET_SEALS))
+            & required_seals
+        ) == required_seals
+        with pytest.raises(OSError):
+            os.write(descriptor, b"tamper")
+    finally:
+        try:
+            os.close(maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER)
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "memfd_create")
+    or not hasattr(maintenance.fcntl, "F_ADD_SEALS"),
+    reason="Linux sealed memfd behavior",
+)
 def test_closed_or_tampered_proof_fd_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -3493,6 +3545,11 @@ def test_candidate_identity_binds_isolated_n_minus_one_plan_and_archive(
         "_verified_installed_controller_bundle",
         lambda **_kwargs: _controller_bundle(),
     )
+    monkeypatch.setattr(
+        maintenance,
+        "_run_git_bytes",
+        lambda *_args: _retry_reconciliation_helper()["payload"],
+    )
 
     evidence = maintenance._validate_candidate_identity(
         repo_root=repo,
@@ -3504,6 +3561,9 @@ def test_candidate_identity_binds_isolated_n_minus_one_plan_and_archive(
     )
 
     assert evidence["tree_hash"] == TREE_HASH
+    assert evidence["retry_reconciliation_helper"]["commitment"].startswith(
+        "sha256:"
+    )
     tampered = json.loads(plan.read_text(encoding="utf-8"))
     tampered["branch_head_sha"] = "f" * 40
     plan.write_text(json.dumps(tampered), encoding="utf-8")
@@ -4028,7 +4088,7 @@ def test_exact_deployed_n_minus_one_preserves_proof_until_candidate_gates():
         "finalize_deployment_record succeeded", runtime_verify
     )
     close_parent = candidate_restart.index(
-        "exec 190>&- 191>&- 192>&- 193>&- 194>&-",
+        "exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-",
         finalize,
     )
     completed = candidate_restart.index("GATEWAY_DEPLOY_COMPLETED=1", close_parent)
@@ -4039,7 +4099,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
     restart = (
         Path(__file__).resolve().parents[1] / "gw_restart.sh"
     ).read_text(encoding="utf-8")
-    close_set = "190>&- 191>&- 192>&- 193>&- 194>&-"
+    close_set = "190>&- 191>&- 192>&- 193>&- 194>&- 195>&-"
     for module_name in (
         "gateway.utils.tee_egress_forwarder",
         "gateway.utils.tee_inter_enclave_relay",
@@ -4051,6 +4111,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
         command = restart[position:command_end]
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
+        assert "-u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" in command
         assert "-u GATEWAY_GIT_HELPER" in command
         assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command
@@ -4064,6 +4125,7 @@ def test_long_lived_runtime_children_receive_no_proof_or_controller_fds():
         command = restart[command_start:position + 300]
         assert close_set in command
         assert "-u GATEWAY_MINER_MAINTENANCE_PROOF_FD" in command
+        assert "-u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" in command
         assert "-u GATEWAY_GIT_HELPER" in command
         assert "-u GATEWAY_EXACT_COMMIT_HELPER" in command
         assert "-u GATEWAY_HOST_MEMORY_GUARD_PATH" in command

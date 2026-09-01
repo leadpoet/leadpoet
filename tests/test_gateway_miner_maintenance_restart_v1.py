@@ -3206,6 +3206,7 @@ def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
     )
     assert "_require_pre_activation_runtime_source_add_closed" in bootstrap_names
     assert "_require_runtime_source_add_closed" not in bootstrap_names
+    assert "_controller_exec_environment" in bootstrap_names
 
 
 def test_candidate_runtime_rejects_missing_source_add_intake_field(
@@ -3388,6 +3389,28 @@ def test_candidate_retry_reconciliation_helper_is_sealed_for_controller_exec():
             os.close(maintenance.RETRY_RECONCILIATION_HELPER_FD_NUMBER)
         except OSError:
             pass
+
+
+@pytest.mark.parametrize("parent_value", [None, "true"])
+def test_controller_exec_carries_proved_disabled_miner_submissions(parent_value):
+    parent = {"UNRELATED": "preserved"}
+    if parent_value is not None:
+        parent[disable_operation.TARGET_ENV_NAME] = parent_value
+
+    environment = maintenance._controller_exec_environment(parent)
+
+    assert environment == {
+        "UNRELATED": "preserved",
+        disable_operation.TARGET_ENV_NAME: disable_operation.TARGET_ENV_VALUE,
+    }
+    assert parent == (
+        {"UNRELATED": "preserved"}
+        if parent_value is None
+        else {
+            "UNRELATED": "preserved",
+            disable_operation.TARGET_ENV_NAME: parent_value,
+        }
+    )
 
 
 @pytest.mark.skipif(

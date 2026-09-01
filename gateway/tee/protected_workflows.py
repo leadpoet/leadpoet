@@ -1454,6 +1454,7 @@ PROTECTED_SYMBOLS = {
         "_leave_and_close_bootstrap_tree",
         "_install_controller_bundle_memfds",
         "_install_retry_reconciliation_helper_memfd",
+        "_controller_exec_environment",
         "bootstrap_gateway_miner_maintenance_restart",
         "_fetch_runtime_status",
         "verify_gateway_miner_maintenance_shutdown_quiescence",

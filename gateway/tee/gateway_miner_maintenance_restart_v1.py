@@ -4253,6 +4253,16 @@ def _install_retry_reconciliation_helper_memfd(
     )
 
 
+def _controller_exec_environment(
+    parent_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Carry the already-proved maintenance control across controller exec."""
+
+    environment = dict(parent_environment)
+    environment[TARGET_ENV_NAME] = TARGET_ENV_VALUE
+    return environment
+
+
 def bootstrap_gateway_miner_maintenance_restart(
     *,
     repo_root: Path,
@@ -4358,7 +4368,13 @@ def bootstrap_gateway_miner_maintenance_restart(
         _require_canonical_restart_lock_fd()
         _leave_and_close_bootstrap_tree(bootstrap_root)
         cleaned = True
-        environment = dict(os.environ)
+        # The exact candidate has already proved the durable false value and
+        # bound it into the sealed invocation proof.  The installed N-1 shell
+        # otherwise inherits its pre-mutation parent environment until its
+        # prepared runtime clone is loaded.  Carry only this fixed, proved
+        # control across exec; the destructive-boundary verifier independently
+        # rereads both the durable secret and sealed proof before shutdown.
+        environment = _controller_exec_environment(os.environ)
         environment.update(
             {
                 PROOF_FD_ENV_NAME: str(PROOF_FD_NUMBER),

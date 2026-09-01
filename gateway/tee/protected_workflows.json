@@ -5882,7 +5882,7 @@
       "symbol": "SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:4c707c30cf021898ff829b56418bdf12600f7f2e06970a2a6bffbad88d1a5dc1",
+      "ast_sha256": "sha256:9af082a67e92e86320efc151f0b7a8a469881ba6f1a6057485bc13bc2668806e",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
     },
@@ -8557,7 +8557,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:05c1253c4a4e349b1b3077785a8ef5d18d9a6152530d59f02aab518a22dfccab",
-  "protected_source_commit": "97c7e761c76f9ab23737d6cb90e5912122c8910f",
+  "manifest_hash": "sha256:383533e6a6262527ce39c58b9f45b7809ba801dac13db24b49494a2b4549e91f",
+  "protected_source_commit": "1840a3910fc5cb74c6fce5c5663fe1da594eda3d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

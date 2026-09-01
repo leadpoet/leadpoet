@@ -177,6 +177,23 @@ def test_lifespan_starts_and_cleans_source_add_outside_worker_startup() -> None:
         }
         for node in ast.walk(worker_services)
     )
+    worker_imports = [
+        node
+        for node in ast.walk(worker_services)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "gateway.research_lab.worker_autostart"
+    ]
+    worker_constructors = [
+        node
+        for node in ast.walk(worker_services)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ResearchLabWorkerSupervisor"
+    ]
+    assert len(worker_imports) == 1
+    assert len(worker_constructors) == 1
+    assert worker_imports[0].lineno > worker_services.lineno
+    assert worker_constructors[0].lineno > worker_services.lineno
 
     cleanup_lists = [
         node

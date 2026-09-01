@@ -490,8 +490,22 @@ async def _seal_openrouter_credential_v2(
     return dict(envelope)
 
 
+def _source_add_dispatcher_runtime_ready(request: Request) -> bool:
+    """Project the same live dispatcher gate used by gateway middleware."""
+
+    task = getattr(request.app.state, "source_add_dispatcher_task", None)
+    try:
+        return bool(task is not None and not task.done())
+    except Exception as exc:
+        logger.warning(
+            "research_lab_source_add_dispatcher_status_unavailable type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 @router.get("/status")
-async def research_lab_status() -> dict[str, object]:
+async def research_lab_status(request: Request) -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
     maintenance, source_add_control = await asyncio.gather(
         get_autoresearch_maintenance_state(),
@@ -534,9 +548,11 @@ async def research_lab_status() -> dict[str, object]:
         for key in ("paused", "status", "updated_at", "unavailable")
         if key in source_add_control
     }
+    dispatcher_runtime_ready = _source_add_dispatcher_runtime_ready(request)
     source_add_public["effective_dispatcher_enabled"] = bool(
         config.source_add_enabled
         and config.source_add_dispatcher_enabled
+        and dispatcher_runtime_ready
         and not source_add_control.get("paused", True)
     )
     # This is the public, fail-closed projection of every launch gate checked
@@ -546,6 +562,8 @@ async def research_lab_status() -> dict[str, object]:
         config.api_enabled
         and config.production_writes_enabled
         and config.source_add_enabled
+        and config.source_add_dispatcher_enabled
+        and dispatcher_runtime_ready
         and not source_add_control.get("paused", True)
     )
     return {

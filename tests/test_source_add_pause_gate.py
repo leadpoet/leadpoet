@@ -24,6 +24,17 @@ def _async_value(value):
     return _inner
 
 
+def _status_request(*, dispatcher_ready: bool = True):
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(done=lambda: not dispatcher_ready)
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(source_add_dispatcher_task=task)
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
     from types import SimpleNamespace
@@ -69,7 +80,7 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
         _async_value({"status": "aligned"}),
     )
 
-    status = await api.research_lab_status()
+    status = await api.research_lab_status(_status_request())
 
     assert status["source_add"]["control"] == {
         "paused": True,
@@ -90,6 +101,8 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
         ("production_writes_enabled", False, False),
         ("miner_submissions_enabled", False, True),
         ("source_add_enabled", False, False),
+        ("source_add_dispatcher_enabled", False, False),
+        ("source_add_dispatcher_ready", False, False),
         ("autoresearch_paused", True, True),
         ("source_add_paused", True, False),
     ),
@@ -107,6 +120,8 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
         "production_writes_enabled": True,
         "miner_submissions_enabled": True,
         "source_add_enabled": True,
+        "source_add_dispatcher_enabled": True,
+        "source_add_dispatcher_ready": True,
         "autoresearch_paused": False,
         "source_add_paused": False,
     }
@@ -117,12 +132,16 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
         production_writes_enabled=values["production_writes_enabled"],
         miner_submissions_enabled=values["miner_submissions_enabled"],
         source_add_enabled=values["source_add_enabled"],
-        source_add_dispatcher_enabled=True,
+        source_add_dispatcher_enabled=values[
+            "source_add_dispatcher_enabled"
+        ],
         reports_enabled=False,
         public_status=lambda: {
             "source_add": {
                 "enabled": values["source_add_enabled"],
-                "dispatcher_enabled": True,
+                "dispatcher_enabled": values[
+                    "source_add_dispatcher_enabled"
+                ],
             }
         },
     )
@@ -147,7 +166,11 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
         _async_value({"status": "aligned"}),
     )
 
-    status = await api.research_lab_status()
+    status = await api.research_lab_status(
+        _status_request(
+            dispatcher_ready=values["source_add_dispatcher_ready"]
+        )
+    )
 
     assert status["source_add"]["intake_enabled"] is expected
 

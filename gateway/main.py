@@ -564,20 +564,23 @@ async def lifespan(app: FastAPI):
         # deferred without delaying miner submissions or SOURCE_ADD work.
         source_add_dispatcher_task = _start_source_add_dispatcher_task(app)
 
-        # Start gateway-owned Research Lab worker fleets. This mirrors the
-        # validator dynamic worker model: one auto-research/scoring worker per
-        # configured gateway proxy, supervised by the gateway process.
-        from gateway.research_lab.worker_autostart import (
-            ResearchLabWorkerSupervisor,
-            start_worker_supervisor_without_blocking_event_loop,
-        )
-
-        research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
-        app.state.research_lab_worker_supervisor = research_lab_worker_supervisor
+        # Start gateway-owned Research Lab worker fleets. Keep every import and
+        # constructor inside the observed task so a broken scoring/autoresearch
+        # fleet remains fail-closed without taking down independent SOURCE_ADD.
+        app.state.research_lab_worker_supervisor = None
         app.state.research_lab_worker_health = None
 
         async def _start_research_lab_worker_services() -> dict[str, object]:
-            nonlocal routing_consumer_supervisor
+            nonlocal research_lab_worker_supervisor, routing_consumer_supervisor
+            from gateway.research_lab.worker_autostart import (
+                ResearchLabWorkerSupervisor,
+                start_worker_supervisor_without_blocking_event_loop,
+            )
+
+            research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
+            app.state.research_lab_worker_supervisor = (
+                research_lab_worker_supervisor
+            )
             research_lab_worker_health = (
                 await start_worker_supervisor_without_blocking_event_loop(
                     research_lab_worker_supervisor

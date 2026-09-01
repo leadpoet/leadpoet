@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "97c7e761c76f9ab23737d6cb90e5912122c8910f",
+  "baseline_commit": "41372efa388dbc942b56a21972b927df58222b7b",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2602,7 +2602,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline"
     },
     {
-      "ast_sha256": "sha256:327110a1e5563c930af49cb143234e5e6a6e0a36a4ae1380e9030f13dd27f609",
+      "ast_sha256": "sha256:06379e0367df4077b3790e39da9d467d14ee24d379dc5408b400520608aafc29",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline_impl"
     },
@@ -2732,7 +2732,7 @@
       "symbol": "_exact_official_baseline_model_spec"
     },
     {
-      "ast_sha256": "sha256:4212537e10f7493e49828a56f858f925d6644a19e9430837bfd0ab8d884530b8",
+      "ast_sha256": "sha256:65f572aca6ef21f678f17b46c934511524ed03654a09027fd1955070a7f2b6ae",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_load_baseline_scoring_progress"
     },
@@ -8587,7 +8587,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:6f7fa41fed4e28a3e99da431f278bca4d67737f445cd8b16342ee20af5f80a92",
-  "protected_source_commit": "99676eacda08469a3c2787cb87733c49926d9ceb",
+  "manifest_hash": "sha256:abee8627da1eef77198c08696267538dcc8389d016ebb890f9ea610f9bab84ed",
+  "protected_source_commit": "41372efa388dbc942b56a21972b927df58222b7b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

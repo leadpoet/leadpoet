@@ -2399,8 +2399,18 @@ acquire_gateway_restart_lock() {
 }
 
 reconcile_gateway_rebenchmark_retry_runtime() {
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - \
-    "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
+  local reconciliation_root
+  reconciliation_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
+  if [ ! -r "$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py" ] \
+      || [ -L "$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py" ]; then
+    echo "ERROR: exact retry reconciliation authority is unavailable" >&2
+    return 1
+  fi
+  (
+    cd "$reconciliation_root"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$reconciliation_root" \
+      "$GATEWAY_PYTHON_BIN" - \
+      "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
 import sys
 from pathlib import Path
 
@@ -2422,6 +2432,7 @@ print(
     )
 )
 PY
+  )
   # Absence in the durable secret restores the model-compatible defaults.
   # Clear inherited controller values before any reconciled clone is sourced.
   unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS

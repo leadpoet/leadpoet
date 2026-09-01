@@ -237,6 +237,70 @@ def test_gateway_restart_reconciles_retry_defaults_across_candidate_reexec() -> 
     assert "unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" in script
 
 
+def test_gateway_retry_reconciliation_uses_candidate_authority_over_n_minus_one(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    function = _shell_function_source(
+        script,
+        "reconcile_gateway_rebenchmark_retry_runtime",
+    )
+    old_root = tmp_path / "n-minus-one"
+    legacy_module = (
+        old_root / "gateway" / "tee" / "update_gateway_rebenchmark_retry_secret.py"
+    )
+    legacy_module.parent.mkdir(parents=True)
+    (old_root / "gateway" / "__init__.py").write_text("", encoding="utf-8")
+    (old_root / "gateway" / "tee" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+    legacy_module.write_text(
+        "# The deployed N-1 helper deliberately lacks candidate reconciliation.\n",
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "runtime.env"
+    authority = tmp_path / "authority.env"
+    runtime.write_text(
+        "export UNRELATED=preserved\n"
+        "export RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS=2\n"
+        "export RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY=1\n",
+        encoding="utf-8",
+    )
+    authority.write_text("export UNRELATED=preserved\n", encoding="utf-8")
+    harness = tmp_path / "candidate-authority-reconcile.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -Eeuo pipefail\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(old_root))}\n"
+        f"GATEWAY_RESTART_AUTHORITY_ROOT={shlex.quote(str(ROOT))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        f"ENV_CLONE={shlex.quote(str(runtime))}\n"
+        f"GATEWAY_ENV_FILE={shlex.quote(str(authority))}\n"
+        f"{function}\n"
+        "reconcile_gateway_rebenchmark_retry_runtime\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Reconciled secret-authoritative rebenchmark retry controls" in (
+        completed.stdout
+    )
+    reconciled = runtime.read_text(encoding="utf-8")
+    assert "UNRELATED=preserved" in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS" not in reconciled
+    assert "RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY" not in reconciled
+
+
 def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))

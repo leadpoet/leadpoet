@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "54286923ee6cae55b25574838aaf7ecc4f6f378e",
+  "baseline_commit": "af8855da3ab8c6265b332d880bb6402e3ce1ad6d",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2602,7 +2602,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline"
     },
     {
-      "ast_sha256": "sha256:dbda72e764179e8656785819fbeb5553b83e55f37bb9b2f320eb8764bb48e6c1",
+      "ast_sha256": "sha256:e494488b9007b0b8e0ff4cc0a69f351fbd410083d9bb7f5a430e5b173ca6a6d6",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._maybe_run_private_baseline_impl"
     },
@@ -2670,6 +2670,11 @@
       "ast_sha256": "sha256:ab88fe9ae80b76ea30f6cae9f933a81b6c645fbf0a5278b6ac4c0b52a3c6e13c",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "_OfficialBaselineEvidenceProxyLease.validate_live"
+    },
+    {
+      "ast_sha256": "sha256:daa9d0c896870b589a2a8d45079658bcb884aade68192d4206daec8a65d9dbc7",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_baseline_all_zero_distribution_is_attested_terminal"
     },
     {
       "ast_sha256": "sha256:fc06f2f15420e6294146efb0d8f709fa5b02ab04148e08d9e772c567efec8d65",
@@ -8617,7 +8622,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:93d772854ca069e5d7581b8a90a42fa84f7eaacd040b81f4ed13d22e952de261",
-  "protected_source_commit": "54286923ee6cae55b25574838aaf7ecc4f6f378e",
+  "manifest_hash": "sha256:c308021cf2fd355051df5fcb8753906ac077d4ea06aeeb49be17dd7fe683d822",
+  "protected_source_commit": "af8855da3ab8c6265b332d880bb6402e3ce1ad6d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -3335,8 +3335,18 @@ async def verify_three_stage(
                 if str(url or "").strip()
             }
             deterministic_exact_hiring_evidence = (
+                # The exact, currently listed ATS record is the authority here.
+                # A semantic ``contradicted`` verdict may be normalized only
+                # when every quote it supplied as a contradiction is absent
+                # from that immutable posting; a grounded contradiction still
+                # fails closed through ``grounded_contradictions`` below.
                 item.get("signal_status")
-                in {"supported", "partially_supported", "wrong_entity"}
+                in {
+                    "supported",
+                    "partially_supported",
+                    "wrong_entity",
+                    "contradicted",
+                }
                 and item.get("verification_mode") == "source_grounded"
                 and item.get("confidence") in {"medium", "high"}
                 and item.get("same_entity_check") in {"pass", "unclear", "fail"}

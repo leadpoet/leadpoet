@@ -431,6 +431,10 @@ def test_validator_release_follow_executes_new_candidate_before_shutdown(
     tmp_path: Path,
 ) -> None:
     _, checkout, first, second = _restart_repositories(tmp_path)
+    reset_handoff = _extract_shell_function(
+        ROOT / "validator_restart.sh",
+        "reset_standalone_active_release_handoff_for_reexec",
+    )
     function = _extract_shell_function(
         ROOT / "validator_restart.sh",
         "follow_superseding_validator_release",
@@ -467,10 +471,12 @@ VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT={tmp_path / 'initial-requirements.j
 VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT={tmp_path / 'final-requirements.json'!s}
 VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT={tmp_path / 'final-lineage.json'!s}
 VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS={tmp_path / 'stable-requirements.json'!s}
+active_release_handoff_count=0
 REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY=0
 record_validator_restart_timing() {{ echo TIMING:$1; }}
 cleanup_validator_restart_preparation() {{ echo CLEANUP_PREPARATION; }}
 cd "$VALIDATOR_ROOT"
+{reset_handoff}
 {function}
 follow_superseding_validator_release
 echo UNEXPECTED_RETURN

@@ -60,7 +60,18 @@ recovery is gated four ways:
   rebuilds enclaves.
 
 Only one watchdog runs at a time; it takes its own `flock` first, so a timer
-firing during a several-minute recovery is a no-op.
+firing during a several-minute recovery is a no-op. That lock lives on
+descriptor 209 — outside the 7/8/9 and 190-195 range `gw_restart.sh` uses — and
+is closed across the recovery invocation, so it can never be inherited by the
+gateway process the restart leaves running.
+
+It also does not treat a failed recovery as something to work around.
+`gw_restart.sh` fails closed *before* its destructive phase for a number of
+reasons — the SOURCE_ADD shutdown-quiescence recheck at the destructive
+boundary is the newest — and in every one of those cases it exits non-zero
+having changed nothing on the host. The watchdog logs that outcome and lets the
+cooldown and circuit breaker bound how often it tries again; it never retries
+faster or skips a gate.
 
 Everything it does is appended to `/home/ec2-user/gateway/watchdog.log`, one
 line per decision, including the ones where it stood down.

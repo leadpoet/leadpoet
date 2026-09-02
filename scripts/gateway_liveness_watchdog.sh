@@ -66,9 +66,17 @@ log() {
 
 # One watchdog at a time. A restart attempt runs far longer than the timer
 # interval, so overlapping invocations are expected and must not stack.
-exec 8>"$WATCHDOG_LOCK_FILE"
+#
+# Descriptor 209 is deliberately outside every number gw_restart.sh works with
+# (7, 8, 9 and 190-195). That script reassigns 8 for its own recovery lock and
+# closes 9 and 190-195 across each detached launch; a watchdog lock sitting on
+# one of those numbers would either collide with it or be inherited by a
+# long-lived runtime process, which is exactly the "lock inherited by a
+# detached runtime process" state gw_restart.sh has to recover from. We also
+# close 209 explicitly across the recovery invocation below.
+exec 209>"$WATCHDOG_LOCK_FILE"
 chmod 600 "$WATCHDOG_LOCK_FILE"
-if ! flock -n 8; then
+if ! flock -n 209; then
   exit 0
 fi
 
@@ -180,7 +188,12 @@ restart_history="${restart_history:+$restart_history,}$now"
 consecutive_failures=0
 save_state
 
-if "$GATEWAY_RESTART_SCRIPT" >>"$WATCHDOG_LOG_FILE" 2>&1; then
+# 209>&- keeps our lock out of the restart script and out of anything it
+# leaves running. A non-zero exit here is a normal, safe outcome: gw_restart.sh
+# fails closed before its destructive phase for several reasons — most recently
+# the SOURCE_ADD shutdown-quiescence recheck — and when it does, production was
+# never touched. The cooldown and the circuit breaker bound the retries.
+if "$GATEWAY_RESTART_SCRIPT" >>"$WATCHDOG_LOG_FILE" 2>&1 209>&-; then
   log "restart completed"
 else
   log "ERROR: restart exited non-zero — see the output above and the gateway log"

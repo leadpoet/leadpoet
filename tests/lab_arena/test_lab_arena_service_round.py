@@ -581,6 +581,10 @@ def test_startup_checks_fail_closed_and_banned_snapshot_governs_requests(connect
     banned_runner = harness.runner_keys[1]
     harness.service = svc.ArenaService(svc.ServiceConfig(**{**harness.service.config.__dict__, "banned_hotkeys_source": lambda: [banned_runner]}))
     service = harness.service
+    # Rounds left open by earlier tests in this shared database are cancelled first.
+    for row in service.store.list_rounds():
+        if row["status"] not in ("published", "cancelled"):
+            service.store.cancel_round(row["round_id"], "operator")
     checks = service.startup_checks()
     assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
     configuration = service.create_round(datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc))
@@ -629,6 +633,10 @@ def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_fun
 
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     service = harness.service
+    # Earlier tests share this database but not this object store: close their rounds.
+    for row in service.store.list_rounds():
+        if row["status"] not in ("published", "cancelled"):
+            service.store.cancel_round(row["round_id"], "operator")
     miner = keypair("svc-miner-credential")
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     recipient = creds.recipient_document(private.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
@@ -650,7 +658,9 @@ def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_fun
         return Response()
 
     register = lambda env: creds.register_openrouter_key(env, decryptor=decryptor, urlopen=fake_urlopen, expected_recipient_key_hash=recipient["public_key_hash"])
-    request = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id="arena-0000-00-00", hotkey=miner.ss58_address, body={"envelope": envelope}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    current = service.current_round()
+    request_round = current["round_id"] if current else "arena-0000-00-00"
+    request = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id=request_round, hotkey=miner.ss58_address, body={"envelope": envelope}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
     result = service.handle_credential(request, register=register)
     assert result["status"] == "ok" and result["preflight_status"] == "ok" and result["observed_limit_remaining_microusd"] == 20_500_000
     account = service.store.get_account(miner.ss58_address)
@@ -666,7 +676,7 @@ def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_fun
         confirmations.append((hotkey, body["block_hash"]))
         return service.store.credit_deposit(miner_hotkey=hotkey, payment_reference="finney:0x" + hashlib.sha256(body["block_hash"].encode()).hexdigest() + ":1", amount_microusd=1_500_000, deposit_doc={"block_hash": body["block_hash"]})
 
-    funding = contracts.build_signed_request(scope=contracts.SCOPE_FUNDING, round_id="arena-0000-00-00", hotkey=miner.ss58_address, body={"block_hash": "0x" + "ab" * 32, "extrinsic_index": 2}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    funding = contracts.build_signed_request(scope=contracts.SCOPE_FUNDING, round_id=request_round, hotkey=miner.ss58_address, body={"block_hash": "0x" + "ab" * 32, "extrinsic_index": 2}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
     first = service.handle_funding(funding, confirm=confirm)
     second = service.handle_funding(funding, confirm=confirm)
     assert first["credited"] is True and second["credited"] is False and second["idempotent"] is True

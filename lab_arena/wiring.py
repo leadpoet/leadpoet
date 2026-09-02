@@ -114,6 +114,8 @@ def funding_confirmer(*, chain, config: funding.FundingConfig, store, price_sour
             return {"credited": False, "idempotent": False, "rejected": True, "rule": "reference_malformed"}
         except (funding.PriceUnavailable, funding.FundingStoreError, chain_module.ArenaChainError) as exc:
             raise ServiceError("funding_unavailable:%s" % type(exc).__name__, 503) from exc
+        except funding.FundingError as exc:
+            raise ServiceError("funding_rejected:%s" % type(exc).__name__, 400) from exc
         return {
             "credited": bool(receipt.credited), "idempotent": bool(receipt.idempotent), "balance_microusd": int(receipt.balance_microusd),
             "payment_reference": receipt.deposit_doc.get("payment_reference"), "amount_microusd": receipt.deposit_doc.get("amount_microusd"),

@@ -81,19 +81,21 @@ def test_funding_confirmer_maps_rejections_and_outages_without_leaking():
 
     from lab_arena import chain as chain_module, funding, wiring
 
-    class StubChain:
-        def __init__(self, error):
-            self.error = error
+    class FailingClient:
+        def __getattr__(self, name):
+            def call(*args, **kwargs):
+                raise RuntimeError("endpoint down")
 
-        def finalized_head(self):
-            raise self.error
+            return call
 
+    chain_config = chain_module.ArenaChainConfig(endpoint="wss://entrypoint.invalid:443", netuid=71, network_name="finney", request_timeout_seconds=10)
+    chain = chain_module.ArenaChain(chain_config, FailingClient(), metagraph_source=lambda *args: None)
     config = funding.FundingConfig(recipient_wallet="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", network_name="finney")
-    confirm = wiring.funding_confirmer(chain=StubChain(chain_module.ArenaChainError("endpoint down")), config=config, store=None, price_source=None, clock=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc))
+    confirm = wiring.funding_confirmer(chain=chain, config=config, store=None, price_source=None, clock=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc))
     with pytest.raises(ServiceError, match="funding_unavailable"):
         confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "0x" + "a" * 64, "extrinsic_index": 1})
     malformed = confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "not-a-hash", "extrinsic_index": 1})
-    assert malformed["credited"] is False and malformed["rule"] in ("reference_malformed", "finality") or malformed.get("rejected")
+    assert malformed["credited"] is False and malformed.get("rejected") is True
 
 
 def test_credential_registrar_rejects_bad_envelopes_and_records_good_ones():

@@ -3021,6 +3021,9 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             == "0"
         )
         supabase_url, service_role_key = database.start_postgrest()
+        assert database._psql(
+            "SELECT has_schema_privilege('service_role','extensions','USAGE')::text;"
+        ).strip() == "t"
         result = schema_preflight.verify_required_supabase_v2_schema(
             {
                 "SUPABASE_URL": supabase_url,

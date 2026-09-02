@@ -247,6 +247,50 @@ def test_migration_176_repairs_historical_host_collision_and_is_idempotent(
                     unique_terminal["record"]["submission_id"],
                 ]
             )
+            cursor.execute(
+                """
+                ALTER ROLE service_role BYPASSRLS;
+                GRANT USAGE ON SCHEMA public, extensions TO service_role;
+                GRANT SELECT ON ALL TABLES IN SCHEMA public TO service_role;
+                """
+            )
+            cursor.execute("SET ROLE service_role")
+            try:
+                service_role_authority = _scalar(
+                    cursor,
+                    """
+                    SELECT jsonb_agg(submission_id ORDER BY submission_id)
+                    FROM public.research_lab_source_add_provenance_leg1_authority_v1
+                    WHERE submission_id IN (%s,%s,%s)
+                    """,
+                    (
+                        earlier["record"]["submission_id"],
+                        later["record"]["submission_id"],
+                        unique_terminal["record"]["submission_id"],
+                    ),
+                )
+            finally:
+                cursor.execute("RESET ROLE")
+            assert service_role_authority == authority
+            for helper in (
+                "public.research_lab_source_add_provider_origin_host_v1(text)",
+                "public.research_lab_source_add_provider_origin_hash_v1(text)",
+            ):
+                assert _scalar(
+                    cursor,
+                    "SELECT has_function_privilege('service_role', %s, 'EXECUTE')",
+                    (helper,),
+                ) is True
+                assert _scalar(
+                    cursor,
+                    "SELECT has_function_privilege('anon', %s, 'EXECUTE')",
+                    (helper,),
+                ) is False
+                assert _scalar(
+                    cursor,
+                    "SELECT has_function_privilege('authenticated', %s, 'EXECUTE')",
+                    (helper,),
+                ) is False
             assert _scalar(
                 cursor,
                 """

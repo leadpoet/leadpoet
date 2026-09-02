@@ -165,7 +165,7 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
         "sequence": 176,
-        "sha256": "sha256:9ec8d3d9bc9412c285ac780c42fd9aa283d3705cd54a155dac65313cc051d1f8",
+        "sha256": "sha256:6bcb245b22b50de3a2ca8f41719055acdaf4dd1fa1ebd92c862e6edfea94f61c",
         "transaction_mode": "candidate-file",
     },
 )
@@ -222,6 +222,8 @@ _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_post_accept_leg1_contract_v2()",
     "public.research_lab_source_add_post_accept_leg1_contract_v3()",
     "public.research_lab_source_add_post_accept_leg1_contract_v4()",
+    "public.research_lab_source_add_provider_origin_hash_v1(text)",
+    "public.research_lab_source_add_provider_origin_host_v1(text)",
     "public.research_lab_source_add_provider_origin_contract_v1()",
     "public.research_lab_source_add_finish_work(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,timestamp with time zone,boolean)",
     "public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)",
@@ -272,8 +274,6 @@ _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_finalize_leg1(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_smoke(text,uuid,text,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_jsonb_hash_v2(jsonb)",
-    "public.research_lab_source_add_provider_origin_hash_v1(text)",
-    "public.research_lab_source_add_provider_origin_host_v1(text)",
     "public.research_lab_source_add_provenance_leg1_authority_matches_v1(text,text,text,text,text)",
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION = (

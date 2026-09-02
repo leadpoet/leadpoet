@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from leadpoet_verifier.economics import allocate_research_lab_epoch
+from leadpoet_verifier.economics import (
+    _canonical_source_add_created_at,
+    allocate_research_lab_epoch,
+)
 from research_lab.canonical import sha256_json
 from research_lab.source_add_rewards import (
     REWARD_KIND_SOURCE_ACCEPTANCE,
@@ -215,6 +218,60 @@ class TestAllocationRails:
             "remaining_alpha_percent": total_due,
             "reward_kind": row["reward_kind"],
         }
+
+    @pytest.mark.parametrize(
+        ("timestamp", "expected"),
+        [
+            ("2026-09-02T22:57:50.9+00:00", "2026-09-02T22:57:50.900000Z"),
+            ("2026-09-02T22:57:50.92+00:00", "2026-09-02T22:57:50.920000Z"),
+            ("2026-09-02T22:57:50.926+00:00", "2026-09-02T22:57:50.926000Z"),
+            ("2026-09-02T22:57:50.9266+00:00", "2026-09-02T22:57:50.926600Z"),
+            ("2026-09-02T22:57:50.92667+00:00", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-02T22:57:50.926670Z", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-02T22:57:50.926670999Z", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-03T04:27:50.92667+05:30", "2026-09-02T22:57:50.926670Z"),
+        ],
+    )
+    def test_source_add_fifo_timestamp_is_python39_safe(self, timestamp, expected):
+        assert _canonical_source_add_created_at(timestamp) == expected
+
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-09-02 22:57:50.92667+00:00",
+            "2026-09-02T22:57:50.92667",
+            "2026-09-02T22:57:50.92667z",
+            "2026-09-02T22:57:50,92667Z",
+            "2026-09-02T22:57:50.92667+0000",
+            "2026-09-02T22:57:50.92667-00:00",
+            "2026-09-02T22:57:50.1234567890Z",
+            "2026-02-30T22:57:50.92667Z",
+            "2026-09-02T24:00:00Z",
+            "2026-09-02T22:57:50.92667+24:00",
+        ],
+    )
+    def test_source_add_fifo_timestamp_rejects_malformed_values(self, timestamp):
+        with pytest.raises(ValueError, match="source add created_at is invalid"):
+            _canonical_source_add_created_at(timestamp)
+
+    def test_first_live_source_add_allocation_accepts_postgrest_fraction_width(self):
+        source = create_leg1_reward(
+            adapter_id="adapter:production-timestamp",
+            miner_ref="miner:owner",
+            start_epoch=100,
+        )
+        obligation = self._source_obligation(source)
+        obligation["created_at"] = "2026-09-02T22:57:50.92667+00:00"
+
+        allocation = allocate_research_lab_epoch(
+            100,
+            self.POLICY,
+            [],
+            [],
+            active_source_add_obligations=[obligation],
+        )
+
+        assert allocation["source_add_alpha_percent"] == pytest.approx(0.2)
 
     def test_source_rewards_are_first_class_and_fixed_size(self):
         leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)

@@ -1595,6 +1595,7 @@ PROTECTED_SYMBOLS = {
         "_champion_total_due_alpha_percent",
         "_champion_paid_alpha_percent_to_date",
         "_champion_remaining_alpha_percent",
+        "_canonical_source_add_created_at",
     ),
     "gateway/tee/coordinator_reward_source_v2.py": (
         "CoordinatorRewardSourceV2",

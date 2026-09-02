@@ -60,6 +60,11 @@ def schema_only_clone_database():
 
 
 @pytest.fixture(scope="module")
+def schema_only_provenance_clone_database():
+    yield from _database_with_migrations(MIGRATIONS)
+
+
+@pytest.fixture(scope="module")
 def database():
     yield from _database_with_migrations(MIGRATIONS)
 
@@ -496,6 +501,73 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
                 "anon_callable": False,
                 "authenticated_callable": False,
             }
+            assert _state(cursor) == _state_shape(
+                paused=True,
+                generation=0,
+                restore_paused=None,
+            )
+    finally:
+        connection.close()
+
+
+def test_schema_only_parity_pauses_exact_174_clone_before_migration_175(
+    schema_only_provenance_clone_database,
+) -> None:
+    psycopg2, dsn = schema_only_provenance_clone_database
+    migration_path = SCRIPTS / PROVENANCE_LEG1_MIGRATION
+    migration_identity = next(
+        dict(migration)
+        for migration in parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS
+        if migration["path"] == parity_snapshot._SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
+    )
+    staging_sql = parity_snapshot._schema_only_source_add_maintenance_sql(
+        migration_identity
+    ).decode("utf-8")
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM public.research_lab_source_add_control WHERE singleton"
+            )
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.research_lab_source_add_work_items"
+            )
+            assert cursor.fetchone()[0] == 0
+
+            cursor.execute(staging_sql)
+            cursor.execute(
+                """
+                SELECT paused, reason, actor_ref,
+                       restart_guard_commitment = '',
+                       restart_guard_owner_commitment = '',
+                       restart_guard_generation,
+                       restart_guard_restore_paused IS NULL
+                FROM public.research_lab_source_add_control
+                WHERE singleton
+                """
+            )
+            assert cursor.fetchone() == (
+                True,
+                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON,
+                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR,
+                True,
+                True,
+                0,
+                True,
+            )
+
+            cursor.execute(migration_path.read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT public.research_lab_source_add_post_accept_leg1_contract_v3()"
+            )
+            contract = cursor.fetchone()[0]
+            assert contract["schema_version"] == (
+                "leadpoet.source_add_post_accept_leg1_contract.v3"
+            )
+            assert contract["daily_cap"] == 50
+            assert contract["leg1_alpha_percent"] == 0.2
+            assert contract["leg1_reward_epochs"] == 20
             assert _state(cursor) == _state_shape(
                 paused=True,
                 generation=0,

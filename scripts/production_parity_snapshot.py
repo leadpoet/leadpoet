@@ -264,13 +264,22 @@ _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_provenance_leg1_authority_matches_v1(text,text,text,text,text)",
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_maintenance.v1"
+    "leadpoet.production_parity.schema_only_source_add_maintenance.v2"
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON = (
-    "production_parity_fast_schema_only_migration_174"
+    "production_parity_fast_schema_only_source_add_cutover"
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR = (
     "operator:production-parity-fast-clone"
+)
+_SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS = tuple(
+    migration
+    for migration in _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+    if migration["path"]
+    in {
+        _SOURCE_ADD_RESTART_STATE_MIGRATION,
+        _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
+    }
 )
 _POSTGRES_MOUNT_TARGETS = frozenset(
     {_POSTGRES_ARCHIVE_TARGET, _POSTGRES_MIGRATION_TARGET}
@@ -616,14 +625,15 @@ def _require_success(result: subprocess.CompletedProcess[bytes], *, stage: str) 
 def _schema_only_source_add_maintenance_sql(
     migration: Mapping[str, Any],
 ) -> bytes:
-    if (
-        migration.get("path") != _SOURCE_ADD_RESTART_STATE_MIGRATION
-        or migration.get("sequence") != 174
-        or migration.get("transaction_mode") != "candidate-file"
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", str(migration.get("sha256") or "")
-        )
-    ):
+    expected = next(
+        (
+            candidate
+            for candidate in _SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS
+            if candidate["path"] == migration.get("path")
+        ),
+        None,
+    )
+    if expected is None or dict(migration) != expected:
         raise ProductionParityError(
             "schema-only SOURCE_ADD maintenance migration identity differs"
         )
@@ -631,6 +641,8 @@ def _schema_only_source_add_maintenance_sql(
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 DO $schema_only_source_add_maintenance$
+DECLARE
+    v_pause JSONB;
 BEGIN
     IF pg_catalog.to_regclass('public.research_lab_source_add_control') IS NULL
        OR pg_catalog.to_regclass('public.research_lab_source_add_work_items') IS NULL THEN
@@ -654,14 +666,26 @@ BEGIN
         singleton, paused, reason, actor_ref
     ) VALUES (
         TRUE,
+        FALSE,
+        'production_parity_fast_schema_only_active_seed',
+        '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR}'
+    );
+    SELECT public.research_lab_source_add_set_paused(
         TRUE,
         '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON}',
         '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR}'
-    );
+    ) INTO v_pause;
+    IF COALESCE((v_pause->>'paused')::BOOLEAN, FALSE) IS NOT TRUE
+       OR v_pause->>'reason' <> '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON}'
+       OR v_pause->>'actor_ref' <> '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR}' THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD pause RPC readback differs';
+    END IF;
 END;
 $schema_only_source_add_maintenance$;
 SELECT pg_catalog.json_build_object(
     'schema_version', '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION}',
+    'initial_paused', FALSE,
+    'pause_rpc', 'research_lab_source_add_set_paused',
     'control_rows', (
         SELECT COUNT(*) FROM public.research_lab_source_add_control
     ),
@@ -1196,7 +1220,7 @@ def _stage_schema_only_source_add_maintenance(
     migration: Mapping[str, Any],
     postgres_image: str | None,
 ) -> dict[str, Any]:
-    """Create only the paused control row omitted by a schema-only dump."""
+    """Reconstruct omitted active control and pause through the production RPC."""
 
     sql = _schema_only_source_add_maintenance_sql(migration)
     raw = _require_success(
@@ -1217,6 +1241,8 @@ def _stage_schema_only_source_add_maintenance(
         ) from exc
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION,
+        "initial_paused": False,
+        "pause_rpc": "research_lab_source_add_set_paused",
         "control_rows": 1,
         "work_rows": 0,
         "paused": True,
@@ -1231,7 +1257,7 @@ def _stage_schema_only_source_add_maintenance(
         )
     return {
         **expected,
-        "migration_path": _SOURCE_ADD_RESTART_STATE_MIGRATION,
+        "migration_path": migration["path"],
         "migration_sha256": migration["sha256"],
     }
 
@@ -1736,7 +1762,12 @@ def restore_snapshot(
             )
         if (
             manifest["capture_mode"] == "schema-only"
-            and migration["path"] == _SOURCE_ADD_RESTART_STATE_MIGRATION
+            and not clone_migration_preconditions
+            and migration["path"]
+            in {
+                candidate["path"]
+                for candidate in _SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS
+            }
         ):
             clone_migration_preconditions.append(
                 _stage_schema_only_source_add_maintenance(

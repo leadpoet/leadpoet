@@ -820,28 +820,13 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
     )
 
 
-def test_schema_only_restore_stages_exact_source_add_migration_precondition(
-    monkeypatch,
-    tmp_path: Path,
-):
-    image = "postgres@sha256:" + "c" * 64
-    archive = tmp_path / "runtime" / "production.dump"
-    archive.parent.mkdir()
-    archive.write_bytes(b"snapshot")
-    migration = tmp_path / parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION
-    migration.parent.mkdir()
-    migration.write_text("SELECT 1;\n", encoding="utf-8")
-    migration_hash = parity_snapshot.file_sha256(migration)
-    migration_identity = {
-        "path": parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION,
-        "sequence": 174,
-        "sha256": migration_hash,
-        "transaction_mode": "candidate-file",
-    }
-    maintenance = {
+def _schema_only_source_add_maintenance_readback() -> dict[str, object]:
+    return {
         "schema_version": (
             parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION
         ),
+        "initial_paused": False,
+        "pause_rpc": "research_lab_source_add_set_paused",
         "control_rows": 1,
         "work_rows": 0,
         "paused": True,
@@ -850,6 +835,35 @@ def test_schema_only_restore_stages_exact_source_add_migration_precondition(
         "reason_bound": True,
         "actor_bound": True,
     }
+
+
+def _copy_cutover_migration(
+    tmp_path: Path, migration_identity: dict[str, object]
+) -> Path:
+    migration = tmp_path / str(migration_identity["path"])
+    migration.parent.mkdir(parents=True, exist_ok=True)
+    migration.write_bytes((ROOT / str(migration_identity["path"])).read_bytes())
+    assert parity_snapshot.file_sha256(migration) == migration_identity["sha256"]
+    return migration
+
+
+@pytest.mark.parametrize(
+    "migration_identity",
+    parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS,
+    ids=lambda migration: f"migration-{migration['sequence']}",
+)
+def test_schema_only_restore_stages_exact_source_add_migration_precondition(
+    monkeypatch,
+    tmp_path: Path,
+    migration_identity: dict[str, object],
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    migration_identity = dict(migration_identity)
+    migration = _copy_cutover_migration(tmp_path, migration_identity)
+    maintenance = _schema_only_source_add_maintenance_readback()
     calls: list[dict[str, object]] = []
 
     def fake_run_postgres(command, **kwargs):
@@ -900,6 +914,8 @@ def test_schema_only_restore_stages_exact_source_add_migration_precondition(
     assert "schema-only SOURCE_ADD work state is not empty" in staging_sql
     assert "IN ACCESS EXCLUSIVE MODE NOWAIT" in staging_sql
     assert "IN SHARE ROW EXCLUSIVE MODE NOWAIT" in staging_sql
+    assert "research_lab_source_add_set_paused(" in staging_sql
+    assert "FALSE," in staging_sql
     assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON in staging_sql
     assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR in staging_sql
     applied = calls[2]
@@ -915,9 +931,99 @@ def test_schema_only_restore_stages_exact_source_add_migration_precondition(
         {
             **maintenance,
             "migration_path": migration_identity["path"],
-            "migration_sha256": migration_hash,
+            "migration_sha256": migration_identity["sha256"],
         }
     ]
+
+
+def test_schema_only_restore_stages_source_add_cutover_only_once(
+    monkeypatch,
+    tmp_path: Path,
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    migrations = [
+        dict(migration)
+        for migration in parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS
+    ]
+    migration_paths = [
+        _copy_cutover_migration(tmp_path, migration) for migration in migrations
+    ]
+    maintenance = _schema_only_source_add_maintenance_readback()
+    calls: list[dict[str, object]] = []
+
+    def fake_run_postgres(command, **kwargs):
+        calls.append({"command": list(command), **kwargs})
+        stdout = b""
+        if command[0] == "psql" and "-f" not in command:
+            stdout = (json.dumps(maintenance, sort_keys=True) + "\n").encode()
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(
+        parity_snapshot,
+        "verify_snapshot",
+        lambda **_kwargs: {"migration_delta": migrations},
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_load_json",
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+    )
+    monkeypatch.setattr(
+        parity_snapshot, "validate_snapshot_manifest", lambda value: value
+    )
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    evidence = restore_snapshot(
+        root=tmp_path,
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=archive,
+        target_dsn=(
+            "postgresql://postgres:secret@127.0.0.1:32768/"
+            "leadpoet_parity_test"
+        ),
+        production_host="db.production.example",
+        postgres_image=image,
+    )
+
+    assert [call["command"][0] for call in calls] == [
+        "pg_restore",
+        "psql",
+        "psql",
+        "psql",
+    ]
+    assert "-f" not in calls[1]["command"]
+    assert [calls[index]["mounts"][0].source for index in (2, 3)] == migration_paths
+    assert evidence["clone_migration_preconditions"] == [
+        {
+            **maintenance,
+            "migration_path": migrations[0]["path"],
+            "migration_sha256": migrations[0]["sha256"],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("sequence", 174),
+        ("sha256", "sha256:" + "0" * 64),
+        ("transaction_mode", "autocommit"),
+    ),
+)
+def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value):
+    migration = dict(
+        parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS[-1]
+    )
+    migration[field] = value
+    with pytest.raises(
+        ProductionParityError,
+        match="schema-only SOURCE_ADD maintenance migration identity differs",
+    ):
+        parity_snapshot._schema_only_source_add_maintenance_sql(migration)
 
 
 def test_schema_only_source_add_acl_is_exact_migration_bound():
@@ -1089,15 +1195,10 @@ def test_full_restore_does_not_stage_schema_only_source_add_state(
 ):
     archive = tmp_path / "production.dump"
     archive.write_bytes(b"snapshot")
-    migration = tmp_path / parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION
-    migration.parent.mkdir()
-    migration.write_text("SELECT 1;\n", encoding="utf-8")
-    migration_identity = {
-        "path": parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION,
-        "sequence": 174,
-        "sha256": parity_snapshot.file_sha256(migration),
-        "transaction_mode": "candidate-file",
-    }
+    migration_identity = dict(
+        parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS[-1]
+    )
+    migration = _copy_cutover_migration(tmp_path, migration_identity)
     calls: list[list[str]] = []
 
     monkeypatch.setattr(

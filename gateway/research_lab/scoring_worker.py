@@ -58,6 +58,7 @@ from gateway.research_lab.code_build import (
     CodeEditPatchApplyError,
     validate_private_code_edit_diff_artifact,
 )
+from gateway.research_lab.common_model_experiment import CommonModelExperimentError
 from gateway.research_lab.config import (
     DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
     DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS,
@@ -1753,6 +1754,29 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
         # run fewer containers at once.
         return True
     return False
+
+
+def _private_model_runtime_cause(
+    exc: BaseException,
+) -> PrivateModelRuntimeError | None:
+    """Return an explicitly wrapped private-runtime failure, if present.
+
+    The common model coordinator wraps artifact request-preparation failures so
+    it can preserve its protocol boundary. The scoring worker still needs the
+    typed inner failure to contain that one ICP and apply the existing retry
+    policy. Follow only explicit ``raise ... from`` links: an incidental
+    exception context must never turn a protocol-integrity failure into a
+    scoreable model attempt.
+    """
+
+    current = exc.__cause__
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, PrivateModelRuntimeError):
+            return current
+        current = current.__cause__
+    return None
 
 
 def _baseline_429_retry_backoff_seconds(error_text: str) -> float:
@@ -17020,21 +17044,31 @@ class ResearchLabGatewayScoringWorker:
         except (
             PrivateModelRuntimeError,
             OfficialBaselineTerminalUncertainError,
+            CommonModelExperimentError,
         ) as exc:
+            runtime_exc: BaseException = exc
+            if isinstance(exc, CommonModelExperimentError) and not isinstance(
+                exc,
+                OfficialBaselineTerminalUncertainError,
+            ):
+                runtime_cause = _private_model_runtime_cause(exc)
+                if runtime_cause is None:
+                    raise
+                runtime_exc = runtime_cause
             outputs = []
-            runtime_error = _short_error(exc)
-            runtime_error_class = type(exc).__name__
-            if isinstance(exc, QualificationOutcomeIncompleteV2Error):
+            runtime_error = _short_error(runtime_exc)
+            runtime_error_class = type(runtime_exc).__name__
+            if isinstance(runtime_exc, QualificationOutcomeIncompleteV2Error):
                 model_qualification_authority = (
                     validate_model_qualification_authority_v1(
-                        exc.model_qualification_authority
+                        runtime_exc.model_qualification_authority
                     )
                 )
-                retryable = bool(exc.retryable)
+                retryable = bool(runtime_exc.retryable)
                 model_qualification_partial_count = len(
-                    tuple(exc.partial_companies)
+                    tuple(runtime_exc.partial_companies)
                 )
-            elif isinstance(exc, OfficialBaselineTerminalUncertainError):
+            elif isinstance(runtime_exc, OfficialBaselineTerminalUncertainError):
                 # The append-only authority correctly forbids reopening the
                 # unresolved paid-call identity.  The existing bounded retry
                 # round supplies a fresh durable unit/attempt identity, while
@@ -17046,10 +17080,10 @@ class ResearchLabGatewayScoringWorker:
                 # truncates to 300 chars and can drop the status marker the
                 # legacy classifier needs. Typed v2 outcomes never use prose
                 # for retry policy.
-                retryable = _baseline_error_is_retryable(str(exc))
+                retryable = _baseline_error_is_retryable(str(runtime_exc))
                 retry_backoff_seconds = max(
                     retry_backoff_seconds,
-                    _baseline_429_retry_backoff_seconds(str(exc)),
+                    _baseline_429_retry_backoff_seconds(str(runtime_exc)),
                 )
             logger.warning(
                 format_worker_block(

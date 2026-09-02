@@ -1214,6 +1214,126 @@ async def test_scoring_worker_retries_terminal_uncertain_with_fresh_attempt(
     assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD not in row
 
 
+@pytest.mark.parametrize(
+    ("runtime_message", "expected_retryable"),
+    (
+        (
+            "common model runner operation failed with code 1: "
+            "ModelRunnerContractError: company_name is required",
+            False,
+        ),
+        ("ScrapingDog provider HTTP 429: too many requests", True),
+    ),
+)
+@pytest.mark.asyncio
+async def test_scoring_worker_contains_wrapped_artifact_runtime_failure_per_icp(
+    monkeypatch,
+    runtime_message: str,
+    expected_retryable: bool,
+):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(private_baseline_provider_retry_rounds=2)
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    async def no_traces(**_values):
+        return None
+
+    def wrapped_runtime_failure(*_args, **_kwargs):
+        try:
+            raise PrivateModelRuntimeError(runtime_message)
+        except PrivateModelRuntimeError as exc:
+            raise CommonModelExperimentError(
+                "artifact provider request preparation failed"
+            ) from exc
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    worker._record_baseline_icp_traces = no_traces
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        wrapped_runtime_failure,
+    )
+    item = {
+        "icp_ref": "icp-wrapped-runtime",
+        "icp_hash": "sha256:" + "3" * 64,
+        "set_id": "set-1",
+        "day_index": 0,
+        "day_rank": 1,
+        "icp": {"outputs": [], "max_companies": 1},
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        row = await worker._run_baseline_icp(
+            runner=runner,
+            scorer=object(),
+            item=item,
+            item_index=1,
+            total_icps=1,
+            run_start=0.0,
+            executor=executor,
+            benchmark_date="2026-09-02",
+            retry_round=0,
+        )
+
+    assert row["_retryable"] is expected_retryable
+    assert row["_nonempty"] is False
+    assert row["_runtime_error"].startswith("PrivateModelRuntimeError:")
+    assert row["diagnostics"]["sourcing_failed"] is True
+    assert scoring_worker_module._OFFICIAL_BASELINE_CHECKPOINT_FIELD not in row
+
+
+@pytest.mark.asyncio
+async def test_scoring_worker_keeps_untyped_common_model_error_fail_closed(
+    monkeypatch,
+):
+    runner, _projector, _authority, _terminal = _exact_fixture()
+    worker = object.__new__(scoring_worker_module.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "test-worker"
+    worker.config = SimpleNamespace(private_baseline_provider_retry_rounds=2)
+    worker._active_baseline_context = {}
+
+    async def unchanged(**_values):
+        return None
+
+    def protocol_failure(*_args, **_kwargs):
+        raise CommonModelExperimentError("stored Model transition differs")
+
+    worker._ensure_private_baseline_repo_head_unchanged = unchanged
+    monkeypatch.setattr(
+        ExactOfficialBaselineRunner,
+        "run_icp",
+        protocol_failure,
+    )
+    item = {
+        "icp_ref": "icp-protocol-failure",
+        "icp_hash": "sha256:" + "4" * 64,
+        "set_id": "set-1",
+        "day_index": 0,
+        "day_rank": 1,
+        "icp": {"outputs": [], "max_companies": 1},
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        with pytest.raises(
+            CommonModelExperimentError,
+            match="stored Model transition differs",
+        ):
+            await worker._run_baseline_icp(
+                runner=runner,
+                scorer=object(),
+                item=item,
+                item_index=1,
+                total_icps=1,
+                run_start=0.0,
+                executor=executor,
+                benchmark_date="2026-09-02",
+                retry_round=0,
+            )
+
+
 @pytest.mark.asyncio
 async def test_terminal_uncertain_advances_to_fresh_bounded_attempt(
     monkeypatch,

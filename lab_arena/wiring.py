@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, runtime, scoring, signing
+from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, funding, runtime, scoring, signing
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
 from lab_arena.store import ArenaStore, PostgrestTransport
@@ -94,6 +94,48 @@ class ChainReadsAdapter:
         return [hotkey for hotkey, permit in zip(snapshot.hotkeys, snapshot.validator_permit) if permit]
 
 
+def funding_confirmer(*, chain, config: funding.FundingConfig, store, price_source, clock=None):
+    """The ``POST /funding/confirm`` handler: verify one finalized transfer, credit once.
+
+    Returns structured, secret-free results; verification failures name the
+    published rule and create no credit.
+    """
+
+    def confirm(miner_hotkey: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        moment = (clock or (lambda: datetime.now(timezone.utc)))()
+        try:
+            receipt = funding.confirm_funding(
+                chain=chain, config=config, store=store, miner_hotkey=miner_hotkey,
+                block_hash=body.get("block_hash"), extrinsic_index=body.get("extrinsic_index"), now=moment, price_source=price_source,
+            )
+        except funding.DepositRejected as exc:
+            return {"credited": False, "idempotent": False, "rejected": True, "rule": exc.rule_id}
+        except funding.MalformedReference as exc:
+            return {"credited": False, "idempotent": False, "rejected": True, "rule": "reference_malformed"}
+        except (funding.PriceUnavailable, funding.FundingStoreError, chain_module.ArenaChainError) as exc:
+            raise ServiceError("funding_unavailable:%s" % type(exc).__name__, 503) from exc
+        return {
+            "credited": bool(receipt.credited), "idempotent": bool(receipt.idempotent), "balance_microusd": int(receipt.balance_microusd),
+            "payment_reference": receipt.deposit_doc.get("payment_reference"), "amount_microusd": receipt.deposit_doc.get("amount_microusd"),
+        }
+
+    return confirm
+
+
+def credential_registrar(*, decryptor, urlopen=urllib.request.urlopen, clock=None):
+    """The ``POST /credentials/openrouter`` handler: decrypt once in the broker identity, preflight, record."""
+
+    def register(envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        try:
+            return credentials.register_openrouter_key(envelope, decryptor=decryptor, urlopen=urlopen, expected_recipient_key_hash=decryptor.recipient_key_hash, now=clock)
+        except credentials.OpenRouterKeyError as exc:
+            raise ServiceError("credential_rejected:%s" % str(exc)[:80], 400) from exc
+        except contracts.ArenaContractError as exc:
+            raise ServiceError("envelope_invalid:%s" % str(exc)[:80], 400) from exc
+
+    return register
+
+
 def banned_hotkeys_from_environment() -> List[str]:
     """Operator-provided ban snapshot: a JSON list at LAB_ARENA_BANNED_HOTKEYS_PATH."""
 
@@ -151,11 +193,14 @@ def build_service_from_environment(mode: str):
         runtime_lock_hash=lock.runtime_lock_hash, scoring_workers=int(os.environ.get("LAB_ARENA_SCORING_WORKERS", "4")),
     )
     service = ArenaService(config)
-    recipient = None
-    recipient_path = os.environ.get("LAB_ARENA_RECIPIENT_DOCUMENT_PATH", "").strip()
-    if recipient_path:
-        recipient = credentials.validate_recipient_document(json.loads(Path(recipient_path).read_text(encoding="utf-8"))) and json.loads(Path(recipient_path).read_text(encoding="utf-8"))
-    app = create_app(service, recipient_document=recipient)
+    recipient = credentials.recipient_document(decryptor.public_key_der)
+    funding_config = funding.FundingConfig(recipient_wallet=_required("LAB_ARENA_TAO_RECIPIENT_WALLET"), network_name=config.network_name)
+    app = create_app(
+        service,
+        recipient_document=recipient,
+        funding_confirm=funding_confirmer(chain=arena_chain, config=funding_config, store=store, price_source=funding.coingecko_price_source()),
+        credential_register=credential_registrar(decryptor=decryptor),
+    )
     return service, app
 
 

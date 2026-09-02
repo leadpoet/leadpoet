@@ -219,6 +219,7 @@ class ArenaService:
         self._worker_release = worker_release_identity(repository_commit=config.defaults.repository_commit, runtime_lock_hash=config.runtime_lock_hash)
         self._brokers: Dict[str, broker_module.Broker] = {}
         self._scoring_results: Dict[Tuple[str, int], Dict[str, List[Dict[str, Any]]]] = {}
+        self._banned_cache: Dict[str, set] = {}
 
     # -- accessors -------------------------------------------------------------
 
@@ -254,10 +255,55 @@ class ArenaService:
         return row
 
     def startup_checks(self) -> Dict[str, Any]:
-        """Fail closed unless the role, key, and identities are what the round pins."""
+        """Fail closed unless every required identity is present and consistent (section 16).
+
+        Checks the database role, every Arena table and function grant, the
+        object store, the signing key, and, when a round exists, that its pinned
+        scorer policy, operation table, and worker release equal this build's.
+        """
 
         identity = self._store.require_service_role()
-        return {"database_identity": identity, "signing_public_key_hash": self._signer.public_key_hash, "worker_release_hash": self.worker_release_hash, "operation_table_hash": operations.OPERATION_TABLE_HASH, "scorer_policy_hash": self._scorer_policy["policy_hash"]}
+        for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_events", "lab_arena_accounts", "lab_arena_ledger"):
+            try:
+                self._store._transport.select(table, limit=1)
+            except ArenaStoreError as exc:
+                raise ServiceError("table_unavailable:%s" % table, 500) from exc
+        # Every service function must exist and be granted: a missing round is the
+        # expected structured failure; a permission or undefined-function error is not.
+        for function, params in (
+            ("lab_arena_expire_leases", {"p_round_id": "arena-0000-00-00"}),
+            ("lab_arena_close_stage", {"p_round_id": "arena-0000-00-00", "p_stage": 1}),
+            ("lab_arena_cancel_round", {"p_round_id": "arena-0000-00-00", "p_reason": "startup-probe"}),
+        ):
+            try:
+                self._store._transport.rpc(function, params)
+            except ArenaStoreError as exc:
+                if "lab_arena_round_missing" not in str(exc):
+                    raise ServiceError("function_unavailable:%s" % function, 500) from exc
+        probe_ref = "arena/_startup/%s.json" % contracts.document_hash(self._signer.public_key_hash)[7:23]
+        probe_bytes = contracts.canonical_json({"probe": self._signer.public_key_hash}).encode("utf-8")
+        try:
+            self._objects.put(probe_ref, probe_bytes)
+            if self._objects.get(probe_ref) != probe_bytes:
+                raise ServiceError("object_store_mismatch", 500)
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise ServiceError("object_store_unavailable", 500) from exc
+        probe_document = self._sign(contracts.hashed_document({"startup": True}, "probe_hash"), "probe_hash")
+        signing.verify_document_signature(probe_document, hash_field="probe_hash", public_key_der=self._signer.public_key_der, expected_public_key_hash=self._signer.public_key_hash)
+        current = self.current_round()
+        if current is not None:
+            configuration = current["configuration_doc"]
+            for name, pinned, ours in (
+                ("scorer_policy_hash", configuration.get("scorer_policy_hash"), self._scorer_policy["policy_hash"]),
+                ("operation_table_hash", configuration.get("operation_table_hash"), operations.OPERATION_TABLE_HASH),
+                ("worker_release_hash", (configuration.get("release") or {}).get("worker_release_hash"), self.worker_release_hash),
+                ("signing_public_key_hash", configuration.get("signing_public_key_hash"), self._signer.public_key_hash),
+            ):
+                if pinned != ours:
+                    raise ServiceError("release_identity_mismatch:%s" % name, 500)
+        return {"database_identity": identity, "signing_public_key_hash": self._signer.public_key_hash, "worker_release_hash": self.worker_release_hash, "operation_table_hash": operations.OPERATION_TABLE_HASH, "scorer_policy_hash": self._scorer_policy["policy_hash"], "current_round": current["round_id"] if current else None}
 
     # -- round creation (section 5.1) ----------------------------------------
 
@@ -374,11 +420,25 @@ class ArenaService:
             raise ServiceError("signature_invalid", 401)
         except ArenaContractError as exc:
             raise ServiceError("request_invalid:%s" % str(exc)[:80], 400)
-        if round_id is not None:
-            banned = set(self._config.banned_hotkeys_source())
-            if validated["hotkey"] in banned:
-                raise ServiceError("hotkey_banned", 403)
+        if round_id is not None and validated["hotkey"] in self._banned_snapshot(round_id):
+            raise ServiceError("hotkey_banned", 403)
         return validated
+
+    def _banned_snapshot(self, round_id: str) -> set:
+        """The banned-hotkey set frozen into the round configuration, verified by hash."""
+
+        with self._lock:
+            cached = self._banned_cache.get(round_id)
+            if cached is not None:
+                return cached
+        round_row = self._round(round_id)
+        document = json.loads(self._objects.get("arena/%s/banned_snapshot.json" % round_id).decode("utf-8"))
+        if contracts.verify_hashed_document(document, "snapshot_hash") != round_row["configuration_doc"]["banned_hotkeys_snapshot_hash"]:
+            raise ServiceError("banned_snapshot_mismatch", 500)
+        banned = set(str(item) for item in document.get("hotkeys") or [])
+        with self._lock:
+            self._banned_cache[round_id] = banned
+        return banned
 
     # -- submissions (sections 6, 7, 14.2) -------------------------------------
 
@@ -425,10 +485,21 @@ class ArenaService:
         return confirm(validated["hotkey"], validated["body"])
 
     def handle_credential(self, envelope: Any, *, register: Callable[[Mapping[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+        """Register or replace a miner's encrypted OpenRouter runtime key (section 7.3).
+
+        ``register`` decrypts once inside the broker identity and returns the
+        non-secret preflight record; the account stores the whole ciphertext
+        envelope (never the plaintext) so the broker can decrypt it per run.
+        """
+
         round_row = self.current_round()
         validated = self.validate_request(envelope, scope=contracts.SCOPE_CREDENTIAL, round_id=round_row["round_id"] if round_row else None)
-        record = register(validated["body"].get("envelope") or {})
-        return self._store.upsert_account_credential(validated["hotkey"], str(validated["body"]["envelope"]["ciphertext_b64"]), str(record["key_hash"]), record)
+        key_envelope = validated["body"].get("envelope")
+        if not isinstance(key_envelope, Mapping):
+            raise ServiceError("envelope_missing", 400)
+        record = register(key_envelope)
+        stored = contracts.canonical_json(dict(key_envelope))
+        return self._store.upsert_account_credential(validated["hotkey"], stored, str(record["key_hash"]), record)
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 

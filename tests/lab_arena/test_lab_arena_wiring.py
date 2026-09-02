@@ -74,3 +74,61 @@ def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):
     assert wiring.banned_hotkeys_from_environment() == ["5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"]
     monkeypatch.delenv("LAB_ARENA_BANNED_HOTKEYS_PATH")
     assert wiring.banned_hotkeys_from_environment() == []
+
+
+def test_funding_confirmer_maps_rejections_and_outages_without_leaking():
+    from datetime import datetime, timezone
+
+    from lab_arena import chain as chain_module, funding, wiring
+
+    class StubChain:
+        def __init__(self, error):
+            self.error = error
+
+        def finalized_head(self):
+            raise self.error
+
+    config = funding.FundingConfig(recipient_wallet="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", network_name="finney")
+    confirm = wiring.funding_confirmer(chain=StubChain(chain_module.ArenaChainError("endpoint down")), config=config, store=None, price_source=None, clock=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc))
+    with pytest.raises(ServiceError, match="funding_unavailable"):
+        confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "0x" + "a" * 64, "extrinsic_index": 1})
+    malformed = confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "not-a-hash", "extrinsic_index": 1})
+    assert malformed["credited"] is False and malformed["rule"] in ("reference_malformed", "finality") or malformed.get("rejected")
+
+
+def test_credential_registrar_rejects_bad_envelopes_and_records_good_ones():
+    import json
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from lab_arena import credentials, wiring
+
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    recipient = credentials.recipient_document(private.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+    decryptor = credentials.LocalRsaDecryptor(private)
+    raw_key = "sk-or-v1-" + "w" * 40
+
+    def urlopen(request, timeout):
+        class Response:
+            def read(self):
+                return json.dumps({"data": {"limit": None, "limit_remaining": None, "usage": 1.25, "disabled": False}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return Response()
+
+    register = wiring.credential_registrar(decryptor=decryptor, urlopen=urlopen)
+    record = register(credentials.encrypt_runtime_key(recipient, raw_key))
+    assert record["preflight_status"] == "ok" and record["limit_remaining_microusd"] is None and record["usage_microusd"] == 1_250_000
+    assert raw_key not in json.dumps(record)
+    with pytest.raises(ServiceError, match="envelope_invalid"):
+        register({"schema_version": "x"})
+    tampered = credentials.encrypt_runtime_key(recipient, raw_key)
+    tampered["ciphertext_b64"] = tampered["ciphertext_b64"][:-4] + "AAAA"
+    with pytest.raises(ServiceError):
+        register(tampered)

@@ -573,3 +573,103 @@ def test_shadow_round_runs_every_participant_through_all_fifty_icps_and_reports_
     assert set(final["submission_scores"]) == {p["submission_id"] for p in participants}
     with pytest.raises(svc.ServiceError):
         harness.service.shadow_report("arena-1999-01-01")
+
+
+def test_startup_checks_fail_closed_and_banned_snapshot_governs_requests(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Xray"], runners=["alpha", "beta"])
+    harness.chain.epoch = 27000
+    banned_runner = harness.runner_keys[1]
+    harness.service = svc.ArenaService(svc.ServiceConfig(**{**harness.service.config.__dict__, "banned_hotkeys_source": lambda: [banned_runner]}))
+    service = harness.service
+    checks = service.startup_checks()
+    assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
+    configuration = service.create_round(datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc))
+    harness.round_id = configuration["round_id"]
+    assert banned_runner not in configuration["runner_allowlist"] and harness.runner_keys[0] in configuration["runner_allowlist"]
+    checks = service.startup_checks()
+    assert checks["current_round"] == harness.round_id
+    # A service built with a different signing key refuses to start against the pinned round.
+    other = svc.ServiceConfig(**{**service.config.__dict__, "signer": signing.LocalSigner.generate()})
+    with pytest.raises(svc.ServiceError, match="release_identity_mismatch:signing_public_key_hash"):
+        svc.ArenaService(other).startup_checks()
+    # A broken object store fails startup.
+    class BrokenObjects:
+        def put(self, ref, data):
+            raise OSError("bucket unavailable")
+
+        def get(self, ref):
+            raise OSError("bucket unavailable")
+
+    with pytest.raises(svc.ServiceError, match="object_store_unavailable"):
+        svc.ArenaService(svc.ServiceConfig(**{**service.config.__dict__, "object_store": BrokenObjects()})).startup_checks()
+    # The frozen snapshot, not the live source, governs: the live source changes but the round's set stands.
+    harness.submit("Xray", harness.round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    service.advance_round(harness.round_id)
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    service.advance_round(harness.round_id)
+    banned_kp = keypair("svc-runner-beta")
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_CLAIM, round_id=harness.round_id, hotkey=banned_kp.ss58_address, body={"declared_parallelism": 1, "worker_release_hash": service.worker_release_hash}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: banned_kp.sign(m.encode()).hex())
+    live_unbanned = svc.ArenaService(svc.ServiceConfig(**{**service.config.__dict__, "banned_hotkeys_source": lambda: []}))
+    with pytest.raises(svc.ServiceError, match="hotkey_banned"):
+        live_unbanned.handle_claim(envelope)
+    good_kp = keypair("svc-runner-alpha")
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_CLAIM, round_id=harness.round_id, hotkey=good_kp.ss58_address, body={"declared_parallelism": 1, "worker_release_hash": service.worker_release_hash}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: good_kp.sign(m.encode()).hex())
+    assert live_unbanned.handle_claim(envelope)["status"] == "leased"
+    wrong_release = contracts.build_signed_request(scope=contracts.SCOPE_CLAIM, round_id=harness.round_id, hotkey=good_kp.ss58_address, body={"declared_parallelism": 1, "worker_release_hash": contracts.document_hash("other")}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: good_kp.sign(m.encode()).hex())
+    with pytest.raises(svc.ServiceError, match="worker_release_mismatch"):
+        service.handle_claim(wrong_release)
+
+
+def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_funding_credits_once(connect, tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from lab_arena import credentials as creds
+
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    service = harness.service
+    miner = keypair("svc-miner-credential")
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    recipient = creds.recipient_document(private.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+    raw_key = "sk-or-v1-" + "c" * 40
+    envelope = creds.encrypt_runtime_key(recipient, raw_key)
+    decryptor = creds.LocalRsaDecryptor(private)
+
+    def fake_urlopen(request, timeout):
+        class Response:
+            def read(self):
+                return json.dumps({"data": {"limit": 25.0, "limit_remaining": 20.5, "usage": 4.5, "disabled": False, "hash": hashlib.sha256(raw_key.encode()).hexdigest()}}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return Response()
+
+    register = lambda env: creds.register_openrouter_key(env, decryptor=decryptor, urlopen=fake_urlopen, expected_recipient_key_hash=recipient["public_key_hash"])
+    request = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id="arena-0000-00-00", hotkey=miner.ss58_address, body={"envelope": envelope}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    result = service.handle_credential(request, register=register)
+    assert result["status"] == "ok" and result["preflight_status"] == "ok" and result["observed_limit_remaining_microusd"] == 20_500_000
+    account = service.store.get_account(miner.ss58_address)
+    stored = json.loads(account["openrouter_ciphertext"])
+    assert raw_key not in account["openrouter_ciphertext"]
+    # The broker identity decrypts the stored envelope per run (wiring.openrouter_key_for path).
+    handle = creds.decrypt_runtime_key(stored, decryptor, expected_recipient_key_hash=recipient["public_key_hash"])
+    assert handle.bearer_header()["Authorization"] == "Bearer " + raw_key
+    # Funding confirmation is signed, scoped, and credited through the store exactly once.
+    confirmations = []
+
+    def confirm(hotkey, body):
+        confirmations.append((hotkey, body["block_hash"]))
+        return service.store.credit_deposit(miner_hotkey=hotkey, payment_reference="finney:0x" + hashlib.sha256(body["block_hash"].encode()).hexdigest() + ":1", amount_microusd=1_500_000, deposit_doc={"block_hash": body["block_hash"]})
+
+    funding = contracts.build_signed_request(scope=contracts.SCOPE_FUNDING, round_id="arena-0000-00-00", hotkey=miner.ss58_address, body={"block_hash": "0x" + "ab" * 32, "extrinsic_index": 2}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    first = service.handle_funding(funding, confirm=confirm)
+    second = service.handle_funding(funding, confirm=confirm)
+    assert first["credited"] is True and second["credited"] is False and second["idempotent"] is True
+    assert service.store.get_account(miner.ss58_address)["balance_microusd"] == 1_500_000
+    with pytest.raises(svc.ServiceError, match="signature_invalid"):
+        service.handle_funding(dict(funding, body={"block_hash": "0x" + "cd" * 32, "extrinsic_index": 2}), confirm=confirm)

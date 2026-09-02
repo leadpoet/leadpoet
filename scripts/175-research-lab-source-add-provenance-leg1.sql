@@ -54,6 +54,23 @@ ALTER TABLE public.research_lab_source_add_reward_intents
 ALTER TABLE public.research_lab_source_add_reward_intents
     ADD COLUMN IF NOT EXISTS provenance_artifact_hash TEXT NOT NULL DEFAULT '';
 
+-- The v4 reward worker deliberately consumes only provenance-era intents.
+-- Refuse the cutover while any actionable legacy intent still needs the v3
+-- worker, rather than strand it behind a mixed-version dispatcher.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.research_lab_source_add_reward_intents
+        WHERE approval_kind = 'post_accept_functional_probe'
+          AND intent_status IN ('queued', 'leased', 'retry_wait')
+    ) THEN
+        RAISE EXCEPTION
+            'SOURCE_ADD actionable legacy Leg 1 intent must drain before provenance Leg 1 migration';
+    END IF;
+END;
+$$;
+
 ALTER TABLE public.research_lab_source_add_reward_intents
     DROP CONSTRAINT IF EXISTS
         research_lab_source_add_reward_intents_approval_kind_check;

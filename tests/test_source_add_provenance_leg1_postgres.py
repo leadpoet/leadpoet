@@ -951,6 +951,39 @@ def test_migration_175_full_provenance_leg1_contract(pre_migration_database):
                 "DELETE FROM public.research_lab_source_add_work_items WHERE work_id=%s",
                 ("source_add_work:1750000000000000",),
             )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_reward_intents (
+                    intent_id, submission_id, adapter_id, miner_hotkey,
+                    intent_status, functional_receipt_hash,
+                    business_artifact_hash
+                ) VALUES (
+                    'source_add_reward_intent:1750000000000001',
+                    'source_add_submission:1750000000000001',
+                    'adapter:migration-175-legacy-actionable',
+                    '5Migration175LegacyActionable', 'queued', %s, %s
+                )
+                """,
+                (
+                    sha256_json({"legacy": "receipt"}),
+                    sha256_json({"legacy": "artifact"}),
+                ),
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match=(
+                    "SOURCE_ADD actionable legacy Leg 1 intent must drain "
+                    "before provenance Leg 1 migration"
+                ),
+            ):
+                cursor.execute(migration_sql)
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                """
+                DELETE FROM public.research_lab_source_add_reward_intents
+                WHERE intent_id='source_add_reward_intent:1750000000000001'
+                """
+            )
 
             _set_paused(cursor, False, "seed")
             _seed_boot_identity(cursor)
@@ -1303,6 +1336,16 @@ def test_migration_175_full_provenance_leg1_contract(pre_migration_database):
                 "SELECT count(*) FROM public.research_lab_source_add_reward_obligations WHERE adapter_id=%s AND leg=1",
                 (queued_builtin["record"]["adapter_id"],),
             ) == 1
+            assert _scalar(
+                cursor,
+                "SELECT stage FROM public.research_lab_source_add_submission_current WHERE submission_id=%s",
+                (queued_builtin["record"]["submission_id"],),
+            ) == "functional_probe_failed"
+            assert _scalar(
+                cursor,
+                "SELECT provision_status FROM public.research_lab_source_add_provisioning_current WHERE submission_id=%s",
+                (queued_builtin["record"]["submission_id"],),
+            ) == "disabled"
             queued_rejection_sql, queued_rejection_args = queued_rejection
             assert _scalar(
                 cursor, queued_rejection_sql, queued_rejection_args

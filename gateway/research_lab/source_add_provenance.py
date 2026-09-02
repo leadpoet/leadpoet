@@ -22,6 +22,11 @@ import urllib.request
 
 from publicsuffix2 import get_sld
 
+from research_lab.source_add import (
+    source_add_contains_credential_material,
+    source_add_text_contains_credential_material,
+)
+
 
 PRECHECK_PASSED = "provenance_precheck_passed"
 PRECHECK_MANUAL = "needs_manual_review"
@@ -100,7 +105,16 @@ def sanitize_source_add_precheck_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
             out: dict[str, Any] = {}
             for key, item in value.items():
                 lowered_key = str(key).lower()
-                if any(marker in lowered_key for marker in ("api_key", "secret", "password", "token", "credential")):
+                if any(
+                    marker in lowered_key
+                    for marker in (
+                        "api_key",
+                        "secret",
+                        "password",
+                        "token",
+                        "credential",
+                    )
+                ) or source_add_contains_credential_material({str(key): ""}):
                     out[str(key)[:80]] = "[redacted]"
                 else:
                     out[str(key)[:80]] = clean(item)
@@ -115,6 +129,8 @@ def sanitize_source_add_precheck_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
             for marker in ("sk-or-", "sb_secret", "service_role", "raw_secret", "api_key="):
                 if marker in lowered:
                     return "[redacted]"
+            if source_add_text_contains_credential_material(text):
+                return "[redacted]"
             return text[:2000]
         return value
 

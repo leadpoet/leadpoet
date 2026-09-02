@@ -7,6 +7,9 @@ import json
 
 import pytest
 
+from gateway.research_lab.source_add_provenance import (
+    sanitize_source_add_precheck_doc,
+)
 from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
 )
@@ -789,5 +792,71 @@ def test_submission_constraint_allows_credential_free_document(database) -> None
                         submission_id,
                     ),
                 )
+    finally:
+        connection.close()
+
+
+def test_submission_constraint_allows_sanitized_builtwith_precheck(
+    database,
+) -> None:
+    psycopg2, dsn = database
+    submission_id = "source_add_submission:1740000000000003"
+    adapter_id = "adapter:sanitized-builtwith-174"
+    miner_hotkey = "5RestartRestoreSanitizedBuiltWithMiner"
+    api_base_url = "https://api.builtwith.com/trends/v6"
+    precheck_doc = sanitize_source_add_precheck_doc(
+        {
+            "docs_fetch": {
+                "text_excerpt": (
+                    "Call /api.json?KEY=YOUR_API_KEY&TECH=Shopify for trend metadata."
+                )
+            }
+        }
+    )
+    assert precheck_doc["docs_fetch"]["text_excerpt"] == "[redacted]"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _reserve_provider_origin(
+                cursor,
+                submission_id=submission_id,
+                adapter_id=adapter_id,
+                miner_hotkey=miner_hotkey,
+                api_base_url=api_base_url,
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_submissions (
+                    submission_id, adapter_id, miner_hotkey, stage, seq,
+                    submission_doc, precheck_status, precheck_doc
+                ) VALUES (
+                    %s, %s, %s, 'provenance_precheck_passed', 0,
+                    %s::JSONB, 'provenance_precheck_passed', %s::JSONB
+                )
+                """,
+                (
+                    submission_id,
+                    adapter_id,
+                    miner_hotkey,
+                    json.dumps(
+                        {
+                            "source_metadata": {"api_base_url": api_base_url},
+                            "precheck_doc": precheck_doc,
+                        },
+                        sort_keys=True,
+                    ),
+                    json.dumps(precheck_doc, sort_keys=True),
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT submission_doc->'precheck_doc'->'docs_fetch'->>'text_excerpt'
+                FROM public.research_lab_source_add_submissions
+                WHERE submission_id = %s
+                """,
+                (submission_id,),
+            )
+            assert cursor.fetchone()[0] == "[redacted]"
     finally:
         connection.close()

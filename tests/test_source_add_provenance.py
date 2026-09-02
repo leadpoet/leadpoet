@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from gateway.research_lab import source_add_provenance as provenance
+from research_lab.source_add import source_add_contains_credential_material
 
 
 @pytest.fixture(autouse=True)
@@ -741,3 +742,24 @@ def test_ai_summary_keeps_actual_uncertain_verdict_after_echoed_query():
     legitimacy = provenance._ai_legitimacy(summary["markdown_excerpt"])
     assert legitimacy["positive_verdict"] is False
     assert "verdict: uncertain" in legitimacy["uncertain_markers"]
+
+
+def test_precheck_sanitizer_redacts_builtwith_key_placeholder():
+    sanitized = provenance.sanitize_source_add_precheck_doc(
+        {
+            "docs_fetch": {
+                "text_excerpt": (
+                    "Call /api.json?KEY=YOUR_API_KEY&TECH=Shopify for trend metadata."
+                )
+            },
+            "ai_mode": {
+                "markdown_excerpt": "VERDICT: CREDIBLE. Official API documentation."
+            },
+        }
+    )
+
+    assert sanitized["docs_fetch"]["text_excerpt"] == "[redacted]"
+    assert sanitized["ai_mode"]["markdown_excerpt"].startswith(
+        "VERDICT: CREDIBLE"
+    )
+    assert source_add_contains_credential_material(sanitized) is False

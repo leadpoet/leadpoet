@@ -268,12 +268,23 @@ def _source_add_duplicate_privacy_contract_fixture() -> dict[str, Any]:
 
 def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
     return {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v4",
+        "required_migration": (
+            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+        ),
         "daily_cap": 50,
         "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
         "approval_boundary": "provenance_precheck_passed",
-        "backfill_policy": "all_exact_attested_provenance",
+        "backfill_policy": (
+            "earliest_exact_attested_provenance_per_provider_origin"
+        ),
+        "provider_origin_scope": "normalized_exact_host",
+        "provider_origin_winner_order": [
+            "provenance_created_at",
+            "submission_id",
+        ],
+        "cancelled_intents_are_authority": False,
         "public_trigger_fields": [
             "precheck_status",
             "provenance_artifact_hash",
@@ -293,6 +304,10 @@ def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
         ),
         "view_authority_sha256": (
             rehearsal_sitecustomize._candidate_provenance_leg1_view_authority()
+        ),
+        "repair_function_authority_sha256": (
+            rehearsal_sitecustomize
+            ._candidate_provenance_origin_repair_function_authority()
         ),
         "functions": {
             "configure_probe_v3": True,
@@ -412,7 +427,7 @@ def test_local_schema_adapter_returns_full_source_add_leg1_contract(
     request = urllib.request.Request(
         (
             "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
-            "research_lab_source_add_post_accept_leg1_contract_v3"
+            "research_lab_source_add_post_accept_leg1_contract_v4"
         ),
         data=b"{}",
         headers={
@@ -1601,6 +1616,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v2",
             "research_lab_source_add_post_accept_leg1_contract_v3",
+            "research_lab_source_add_post_accept_leg1_contract_v4",
             "research_lab_source_add_configure_probe_v3",
             "research_lab_source_add_enqueue_leg1_after_provenance_v1",
             "research_lab_source_add_enqueue_provision_smoke_v2",
@@ -1911,6 +1927,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v2",
             "research_lab_source_add_post_accept_leg1_contract_v3",
+            "research_lab_source_add_post_accept_leg1_contract_v4",
             "research_lab_source_add_configure_probe_v3",
             "research_lab_source_add_enqueue_leg1_after_provenance_v1",
             "research_lab_source_add_enqueue_provision_smoke_v2",

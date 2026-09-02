@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "4c00ff8fa6648ccffa5a6eb8ee497e510543a07e",
+  "baseline_commit": "0cd8f6dfde08ac321174b881e860f4d5915d8b24",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -97,7 +97,7 @@
       "symbol": "require_worker_authority_after_liveness"
     },
     {
-      "ast_sha256": "sha256:3e76ff2fb413d0a9779cf9bf56777908084eca03de44587fd09baa46ac7f6147",
+      "ast_sha256": "sha256:d4fe414133acde1f7772c992c0a7c325307df9dd507c51540678584fb5bf9861",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
     },
@@ -8707,7 +8707,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:8105993d61b50374f8cd3a2e7cce5d1e9046d0cd7c2acd02e0aa340117a9c008",
-  "protected_source_commit": "4c00ff8fa6648ccffa5a6eb8ee497e510543a07e",
+  "manifest_hash": "sha256:263f85dd81176567ef3fa0629e16e5039c0581e1894f5e4b5419b18b4387d1d5",
+  "protected_source_commit": "0cd8f6dfde08ac321174b881e860f4d5915d8b24",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

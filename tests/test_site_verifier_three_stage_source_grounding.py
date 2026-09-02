@@ -293,6 +293,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.await_count, 1)
         fetch.assert_awaited_once_with([url])
         self.assertFalse(result["client_ready"])
+        self.assertEqual(result["decision"], "unavailable")
         self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
         self.assertEqual(result["verdict"]["signal_evaluations"][0]["signal_status"], "unable_to_verify")
 

@@ -2550,7 +2550,12 @@ async def verify_three_stage(
     if not (contents.get("results") or []):
         return {
             "client_ready": False,
-            "decision": "reject",
+            # No verifier-readable source is an infrastructure-unavailable
+            # observation, not evidence that the model fabricated the event.
+            # Keep the score fail-closed at zero while allowing the existing
+            # Research Lab retry path to rerun the ICP instead of persisting a
+            # false semantic rejection.
+            "decision": "unavailable",
             "rejection_reason": "evidence_fetch_failed",
             "stage1": stage1_info,
             "scrape": {

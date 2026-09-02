@@ -78,9 +78,14 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     for row in service.store.list_rounds():
         if row["status"] not in ("published", "cancelled"):
             service.store.cancel_round(row["round_id"], "operator_abort")
+    # The operator's first command (--check-only) parses PostgREST error bodies for the function probes.
+    checks = service.startup_checks()
+    assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
     configuration = service.create_round(datetime(2026, 9, 2, 0, 0, tzinfo=timezone.utc))
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
+    # With a current round, startup also compares the pinned identities of this build.
+    assert harness.build_service().startup_checks()["current_round"] == round_id
     submissions = {flavor: harness.submit(flavor, round_id) for flavor in harness.challengers}
     assert service.advance_round(round_id)["status"] == "waiting"
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])

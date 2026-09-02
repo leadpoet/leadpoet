@@ -56,6 +56,7 @@ from leadpoet_canonical.production_parity import (  # noqa: E402
 from scripts.production_parity_snapshot import (  # noqa: E402
     DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
     DEFAULT_SNAPSHOT_IO_TIMEOUT_SECONDS,
+    restore_schema_only_source_add_acl_contract,
     restore_snapshot,
     verify_snapshot,
 )
@@ -1954,6 +1955,18 @@ def _run_database_lane(
             )
         )
         supabase_url, service_role_key = database.start_postgrest()
+        manifest = validate_snapshot_manifest(
+            _load_json(manifest_path, description="snapshot manifest")
+        )
+        if manifest["capture_mode"] != "schema-only":
+            raise ProductionParityError(
+                "fast database lane requires a schema-only snapshot"
+            )
+        source_add_acl = restore_schema_only_source_add_acl_contract(
+            target_dsn=database.target_dsn,
+            production_host=production_host,
+            candidate_migrations=contract["migrations"],
+        )
         schema = verify_required_supabase_v2_schema(
             {
                 "SUPABASE_URL": supabase_url,
@@ -1963,9 +1976,6 @@ def _run_database_lane(
             opener=_StandalonePostgrestSchemaOpener(supabase_url),
             timeout_seconds=FAST_SCHEMA_PREFLIGHT_TIMEOUT_SECONDS,
             chain_realized_activation_authority=activation_row,
-        )
-        manifest = validate_snapshot_manifest(
-            _load_json(manifest_path, description="snapshot manifest")
         )
         shape = database.shape_evidence(
             service_role_key=service_role_key,
@@ -1989,6 +1999,7 @@ def _run_database_lane(
                 **restore,
                 "clone_prerequisites": prerequisites,
                 "clone_restore_contract": restore_contract,
+                "schema_only_source_add_acl": source_add_acl,
                 "production_activation_authority": activation_live_evidence,
             },
             "schema": schema,

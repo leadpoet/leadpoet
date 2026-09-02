@@ -920,6 +920,40 @@ def test_schema_only_restore_stages_exact_source_add_migration_precondition(
     ]
 
 
+def test_schema_only_source_add_acl_is_exact_migration_bound():
+    migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+    sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
+        "utf-8"
+    )
+
+    assert migrations[1]["path"] == (
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql"
+    )
+    assert migrations[1]["sha256"] in sql
+    assert (
+        "public.research_lab_source_add_admit_v3"
+        "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
+    ) in sql
+    assert "schema-only SOURCE_ADD ACL function signatures differ" in sql
+    assert "FROM PUBLIC, anon, authenticated" in sql
+    assert "FROM service_role" in sql
+
+    rewritten = [dict(item) for item in migrations]
+    rewritten[1]["sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(
+        ProductionParityError,
+        match="schema-only SOURCE_ADD ACL migration identity differs",
+    ):
+        parity_snapshot._schema_only_source_add_acl_sql(rewritten)
+
+    extended = [*migrations, {**migrations[-1], "path": "scripts/175-next.sql", "sequence": 175}]
+    with pytest.raises(
+        ProductionParityError,
+        match="not bound to the latest candidate migration",
+    ):
+        parity_snapshot._schema_only_source_add_acl_sql(extended)
+
+
 def test_full_restore_does_not_stage_schema_only_source_add_state(
     monkeypatch,
     tmp_path: Path,

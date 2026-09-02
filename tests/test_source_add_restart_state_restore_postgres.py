@@ -75,6 +75,25 @@ def _state(cursor) -> dict:
     return cursor.fetchone()[0]
 
 
+def _source_add_acl_contracts(cursor) -> dict:
+    cursor.execute(
+        """
+        SELECT pg_catalog.json_build_object(
+            'duplicate_privacy',
+                public.research_lab_source_add_duplicate_privacy_contract_v1()
+                    -> 'permissions',
+            'post_accept_leg1',
+                public.research_lab_source_add_post_accept_leg1_contract_v2()
+                    -> 'permissions',
+            'claim_control',
+                public.research_lab_source_add_claim_control_contract_v2()
+                    -> 'permissions'
+        )
+        """
+    )
+    return cursor.fetchone()[0]
+
+
 def _acquire(
     cursor,
     guard_id: str,
@@ -264,6 +283,16 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_duplicate_privacy_contract_v1()
+                    -> 'permissions'
+                """
+            )
+            source_duplicate_permissions = cursor.fetchone()[0]
+            assert source_duplicate_permissions["anon_callable"] is False
+            assert source_duplicate_permissions["authenticated_callable"] is False
+
             with pytest.raises(
                 psycopg2.Error,
                 match="schema-only SOURCE_ADD control state is not empty",
@@ -277,6 +306,22 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
                 "SELECT COUNT(*) FROM public.research_lab_source_add_work_items"
             )
             assert cursor.fetchone()[0] == 0
+
+            # pg_dump/pg_restore --no-acl recreates PostgreSQL's default
+            # PUBLIC EXECUTE privilege; the parity role bootstrap also grants
+            # service_role every function before this clone-only repair.
+            cursor.execute(
+                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO PUBLIC"
+            )
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_duplicate_privacy_contract_v1()
+                    -> 'permissions'
+                """
+            )
+            leaked_duplicate_permissions = cursor.fetchone()[0]
+            assert leaked_duplicate_permissions["anon_callable"] is True
+            assert leaked_duplicate_permissions["authenticated_callable"] is True
 
             cursor.execute(staging_sql)
             cursor.execute(
@@ -305,6 +350,30 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
             )
 
             cursor.execute(migration_path.read_text(encoding="utf-8"))
+            cursor.execute(
+                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role"
+            )
+            cursor.execute(
+                parity_snapshot._schema_only_source_add_acl_sql(
+                    parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+                ).decode("utf-8")
+            )
+            repaired_contracts = _source_add_acl_contracts(cursor)
+            assert repaired_contracts["duplicate_privacy"] == (
+                source_duplicate_permissions
+            )
+            assert repaired_contracts["post_accept_leg1"] == {
+                "service_role_exists": True,
+                "candidate_callable": True,
+                "rollback_v2_callable": True,
+                "legacy_not_callable": True,
+            }
+            assert repaired_contracts["claim_control"] == {
+                "service_role_exists": True,
+                "service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            }
             assert _state(cursor) == _state_shape(
                 paused=True,
                 generation=0,

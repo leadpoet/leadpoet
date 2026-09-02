@@ -3353,10 +3353,10 @@ async def verify_three_stage(
                 and item.get("claim_matches_miner_date")
                 in {"consistent", "no_date_in_content"}
                 and str(item.get("claim") or "") == str(row.get("claim") or "")
-                and _grounded_exact_text(
-                    combined_exact_source,
-                    row.get("claim") or "",
-                )
+                # Model-owned verified-event summaries are normalized claims,
+                # not promised verbatim source spans.  Ground the evidence
+                # quotes below against the exact live ATS body instead of
+                # rejecting a valid posting because its summary was rewritten.
                 and supporting_quotes
                 and all(
                     _grounded_exact_text(combined_exact_source, quote)

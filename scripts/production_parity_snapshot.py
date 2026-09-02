@@ -56,6 +56,18 @@ _POSTGRES_ENVIRONMENT_KEYS = (
 )
 _POSTGRES_ARCHIVE_TARGET = "/leadpoet-parity.snapshot"
 _POSTGRES_MIGRATION_TARGET = "/leadpoet-parity.migration.sql"
+_SOURCE_ADD_RESTART_STATE_MIGRATION = (
+    "scripts/174-research-lab-source-add-restart-state-restore.sql"
+)
+_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION = (
+    "leadpoet.production_parity.schema_only_source_add_maintenance.v1"
+)
+_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON = (
+    "production_parity_fast_schema_only_migration_174"
+)
+_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR = (
+    "operator:production-parity-fast-clone"
+)
 _POSTGRES_MOUNT_TARGETS = frozenset(
     {_POSTGRES_ARCHIVE_TARGET, _POSTGRES_MIGRATION_TARGET}
 )
@@ -395,6 +407,135 @@ def _require_success(result: subprocess.CompletedProcess[bytes], *, stage: str) 
         detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()[-800:]
         raise ProductionParityError(f"{stage} failed: {detail}")
     return result.stdout
+
+
+def _schema_only_source_add_maintenance_sql(
+    migration: Mapping[str, Any],
+) -> bytes:
+    if (
+        migration.get("path") != _SOURCE_ADD_RESTART_STATE_MIGRATION
+        or migration.get("sequence") != 174
+        or migration.get("transaction_mode") != "candidate-file"
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(migration.get("sha256") or "")
+        )
+    ):
+        raise ProductionParityError(
+            "schema-only SOURCE_ADD maintenance migration identity differs"
+        )
+    return f"""
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $schema_only_source_add_maintenance$
+BEGIN
+    IF pg_catalog.to_regclass('public.research_lab_source_add_control') IS NULL
+       OR pg_catalog.to_regclass('public.research_lab_source_add_work_items') IS NULL THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD maintenance relations are unavailable';
+    END IF;
+    LOCK TABLE public.research_lab_source_add_control
+        IN ACCESS EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE public.research_lab_source_add_work_items
+        IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    IF EXISTS (
+        SELECT 1 FROM public.research_lab_source_add_control
+    ) THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD control state is not empty';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.research_lab_source_add_work_items
+    ) THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD work state is not empty';
+    END IF;
+    INSERT INTO public.research_lab_source_add_control (
+        singleton, paused, reason, actor_ref
+    ) VALUES (
+        TRUE,
+        TRUE,
+        '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON}',
+        '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR}'
+    );
+END;
+$schema_only_source_add_maintenance$;
+SELECT pg_catalog.json_build_object(
+    'schema_version', '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION}',
+    'control_rows', (
+        SELECT COUNT(*) FROM public.research_lab_source_add_control
+    ),
+    'work_rows', (
+        SELECT COUNT(*) FROM public.research_lab_source_add_work_items
+    ),
+    'paused', (
+        SELECT paused FROM public.research_lab_source_add_control WHERE singleton
+    ),
+    'guard_active', (
+        SELECT restart_guard_commitment <> ''
+        FROM public.research_lab_source_add_control
+        WHERE singleton
+    ),
+    'guard_generation', (
+        SELECT restart_guard_generation
+        FROM public.research_lab_source_add_control
+        WHERE singleton
+    ),
+    'reason_bound', (
+        SELECT reason = '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON}'
+        FROM public.research_lab_source_add_control
+        WHERE singleton
+    ),
+    'actor_bound', (
+        SELECT actor_ref = '{_SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR}'
+        FROM public.research_lab_source_add_control
+        WHERE singleton
+    )
+)::TEXT;
+COMMIT;
+""".encode("utf-8")
+
+
+def _stage_schema_only_source_add_maintenance(
+    *,
+    env: Mapping[str, str],
+    migration: Mapping[str, Any],
+    postgres_image: str | None,
+) -> dict[str, Any]:
+    """Create only the paused control row omitted by a schema-only dump."""
+
+    sql = _schema_only_source_add_maintenance_sql(migration)
+    raw = _require_success(
+        _run_postgres(
+            ["psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"],
+            env=env,
+            timeout=DEFAULT_CANDIDATE_MIGRATION_TIMEOUT_SECONDS,
+            stdin=sql,
+            postgres_image=postgres_image,
+        ),
+        stage="schema-only SOURCE_ADD maintenance staging",
+    ).decode("utf-8", "strict").strip()
+    try:
+        observed = json.loads(raw)
+    except ValueError as exc:
+        raise ProductionParityError(
+            "schema-only SOURCE_ADD maintenance readback is invalid"
+        ) from exc
+    expected = {
+        "schema_version": _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION,
+        "control_rows": 1,
+        "work_rows": 0,
+        "paused": True,
+        "guard_active": False,
+        "guard_generation": 0,
+        "reason_bound": True,
+        "actor_bound": True,
+    }
+    if observed != expected:
+        raise ProductionParityError(
+            "schema-only SOURCE_ADD maintenance readback differs"
+        )
+    return {
+        **expected,
+        "migration_path": _SOURCE_ADD_RESTART_STATE_MIGRATION,
+        "migration_sha256": migration["sha256"],
+    }
 
 
 def _database_stats(
@@ -888,11 +1029,23 @@ def restore_snapshot(
         ),
         stage="isolated production snapshot restore",
     )
+    clone_migration_preconditions: list[dict[str, Any]] = []
     for migration in evidence["migration_delta"]:
         path = root / str(migration["path"])
         if not path.is_file() or file_sha256(path) != migration["sha256"]:
             raise ProductionParityError(
                 f"candidate migration bytes differ: {migration['path']}"
+            )
+        if (
+            manifest["capture_mode"] == "schema-only"
+            and migration["path"] == _SOURCE_ADD_RESTART_STATE_MIGRATION
+        ):
+            clone_migration_preconditions.append(
+                _stage_schema_only_source_add_maintenance(
+                    env=env,
+                    migration=migration,
+                    postgres_image=postgres_image,
+                )
             )
         _require_success(
             _run_postgres(
@@ -925,6 +1078,11 @@ def restore_snapshot(
             ),
             stage=f"candidate migration {migration['path']}",
         )
+    if clone_migration_preconditions:
+        return {
+            **evidence,
+            "clone_migration_preconditions": clone_migration_preconditions,
+        }
     return evidence
 
 

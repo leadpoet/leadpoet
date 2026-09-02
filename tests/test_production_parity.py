@@ -820,6 +820,168 @@ def test_pinned_snapshot_restore_mounts_only_archive_and_exact_migration(
     )
 
 
+def test_schema_only_restore_stages_exact_source_add_migration_precondition(
+    monkeypatch,
+    tmp_path: Path,
+):
+    image = "postgres@sha256:" + "c" * 64
+    archive = tmp_path / "runtime" / "production.dump"
+    archive.parent.mkdir()
+    archive.write_bytes(b"snapshot")
+    migration = tmp_path / parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION
+    migration.parent.mkdir()
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+    migration_hash = parity_snapshot.file_sha256(migration)
+    migration_identity = {
+        "path": parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION,
+        "sequence": 174,
+        "sha256": migration_hash,
+        "transaction_mode": "candidate-file",
+    }
+    maintenance = {
+        "schema_version": (
+            parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION
+        ),
+        "control_rows": 1,
+        "work_rows": 0,
+        "paused": True,
+        "guard_active": False,
+        "guard_generation": 0,
+        "reason_bound": True,
+        "actor_bound": True,
+    }
+    calls: list[dict[str, object]] = []
+
+    def fake_run_postgres(command, **kwargs):
+        calls.append({"command": list(command), **kwargs})
+        stdout = b""
+        if command[0] == "psql" and "-f" not in command:
+            stdout = (json.dumps(maintenance, sort_keys=True) + "\n").encode()
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(
+        parity_snapshot,
+        "verify_snapshot",
+        lambda **_kwargs: {"migration_delta": [migration_identity]},
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_load_json",
+        lambda *_args, **_kwargs: {"capture_mode": "schema-only"},
+    )
+    monkeypatch.setattr(
+        parity_snapshot, "validate_snapshot_manifest", lambda value: value
+    )
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    evidence = restore_snapshot(
+        root=tmp_path,
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=archive,
+        target_dsn=(
+            "postgresql://postgres:secret@127.0.0.1:32768/"
+            "leadpoet_parity_test"
+        ),
+        production_host="db.production.example",
+        postgres_image=image,
+    )
+
+    assert [call["command"][0] for call in calls] == [
+        "pg_restore",
+        "psql",
+        "psql",
+    ]
+    staging = calls[1]
+    assert staging.get("mounts", ()) == ()
+    assert "-f" not in staging["command"]
+    staging_sql = staging["stdin"].decode("utf-8")
+    assert "schema-only SOURCE_ADD control state is not empty" in staging_sql
+    assert "schema-only SOURCE_ADD work state is not empty" in staging_sql
+    assert "IN ACCESS EXCLUSIVE MODE NOWAIT" in staging_sql
+    assert "IN SHARE ROW EXCLUSIVE MODE NOWAIT" in staging_sql
+    assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON in staging_sql
+    assert parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR in staging_sql
+    applied = calls[2]
+    assert applied["command"][-1] == parity_snapshot._POSTGRES_MIGRATION_TARGET
+    assert applied["mounts"] == (
+        parity_snapshot._PostgresClientMount(
+            source=migration,
+            target=parity_snapshot._POSTGRES_MIGRATION_TARGET,
+            read_only=True,
+        ),
+    )
+    assert evidence["clone_migration_preconditions"] == [
+        {
+            **maintenance,
+            "migration_path": migration_identity["path"],
+            "migration_sha256": migration_hash,
+        }
+    ]
+
+
+def test_full_restore_does_not_stage_schema_only_source_add_state(
+    monkeypatch,
+    tmp_path: Path,
+):
+    archive = tmp_path / "production.dump"
+    archive.write_bytes(b"snapshot")
+    migration = tmp_path / parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION
+    migration.parent.mkdir()
+    migration.write_text("SELECT 1;\n", encoding="utf-8")
+    migration_identity = {
+        "path": parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION,
+        "sequence": 174,
+        "sha256": parity_snapshot.file_sha256(migration),
+        "transaction_mode": "candidate-file",
+    }
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        parity_snapshot,
+        "verify_snapshot",
+        lambda **_kwargs: {"migration_delta": [migration_identity]},
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_load_json",
+        lambda *_args, **_kwargs: {
+            "capture_mode": "full",
+            "database": {"total_relation_bytes": 1},
+        },
+    )
+    monkeypatch.setattr(
+        parity_snapshot, "validate_snapshot_manifest", lambda value: value
+    )
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_require_full_snapshot_disk_headroom",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def fake_run_postgres(command, **_kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    evidence = restore_snapshot(
+        root=tmp_path,
+        contract_path=tmp_path / "contract.json",
+        manifest_path=tmp_path / "manifest.json",
+        archive_path=archive,
+        target_dsn=(
+            "postgresql://postgres:secret@127.0.0.1:32768/"
+            "leadpoet_parity_test"
+        ),
+        production_host="db.production.example",
+    )
+
+    assert [command[0] for command in calls] == ["pg_restore", "psql"]
+    assert "-f" in calls[1]
+    assert "clone_migration_preconditions" not in evidence
+
+
 def test_disposable_clone_bootstraps_exact_supabase_restore_prerequisites(
     monkeypatch,
 ):

@@ -10,6 +10,7 @@ import pytest
 from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
 )
+from scripts import production_parity_snapshot as parity_snapshot
 from tests.test_source_add_claim_control_postgres import (
     _insert_work,
 )
@@ -43,6 +44,11 @@ def _owner_generation_commitment(owner_id: str, generation: int) -> str:
 
 @pytest.fixture(scope="module")
 def pre_restore_database():
+    yield from _database_with_migrations(PRE_RESTORE_MIGRATIONS)
+
+
+@pytest.fixture(scope="module")
+def schema_only_clone_database():
     yield from _database_with_migrations(PRE_RESTORE_MIGRATIONS)
 
 
@@ -232,6 +238,74 @@ def test_migration_rejects_active_guarded_or_leased_state(
                 "DELETE FROM public.research_lab_source_add_work_items "
                 "WHERE work_id = %s",
                 ("source_add_work:1740000000000001",),
+            )
+    finally:
+        connection.close()
+
+
+def test_schema_only_parity_stages_paused_empty_clone_before_migration(
+    schema_only_clone_database,
+) -> None:
+    psycopg2, dsn = schema_only_clone_database
+    migration_path = SCRIPTS / MIGRATION
+    migration_identity = {
+        "path": parity_snapshot._SOURCE_ADD_RESTART_STATE_MIGRATION,
+        "sequence": 174,
+        "sha256": parity_snapshot.file_sha256(migration_path),
+        "transaction_mode": "candidate-file",
+    }
+    staging_sql = parity_snapshot._schema_only_source_add_maintenance_sql(
+        migration_identity
+    ).decode("utf-8")
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            with pytest.raises(
+                psycopg2.Error,
+                match="schema-only SOURCE_ADD control state is not empty",
+            ):
+                cursor.execute(staging_sql)
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                "DELETE FROM public.research_lab_source_add_control WHERE singleton"
+            )
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.research_lab_source_add_work_items"
+            )
+            assert cursor.fetchone()[0] == 0
+
+            cursor.execute(staging_sql)
+            cursor.execute(
+                """
+                SELECT paused, reason, actor_ref,
+                       restart_guard_commitment = '',
+                       restart_guard_owner_commitment = '',
+                       restart_guard_generation,
+                       restart_guard_expires_at IS NULL,
+                       restart_guard_acquired_at IS NULL,
+                       restart_guard_actor_ref = ''
+                FROM public.research_lab_source_add_control
+                WHERE singleton
+                """
+            )
+            assert cursor.fetchone() == (
+                True,
+                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_REASON,
+                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_ACTOR,
+                True,
+                True,
+                0,
+                True,
+                True,
+                True,
+            )
+
+            cursor.execute(migration_path.read_text(encoding="utf-8"))
+            assert _state(cursor) == _state_shape(
+                paused=True,
+                generation=0,
+                restore_paused=None,
             )
     finally:
         connection.close()

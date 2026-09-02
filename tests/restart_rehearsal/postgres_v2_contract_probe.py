@@ -48,6 +48,8 @@ from gateway.research_lab.attested_v2_store import (
 from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
+    SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256,
+    SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
 )
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
@@ -294,6 +296,9 @@ SOURCE_ADD_CLAIM_CONTROL_MIGRATION = (
 SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION = (
     "173-research-lab-source-add-leg1-release-policy.sql"
 )
+SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION = (
+    "174-research-lab-source-add-restart-state-restore.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -367,6 +372,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
     SOURCE_ADD_CLAIM_CONTROL_MIGRATION,
     SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION,
+    SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -412,6 +418,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_170_source_add_duplicate_privacy_valid",
     "post_172_source_add_claim_control_valid",
     "post_173_source_add_leg1_release_policy_valid",
+    "post_174_source_add_restart_state_restore_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6469,6 +6476,224 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-172 SOURCE_ADD restart guard released state differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION
+        )
+        applied.append(SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION)
+        source_add_restart_state_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_claim_control_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_restart_state_contract = {
+            "schema_version": "leadpoet.source_add_claim_control_contract.v2",
+            "control_lock": "source-add-control",
+            "pause_rpc": "research_lab_source_add_set_paused",
+            "pause_signature": "boolean,text,text",
+            "claim_rpc": "research_lab_source_add_claim_work",
+            "claim_signature": "text,integer",
+            "acquire_guard_rpc": (
+                "research_lab_source_add_acquire_restart_guard_v2"
+            ),
+            "acquire_guard_signature": "text,text,bigint,integer,text",
+            "guard_state_rpc": (
+                "research_lab_source_add_restart_guard_state_v2"
+            ),
+            "guard_state_signature": "",
+            "release_guard_rpc": (
+                "research_lab_source_add_release_restart_guard_v2"
+            ),
+            "release_guard_signature": "text,text,bigint,text",
+            "restart_quiescence_rpc": (
+                "research_lab_source_add_restart_quiescence_v1"
+            ),
+            "restart_quiescence_signature": "text,text,bigint",
+            "guard_state_result_fields": [
+                "schema_version",
+                "paused",
+                "guard_active",
+                "guard_commitment",
+                "owner_commitment",
+                "guard_generation",
+                "owner_generation_commitment",
+                "guard_expires_at",
+                "restore_paused",
+            ],
+            "acquire_guard_result_fields": [
+                "schema_version",
+                "paused",
+                "guard_active",
+                "guard_commitment",
+                "owner_commitment",
+                "guard_generation",
+                "owner_generation_commitment",
+                "guard_expires_at",
+                "restore_paused",
+            ],
+            "release_guard_result_fields": [
+                "schema_version",
+                "released",
+                "paused",
+                "guard_active",
+                "guard_generation",
+                "owner_generation_commitment",
+                "restored_pre_restart_state",
+            ],
+            "restore_state_column": "restart_guard_restore_paused",
+            "acquire_captures_pre_restart_paused": True,
+            "renewal_preserves_restore_state": True,
+            "expired_takeover_preserves_restore_state": True,
+            "operator_pause_wins": True,
+            "release_restores_pre_restart_state": True,
+            "failed_restart_keeps_paused": True,
+            "rollback_v1_contract_schema_version": (
+                "leadpoet.source_add_claim_control_contract.v1"
+            ),
+            "rollback_v1_contract_sha256": (
+                SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256
+            ),
+            "migration_requires_paused": True,
+            "migration_requires_zero_leased": True,
+            "migration_requires_guard_clear": True,
+            "function_authority_sha256": (
+                SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256
+            ),
+            "functions": {
+                "admission_guard": True,
+                "acquire_restart_guard_v1": True,
+                "acquire_restart_guard_v2": True,
+                "claim_work": True,
+                "pause": True,
+                "release_restart_guard_v1": True,
+                "release_restart_guard_v2": True,
+                "restart_guard_state_v1": True,
+                "restart_guard_state_v2": True,
+                "restart_quiescence_v1": True,
+                "restore_trigger_v2": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        }
+        if source_add_restart_state_contract != expected_restart_state_contract:
+            raise PostgresContractProbeError(
+                "post-174 SOURCE_ADD restart-state contract differs"
+            )
+
+        # A paused pre-state must remain paused after exact release.
+        paused_guard = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_acquire_restart_guard_v2(
+                    :'guard_id', :'owner_id', 1, 14400,
+                    'operator:restart-rehearsal-v2-paused'
+                )::text;
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if paused_guard.get("restore_paused") is not True:
+            raise PostgresContractProbeError(
+                "post-174 paused SOURCE_ADD restart state was not captured"
+            )
+        paused_release = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_release_restart_guard_v2(
+                    :'guard_id', :'owner_id', 2,
+                    'operator:restart-rehearsal-v2-paused'
+                )::text;
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            paused_release.get("paused") is not True
+            or paused_release.get("restored_pre_restart_state") is not True
+        ):
+            raise PostgresContractProbeError(
+                "post-174 paused SOURCE_ADD restart state was not restored"
+            )
+
+        # An active pre-state is guarded as paused, then restored active only
+        # by the exact owner/generation release.
+        database.psql(
+            """
+            SELECT public.research_lab_source_add_set_paused(
+                FALSE, 'restart_rehearsal_active_prestate',
+                'operator:restart-rehearsal-v2-active'
+            );
+            """
+        )
+        active_guard = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_acquire_restart_guard_v2(
+                    :'guard_id', :'owner_id', 2, 14400,
+                    'operator:restart-rehearsal-v2-active'
+                )::text;
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            active_guard.get("paused") is not True
+            or active_guard.get("restore_paused") is not False
+        ):
+            raise PostgresContractProbeError(
+                "post-174 active SOURCE_ADD restart state was not captured"
+            )
+        active_release = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_release_restart_guard_v2(
+                    :'guard_id', :'owner_id', 3,
+                    'operator:restart-rehearsal-v2-active'
+                )::text;
+                """
+                .replace(":'guard_id'", "'" + rehearsal_guard_id + "'")
+                .replace(":'owner_id'", "'" + rehearsal_owner_id + "'"),
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            active_release.get("paused") is not False
+            or active_release.get("restored_pre_restart_state") is not True
+        ):
+            raise PostgresContractProbeError(
+                "post-174 active SOURCE_ADD restart state was not restored"
+            )
+        restored_state = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_restart_guard_state_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            restored_state.get("paused") is not False
+            or restored_state.get("guard_active") is not False
+            or restored_state.get("restore_paused") is not None
+            or restored_state.get("guard_generation") != 3
+        ):
+            raise PostgresContractProbeError(
+                "post-174 SOURCE_ADD restored durable state differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

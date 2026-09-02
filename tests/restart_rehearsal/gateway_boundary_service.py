@@ -101,6 +101,7 @@ SOURCE_ADD_CONTROL_COLUMNS = frozenset(
         "restart_guard_expires_at",
         "restart_guard_acquired_at",
         "restart_guard_actor_ref",
+        "restart_guard_restore_paused",
     }
 )
 SENSITIVE_DOCUMENT_RE = re.compile(
@@ -170,6 +171,56 @@ def _candidate_post_accept_leg1_function_authority(
         or not HASH_RE.fullmatch(values[0])
     ):
         raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
+    return values[0]
+
+
+def _candidate_source_add_claim_control_v2_function_authority(
+    source_root: Path,
+) -> str:
+    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            == "SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256"
+            for target in node.targets
+        )
+    ]
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or not HASH_RE.fullmatch(values[0])
+    ):
+        raise ValueError("candidate SOURCE_ADD restart-state authority is invalid")
+    return values[0]
+
+
+def _candidate_source_add_claim_control_v1_contract_authority(
+    source_root: Path,
+) -> str:
+    path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            == "SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256"
+            for target in node.targets
+        )
+    ]
+    if (
+        len(values) != 1
+        or not isinstance(values[0], str)
+        or not HASH_RE.fullmatch(values[0])
+    ):
+        raise ValueError("candidate SOURCE_ADD rollback authority is invalid")
     return values[0]
 
 
@@ -574,6 +625,7 @@ def _migration_schema_contract(
             "171-research-lab-source-add-duplicate-privacy.sql",
             "172-research-lab-source-add-claim-control.sql",
             "173-research-lab-source-add-leg1-release-policy.sql",
+            "174-research-lab-source-add-restart-state-restore.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -848,6 +900,108 @@ def _source_add_claim_control_contract() -> dict[str, Any]:
             "release_guard_service_role_callable": True,
             "guard_state_service_role_callable": True,
             "contract_service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+
+
+def _source_add_claim_control_contract_v2(
+    source_root: Path,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v2",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v2"
+        ),
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v2"
+        ),
+        "guard_state_signature": "",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v2"
+        ),
+        "release_guard_signature": "text,text,bigint,text",
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text,text,bigint",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "restore_paused",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "restore_paused",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+            "restored_pre_restart_state",
+        ],
+        "restore_state_column": "restart_guard_restore_paused",
+        "acquire_captures_pre_restart_paused": True,
+        "renewal_preserves_restore_state": True,
+        "expired_takeover_preserves_restore_state": True,
+        "operator_pause_wins": True,
+        "release_restores_pre_restart_state": True,
+        "failed_restart_keeps_paused": True,
+        "rollback_v1_contract_schema_version": (
+            "leadpoet.source_add_claim_control_contract.v1"
+        ),
+        "rollback_v1_contract_sha256": (
+            _candidate_source_add_claim_control_v1_contract_authority(
+                source_root
+            )
+        ),
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "migration_requires_guard_clear": True,
+        "function_authority_sha256": (
+            _candidate_source_add_claim_control_v2_function_authority(
+                source_root
+            )
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "acquire_restart_guard_v2": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "release_restart_guard_v2": True,
+            "restart_guard_state_v1": True,
+            "restart_guard_state_v2": True,
+            "restart_quiescence_v1": True,
+            "restore_trigger_v2": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "service_role_callable": True,
             "anon_callable": False,
             "authenticated_callable": False,
         },
@@ -1191,6 +1345,7 @@ class LocalPostgRESTState:
                 "restart_guard_expires_at": None,
                 "restart_guard_acquired_at": None,
                 "restart_guard_actor_ref": "",
+                "restart_guard_restore_paused": None,
             }
         ]
         return True
@@ -1226,6 +1381,7 @@ class LocalPostgRESTState:
         expires_at = row["restart_guard_expires_at"]
         acquired_at = row["restart_guard_acquired_at"]
         guard_actor = row["restart_guard_actor_ref"]
+        restore_paused = row["restart_guard_restore_paused"]
         if (
             row["singleton"] is not True
             or not isinstance(row["paused"], bool)
@@ -1237,6 +1393,10 @@ class LocalPostgRESTState:
             or not isinstance(commitment, str)
             or not isinstance(owner_commitment, str)
             or not isinstance(guard_actor, str)
+            or (
+                restore_paused is not None
+                and not isinstance(restore_paused, bool)
+            )
         ):
             raise ValueError("SOURCE_ADD control row is invalid")
         self._source_add_timestamp(
@@ -1248,6 +1408,7 @@ class LocalPostgRESTState:
             and expires_at is None
             and acquired_at is None
             and guard_actor == ""
+            and restore_paused is None
         )
         active_shape = (
             HASH_RE.fullmatch(commitment) is not None
@@ -1256,6 +1417,7 @@ class LocalPostgRESTState:
             and expires_at is not None
             and acquired_at is not None
             and guard_actor != ""
+            and isinstance(restore_paused, bool)
         )
         if not (inactive or active_shape):
             raise ValueError("SOURCE_ADD restart guard row is invalid")
@@ -1282,10 +1444,16 @@ class LocalPostgRESTState:
         )
 
     def source_add_restart_guard_state(
-        self, body: Any, *, now: datetime | None = None
+        self,
+        body: Any,
+        *,
+        now: datetime | None = None,
+        version: int = 1,
     ) -> dict[str, Any]:
         if body not in ({}, None):
             raise ValueError("SOURCE_ADD restart guard state body is invalid")
+        if version not in {1, 2}:
+            raise ValueError("SOURCE_ADD restart guard state version is invalid")
         observed_now = (now or datetime.now(timezone.utc)).astimezone(
             timezone.utc
         )
@@ -1301,8 +1469,10 @@ class LocalPostgRESTState:
                 )
                 > observed_now
             )
-            return {
-                "schema_version": "leadpoet.source_add_restart_guard_state.v1",
+            result = {
+                "schema_version": (
+                    f"leadpoet.source_add_restart_guard_state.v{version}"
+                ),
                 "paused": row["paused"],
                 "guard_active": guard_active,
                 "guard_commitment": row["restart_guard_commitment"],
@@ -1318,10 +1488,21 @@ class LocalPostgRESTState:
                 ),
                 "guard_expires_at": expires_at,
             }
+            if version == 2:
+                result["restore_paused"] = row[
+                    "restart_guard_restore_paused"
+                ]
+            return result
 
     def acquire_source_add_restart_guard(
-        self, body: Any, *, now: datetime | None = None
+        self,
+        body: Any,
+        *,
+        now: datetime | None = None,
+        version: int = 1,
     ) -> dict[str, Any]:
+        if version not in {1, 2}:
+            raise ValueError("SOURCE_ADD restart guard version is invalid")
         expected_keys = {
             "p_actor_ref",
             "p_expected_generation",
@@ -1397,6 +1578,11 @@ class LocalPostgRESTState:
                 generation += 1
                 expires_at = requested_expiry
                 encoded_now = observed_now.isoformat()
+                restore_paused = row["restart_guard_restore_paused"]
+                if not row["restart_guard_commitment"]:
+                    restore_paused = row["paused"]
+                elif restore_paused is None:
+                    restore_paused = True
                 row.update(
                     {
                         "paused": True,
@@ -1409,11 +1595,12 @@ class LocalPostgRESTState:
                         "restart_guard_expires_at": expires_at.isoformat(),
                         "restart_guard_acquired_at": encoded_now,
                         "restart_guard_actor_ref": actor_ref[:200],
+                        "restart_guard_restore_paused": restore_paused,
                     }
                 )
             self._write_durable_state_locked(mutated=True)
-            return {
-                "schema_version": "leadpoet.source_add_restart_guard.v1",
+            result = {
+                "schema_version": f"leadpoet.source_add_restart_guard.v{version}",
                 "paused": True,
                 "guard_active": True,
                 "guard_commitment": guard_commitment,
@@ -1426,6 +1613,11 @@ class LocalPostgRESTState:
                 ),
                 "guard_expires_at": expires_at.isoformat(),
             }
+            if version == 2:
+                result["restore_paused"] = row[
+                    "restart_guard_restore_paused"
+                ]
+            return result
 
     def source_add_restart_quiescence(
         self, body: Any, *, now: datetime | None = None
@@ -1508,9 +1700,63 @@ class LocalPostgRESTState:
                 ),
             }
 
-    def release_source_add_restart_guard(
+    def set_source_add_paused(
         self, body: Any, *, now: datetime | None = None
     ) -> dict[str, Any]:
+        expected_keys = {"p_actor_ref", "p_paused", "p_reason"}
+        if not isinstance(body, dict) or set(body) != expected_keys:
+            raise ValueError("SOURCE_ADD pause input is invalid")
+        paused = body["p_paused"]
+        reason = body["p_reason"]
+        actor_ref = body["p_actor_ref"]
+        if (
+            not isinstance(paused, bool)
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or not isinstance(actor_ref, str)
+            or not actor_ref.strip()
+        ):
+            raise ValueError("SOURCE_ADD pause input is invalid")
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        )
+        with self.lock:
+            self._validate_source_add_control()
+            row = self.rows["research_lab_source_add_control"][0]
+            if not paused and row["restart_guard_commitment"]:
+                raise ValueError(
+                    "SOURCE_ADD restart guard must be explicitly reacquired "
+                    "and released before resume"
+                )
+            if (
+                paused
+                and row["restart_guard_commitment"]
+                and (
+                    reason[:500] != row["reason"]
+                    or actor_ref[:200] != row["actor_ref"]
+                )
+            ):
+                row["restart_guard_restore_paused"] = True
+            row.update(
+                {
+                    "paused": paused,
+                    "reason": reason[:500],
+                    "actor_ref": actor_ref[:200],
+                    "updated_at": observed_now.isoformat(),
+                }
+            )
+            self._write_durable_state_locked(mutated=True)
+            return dict(row)
+
+    def release_source_add_restart_guard(
+        self,
+        body: Any,
+        *,
+        now: datetime | None = None,
+        version: int = 1,
+    ) -> dict[str, Any]:
+        if version not in {1, 2}:
+            raise ValueError("SOURCE_ADD restart guard release version is invalid")
         expected_keys = {
             "p_actor_ref",
             "p_guard_generation",
@@ -1555,10 +1801,30 @@ class LocalPostgRESTState:
             owner_generation = self._source_add_owner_generation_commitment(
                 owner_commitment, generation
             )
+            final_paused = True
+            if version == 2:
+                restore_paused = row["restart_guard_restore_paused"]
+                if not isinstance(restore_paused, bool):
+                    raise ValueError(
+                        "SOURCE_ADD restart restore state is unavailable"
+                    )
+                final_paused = bool(
+                    restore_paused
+                    or row["reason"] != "canonical_restart_guard"
+                    or row["actor_ref"] != actor_ref[:200]
+                )
             row.update(
                 {
-                    "paused": True,
-                    "reason": "canonical_restart_guard_released_paused",
+                    "paused": final_paused,
+                    "reason": (
+                        "canonical_restart_guard_released_paused"
+                        if version == 1
+                        else (
+                            "canonical_restart_guard_restored_paused"
+                            if final_paused
+                            else "canonical_restart_guard_restored_active"
+                        )
+                    ),
                     "actor_ref": actor_ref[:200],
                     "updated_at": observed_now.isoformat(),
                     "restart_guard_commitment": "",
@@ -1566,19 +1832,23 @@ class LocalPostgRESTState:
                     "restart_guard_expires_at": None,
                     "restart_guard_acquired_at": None,
                     "restart_guard_actor_ref": "",
+                    "restart_guard_restore_paused": None,
                 }
             )
             self._write_durable_state_locked(mutated=True)
-            return {
+            result = {
                 "schema_version": (
-                    "leadpoet.source_add_restart_guard_release.v1"
+                    f"leadpoet.source_add_restart_guard_release.v{version}"
                 ),
                 "released": True,
-                "paused": True,
+                "paused": final_paused,
                 "guard_active": False,
                 "guard_generation": generation,
                 "owner_generation_commitment": owner_generation,
             }
+            if version == 2:
+                result["restored_pre_restart_state"] = True
+            return result
 
     def _restore_durable_state(self) -> None:
         path = self.durable_state_path
@@ -3462,12 +3732,24 @@ class Handler(BaseHTTPRequestHandler):
                 response = self.server.state.source_add_restart_guard_state(
                     body
                 )
+            elif name == "research_lab_source_add_restart_guard_state_v2":
+                response = self.server.state.source_add_restart_guard_state(
+                    body, version=2
+                )
             elif name == (
                 "research_lab_source_add_acquire_restart_guard_v1"
             ):
                 response = self.server.state.acquire_source_add_restart_guard(
                     body
                 )
+            elif name == (
+                "research_lab_source_add_acquire_restart_guard_v2"
+            ):
+                response = self.server.state.acquire_source_add_restart_guard(
+                    body, version=2
+                )
+            elif name == "research_lab_source_add_set_paused":
+                response = self.server.state.set_source_add_paused(body)
             elif name == (
                 "research_lab_source_add_restart_quiescence_v1"
             ):
@@ -3479,6 +3761,12 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 response = self.server.state.release_source_add_restart_guard(
                     body
+                )
+            elif name == (
+                "research_lab_source_add_release_restart_guard_v2"
+            ):
+                response = self.server.state.release_source_add_restart_guard(
+                    body, version=2
                 )
             elif name == "research_lab_acquire_maintenance_lease":
                 response = self.server.state.acquire_maintenance_lease(body)
@@ -3753,6 +4041,16 @@ class Handler(BaseHTTPRequestHandler):
                         "SOURCE_ADD claim-control contract body is invalid"
                     )
                 response = _source_add_claim_control_contract()
+            elif name == (
+                "research_lab_source_add_claim_control_contract_v2"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD restart-state contract body is invalid"
+                    )
+                response = _source_add_claim_control_contract_v2(
+                    self.server.state.source_root
+                )
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)
                 self.server.state.record(

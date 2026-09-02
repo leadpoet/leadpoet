@@ -100,7 +100,8 @@ fencing the prior invocation. The exact owner/generation is renewed with a
 14,400-second lease and the zero-lease state is rechecked immediately before
 shutdown and after candidate startup. A drain timeout aborts while
 leaving SOURCE_ADD paused and guarded; successful runtime verification releases
-the guard while retaining the pause. The restart never resumes SOURCE_ADD.
+the guard and atomically restores the SOURCE_ADD pause state that existed before
+the restart. A failed restart remains paused.
 EOF
 }
 

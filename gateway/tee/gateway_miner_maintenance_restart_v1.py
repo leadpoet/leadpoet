@@ -7,9 +7,9 @@ while the canonical gateway restart lock is held.  It acquires the retry-stable
 production SOURCE_ADD restart guard, drains every lease, disables the existing
 global miner setting, and carries only non-secret commitments through that
 invocation in a sealed, unlinked memory file.  The guard is exact-released only
-after candidate runtime verification and leaves SOURCE_ADD paused. No
-cross-invocation local receipt or restart authority is persisted, and
-SOURCE_ADD is never resumed automatically.
+after candidate runtime verification and atomically restores the durable
+SOURCE_ADD pause state captured before the restart. No cross-invocation local
+receipt or restart authority is persisted. A failed restart remains paused.
 """
 
 from __future__ import annotations
@@ -58,9 +58,10 @@ from gateway.tee.release_channel_v2 import (
 )
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.supabase_schema_preflight_v2 import (
-    SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256,
+    SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
     SupabaseSchemaPreflightV2Error,
-    _verify_source_add_claim_control_contract_v1,
+    _verify_source_add_claim_control_contract_v2,
 )
 from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -106,19 +107,19 @@ SOURCE_ADD_ADMISSION_CONTRACT_RPC = (
     "research_lab_source_add_admission_control_contract_v1"
 )
 SOURCE_ADD_CLAIM_CONTROL_CONTRACT_RPC = (
-    "research_lab_source_add_claim_control_contract_v1"
+    "research_lab_source_add_claim_control_contract_v2"
 )
 SOURCE_ADD_RESTART_QUIESCENCE_RPC = (
     "research_lab_source_add_restart_quiescence_v1"
 )
 SOURCE_ADD_RESTART_GUARD_STATE_RPC = (
-    "research_lab_source_add_restart_guard_state_v1"
+    "research_lab_source_add_restart_guard_state_v2"
 )
 SOURCE_ADD_ACQUIRE_RESTART_GUARD_RPC = (
-    "research_lab_source_add_acquire_restart_guard_v1"
+    "research_lab_source_add_acquire_restart_guard_v2"
 )
 SOURCE_ADD_RELEASE_RESTART_GUARD_RPC = (
-    "research_lab_source_add_release_restart_guard_v1"
+    "research_lab_source_add_release_restart_guard_v2"
 )
 SOURCE_ADD_CONTROL_TABLE = "research_lab_source_add_control"
 SOURCE_ADD_PAUSE_REASON = "canonical_restart_guard"
@@ -206,6 +207,7 @@ _PROOF_FIELDS = frozenset(
         "source_add_restart_guard_commitment",
         "source_add_restart_guard_generation",
         "source_add_restart_guard_owner_generation_commitment",
+        "source_add_restart_guard_restore_paused",
         "source_add_quiescence_commitment",
         "controller_wrapper_sha256",
         "controller_git_helper_sha256",
@@ -414,7 +416,7 @@ def _normalized_source_add_control(value: Any) -> dict[str, Any]:
         not isinstance(value, Mapping)
         or set(value) != fields
         or value.get("singleton") is not True
-        or value.get("paused") is not True
+        or not isinstance(value.get("paused"), bool)
         or not isinstance(value.get("reason"), str)
         or not str(value.get("reason"))
         or len(str(value.get("reason"))) > 500
@@ -520,7 +522,7 @@ def _require_source_add_claim_control_contract(
         return _SourceAddClaimControlContractResponse(value)
 
     try:
-        contract = _verify_source_add_claim_control_contract_v1(
+        contract = _verify_source_add_claim_control_contract_v2(
             headers={},
             supabase_url=PRODUCTION_SUPABASE_ORIGIN,
             opener=opener,
@@ -531,10 +533,16 @@ def _require_source_add_claim_control_contract(
             "SOURCE_ADD claim-control contract is unavailable or invalid"
         ) from exc
     if contract.get("function_authority_sha256") != (
-        SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256
+        SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256
     ):
         raise GatewayMinerMaintenanceRestartError(
             "SOURCE_ADD claim-control function authority differs"
+        )
+    if contract.get("rollback_v1_contract_sha256") != (
+        SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD rollback claim-control authority differs"
         )
 
 
@@ -600,6 +608,16 @@ def _source_add_expected_guard_generation(value: Any, *, label: str) -> int:
     return _source_add_guard_generation(int(value), label=label)
 
 
+def _source_add_expected_restore_paused(value: Any, *, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise GatewayMinerMaintenanceRestartError(label)
+
+
 def _source_add_guard_expiry(value: Any, *, label: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise GatewayMinerMaintenanceRestartError(label)
@@ -622,13 +640,14 @@ def _normalized_source_add_restart_guard_state(value: Any) -> dict[str, Any]:
         "guard_generation",
         "owner_generation_commitment",
         "guard_expires_at",
+        "restore_paused",
     }
     label = "SOURCE_ADD restart guard state is invalid"
     if (
         not isinstance(value, Mapping)
         or set(value) != fields
         or value.get("schema_version")
-        != "leadpoet.source_add_restart_guard_state.v1"
+        != "leadpoet.source_add_restart_guard_state.v2"
         or not isinstance(value.get("paused"), bool)
         or not isinstance(value.get("guard_active"), bool)
         or not isinstance(value.get("guard_commitment"), str)
@@ -637,6 +656,10 @@ def _normalized_source_add_restart_guard_state(value: Any) -> dict[str, Any]:
         or (
             value.get("guard_expires_at") is not None
             and not isinstance(value.get("guard_expires_at"), str)
+        )
+        or (
+            value.get("restore_paused") is not None
+            and not isinstance(value.get("restore_paused"), bool)
         )
     ):
         raise GatewayMinerMaintenanceRestartError(label)
@@ -656,7 +679,9 @@ def _normalized_source_add_restart_guard_state(value: Any) -> dict[str, Any]:
     ):
         raise GatewayMinerMaintenanceRestartError(label)
     if not has_commitments and (
-        any(commitments) or value.get("guard_expires_at") is not None
+        any(commitments)
+        or value.get("guard_expires_at") is not None
+        or value.get("restore_paused") is not None
     ):
         raise GatewayMinerMaintenanceRestartError(label)
     if value.get("guard_expires_at") is not None:
@@ -665,6 +690,7 @@ def _normalized_source_add_restart_guard_state(value: Any) -> dict[str, Any]:
         value["paused"] is not True
         or not has_commitments
         or value.get("guard_expires_at") is None
+        or not isinstance(value.get("restore_paused"), bool)
     ):
         raise GatewayMinerMaintenanceRestartError(label)
     return {name: value[name] for name in sorted(fields)}
@@ -680,12 +706,13 @@ def _normalized_source_add_restart_guard(value: Any) -> dict[str, Any]:
         "guard_generation",
         "owner_generation_commitment",
         "guard_expires_at",
+        "restore_paused",
     }
     if (
         not isinstance(value, Mapping)
         or set(value) != fields
         or value.get("schema_version")
-        != "leadpoet.source_add_restart_guard.v1"
+        != "leadpoet.source_add_restart_guard.v2"
         or value.get("paused") is not True
         or value.get("guard_active") is not True
         or not isinstance(value.get("guard_commitment"), str)
@@ -696,6 +723,7 @@ def _normalized_source_add_restart_guard(value: Any) -> dict[str, Any]:
         or not _SHA256_RE.fullmatch(
             str(value.get("owner_generation_commitment"))
         )
+        or not isinstance(value.get("restore_paused"), bool)
     ):
         raise GatewayMinerMaintenanceRestartError(
             "SOURCE_ADD restart guard response is invalid"
@@ -844,6 +872,7 @@ def _require_owned_source_add_guard_state(
     expected_guard_commitment: Optional[str] = None,
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
+    expected_restore_paused: Optional[Any] = None,
     connection_factory: Any = http.client.HTTPSConnection,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     identity = _source_add_restart_guard_identity(restart_invocation_id)
@@ -887,6 +916,14 @@ def _require_owned_source_add_guard_state(
             and owner_generation
             != str(expected_owner_generation_commitment)
         )
+        or (
+            expected_restore_paused is not None
+            and state["restore_paused"]
+            is not _source_add_expected_restore_paused(
+                expected_restore_paused,
+                label="SOURCE_ADD restart restore state is invalid",
+            )
+        )
     ):
         raise GatewayMinerMaintenanceRestartError(
             "SOURCE_ADD restart guard is not owned by this invocation"
@@ -913,6 +950,7 @@ def _wait_for_source_add_quiescence(
     expected_guard_commitment: Optional[str] = None,
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
+    expected_restore_paused: Optional[Any] = None,
     connection_factory: Any = http.client.HTTPSConnection,
     timeout_seconds: float = SOURCE_ADD_QUIESCENCE_TIMEOUT_SECONDS,
     poll_seconds: float = SOURCE_ADD_QUIESCENCE_POLL_SECONDS,
@@ -937,6 +975,7 @@ def _wait_for_source_add_quiescence(
         expected_owner_generation_commitment=(
             expected_owner_generation_commitment
         ),
+        expected_restore_paused=expected_restore_paused,
         connection_factory=connection_factory,
     )
     generation = int(guard_state["guard_generation"])
@@ -979,6 +1018,9 @@ def _wait_for_source_add_quiescence(
                 "source_add_restart_guard_owner_generation_commitment": (
                     owner_generation
                 ),
+                "source_add_restart_guard_restore_paused": (
+                    "true" if guard_state["restore_paused"] else "false"
+                ),
                 "source_add_quiescence_commitment": (
                     _source_add_quiescence_commitment(state)
                 ),
@@ -999,6 +1041,7 @@ def _require_source_add_quiescent(
     expected_guard_commitment: Optional[str] = None,
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
+    expected_restore_paused: Optional[Any] = None,
     expected_quiescence_commitment: Optional[str] = None,
     connection_factory: Any = http.client.HTTPSConnection,
 ) -> dict[str, str]:
@@ -1014,6 +1057,7 @@ def _require_source_add_quiescent(
         expected_owner_generation_commitment=(
             expected_owner_generation_commitment
         ),
+        expected_restore_paused=expected_restore_paused,
         connection_factory=connection_factory,
     )
     generation = int(guard_state["guard_generation"])
@@ -1060,6 +1104,9 @@ def _require_source_add_quiescent(
         "source_add_restart_guard_owner_generation_commitment": (
             owner_generation
         ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if guard_state["restore_paused"] else "false"
+        ),
         "source_add_quiescence_commitment": commitment,
     }
 
@@ -1079,6 +1126,7 @@ def _acquire_source_add_restart_guard(
         connection_factory=connection_factory,
     )
     before_generation = int(before["guard_generation"])
+    before_has_guard = bool(before["guard_commitment"])
     same_owner = (
         before["guard_active"] is True
         and before["guard_commitment"] == identity["guard_commitment"]
@@ -1117,6 +1165,13 @@ def _acquire_source_add_restart_guard(
             "SOURCE_ADD restart guard owner changed before renewal"
         )
     result_generation = before_generation if same_owner else before_generation + 1
+    expected_restore_paused = (
+        before["restore_paused"]
+        if same_owner or before_has_guard
+        else before["paused"]
+    )
+    if not isinstance(expected_restore_paused, bool):
+        expected_restore_paused = True
     result_owner_generation = _source_add_owner_generation_commitment(
         identity["owner_commitment"], result_generation
     )
@@ -1148,7 +1203,10 @@ def _acquire_source_add_restart_guard(
         )
     except _SourceAddAuthorityRejected:
         raise
-    except GatewayMinerMaintenanceRestartError as exc:
+    except (
+        GatewayMinerMaintenanceRestartError,
+        GatewayMinerSubmissionsDisableError,
+    ) as exc:
         # The write may have committed even when its response was lost.  One
         # exact state read reconciles only this invocation's expected CAS
         # result; a rejection or another owner's state is never taken over in
@@ -1168,12 +1226,13 @@ def _acquire_source_add_restart_guard(
                 or reconciled["guard_generation"] != result_generation
                 or reconciled["owner_generation_commitment"]
                 != result_owner_generation
+                or reconciled["restore_paused"] is not expected_restore_paused
             ):
                 raise GatewayMinerMaintenanceRestartError(
                     "SOURCE_ADD restart guard acquisition outcome is unknown"
                 )
             acquired = {
-                "schema_version": "leadpoet.source_add_restart_guard.v1",
+                "schema_version": "leadpoet.source_add_restart_guard.v2",
                 "paused": True,
                 "guard_active": True,
                 "guard_commitment": reconciled["guard_commitment"],
@@ -1183,6 +1242,7 @@ def _acquire_source_add_restart_guard(
                     "owner_generation_commitment"
                 ],
                 "guard_expires_at": reconciled["guard_expires_at"],
+                "restore_paused": reconciled["restore_paused"],
             }
         except GatewayMinerMaintenanceRestartError:
             raise exc
@@ -1196,6 +1256,7 @@ def _acquire_source_add_restart_guard(
         or acquired["guard_generation"] != result_generation
         or acquired["owner_generation_commitment"]
         != result_owner_generation
+        or acquired["restore_paused"] is not expected_restore_paused
         or expiry <= datetime.now(timezone.utc)
         or (previous_expiry is not None and expiry <= previous_expiry)
     ):
@@ -1234,7 +1295,8 @@ def _pause_source_add_for_restart(
         connection_factory=connection_factory,
     )
     if (
-        readback["reason"] != SOURCE_ADD_PAUSE_REASON
+        readback["paused"] is not True
+        or readback["reason"] != SOURCE_ADD_PAUSE_REASON
         or readback["actor_ref"] != guard["actor_ref"]
     ):
         raise GatewayMinerMaintenanceRestartError(
@@ -1252,6 +1314,9 @@ def _pause_source_add_for_restart(
         "source_add_restart_guard_owner_generation_commitment": str(
             rpc_result["owner_generation_commitment"]
         ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if rpc_result["restore_paused"] else "false"
+        ),
     }
 
 
@@ -1262,6 +1327,7 @@ def _renew_source_add_restart_guard(
     expected_current_version_id: Optional[str] = None,
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
+    expected_restore_paused: Optional[Any] = None,
     connection_factory: Any = http.client.HTTPSConnection,
 ) -> dict[str, str]:
     _supabase_url, service_role_key = _source_add_pause_credentials(
@@ -1278,6 +1344,17 @@ def _renew_source_add_restart_guard(
         ),
         connection_factory=connection_factory,
     )
+    if (
+        expected_restore_paused is not None
+        and acquired["restore_paused"]
+        is not _source_add_expected_restore_paused(
+            expected_restore_paused,
+            label="SOURCE_ADD restart restore state changed before renewal",
+        )
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD restart restore state changed before renewal"
+        )
     return {
         "status": "renewed",
         "source_add_restart_guard_commitment": str(
@@ -1288,6 +1365,9 @@ def _renew_source_add_restart_guard(
         ),
         "source_add_restart_guard_owner_generation_commitment": str(
             acquired["owner_generation_commitment"]
+        ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if acquired["restore_paused"] else "false"
         ),
     }
 
@@ -1300,15 +1380,17 @@ def _normalized_source_add_restart_guard_release(value: Any) -> dict[str, Any]:
         "guard_active",
         "guard_generation",
         "owner_generation_commitment",
+        "restored_pre_restart_state",
     }
     if (
         not isinstance(value, Mapping)
         or set(value) != fields
         or value.get("schema_version")
-        != "leadpoet.source_add_restart_guard_release.v1"
+        != "leadpoet.source_add_restart_guard_release.v2"
         or value.get("released") is not True
-        or value.get("paused") is not True
+        or not isinstance(value.get("paused"), bool)
         or value.get("guard_active") is not False
+        or value.get("restored_pre_restart_state") is not True
         or not isinstance(value.get("owner_generation_commitment"), str)
         or not _SHA256_RE.fullmatch(
             str(value.get("owner_generation_commitment"))
@@ -1331,6 +1413,7 @@ def _release_source_add_restart_guard(
     expected_current_version_id: Optional[str] = None,
     expected_guard_generation: Optional[Any] = None,
     expected_owner_generation_commitment: Optional[str] = None,
+    expected_restore_paused: Optional[Any] = None,
     connection_factory: Any = http.client.HTTPSConnection,
 ) -> dict[str, str]:
     _supabase_url, service_role_key = _source_add_pause_credentials(
@@ -1344,6 +1427,7 @@ def _release_source_add_restart_guard(
         expected_owner_generation_commitment=(
             expected_owner_generation_commitment
         ),
+        expected_restore_paused=expected_restore_paused,
         connection_factory=connection_factory,
     )
     generation = int(guard_state["guard_generation"])
@@ -1368,22 +1452,31 @@ def _release_source_add_restart_guard(
         released["guard_generation"] != generation
         or released["owner_generation_commitment"]
         != expected_owner_generation
+        or released["paused"] is not guard_state["restore_paused"]
     ):
         raise GatewayMinerMaintenanceRestartError(
             "SOURCE_ADD restart guard release response is invalid"
         )
     return {
-        "status": "released_paused",
+        "status": (
+            "released_restored_paused"
+            if released["paused"]
+            else "released_restored_active"
+        ),
         "source_add_restart_guard_generation": str(generation),
         "source_add_restart_guard_owner_generation_commitment": (
             expected_owner_generation
         ),
+        "source_add_restart_guard_restore_paused": (
+            "true" if released["paused"] else "false"
+        ),
     }
 
 
-def _require_source_add_paused(
+def _require_source_add_state(
     *,
     secrets_client: Any,
+    expected_paused: bool,
     expected_current_version_id: Optional[str] = None,
     expected_control_commitment: Optional[str] = None,
     connection_factory: Any = http.client.HTTPSConnection,
@@ -1396,12 +1489,15 @@ def _require_source_add_paused(
         service_role_key=service_role_key,
         connection_factory=connection_factory,
     )
-    commitment = _source_add_control_commitment(
-        _read_source_add_control(
-            service_role_key=service_role_key,
-            connection_factory=connection_factory,
-        )
+    control = _read_source_add_control(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
     )
+    if control["paused"] is not expected_paused:
+        raise GatewayMinerMaintenanceRestartError(
+            "durable SOURCE_ADD state differs from restart restoration"
+        )
+    commitment = _source_add_control_commitment(control)
     if (
         expected_control_commitment is not None
         and commitment != str(expected_control_commitment)
@@ -1410,9 +1506,60 @@ def _require_source_add_paused(
             "durable SOURCE_ADD pause differs from the invocation proof"
         )
     return {
-        "status": "paused",
+        "status": "paused" if expected_paused else "active",
         "source_add_control_commitment": commitment,
     }
+
+
+def _force_source_add_paused_after_restart_failure(
+    *,
+    secrets_client: Any,
+    restart_invocation_id: str,
+    expected_current_version_id: Optional[str] = None,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> None:
+    """Fail closed if completion fails after guard release may have committed."""
+
+    _supabase_url, service_role_key = _source_add_pause_credentials(
+        secrets_client=secrets_client,
+        expected_current_version_id=expected_current_version_id,
+    )
+    guard = _source_add_restart_guard_identity(restart_invocation_id)
+    _source_add_control_request(
+        method="POST",
+        path=f"/rest/v1/rpc/{SOURCE_ADD_PAUSE_RPC}",
+        service_role_key=service_role_key,
+        payload={
+            "p_actor_ref": guard["actor_ref"],
+            "p_paused": True,
+            "p_reason": "canonical_restart_completion_failed",
+        },
+        connection_factory=connection_factory,
+    )
+    control = _read_source_add_control(
+        service_role_key=service_role_key,
+        connection_factory=connection_factory,
+    )
+    if control["paused"] is not True:
+        raise GatewayMinerMaintenanceRestartError(
+            "SOURCE_ADD fail-closed pause was not durable"
+        )
+
+
+def _require_source_add_paused(
+    *,
+    secrets_client: Any,
+    expected_current_version_id: Optional[str] = None,
+    expected_control_commitment: Optional[str] = None,
+    connection_factory: Any = http.client.HTTPSConnection,
+) -> dict[str, str]:
+    return _require_source_add_state(
+        secrets_client=secrets_client,
+        expected_paused=True,
+        expected_current_version_id=expected_current_version_id,
+        expected_control_commitment=expected_control_commitment,
+        connection_factory=connection_factory,
+    )
 
 
 def _require_runtime_source_add_closed(
@@ -1442,6 +1589,27 @@ def _require_runtime_source_add_closed(
     ):
         raise GatewayMinerMaintenanceRestartError(
             "running gateway SOURCE_ADD intake is not durably paused"
+        )
+
+
+def _require_runtime_source_add_restored(
+    runtime_status: Mapping[str, Any], *, expected_paused: bool
+) -> None:
+    if expected_paused:
+        _require_runtime_source_add_closed(runtime_status)
+        return
+    source_add = runtime_status.get("source_add")
+    control = source_add.get("control") if isinstance(source_add, Mapping) else None
+    if (
+        not isinstance(source_add, Mapping)
+        or not isinstance(control, Mapping)
+        or control.get("paused") is not False
+        or control.get("unavailable") is not False
+        or source_add.get("intake_enabled") is not True
+        or source_add.get("effective_dispatcher_enabled") is not True
+    ):
+        raise GatewayMinerMaintenanceRestartError(
+            "running gateway SOURCE_ADD intake did not restore active"
         )
 
 
@@ -3141,6 +3309,11 @@ def _proof_body(
                 "source_add_restart_guard_owner_generation_commitment"
             ]
         ),
+        "source_add_restart_guard_restore_paused": str(
+            source_add_pause_result[
+                "source_add_restart_guard_restore_paused"
+            ]
+        ),
         "source_add_quiescence_commitment": str(
             source_add_quiescence_result[
                 "source_add_quiescence_commitment"
@@ -3202,6 +3375,8 @@ def _validate_proof_document(value: Mapping[str, Any]) -> dict[str, str]:
             not _SHA256_RE.fullmatch(normalized[name])
             for name in commitment_fields
         )
+        or normalized["source_add_restart_guard_restore_paused"]
+        not in {"true", "false"}
         or not _s3_version_id(normalized["release_channel_object_version_id"])
         or not _VERSION_ID_RE.fullmatch(normalized["current_secret_version_id"])
         or not re.fullmatch(
@@ -3567,6 +3742,9 @@ def _verify_proof_against_state(
         expected_owner_generation_commitment=validated[
             "source_add_restart_guard_owner_generation_commitment"
         ],
+        expected_restore_paused=validated[
+            "source_add_restart_guard_restore_paused"
+        ],
         expected_quiescence_commitment=validated[
             "source_add_quiescence_commitment"
         ],
@@ -3613,6 +3791,9 @@ def _verify_proof_against_state(
         expected_owner_generation_commitment=validated[
             "source_add_restart_guard_owner_generation_commitment"
         ],
+        expected_restore_paused=validated[
+            "source_add_restart_guard_restore_paused"
+        ],
         expected_quiescence_commitment=validated[
             "source_add_quiescence_commitment"
         ],
@@ -3655,6 +3836,9 @@ def _verify_proof_against_state(
         ],
         "source_add_restart_guard_owner_generation_commitment": validated[
             "source_add_restart_guard_owner_generation_commitment"
+        ],
+        "source_add_restart_guard_restore_paused": validated[
+            "source_add_restart_guard_restore_paused"
         ],
         "source_add_quiescence_commitment": validated[
             "source_add_quiescence_commitment"
@@ -3735,6 +3919,9 @@ def prepare_gateway_miner_maintenance_restart(
         expected_owner_generation_commitment=source_add_pause_result[
             "source_add_restart_guard_owner_generation_commitment"
         ],
+        expected_restore_paused=source_add_pause_result[
+            "source_add_restart_guard_restore_paused"
+        ],
     )
     with _open_recovery_journal_parent_fd(
         recovery_journal_path
@@ -3789,6 +3976,9 @@ def prepare_gateway_miner_maintenance_restart(
         ],
         expected_owner_generation_commitment=source_add_pause_result[
             "source_add_restart_guard_owner_generation_commitment"
+        ],
+        expected_restore_paused=source_add_pause_result[
+            "source_add_restart_guard_restore_paused"
         ],
         expected_quiescence_commitment=source_add_wait_result[
             "source_add_quiescence_commitment"
@@ -3902,6 +4092,9 @@ def verify_gateway_miner_maintenance_state(
             expected_owner_generation_commitment=source_add_acquisition[
                 "source_add_restart_guard_owner_generation_commitment"
             ],
+            expected_restore_paused=source_add_acquisition[
+                "source_add_restart_guard_restore_paused"
+            ],
         )
     _require_hydrated_environment_commitment(
         path=hydrated_environment_path,
@@ -3958,6 +4151,13 @@ def verify_gateway_miner_maintenance_state(
             if source_add_acquisition is not None
             else None
         ),
+        expected_restore_paused=(
+            source_add_acquisition[
+                "source_add_restart_guard_restore_paused"
+            ]
+            if source_add_acquisition is not None
+            else None
+        ),
         expected_quiescence_commitment=(
             source_add_wait_result[
                 "source_add_quiescence_commitment"
@@ -3991,6 +4191,9 @@ def verify_gateway_miner_maintenance_state(
                 "source_add_restart_guard_owner_generation_commitment"
             ]
         ),
+        "source_add_restart_guard_restore_paused": source_add_quiescence[
+            "source_add_restart_guard_restore_paused"
+        ],
         "release_channel_object_version_id": str(
             release_evidence["object_version_id"]
         ),
@@ -4523,6 +4726,7 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
     expected_guard_commitment: Optional[str] = None
     expected_guard_generation: Optional[str] = None
     expected_owner_generation_commitment: Optional[str] = None
+    expected_restore_paused: Optional[str] = None
     expected_quiescence_commitment: Optional[str] = None
     if proof_fd is not None:
         proof = _validate_proof_document(_proof_from_fd(proof_fd))
@@ -4545,6 +4749,9 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
         ]
         expected_owner_generation_commitment = proof[
             "source_add_restart_guard_owner_generation_commitment"
+        ]
+        expected_restore_paused = proof[
+            "source_add_restart_guard_restore_paused"
         ]
         expected_quiescence_commitment = proof[
             "source_add_quiescence_commitment"
@@ -4570,6 +4777,7 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
         expected_owner_generation_commitment=(
             expected_owner_generation_commitment
         ),
+        expected_restore_paused=expected_restore_paused,
     )
     if (
         expected_guard_commitment is not None
@@ -4596,6 +4804,9 @@ def verify_gateway_miner_maintenance_shutdown_quiescence(
         ],
         expected_owner_generation_commitment=renewed[
             "source_add_restart_guard_owner_generation_commitment"
+        ],
+        expected_restore_paused=renewed[
+            "source_add_restart_guard_restore_paused"
         ],
         expected_quiescence_commitment=expected_quiescence_commitment,
     )
@@ -4648,28 +4859,62 @@ def verify_gateway_miner_maintenance_runtime_state(
     restart_invocation_id = str(
         runtime_environment.get("GATEWAY_RESTART_INVOCATION_ID") or ""
     )
-    _release_source_add_restart_guard(
-        secrets_client=secrets_client,
-        restart_invocation_id=restart_invocation_id,
-        expected_current_version_id=result["current_secret_version_id"],
-        expected_guard_generation=result[
-            "source_add_restart_guard_generation"
-        ],
-        expected_owner_generation_commitment=result[
-            "source_add_restart_guard_owner_generation_commitment"
-        ],
-    )
-    released_pause = _require_source_add_paused(
-        secrets_client=secrets_client,
-        expected_current_version_id=result["current_secret_version_id"],
-    )
+    try:
+        released = _release_source_add_restart_guard(
+            secrets_client=secrets_client,
+            restart_invocation_id=restart_invocation_id,
+            expected_current_version_id=result["current_secret_version_id"],
+            expected_guard_generation=result[
+                "source_add_restart_guard_generation"
+            ],
+            expected_owner_generation_commitment=result[
+                "source_add_restart_guard_owner_generation_commitment"
+            ],
+            expected_restore_paused=result[
+                "source_add_restart_guard_restore_paused"
+            ],
+        )
+        restored_paused = _source_add_expected_restore_paused(
+            released["source_add_restart_guard_restore_paused"],
+            label="SOURCE_ADD restart restoration result is invalid",
+        )
+        released_control = _require_source_add_state(
+            secrets_client=secrets_client,
+            expected_paused=restored_paused,
+            expected_current_version_id=result["current_secret_version_id"],
+        )
+        _require_runtime_source_add_restored(
+            _fetch_runtime_status(),
+            expected_paused=restored_paused,
+        )
+    except (
+        GatewayMinerMaintenanceRestartError,
+        GatewayMinerSubmissionsDisableError,
+    ) as exc:
+        try:
+            _force_source_add_paused_after_restart_failure(
+                secrets_client=secrets_client,
+                restart_invocation_id=restart_invocation_id,
+                expected_current_version_id=result[
+                    "current_secret_version_id"
+                ],
+            )
+        except (
+            GatewayMinerMaintenanceRestartError,
+            GatewayMinerSubmissionsDisableError,
+        ) as pause_exc:
+            raise GatewayMinerMaintenanceRestartError(
+                "SOURCE_ADD restart completion failed and the fail-closed "
+                "pause could not be verified"
+            ) from pause_exc
+        raise
     return {
         **result,
-        "source_add_control_commitment": released_pause[
+        "source_add_control_commitment": released_control[
             "source_add_control_commitment"
         ],
         "runtime_status": "disabled",
-        "source_add_restart_guard_status": "released_paused",
+        "source_add_restart_guard_status": released["status"],
     }
 
 

@@ -1,0 +1,719 @@
+"""Exercise SOURCE_ADD restart-state restoration in disposable PostgreSQL."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import pytest
+
+from gateway.tee.supabase_schema_preflight_v2 import (
+    SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
+)
+from tests.test_source_add_claim_control_postgres import (
+    _insert_work,
+)
+from tests.test_source_add_end_to_end_postgres import (
+    SCRIPTS,
+    _database_with_migrations,
+)
+from tests.test_source_add_leg1_release_policy_postgres import (
+    LATEST_MIGRATIONS as PRE_RESTORE_MIGRATIONS,
+)
+
+
+MIGRATION = "174-research-lab-source-add-restart-state-restore.sql"
+MIGRATIONS = PRE_RESTORE_MIGRATIONS + (MIGRATION,)
+GUARD_A = "source_add_restart_guard:" + "a" * 64
+GUARD_B = "source_add_restart_guard:" + "b" * 64
+GUARD_C = "source_add_restart_guard:" + "c" * 64
+OWNER_A = "source_add_restart_owner:" + "1" * 64
+OWNER_B = "source_add_restart_owner:" + "2" * 64
+OWNER_C = "source_add_restart_owner:" + "3" * 64
+
+
+def _commitment(identity: str) -> str:
+    return "sha256:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _owner_generation_commitment(owner_id: str, generation: int) -> str:
+    value = f"{_commitment(owner_id)}:{generation}".encode("utf-8")
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+@pytest.fixture(scope="module")
+def pre_restore_database():
+    yield from _database_with_migrations(PRE_RESTORE_MIGRATIONS)
+
+
+@pytest.fixture(scope="module")
+def database():
+    yield from _database_with_migrations(MIGRATIONS)
+
+
+def _set_paused(cursor, paused: bool, reason: str, actor: str) -> dict:
+    cursor.execute(
+        "SELECT public.research_lab_source_add_set_paused(%s, %s, %s)",
+        (paused, reason, actor),
+    )
+    return cursor.fetchone()[0]
+
+
+def _state(cursor) -> dict:
+    cursor.execute(
+        "SELECT public.research_lab_source_add_restart_guard_state_v2()"
+    )
+    return cursor.fetchone()[0]
+
+
+def _acquire(
+    cursor,
+    guard_id: str,
+    owner_id: str,
+    expected_generation: int,
+    actor: str,
+    *,
+    lease_seconds: int = 300,
+) -> dict:
+    cursor.execute(
+        """
+        SELECT public.research_lab_source_add_acquire_restart_guard_v2(
+            %s, %s, %s, %s, %s
+        )
+        """,
+        (guard_id, owner_id, expected_generation, lease_seconds, actor),
+    )
+    return cursor.fetchone()[0]
+
+
+def _release(
+    cursor,
+    guard_id: str,
+    owner_id: str,
+    generation: int,
+    actor: str,
+) -> dict:
+    cursor.execute(
+        """
+        SELECT public.research_lab_source_add_release_restart_guard_v2(
+            %s, %s, %s, %s
+        )
+        """,
+        (guard_id, owner_id, generation, actor),
+    )
+    return cursor.fetchone()[0]
+
+
+def _state_shape(
+    *,
+    paused: bool,
+    generation: int,
+    restore_paused: bool | None,
+    guard_id: str = "",
+    owner_id: str = "",
+    expires_at=None,
+) -> dict:
+    return {
+        "schema_version": "leadpoet.source_add_restart_guard_state.v2",
+        "paused": paused,
+        "guard_active": bool(guard_id),
+        "guard_commitment": _commitment(guard_id) if guard_id else "",
+        "owner_commitment": _commitment(owner_id) if owner_id else "",
+        "guard_generation": generation,
+        "owner_generation_commitment": (
+            _owner_generation_commitment(owner_id, generation)
+            if owner_id
+            else ""
+        ),
+        "guard_expires_at": expires_at,
+        "restore_paused": restore_paused,
+    }
+
+
+def _reserve_provider_origin(
+    cursor,
+    *,
+    submission_id: str,
+    adapter_id: str,
+    miner_hotkey: str,
+    api_base_url: str,
+) -> None:
+    cursor.execute(
+        "SELECT public.research_lab_source_add_provider_origin_hash_v1(%s)",
+        (api_base_url,),
+    )
+    provider_origin_hash = cursor.fetchone()[0]
+    cursor.execute(
+        """
+        INSERT INTO public.research_lab_source_add_provider_origin_events (
+            origin_version, provider_origin_hash, submission_id, adapter_id,
+            miner_hotkey, reservation_status, seq, reason
+        ) VALUES ('v1', %s, %s, %s, %s, 'reserved', 0, %s)
+        """,
+        (
+            provider_origin_hash,
+            submission_id,
+            adapter_id,
+            miner_hotkey,
+            "restart_state_restore_credential_constraint_test",
+        ),
+    )
+
+
+def test_migration_rejects_active_guarded_or_leased_state(
+    pre_restore_database,
+) -> None:
+    psycopg2, dsn = pre_restore_database
+    migration_sql = (SCRIPTS / MIGRATION).read_text(encoding="utf-8")
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _set_paused(
+                cursor,
+                False,
+                "restart restore active precondition",
+                "operator:restart-restore-test",
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match="SOURCE_ADD must be paused before restart-state migration",
+            ):
+                cursor.execute(migration_sql)
+            cursor.execute("ROLLBACK")
+
+            _set_paused(
+                cursor,
+                True,
+                "restart restore guard precondition",
+                "operator:restart-restore-test",
+            )
+            cursor.execute(
+                "SELECT public.research_lab_source_add_restart_guard_state_v1()"
+            )
+            generation = cursor.fetchone()[0]["guard_generation"]
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_acquire_restart_guard_v1(
+                    %s, %s, %s, 300, %s
+                )
+                """,
+                (GUARD_A, OWNER_A, generation, "operator:pre-migration-guard"),
+            )
+            acquired = cursor.fetchone()[0]
+            with pytest.raises(
+                psycopg2.Error,
+                match="SOURCE_ADD restart guard is active during restart-state migration",
+            ):
+                cursor.execute(migration_sql)
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                """
+                SELECT public.research_lab_source_add_release_restart_guard_v1(
+                    %s, %s, %s, %s
+                )
+                """,
+                (
+                    GUARD_A,
+                    OWNER_A,
+                    acquired["guard_generation"],
+                    "operator:pre-migration-guard",
+                ),
+            )
+
+            _insert_work(cursor, suffix="1740000000000001", status="leased")
+            with pytest.raises(
+                psycopg2.Error,
+                match="SOURCE_ADD work is leased during restart-state migration",
+            ):
+                cursor.execute(migration_sql)
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                "DELETE FROM public.research_lab_source_add_work_items "
+                "WHERE work_id = %s",
+                ("source_add_work:1740000000000001",),
+            )
+    finally:
+        connection.close()
+
+
+def test_contract_acl_and_migration_are_idempotent(database) -> None:
+    psycopg2, dsn = database
+    migration_sql = (SCRIPTS / MIGRATION).read_text(encoding="utf-8")
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            initial_state = _state(cursor)
+            assert initial_state == _state_shape(
+                paused=True,
+                generation=0,
+                restore_paused=None,
+            )
+            cursor.execute(
+                "SELECT public.research_lab_source_add_claim_control_contract_v2()"
+            )
+            initial_contract = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT public.research_lab_source_add_claim_control_contract_v1()"
+            )
+            rollback_v1_contract = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT 'sha256:' || encode(
+                    extensions.digest(
+                        convert_to(
+                            public.research_lab_source_add_claim_control_contract_v1()::TEXT,
+                            'UTF8'
+                        ),
+                        'sha256'
+                    ),
+                    'hex'
+                )
+                """
+            )
+            expected_rollback_hash = cursor.fetchone()[0]
+            assert initial_contract["rollback_v1_contract_schema_version"] == (
+                rollback_v1_contract["schema_version"]
+            )
+            assert initial_contract["rollback_v1_contract_sha256"] == (
+                expected_rollback_hash
+            )
+            assert initial_contract["function_authority_sha256"] == (
+                SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256
+            )
+            assert initial_contract["acquire_captures_pre_restart_paused"] is True
+            assert initial_contract["renewal_preserves_restore_state"] is True
+            assert initial_contract["expired_takeover_preserves_restore_state"] is True
+            assert initial_contract["operator_pause_wins"] is True
+            assert initial_contract["release_restores_pre_restart_state"] is True
+            assert initial_contract["failed_restart_keeps_paused"] is True
+            assert all(initial_contract["functions"].values())
+            assert initial_contract["permissions"] == {
+                "service_role_exists": True,
+                "service_role_callable": True,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            }
+
+            cursor.execute(migration_sql)
+            cursor.execute(
+                "SELECT public.research_lab_source_add_claim_control_contract_v2()"
+            )
+            assert cursor.fetchone()[0] == initial_contract
+            assert _state(cursor) == initial_state
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'research_lab_source_add_control'
+                  AND column_name = 'restart_guard_restore_paused'
+                """
+            )
+            assert cursor.fetchone()[0] == 1
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM pg_catalog.pg_trigger
+                WHERE tgname = 'trg_source_add_restart_restore_pause_v2'
+                  AND NOT tgisinternal
+                """
+            )
+            assert cursor.fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_active_before_restart_is_restored_active_after_exact_release(database) -> None:
+    psycopg2, dsn = database
+    actor = "gateway-restart:active-restore"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _set_paused(
+                cursor,
+                False,
+                "operator source add active",
+                "operator:source-add-active",
+            )
+            generation = _state(cursor)["guard_generation"]
+            acquired = _acquire(cursor, GUARD_A, OWNER_A, generation, actor)
+            assert acquired["schema_version"] == (
+                "leadpoet.source_add_restart_guard.v2"
+            )
+            assert acquired["paused"] is True
+            assert acquired["restore_paused"] is False
+            assert acquired["guard_generation"] == generation + 1
+            released = _release(
+                cursor,
+                GUARD_A,
+                OWNER_A,
+                acquired["guard_generation"],
+                actor,
+            )
+            assert released == {
+                "schema_version": (
+                    "leadpoet.source_add_restart_guard_release.v2"
+                ),
+                "released": True,
+                "paused": False,
+                "guard_active": False,
+                "guard_generation": acquired["guard_generation"],
+                "owner_generation_commitment": (
+                    _owner_generation_commitment(
+                        OWNER_A, acquired["guard_generation"]
+                    )
+                ),
+                "restored_pre_restart_state": True,
+            }
+            state = _state(cursor)
+            assert state == _state_shape(
+                paused=False,
+                generation=acquired["guard_generation"],
+                restore_paused=None,
+            )
+            _set_paused(
+                cursor,
+                True,
+                "active restoration test cleanup",
+                "operator:restart-restore-test",
+            )
+    finally:
+        connection.close()
+
+
+def test_paused_before_restart_remains_paused_after_exact_release(database) -> None:
+    psycopg2, dsn = database
+    actor = "gateway-restart:paused-restore"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _set_paused(
+                cursor,
+                True,
+                "operator source add paused",
+                "operator:source-add-paused",
+            )
+            generation = _state(cursor)["guard_generation"]
+            acquired = _acquire(cursor, GUARD_B, OWNER_B, generation, actor)
+            assert acquired["restore_paused"] is True
+            released = _release(
+                cursor,
+                GUARD_B,
+                OWNER_B,
+                acquired["guard_generation"],
+                actor,
+            )
+            assert released["paused"] is True
+            assert released["restored_pre_restart_state"] is True
+            assert _state(cursor)["paused"] is True
+            assert _state(cursor)["restore_paused"] is None
+    finally:
+        connection.close()
+
+
+def test_renewal_and_expired_takeover_preserve_active_restore_state(database) -> None:
+    psycopg2, dsn = database
+    first_actor = "gateway-restart:renewal"
+    takeover_actor = "gateway-restart:takeover"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _set_paused(
+                cursor,
+                False,
+                "operator source add active before renewal",
+                "operator:source-add-active",
+            )
+            generation = _state(cursor)["guard_generation"]
+            acquired = _acquire(
+                cursor,
+                GUARD_A,
+                OWNER_A,
+                generation,
+                first_actor,
+                lease_seconds=60,
+            )
+            renewed = _acquire(
+                cursor,
+                GUARD_A,
+                OWNER_A,
+                acquired["guard_generation"],
+                first_actor,
+                lease_seconds=300,
+            )
+            assert renewed["guard_generation"] == acquired["guard_generation"]
+            assert renewed["restore_paused"] is False
+            assert renewed["guard_expires_at"] >= acquired["guard_expires_at"]
+
+            cursor.execute(
+                """
+                UPDATE public.research_lab_source_add_control
+                SET restart_guard_expires_at = NOW() - INTERVAL '1 second'
+                WHERE singleton
+                """
+            )
+            takeover = _acquire(
+                cursor,
+                GUARD_C,
+                OWNER_C,
+                renewed["guard_generation"],
+                takeover_actor,
+            )
+            assert takeover["guard_generation"] == renewed["guard_generation"] + 1
+            assert takeover["restore_paused"] is False
+            with pytest.raises(
+                psycopg2.Error,
+                match="SOURCE_ADD restart guard owner or generation does not match",
+            ):
+                _release(
+                    cursor,
+                    GUARD_A,
+                    OWNER_A,
+                    renewed["guard_generation"],
+                    first_actor,
+                )
+            current = _state(cursor)
+            assert current["guard_commitment"] == _commitment(GUARD_C)
+            assert current["owner_commitment"] == _commitment(OWNER_C)
+            assert current["restore_paused"] is False
+            released = _release(
+                cursor,
+                GUARD_C,
+                OWNER_C,
+                takeover["guard_generation"],
+                takeover_actor,
+            )
+            assert released["paused"] is False
+            _set_paused(
+                cursor,
+                True,
+                "takeover restoration test cleanup",
+                "operator:restart-restore-test",
+            )
+    finally:
+        connection.close()
+
+
+def test_explicit_operator_pause_while_guarded_wins(database) -> None:
+    psycopg2, dsn = database
+    restart_actor = "gateway-restart:operator-pause"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _set_paused(
+                cursor,
+                False,
+                "operator source add active before restart",
+                "operator:source-add-active",
+            )
+            generation = _state(cursor)["guard_generation"]
+            acquired = _acquire(
+                cursor, GUARD_B, OWNER_B, generation, restart_actor
+            )
+            assert acquired["restore_paused"] is False
+            paused = _set_paused(
+                cursor,
+                True,
+                "operator incident pause",
+                "operator:incident-response",
+            )
+            assert paused["paused"] is True
+            assert paused["restart_guard_restore_paused"] is True
+            assert _state(cursor)["restore_paused"] is True
+            released = _release(
+                cursor,
+                GUARD_B,
+                OWNER_B,
+                acquired["guard_generation"],
+                restart_actor,
+            )
+            assert released["paused"] is True
+            assert _state(cursor)["paused"] is True
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "submission_doc",
+    [
+        {
+            "endpoint_example": (
+                "https://api.builtwith.com/v21/api.json?"
+                "KEY=fake-builtwith-value&LOOKUP=example.com"
+            )
+        },
+        {"request": {"api_key": "fake-api-key-value"}},
+        {"headers": {"Authorization": "Bearer fake-bearer-value"}},
+        {"headers": {"Authorization": "API 00000000-0000-0000-0000-000000000000"}},
+        {"headers": {"X-RapidAPI-Key": "fake-rapid-api-key-value"}},
+        {"headers": {"xApiKey": "fake-camel-api-key-value"}},
+        {"headers": {"xRapidApiKey": "fake-camel-rapid-api-key-value"}},
+        {"request": {"clientSecret": "fake-client-secret-value"}},
+        {"request": {"apiToken": "fake-api-token-value"}},
+        {"request": {"clientToken": "fake-client-token-value"}},
+        {"request": {"providerKey": "fake-provider-key-value"}},
+        {"headers": {"X-Custom-Auth": "fake-custom-auth-value"}},
+        {"request": {"credential": "fake-credential-value"}},
+        {"request": {"clientCredentials": "fake-client-credentials-value"}},
+        {"request": {"privateKey": "fake-private-key-value"}},
+    ],
+    ids=(
+        "builtwith-key-query",
+        "nested-api-key",
+        "authorization-header",
+        "builtwith-authorization-header",
+        "rapidapi-header",
+        "camel-api-header",
+        "camel-rapidapi-header",
+        "camel-client-secret",
+        "camel-api-token",
+        "camel-client-token",
+        "camel-provider-key",
+        "custom-auth-header",
+        "credential-field",
+        "camel-client-credentials",
+        "camel-private-key",
+    ),
+)
+def test_submission_constraint_rejects_credential_material(
+    database,
+    submission_doc,
+) -> None:
+    psycopg2, dsn = database
+    suffix = hashlib.sha256(
+        json.dumps(submission_doc, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    submission_id = f"source_add_submission:{suffix}"
+    adapter_id = f"adapter:credential-{suffix}"
+    miner_hotkey = "5RestartRestoreCredentialGuardMiner"
+    api_base_url = f"https://credential-{suffix}.example.test/v1"
+    submission_doc = {
+        **submission_doc,
+        "source_metadata": {"api_base_url": api_base_url},
+    }
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _reserve_provider_origin(
+                cursor,
+                submission_id=submission_id,
+                adapter_id=adapter_id,
+                miner_hotkey=miner_hotkey,
+                api_base_url=api_base_url,
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match=(
+                    "research_lab_source_add_submission_no_credential_material_v2"
+                ),
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO public.research_lab_source_add_submissions (
+                        submission_id, adapter_id, miner_hotkey, stage, seq,
+                        submission_doc
+                    ) VALUES (%s, %s, %s, 'submitted', 0, %s::JSONB)
+                    """,
+                    (
+                        submission_id,
+                        adapter_id,
+                        miner_hotkey,
+                        json.dumps(submission_doc, sort_keys=True),
+                    ),
+                )
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM public.research_lab_source_add_submissions
+                WHERE submission_id = %s
+                """,
+                (submission_id,),
+            )
+            assert cursor.fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_submission_constraint_allows_credential_free_document(database) -> None:
+    psycopg2, dsn = database
+    submission_id = "source_add_submission:1740000000000002"
+    adapter_id = "adapter:credential-free-174"
+    miner_hotkey = "5RestartRestoreCredentialFreeMiner"
+    api_base_url = "https://credential-free-174.example.test/v1"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _reserve_provider_origin(
+                cursor,
+                submission_id=submission_id,
+                adapter_id=adapter_id,
+                miner_hotkey=miner_hotkey,
+                api_base_url=api_base_url,
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_source_add_submissions (
+                    submission_id, adapter_id, miner_hotkey, stage, seq,
+                    submission_doc
+                ) VALUES (%s, %s, %s, 'submitted', 0, %s::JSONB)
+                """,
+                (
+                    submission_id,
+                    adapter_id,
+                    miner_hotkey,
+                    json.dumps(
+                        {
+                            "source_metadata": {
+                                "api_base_url": api_base_url,
+                            },
+                            "documentation_url": "https://example.com/docs",
+                            "endpoint_example": "/v1/lookup?domain=example.com",
+                            "summary": (
+                                "API key authentication is managed by the operator"
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT submission_doc
+                FROM public.research_lab_source_add_submissions
+                WHERE submission_id = %s
+                """,
+                (submission_id,),
+            )
+            assert cursor.fetchone()[0]["endpoint_example"] == (
+                "/v1/lookup?domain=example.com"
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match=(
+                    "research_lab_source_add_submission_no_credential_material_v2"
+                ),
+            ):
+                cursor.execute(
+                    """
+                    UPDATE public.research_lab_source_add_submissions
+                    SET submission_doc = submission_doc || %s::JSONB
+                    WHERE submission_id = %s
+                    """,
+                    (
+                        json.dumps(
+                            {"request": {"api_key": "late-credential-value"}},
+                            sort_keys=True,
+                        ),
+                        submission_id,
+                    ),
+                )
+    finally:
+        connection.close()

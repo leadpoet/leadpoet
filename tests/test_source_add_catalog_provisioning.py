@@ -3,7 +3,9 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from gateway.research_lab import api, source_add_catalog
@@ -12,6 +14,7 @@ from gateway.research_lab.models import (
     ResearchLabSourceAdapterProbeConfigureRequest,
     ResearchLabSourceAdapterProvisionRequest,
     ResearchLabSourceAdapterSubmissionRequest,
+    ResearchLabSourceMetadata,
     ResearchLabSourceAddCredentialRecipientRequest,
 )
 from gateway.research_lab.source_add_catalog import (
@@ -19,6 +22,7 @@ from gateway.research_lab.source_add_catalog import (
     PROVISION_STATUS_ELIGIBLE,
     provider_registry_entries_from_provisioned_rows,
     probe_endpoints_from_provisioned_rows,
+    sanitize_source_add_doc,
     source_add_row_credential_ready,
 )
 from gateway.research_lab.source_add_llm_judge import _parse_verdict
@@ -78,6 +82,9 @@ def _source_metadata_doc(**overrides):
     return doc
 
 
+FAKE_BUILTWITH_CREDENTIAL = "FAKE_BUILTWITH_VALUE_12345"
+
+
 @pytest.mark.asyncio
 async def test_public_source_add_credential_recipient_is_retired(monkeypatch):
     monkeypatch.setattr(
@@ -129,7 +136,10 @@ async def test_source_add_rejects_plaintext_and_v2_miner_credentials():
         "manifest": _manifest_doc(),
         "source_metadata": _source_metadata_doc(),
     }
-    with pytest.raises(ValidationError, match="miners must not submit"):
+    with pytest.raises(
+        ValidationError,
+        match="credential material|miners must not submit",
+    ):
         ResearchLabSourceAdapterSubmissionRequest(
             **common,
             adapter_credential="plaintext-secret-value",
@@ -138,11 +148,252 @@ async def test_source_add_rejects_plaintext_and_v2_miner_credentials():
         request_id="sha256:" + "8" * 64,
         ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
     )
-    with pytest.raises(ValidationError, match="miners must not submit"):
+    with pytest.raises(
+        ValidationError,
+        match="credential material|miners must not submit",
+    ):
         ResearchLabSourceAdapterSubmissionRequest(
             **common,
             adapter_credential_v2=encrypted,
         )
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        {
+            "miner_hotkey": "miner-hotkey-value",
+            "signature": "signature-value-123",
+            "timestamp": "not-an-integer",
+            "idempotency_key": "source-submit-malformed-builtwith",
+            "manifest": _manifest_doc(),
+            "source_metadata": {
+                **_source_metadata_doc(),
+                "documentation_url": (
+                    "https://api.builtwith.com/docs?"
+                    f"KEY={FAKE_BUILTWITH_CREDENTIAL}"
+                ),
+            },
+        },
+        b'{"source_metadata":{"documentation_url":"KEY='
+        + FAKE_BUILTWITH_CREDENTIAL.encode("utf-8"),
+    ),
+)
+def test_source_add_http_validation_errors_are_generic_and_never_echo_credentials(
+    body,
+):
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    if isinstance(body, bytes):
+        response = client.post(
+            "/research-lab/source-adapters",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+    else:
+        response = client.post("/research-lab/source-adapters", json=body)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Submission failed"}
+    assert FAKE_BUILTWITH_CREDENTIAL not in response.text
+
+
+@pytest.mark.parametrize(
+    "credential_location",
+    (
+        "top_level_unknown",
+        "metadata_unknown",
+        "endpoint_unknown",
+    ),
+)
+def test_source_add_unknown_credential_fields_fail_before_route_execution(
+    monkeypatch,
+    credential_location,
+):
+    async def fail_verify(_payload):
+        raise AssertionError("credential request must not reach signature verification")
+
+    monkeypatch.setattr(api, "_verify_signed_miner", fail_verify)
+    body = {
+        "miner_hotkey": "5" + "A" * 47,
+        "signature": "signature-value-123",
+        "timestamp": int(time.time()),
+        "idempotency_key": f"source-unknown-{credential_location}",
+        "manifest": _manifest_doc(),
+        "source_brief": "Official provider documentation.",
+        "source_metadata": _source_metadata_doc(),
+    }
+    if credential_location == "top_level_unknown":
+        body["xApiKey"] = FAKE_BUILTWITH_CREDENTIAL
+    elif credential_location == "metadata_unknown":
+        body["source_metadata"]["xApiKey"] = FAKE_BUILTWITH_CREDENTIAL
+    else:
+        body["source_metadata"]["endpoint_examples"][0][
+            "xApiKey"
+        ] = FAKE_BUILTWITH_CREDENTIAL
+
+    app = FastAPI()
+    app.include_router(api.router)
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/research-lab/source-adapters",
+        json=body,
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Submission failed"}
+    assert FAKE_BUILTWITH_CREDENTIAL not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential_location",
+    (
+        "manifest_nested",
+        "manifest_authorization_header",
+        "manifest_common_api_header",
+        "manifest_camel_case_api_header",
+        "source_brief",
+        "endpoint_example",
+    ),
+)
+async def test_builtwith_key_is_rejected_generically_after_signature_before_catalog_or_rpc(
+    monkeypatch,
+    credential_location,
+):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+
+    manifest = _manifest_doc()
+    source_brief = "Official BuiltWith API documentation."
+    metadata = _source_metadata_doc(
+        api_base_url="https://api.builtwith.com/v21",
+        documentation_url="https://api.builtwith.com/free-api",
+        auth_type="api_key_query",
+    )
+    marker = f"KEY={FAKE_BUILTWITH_CREDENTIAL}"
+    if credential_location == "manifest_nested":
+        manifest["submission_notes"] = {"example": marker}
+    elif credential_location == "manifest_authorization_header":
+        manifest["request_headers"] = {
+            "Authorization": f"Bearer {FAKE_BUILTWITH_CREDENTIAL}"
+        }
+    elif credential_location == "manifest_common_api_header":
+        manifest["request_headers"] = {
+            "X-RapidAPI-Key": FAKE_BUILTWITH_CREDENTIAL
+        }
+    elif credential_location == "manifest_camel_case_api_header":
+        manifest["request_headers"] = {
+            "xRapidApiKey": FAKE_BUILTWITH_CREDENTIAL
+        }
+    elif credential_location == "source_brief":
+        source_brief = f"BuiltWith request example: {marker}"
+    else:
+        metadata["endpoint_examples"][0]["example_query"] = (
+            f"{marker}&LOOKUP=example.com"
+        )
+
+    payload = ResearchLabSourceAdapterSubmissionRequest.model_construct(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key=f"source-submit-builtwith-{credential_location}",
+        manifest=manifest,
+        source_brief=source_brief,
+        source_metadata=ResearchLabSourceMetadata.model_validate(metadata),
+    )
+
+    async def fail_verify_signed_miner(_value):
+        raise AssertionError(
+            "credential-bearing request must be rejected before signature logging"
+        )
+
+    def fail_builtin(*_args, **_kwargs):
+        raise AssertionError("credential-bearing request must not reach catalog lookup")
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("credential-bearing request must not reach persistence")
+
+    monkeypatch.setattr(api, "_verify_signed_miner", fail_verify_signed_miner)
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        fail_builtin,
+    )
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    body = JSONResponse(
+        status_code=exc_info.value.status_code,
+        content={"detail": exc_info.value.detail},
+    ).body
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Submission failed"
+    assert body == b'{"detail":"Submission failed"}'
+    assert FAKE_BUILTWITH_CREDENTIAL.encode() not in body
+
+
+def test_source_add_sanitizer_recursively_redacts_builtwith_key_values():
+    marker = f"KEY={FAKE_BUILTWITH_CREDENTIAL}"
+    sanitized = sanitize_source_add_doc(
+        {
+            "manifest": {
+                "submission_notes": {
+                    "example": f"/free1/api.json/{marker}/LOOKUP=example.com"
+                }
+            },
+            "source_metadata": {
+                "documentation_url": (
+                    f"https://api.builtwith.com/docs?{marker}"
+                ),
+                "endpoint_examples": [
+                    {
+                        "example_query": f"{marker}&LOOKUP=example.com",
+                        "purpose": "Return key technology signals",
+                    }
+                ],
+            },
+            "safe_summary": "Key technology signals are documented.",
+        }
+    )
+
+    assert FAKE_BUILTWITH_CREDENTIAL not in str(sanitized)
+    assert sanitized["manifest"]["submission_notes"]["example"] == "[redacted]"
+    assert sanitized["source_metadata"]["documentation_url"] == "[redacted]"
+    assert (
+        sanitized["source_metadata"]["endpoint_examples"][0]["example_query"]
+        == "[redacted]"
+    )
+    assert sanitized["safe_summary"] == "Key technology signals are documented."
+
+
+def test_source_add_sanitizer_redacts_generic_auth_header_key():
+    sanitized = sanitize_source_add_doc(
+        {"headers": {"X-Custom-Auth": FAKE_BUILTWITH_CREDENTIAL}}
+    )
+
+    assert sanitized == {"headers": {"X-Custom-Auth": "[redacted]"}}
 
 
 def test_intake_rejects_duplicate_source_identity_hash():

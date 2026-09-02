@@ -126,7 +126,7 @@ on descriptor 9. Under that uninterrupted lock it revalidates the isolated
 plan and candidate tree, the singleton actively COMPLIANCE-locked release
 channel, the protected source, the fixed EC2 instance-role authority, and the
 installed controller. It first invokes the fixed production
-`research_lab_source_add_acquire_restart_guard_v1` RPC and exact-reads the
+`research_lab_source_add_acquire_restart_guard_v2` RPC and exact-reads the
 singleton control row. The guard identity is fixed to the canonical production
 gateway restart authority, while its owner and actor are invocation-specific.
 The acquire RPC compares the exact monotonic generation read under the same
@@ -205,8 +205,12 @@ durable guard prevents an operator resume from racing that boundary. After the
 candidate is live, the strict runtime status, durable pause, exact owner and
 generation, active guard, and zero leased count are checked once more. Only
 then does the candidate compare-and-release that owner/generation and
-exact-read the control again; release explicitly retains `paused=true` and
-never resumes SOURCE_ADD.
+exact-read the control again. Migration 174 binds the pause state from before
+the first guard acquisition to that exact guard generation. Successful release
+atomically restores that state: active remains active and paused remains
+paused. An explicit operator pause while the guard is held overrides an earlier
+active snapshot. Autoresearch and scoring maintenance state are never changed
+by this SOURCE_ADD guard.
 
 The proof and all four controller snapshots are closed in every long-lived
 runtime child and closed by the restart parent after the post-start check.
@@ -217,8 +221,8 @@ safe to retry. If the prior gateway is no longer running, the retry skips its
 loopback status only after the protected `/proc` scan proves that exact absence;
 the durable pause, same canonical guard, fresh invocation owner/generation,
 and zero-leased RPC proofs remain mandatory. An earlier failure may instead
-leave or restore the exact original
-secret topology, but it never automatically resumes SOURCE_ADD.
+leave or restore the exact original secret topology, but it does not restore
+active SOURCE_ADD until candidate runtime verification succeeds.
 
 ## Normal Restart
 

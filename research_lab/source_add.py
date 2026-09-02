@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Optional, Sequence
 
 from .canonical import sha256_json
@@ -57,13 +58,158 @@ RAW_OUTPUT_FIELDS: tuple[str, ...] = (
 # These are defense-in-depth tripwires for declared schemas. The hard guarantee
 # is the ref/hash-only adapter contract plus the disabled sandbox execution path.
 RAW_CREDENTIAL_KEYS: tuple[str, ...] = (
+    "access_key",
+    "access_token",
+    "api-key",
     "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "credential",
+    "credentials",
+    "key",
     "password",
+    "proxy-authorization",
+    "private_key",
     "secret",
     "token",
     "credential_value",
     "raw_credential",
 )
+
+_SOURCE_ADD_CREDENTIAL_MARKERS: tuple[str, ...] = (
+    "sk-or-",
+    "openrouter_api_key",
+    "openrouter_management_key",
+    "raw_openrouter_key",
+    "raw_secret",
+    "service_role",
+)
+_SOURCE_ADD_CREDENTIAL_KEY_SUFFIXES: tuple[str, ...] = (
+    "access_key",
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth_token",
+    "authorization",
+    "client_secret",
+    "credential",
+    "credentials",
+    "password",
+    "private_key",
+    "proxy_authorization",
+    "secret",
+    "secret_key",
+    "subscription_key",
+    "token",
+)
+_SOURCE_ADD_CREDENTIAL_KEY_COMPACT_SUFFIXES: tuple[str, ...] = (
+    "accesskey",
+    "accesstoken",
+    "apikey",
+    "apitoken",
+    "authkey",
+    "auth",
+    "authtoken",
+    "authorization",
+    "clientkey",
+    "clientcredential",
+    "clientcredentials",
+    "clientsecret",
+    "clienttoken",
+    "password",
+    "credential",
+    "credentials",
+    "privatekey",
+    "providerkey",
+    "providersecret",
+    "providertoken",
+    "proxyauthorization",
+    "refreshtoken",
+    "secretkey",
+    "subscriptionkey",
+)
+_SOURCE_ADD_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9_])[\"']?"
+    r"(?:key|token|password|credentials?|authorization|proxy-authorization|"
+    r"[A-Za-z0-9_-]*(?:api|access|auth|client|private|provider|refresh|secret|subscription)"
+    r"[A-Za-z0-9_-]*(?:key|token|secret|password|credentials?|auth|authorization)|"
+    r"x[A-Za-z0-9_-]*(?:key|token|secret|auth|authorization))"
+    r"[\"']?\s*(?:=|:|%3d)\s*[\"']?"
+    r"[^\s\"'&,;}]{8,}"
+    r"|\b(?:authorization|proxy-authorization)\s*:\s*"
+    r"(?:bearer|basic|api(?:[\s_-]*key)?)\s+[^\s\"',;}]{8,}",
+    re.IGNORECASE,
+)
+_SOURCE_ADD_CREDENTIAL_VALUE_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{12,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})\b"
+)
+
+
+def source_add_text_contains_credential_material(value: str) -> bool:
+    """Detect credential-bearing text that SOURCE_ADD must never persist."""
+
+    text = str(value or "")
+    lowered = text.lower()
+    return (
+        any(marker in lowered for marker in _SOURCE_ADD_CREDENTIAL_MARKERS)
+        or bool(_SOURCE_ADD_CREDENTIAL_ASSIGNMENT_RE.search(text))
+        or bool(_SOURCE_ADD_CREDENTIAL_VALUE_RE.search(text))
+    )
+
+
+def source_add_contains_credential_material(value: Any) -> bool:
+    """Return whether any SOURCE_ADD request field carries credentials."""
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = re.sub(
+                r"(?<=[a-z0-9])(?=[A-Z])",
+                "_",
+                str(key).strip(),
+            ).lower()
+            tokenized_key = re.sub(r"[^a-z0-9]+", "_", normalized_key).strip(
+                "_"
+            )
+            compact_key = re.sub(r"[^a-z0-9]+", "", normalized_key)
+            if (
+                normalized_key in RAW_CREDENTIAL_KEYS
+                or tokenized_key == "key"
+                or any(
+                    compact_key == suffix or compact_key.endswith(suffix)
+                    for suffix in _SOURCE_ADD_CREDENTIAL_KEY_COMPACT_SUFFIXES
+                )
+                or (
+                    tokenized_key.endswith("_key")
+                    and any(
+                        marker in tokenized_key
+                        for marker in (
+                            "access",
+                            "api",
+                            "auth",
+                            "private",
+                            "secret",
+                            "subscription",
+                        )
+                    )
+                )
+                or any(
+                    tokenized_key == suffix
+                    or tokenized_key.endswith("_" + suffix)
+                    for suffix in _SOURCE_ADD_CREDENTIAL_KEY_SUFFIXES
+                )
+            ):
+                return True
+            if source_add_text_contains_credential_material(str(key)):
+                return True
+            if source_add_contains_credential_material(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(source_add_contains_credential_material(item) for item in value)
+    if isinstance(value, str):
+        return source_add_text_contains_credential_material(value)
+    return False
 
 
 class SourceAddSourceKind(str, Enum):
@@ -609,18 +755,7 @@ def _contains_any_key(value: Any, keys: Sequence[str]) -> bool:
 
 
 def _contains_raw_credential_key(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            normalized_key = str(key).lower()
-            if normalized_key in RAW_CREDENTIAL_KEYS:
-                return True
-            if normalized_key.endswith("_ref"):
-                continue
-            if _contains_raw_credential_key(nested):
-                return True
-    elif isinstance(value, list):
-        return any(_contains_raw_credential_key(item) for item in value)
-    return False
+    return source_add_contains_credential_material(value)
 
 
 def _assert_expected_error(errors: Sequence[str], record: Mapping[str, Any]) -> None:

@@ -178,6 +178,21 @@ def _source_add_claim_control_contract() -> dict[str, Any]:
     return load_contract()
 
 
+def _source_add_claim_control_contract_v2() -> dict[str, Any]:
+    try:
+        from gateway_boundary_service import (
+            _source_add_claim_control_contract_v2 as load_contract,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name != "gateway_boundary_service":
+            raise
+        from tests.restart_rehearsal.gateway_boundary_service import (
+            _source_add_claim_control_contract_v2 as load_contract,
+        )
+
+    return load_contract(SOURCE_ROOT)
+
+
 class _LocalSupabaseHTTPSConnection:
     """Map only the canonical production PostgREST origin to local HTTP."""
 
@@ -4795,6 +4810,25 @@ def _local_urlopen(
             )
         body = json.dumps(
             _source_add_claim_control_contract(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_claim_control_contract_v2"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD restart-state contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD restart-state contract body differs"
+            )
+        body = json.dumps(
+            _source_add_claim_control_contract_v2(),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()

@@ -70,8 +70,10 @@ from research_lab.source_add_miner import (
     SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
     SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
+    source_add_text_contains_credential_material,
     source_add_submission_ready,
 )
+from research_lab.source_add import source_add_contains_credential_material
 from leadpoet_canonical.credential_recipient_v2 import (
     CredentialRecipientV2Error,
     verify_and_encrypt_openrouter_credential_v2,
@@ -2368,6 +2370,10 @@ def _research_lab_source_add_signed_payload(wallet, payload: dict) -> dict:
     if payload.get("adapter_credential") or payload.get("adapter_credential_v2"):
         raise ValueError("miners must not submit SOURCE_ADD API credentials")
     sign_payload = {key: value for key, value in payload.items() if key != "signature"}
+    if source_add_contains_credential_material(sign_payload):
+        raise ValueError(
+            "SOURCE_ADD submission appears to contain credential material"
+        )
     message = json.dumps(sign_payload, sort_keys=True)
     signature = wallet.hotkey.sign(message.encode()).hex()
     return {**sign_payload, "signature": signature}
@@ -2634,10 +2640,9 @@ def _research_lab_prompt_required_text(label: str, *, max_length: int = 1000) ->
         if len(value) > max_length:
             print(f"❌ Value must be at most {max_length} characters.")
             continue
-        if _looks_like_raw_research_lab_secret(value) or re.search(
-            r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]",
-            value,
-        ):
+        if _looks_like_raw_research_lab_secret(
+            value
+        ) or source_add_text_contains_credential_material(value):
             print("❌ This field appears to contain credential material. Remove secrets and retry.")
             continue
         return value
@@ -2650,10 +2655,9 @@ def _research_lab_prompt_optional_text(label: str, *, max_length: int = 1000) ->
     if len(value) > max_length:
         print(f"   Truncating to {max_length} characters.")
         value = value[:max_length]
-    if _looks_like_raw_research_lab_secret(value) or re.search(
-        r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]",
-        value,
-    ):
+    if _looks_like_raw_research_lab_secret(
+        value
+    ) or source_add_text_contains_credential_material(value):
         raise ValueError("optional text appears to contain credential material")
     return value
 

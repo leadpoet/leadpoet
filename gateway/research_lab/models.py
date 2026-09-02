@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD
 from research_lab.canonical import sha256_json
+from research_lab.source_add import source_add_contains_credential_material
 
 
 SECRET_MARKERS = (
@@ -286,6 +287,22 @@ class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
     # validation error or model representation from echoing plaintext.
     adapter_credential: Optional[SecretStr] = Field(default=None, min_length=8, max_length=512)
     adapter_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def raw_request_contains_no_credentials(cls, value: Any) -> Any:
+        scanned_value = value
+        if isinstance(value, dict):
+            scanned_value = dict(value)
+            for field_name in (
+                "adapter_credential",
+                "adapter_credential_v2",
+            ):
+                if scanned_value.get(field_name) is None:
+                    scanned_value.pop(field_name, None)
+        if source_add_contains_credential_material(scanned_value):
+            raise ValueError("SOURCE_ADD request contains credential material")
+        return value
 
     @model_validator(mode="after")
     def miner_credentials_are_forbidden(self) -> "ResearchLabSourceAdapterSubmissionRequest":

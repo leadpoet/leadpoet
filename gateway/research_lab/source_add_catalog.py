@@ -14,6 +14,10 @@ from gateway.research_lab.key_vault import decrypt_source_add_credential
 from research_lab.canonical import sha256_json
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.source_add_identity import normalize_source_add_provider_origin
+from research_lab.source_add import (
+    source_add_contains_credential_material,
+    source_add_text_contains_credential_material,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +89,7 @@ def source_add_encrypted_envelope_valid(envelope: Mapping[str, Any]) -> bool:
 
 def reject_source_add_secret_text(value: Any, *, field_name: str = "value") -> None:
     text = str(value or "")
-    if _SECRET_RE.search(text):
+    if _SECRET_RE.search(text) or source_add_text_contains_credential_material(text):
         raise ValueError(f"{field_name} contains secret-like material")
 
 
@@ -98,7 +102,16 @@ def sanitize_source_add_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
                 lowered = key_text.lower()
                 if lowered == "credential_ref":
                     out[key_text] = clean(item)
-                elif any(marker in lowered for marker in ("password", "secret", "token", "api_key", "credential")):
+                elif any(
+                    marker in lowered
+                    for marker in (
+                        "password",
+                        "secret",
+                        "token",
+                        "api_key",
+                        "credential",
+                    )
+                ) or source_add_contains_credential_material({key_text: ""}):
                     out[key_text] = "[redacted]"
                 else:
                     out[key_text] = clean(item)
@@ -106,7 +119,7 @@ def sanitize_source_add_doc(doc: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, (list, tuple)):
             return [clean(item) for item in value[:50]]
         if isinstance(value, str):
-            if _SECRET_RE.search(value):
+            if _SECRET_RE.search(value) or source_add_text_contains_credential_material(value):
                 return "[redacted]"
             return value[:4000]
         return value

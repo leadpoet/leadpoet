@@ -21,7 +21,9 @@ from uuid import uuid4
 
 import gzip
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
 
 from gateway.build_info import get_build_info
 from gateway.qualification.api.payment import get_payment_info, verify_payment
@@ -171,6 +173,7 @@ from gateway.research_lab.provider_capabilities import (
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.improvement_engine.config import ImprovementEngineConfig
 from research_lab.source_add_execution import intake_source_add_submission
+from research_lab.source_add import source_add_contains_credential_material
 from research_lab.source_add_identity import (
     SOURCE_ADD_IDENTITY_VERSION,
     legacy_source_identity_hash,
@@ -194,7 +197,35 @@ from gateway.research_lab import allocation_handoff_disk_cache
 
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/research-lab", tags=["research-lab"])
+
+
+class _ResearchLabCredentialSafeRoute(APIRoute):
+    """Keep SOURCE_ADD validation failures generic and credential-free."""
+
+    def get_route_handler(self):
+        original_route_handler = super().get_route_handler()
+
+        async def credential_safe_route_handler(request: Request):
+            try:
+                return await original_route_handler(request)
+            except RequestValidationError:
+                if request.url.path == "/research-lab/source-adapters":
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "detail": SOURCE_ADD_SUBMISSION_FAILED_DETAIL
+                        },
+                    )
+                raise
+
+        return credential_safe_route_handler
+
+
+router = APIRouter(
+    prefix="/research-lab",
+    tags=["research-lab"],
+    route_class=_ResearchLabCredentialSafeRoute,
+)
 _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS = 20
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
@@ -748,6 +779,12 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         raise HTTPException(
             status_code=503,
             detail="SOURCE_ADD workflow is paused",
+        )
+    if source_add_contains_credential_material(payload.signed_payload()):
+        logger.warning("SOURCE_ADD_CREDENTIAL_MATERIAL_REJECTED")
+        raise HTTPException(
+            status_code=400,
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
         )
     await _verify_signed_miner(payload)
 

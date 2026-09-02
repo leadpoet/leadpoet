@@ -13,7 +13,11 @@ import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
-from research_lab.source_add import SourceAddSourceKind
+from research_lab.source_add import (
+    SourceAddSourceKind,
+    source_add_contains_credential_material,
+    source_add_text_contains_credential_material,
+)
 
 
 SOURCE_ADD_SOURCE_KINDS: tuple[str, ...] = tuple(kind.value for kind in SourceAddSourceKind)
@@ -94,6 +98,8 @@ def parse_source_add_domains(value: str) -> tuple[str, ...]:
 
 def normalize_source_add_url(value: str, *, field_name: str) -> str:
     raw = str(value or "").strip()
+    if source_add_text_contains_credential_material(raw):
+        raise ValueError(f"{field_name} appears to contain credential material")
     parsed = urlparse(raw)
     try:
         port = parsed.port or 443
@@ -127,13 +133,18 @@ def _clean_short_text(value: str, *, field_name: str, max_length: int) -> str:
     cleaned = " ".join(str(value or "").strip().split())
     if not cleaned:
         raise ValueError(f"{field_name} is required")
+    if source_add_text_contains_credential_material(cleaned):
+        raise ValueError(f"{field_name} appears to contain credential material")
     if len(cleaned) > max_length:
         raise ValueError(f"{field_name} must be at most {max_length} characters")
     return cleaned
 
 
 def _clean_optional_text(value: str, *, max_length: int) -> str:
-    return " ".join(str(value or "").strip().split())[:max_length]
+    cleaned = " ".join(str(value or "").strip().split())[:max_length]
+    if source_add_text_contains_credential_material(cleaned):
+        raise ValueError("optional text appears to contain credential material")
+    return cleaned
 
 
 def _normalize_endpoint_example(item: Mapping[str, Any], index: int) -> dict[str, str]:
@@ -284,6 +295,13 @@ def build_source_add_submission_docs(
     clean_name = str(source_name or "").strip()
     if not clean_name:
         raise ValueError("source_name is required")
+    for field_name, value in (
+        ("source_name", clean_name),
+        ("endpoint_summary", endpoint_summary),
+        ("claimed_output_type", claimed_output_type),
+    ):
+        if source_add_text_contains_credential_material(str(value or "")):
+            raise ValueError(f"{field_name} appears to contain credential material")
     if max_request_cost_cents <= 0 or max_trial_cost_cents <= 0:
         raise ValueError("cost caps must be positive")
     if max_request_cost_cents > max_trial_cost_cents:
@@ -334,9 +352,19 @@ def build_source_add_submission_docs(
             else "",
             f"Claimed output type: {seed['claimed_output_type'] or 'unspecified'}",
             f"Endpoint details: {seed['endpoint_summary'] or 'not supplied'}",
-            "API credentials: operator-managed after functional review",
+            "Authentication is attached by the operator after functional review",
         )
         if line
     )
+    if source_add_contains_credential_material(
+        {
+            "manifest": manifest,
+            "source_brief": source_brief,
+            "source_metadata": metadata,
+        }
+    ):
+        raise ValueError(
+            "SOURCE_ADD submission appears to contain credential material"
+        )
     idempotency_key = f"research-source-add:{miner_hotkey}:{digest[:24]}"
     return manifest, source_brief[:2000], idempotency_key, metadata

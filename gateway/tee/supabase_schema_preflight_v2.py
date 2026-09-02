@@ -437,6 +437,11 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
+        "scripts/174-research-lab-source-add-restart-state-restore.sql",
+        "research_lab_source_add_control",
+        ("restart_guard_restore_paused",),
+    ),
+    (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_work_items",
         (
@@ -1135,6 +1140,22 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_claim_control_contract_v1",
     ),
     (
+        "scripts/174-research-lab-source-add-restart-state-restore.sql",
+        "research_lab_source_add_acquire_restart_guard_v2",
+    ),
+    (
+        "scripts/174-research-lab-source-add-restart-state-restore.sql",
+        "research_lab_source_add_restart_guard_state_v2",
+    ),
+    (
+        "scripts/174-research-lab-source-add-restart-state-restore.sql",
+        "research_lab_source_add_release_restart_guard_v2",
+    ),
+    (
+        "scripts/174-research-lab-source-add-restart-state-restore.sql",
+        "research_lab_source_add_claim_control_contract_v2",
+    ),
+    (
         "scripts/153-research-lab-private-model-lineage-generation.sql",
         "research_lab_private_model_lineage_generation",
     ),
@@ -1653,6 +1674,12 @@ def _verify_source_add_duplicate_privacy_contract_v1(
 SOURCE_ADD_CLAIM_CONTROL_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:890a1e42b6dd28eb1c8515c3b8c33d31a9974058fbd2c43393bb0880c0ca21e6"
 )
+SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256 = (
+    "sha256:b74dbb957ca2ed1741aed6503351c0934fad76614614a52669d5b7b03d0c011f"
+)
+SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:1082a75d70849b072299929ff00999b5c78a69adc9c7b03e544640ed60b02ff8"
+)
 
 
 def _verify_source_add_claim_control_contract_v1(
@@ -1817,6 +1844,148 @@ def _verify_source_add_claim_control_contract_v1(
     if contract != expected:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD claim-control contract differs"
+        )
+    return dict(contract)
+
+
+def _verify_source_add_claim_control_contract_v2(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_claim_control_contract_v2"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD restart-state contract is unavailable; apply "
+            "scripts/174-research-lab-source-add-restart-state-restore.sql "
+            f"before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD restart-state contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD restart-state contract is unavailable; apply "
+            "scripts/174-research-lab-source-add-restart-state-restore.sql "
+            f"before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD restart-state contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_claim_control_contract.v2",
+        "control_lock": "source-add-control",
+        "pause_rpc": "research_lab_source_add_set_paused",
+        "pause_signature": "boolean,text,text",
+        "claim_rpc": "research_lab_source_add_claim_work",
+        "claim_signature": "text,integer",
+        "acquire_guard_rpc": (
+            "research_lab_source_add_acquire_restart_guard_v2"
+        ),
+        "acquire_guard_signature": "text,text,bigint,integer,text",
+        "guard_state_rpc": (
+            "research_lab_source_add_restart_guard_state_v2"
+        ),
+        "guard_state_signature": "",
+        "release_guard_rpc": (
+            "research_lab_source_add_release_restart_guard_v2"
+        ),
+        "release_guard_signature": "text,text,bigint,text",
+        "restart_quiescence_rpc": (
+            "research_lab_source_add_restart_quiescence_v1"
+        ),
+        "restart_quiescence_signature": "text,text,bigint",
+        "guard_state_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "restore_paused",
+        ],
+        "acquire_guard_result_fields": [
+            "schema_version",
+            "paused",
+            "guard_active",
+            "guard_commitment",
+            "owner_commitment",
+            "guard_generation",
+            "owner_generation_commitment",
+            "guard_expires_at",
+            "restore_paused",
+        ],
+        "release_guard_result_fields": [
+            "schema_version",
+            "released",
+            "paused",
+            "guard_active",
+            "guard_generation",
+            "owner_generation_commitment",
+            "restored_pre_restart_state",
+        ],
+        "restore_state_column": "restart_guard_restore_paused",
+        "acquire_captures_pre_restart_paused": True,
+        "renewal_preserves_restore_state": True,
+        "expired_takeover_preserves_restore_state": True,
+        "operator_pause_wins": True,
+        "release_restores_pre_restart_state": True,
+        "failed_restart_keeps_paused": True,
+        "rollback_v1_contract_schema_version": (
+            "leadpoet.source_add_claim_control_contract.v1"
+        ),
+        "rollback_v1_contract_sha256": (
+            SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256
+        ),
+        "migration_requires_paused": True,
+        "migration_requires_zero_leased": True,
+        "migration_requires_guard_clear": True,
+        "function_authority_sha256": (
+            SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "admission_guard": True,
+            "acquire_restart_guard_v1": True,
+            "acquire_restart_guard_v2": True,
+            "claim_work": True,
+            "pause": True,
+            "release_restart_guard_v1": True,
+            "release_restart_guard_v2": True,
+            "restart_guard_state_v1": True,
+            "restart_guard_state_v2": True,
+            "restart_quiescence_v1": True,
+            "restore_trigger_v2": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "service_role_callable": True,
+            "anon_callable": False,
+            "authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD restart-state contract differs"
         )
     return dict(contract)
 
@@ -2278,7 +2447,7 @@ def verify_required_supabase_v2_schema(
         )
     )
     source_add_claim_control_contract = (
-        _verify_source_add_claim_control_contract_v1(
+        _verify_source_add_claim_control_contract_v2(
             headers=headers,
             supabase_url=supabase_url,
             opener=opener,

@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from research_lab.source_add import SourceAddSourceKind, validate_source_add_adapter_manifest
+from research_lab.source_add import (
+    SourceAddSourceKind,
+    source_add_contains_credential_material,
+    source_add_text_contains_credential_material,
+    validate_source_add_adapter_manifest,
+)
 from research_lab.source_add_miner import (
     SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
     SOURCE_ADD_SOURCE_KINDS,
@@ -30,6 +35,8 @@ EXPECTED_SOURCE_KINDS = (
     "reviews",
     "events",
 )
+
+FAKE_BUILTWITH_CREDENTIAL = "FAKE_BUILTWITH_VALUE_12345"
 
 
 def test_miner_defaults_to_live_research_lab_gateway():
@@ -148,6 +155,175 @@ def test_build_source_add_docs_rejects_miner_credentials():
             claimed_output_type="firmographic",
             credential_supplied=True,
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        f"KEY={FAKE_BUILTWITH_CREDENTIAL}",
+        f"/free1/api.json/KEY={FAKE_BUILTWITH_CREDENTIAL}/LOOKUP=example.com",
+        f"https://api.builtwith.com/v21/api.json?KEY={FAKE_BUILTWITH_CREDENTIAL}&LOOKUP=example.com",
+        f"api_key={FAKE_BUILTWITH_CREDENTIAL}",
+        f"Authorization: Bearer {FAKE_BUILTWITH_CREDENTIAL}",
+        f"Authorization: API {FAKE_BUILTWITH_CREDENTIAL}",
+        f"X-RapidAPI-Key: {FAKE_BUILTWITH_CREDENTIAL}",
+    ),
+)
+def test_source_add_credential_detector_finds_builtwith_style_values(value):
+    assert source_add_text_contains_credential_material(value) is True
+
+
+@pytest.mark.parametrize(
+    "header",
+    (
+        "Authorization",
+        "Proxy-Authorization",
+        "X-API-Key",
+        "X-RapidAPI-Key",
+        "Ocp-Apim-Subscription-Key",
+    ),
+)
+def test_source_add_credential_detector_finds_structured_auth_headers(header):
+    assert source_add_contains_credential_material(
+        {"request": {"headers": {header: f"Bearer {FAKE_BUILTWITH_CREDENTIAL}"}}}
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "clientSecret",
+        "accessToken",
+        "subscriptionKey",
+        "xApiKey",
+        "xRapidApiKey",
+        "authToken",
+        "secretKey",
+        "credential",
+        "credentials",
+        "clientCredential",
+        "clientCredentials",
+        "privateKey",
+        "private_key",
+        "X-Custom-Auth",
+    ),
+)
+def test_source_add_credential_detector_finds_camel_case_keys(key):
+    assert source_add_contains_credential_material(
+        {"request": {key: FAKE_BUILTWITH_CREDENTIAL}}
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        f"apiToken={FAKE_BUILTWITH_CREDENTIAL}",
+        f"clientToken:{FAKE_BUILTWITH_CREDENTIAL}",
+        f"providerKey={FAKE_BUILTWITH_CREDENTIAL}",
+        f"X-Custom-Auth: {FAKE_BUILTWITH_CREDENTIAL}",
+        f"XAPIKey={FAKE_BUILTWITH_CREDENTIAL}",
+        f"clientCredential={FAKE_BUILTWITH_CREDENTIAL}",
+        f"privateKey={FAKE_BUILTWITH_CREDENTIAL}",
+    ),
+)
+def test_source_add_credential_detector_finds_provider_field_assignments(value):
+    assert source_add_text_contains_credential_material(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "Key technology signals are documented by the provider.",
+        "The key result is a normalized company technology profile.",
+        "https://api.example.com/v1/lookup",
+        '{"lookup":"example.com","key_technology":"cloud"}',
+    ),
+)
+def test_source_add_credential_detector_preserves_safe_key_prose(value):
+    assert source_add_text_contains_credential_material(value) is False
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    (
+        ("source_name", f"BuiltWith KEY={FAKE_BUILTWITH_CREDENTIAL}"),
+        ("endpoint_summary", f"GET /lookup?KEY={FAKE_BUILTWITH_CREDENTIAL}"),
+        ("claimed_output_type", f"technology KEY={FAKE_BUILTWITH_CREDENTIAL}"),
+        (
+            "api_base_url",
+            f"https://api.builtwith.com/v21/api.json?KEY={FAKE_BUILTWITH_CREDENTIAL}",
+        ),
+        (
+            "documentation_url",
+            f"https://api.builtwith.com/docs?KEY={FAKE_BUILTWITH_CREDENTIAL}",
+        ),
+        ("example_query", f"KEY={FAKE_BUILTWITH_CREDENTIAL}&LOOKUP=example.com"),
+    ),
+)
+def test_build_source_add_docs_rejects_builtwith_key_from_every_miner_text_seam(
+    field_name,
+    field_value,
+):
+    values = {
+        "source_name": "BuiltWith",
+        "endpoint_summary": "GET /v21/api.json returns technology evidence",
+        "claimed_output_type": "technology evidence",
+        "api_base_url": "https://api.builtwith.com/v21",
+        "documentation_url": "https://api.builtwith.com/free-api",
+        "example_query": "LOOKUP=example.com",
+    }
+    values[field_name] = field_value
+
+    with pytest.raises(ValueError, match="credential material"):
+        build_source_add_submission_docs(
+            miner_hotkey="5MinerHotkey",
+            source_name=values["source_name"],
+            source_kind="tech_stack",
+            api_base_url=values["api_base_url"],
+            documentation_url=values["documentation_url"],
+            auth_type="api_key_query",
+            endpoint_examples=[
+                {
+                    "method": "GET",
+                    "path": "/v21/api.json",
+                    "purpose": "Look up company technologies",
+                    "example_query": values["example_query"],
+                }
+            ],
+            rate_limit_notes="Use conservative request pacing.",
+            endpoint_summary=values["endpoint_summary"],
+            claimed_output_type=values["claimed_output_type"],
+            credential_supplied=False,
+        )
+
+
+def test_build_source_add_docs_accepts_safe_key_language():
+    manifest, source_brief, _idempotency_key, metadata = (
+        build_source_add_submission_docs(
+            miner_hotkey="5MinerHotkey",
+            source_name="Technology Key Signals",
+            source_kind="tech_stack",
+            api_base_url="https://api.example.com/v1",
+            documentation_url="https://docs.example.com/key-technologies",
+            auth_type="api_key_query",
+            endpoint_examples=[
+                {
+                    "method": "GET",
+                    "path": "/technologies",
+                    "purpose": "Return key technology signals",
+                    "example_query": '{"lookup":"example.com","key_technology":"cloud"}',
+                }
+            ],
+            rate_limit_notes="The provider documents key account limits.",
+            endpoint_summary="GET /technologies returns key technology evidence",
+            claimed_output_type="key technology evidence",
+            credential_supplied=False,
+        )
+    )
+
+    assert validate_source_add_adapter_manifest(manifest) == []
+    assert "key technology" in source_brief.lower()
+    assert metadata["endpoint_examples"][0]["example_query"].startswith("{")
 
 
 def test_build_source_add_docs_emit_structured_metadata_and_derived_domains():

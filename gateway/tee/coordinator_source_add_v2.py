@@ -44,7 +44,9 @@ SCRAPINGDOG_ORIGIN = "https://api.scrapingdog.com"
 WAYBACK_ORIGIN = "https://archive.org"
 WAYBACK_CDX_ORIGIN = "https://web.archive.org"
 ARQUIVO_ORIGIN = "https://arquivo.pt"
-_MAX_PROVIDER_BODY = 240_000
+# Match the broker's bounded SOURCE_ADD allowance; bodies remain hash-only
+# artifacts and the provenance evaluator persists only a sanitized summary.
+_MAX_PROVIDER_BODY = 1024 * 1024
 _MAX_PROBE_BODY = 1024 * 1024
 _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 20_000

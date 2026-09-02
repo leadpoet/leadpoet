@@ -472,6 +472,90 @@ def test_six_known_miner_sources_pass_complete_current_metadata(
     assert result.doc["reference_evidence"]["independent_reference_domains"]
 
 
+@pytest.mark.parametrize(
+    ("source_name", "api_url", "docs_url", "docs_body", "expected_marker"),
+    [
+        (
+            "Czech ARES Business Registry",
+            "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest",
+            "https://ares.gov.cz/swagger-ui/",
+            "<html><title>Swagger UI</title></html>",
+            "swagger ui",
+        ),
+        (
+            "Finland PRH Business Information",
+            "https://avoindata.prh.fi",
+            "https://avoindata.prh.fi/en/info/swagger-ui",
+            "API: Finnish Business Information System. Responses use JSON over HTTPS.",
+            "api:",
+        ),
+        (
+            "FDIC BankFind Suite API",
+            "https://api.fdic.gov/banks",
+            "https://api.fdic.gov/banks/docs/",
+            "<title>FDIC: BankFind Suite - API Documentation</title>",
+            "api documentation",
+        ),
+    ],
+)
+def test_standard_official_documentation_surfaces_are_complete(
+    monkeypatch,
+    source_name,
+    api_url,
+    docs_url,
+    docs_body,
+    expected_marker,
+):
+    monkeypatch.setattr(
+        provenance,
+        "_archive_available",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "archived_snapshots": {
+                    "closest": {"available": True, "timestamp": "20200101000000"}
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_scrape",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "content_type": "text/html",
+            "body_text": docs_body,
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_ai_mode",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "markdown": "VERDICT: CREDIBLE. The named entity operates the API.",
+                "references": [{"title": "Official", "link": docs_url}],
+            },
+        },
+    )
+    metadata = _metadata(api_url=api_url, docs_url=docs_url)
+
+    result = provenance.evaluate_source_add_provenance(
+        source_name=source_name,
+        source_kind="registry",
+        declared_base_domains=(provenance._domain(api_url),),
+        source_metadata=metadata,
+        scrapingdog_api_key="test-key",
+    )
+
+    assert result.precheck_status == provenance.PRECHECK_PASSED
+    assert result.doc["docs_completeness"]["score"] >= 2
+    assert expected_marker in result.doc["docs_completeness"]["markers"]
+
+
 def test_self_references_only_remain_manual_review(monkeypatch):
     monkeypatch.setattr(
         provenance,

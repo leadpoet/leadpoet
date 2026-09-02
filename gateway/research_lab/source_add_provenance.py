@@ -34,7 +34,10 @@ PRECHECK_REJECTED = "rejected_precheck"
 
 _SD_BASE_URL = "https://api.scrapingdog.com"
 _MAX_DOC_EXCERPT = 1200
-_MAX_DOC_BODY = 240_000
+# The measured provider broker already enforces this one-MiB ceiling.  Keep
+# enough transient body for legitimate documentation portals while persisting
+# only the bounded summary produced below.
+_MAX_DOC_BODY = 1024 * 1024
 _MAX_DOC_ANALYSIS = 120_000
 _MAX_FAKE_SCAN = 12_000
 _FAKE_TEST_PATTERNS = (
@@ -44,15 +47,23 @@ _FAKE_TEST_PATTERNS = (
     "dummy api",
 )
 _DOC_MARKERS = (
-    "api reference",
-    "quickstart",
-    "endpoint",
-    "authentication",
-    "authorization",
-    "rate limit",
-    "status code",
-    "curl",
-    "http",
+    # Standard API-documentation identities are stronger evidence than an
+    # isolated navigation word such as "endpoint" or "HTTP".
+    ("api reference", 2),
+    ("api documentation", 2),
+    ("swagger ui", 2),
+    ("openapi", 2),
+    ("application programming interface", 1),
+    ("api:", 1),
+    ("quickstart", 1),
+    ("endpoint", 1),
+    ("authentication", 1),
+    ("authorization", 1),
+    ("rate limit", 1),
+    ("status code", 1),
+    ("curl", 1),
+    ("json", 1),
+    ("http", 1),
 )
 _AI_POSITIVE_PATTERNS = (
     "verdict: credible",
@@ -530,8 +541,9 @@ def _extract_raw_text(result: Mapping[str, Any]) -> str:
 
 
 def _docs_completeness(text: str) -> dict[str, Any]:
-    hits = [marker for marker in _DOC_MARKERS if marker in text]
-    return {"score": len(hits), "markers": hits[:12]}
+    hits = [marker for marker, _weight in _DOC_MARKERS if marker in text]
+    score = sum(weight for marker, weight in _DOC_MARKERS if marker in text)
+    return {"score": score, "markers": hits[:12]}
 
 
 def _fake_pattern_hits(text: str) -> list[str]:

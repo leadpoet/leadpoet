@@ -185,6 +185,7 @@ def test_source_add_provenance_uses_complete_authenticated_provider_chain():
         "scrapingdog",
     ]
     assert all("api_key" not in call["url"] for call in calls)
+    assert all(call["max_response_bytes"] == 1024 * 1024 for call in calls)
     assert len(context.attempts) == 5
     assert len(context.artifacts) == 11
 

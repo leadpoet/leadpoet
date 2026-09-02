@@ -310,6 +310,9 @@ SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
 SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
     "176-research-lab-source-add-provenance-origin-repair.sql"
 )
+SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
+    "177-research-lab-source-add-provenance-authority-acl.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -386,6 +389,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION,
     SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
+    SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -6800,6 +6804,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
         )
         applied.append(SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION)
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION)
         source_add_provenance_origin_contract = json.loads(
             database.psql(
                 """

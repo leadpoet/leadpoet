@@ -664,6 +664,7 @@ def _migration_schema_contract(
             "174-research-lab-source-add-restart-state-restore.sql",
             "175-research-lab-source-add-provenance-leg1.sql",
             "176-research-lab-source-add-provenance-origin-repair.sql",
+            "177-research-lab-source-add-provenance-authority-acl.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (

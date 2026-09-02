@@ -589,16 +589,6 @@ GRANT SELECT ON TABLE
     public.research_lab_source_add_provenance_leg1_authority_v1
     TO service_role;
 
--- The authority view is security-invoker and normalizes the submitted URL
--- through these pure helpers.  Keep them private from miner-facing roles, but
--- allow the gateway service role to evaluate the view through PostgREST.
-GRANT EXECUTE ON FUNCTION
-    public.research_lab_source_add_provider_origin_host_v1(TEXT)
-    TO service_role;
-GRANT EXECUTE ON FUNCTION
-    public.research_lab_source_add_provider_origin_hash_v1(TEXT)
-    TO service_role;
-
 -- Cancelled historical intents are audit records, not permanent owners.
 CREATE OR REPLACE FUNCTION
     public.research_lab_source_add_provider_origin_contract_v1()

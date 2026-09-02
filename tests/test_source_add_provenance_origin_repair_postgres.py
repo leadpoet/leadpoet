@@ -33,6 +33,7 @@ from tests.test_source_add_provenance_leg1_postgres import (
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_175 = "175-research-lab-source-add-provenance-leg1.sql"
 MIGRATION_176 = "176-research-lab-source-add-provenance-origin-repair.sql"
+MIGRATION_177 = "177-research-lab-source-add-provenance-authority-acl.sql"
 
 
 @pytest.fixture(scope="module")
@@ -140,6 +141,7 @@ def test_migration_176_repairs_historical_host_collision_and_is_idempotent(
     psycopg2, dsn = pre_repair_database
     sql_175 = (ROOT / "scripts" / MIGRATION_175).read_text(encoding="utf-8")
     sql_176 = (ROOT / "scripts" / MIGRATION_176).read_text(encoding="utf-8")
+    sql_177 = (ROOT / "scripts" / MIGRATION_177).read_text(encoding="utf-8")
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
     try:
@@ -206,6 +208,7 @@ def test_migration_176_repairs_historical_host_collision_and_is_idempotent(
             assert broken["collision_free"] is False
 
             cursor.execute(sql_176)
+            cursor.execute(sql_177)
             contract = _scalar(
                 cursor,
                 "SELECT public.research_lab_source_add_provider_origin_contract_v1()",
@@ -402,6 +405,7 @@ def test_migration_176_repairs_historical_host_collision_and_is_idempotent(
                 """,
             )
             cursor.execute(sql_176)
+            cursor.execute(sql_177)
             after_reapply = _scalar(
                 cursor,
                 """

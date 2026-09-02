@@ -1052,6 +1052,12 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         )
     )
     assert provenance_origin_repair_migration["sha256"] in sql
+    provenance_authority_acl_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
+        )
+    )
+    assert provenance_authority_acl_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -1088,7 +1094,7 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
 
     extended = [
         *migrations,
-        {**migrations[-1], "path": "scripts/177-next.sql", "sequence": 177},
+        {**migrations[-1], "path": "scripts/178-next.sql", "sequence": 178},
     ]
     with pytest.raises(
         ProductionParityError,
@@ -1116,6 +1122,11 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
             "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
         )
     )
+    provenance_authority_acl_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
+        )
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
@@ -1124,6 +1135,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
         "migration_175_sha256": provenance_leg1_migration["sha256"],
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
+        "migration_177_sha256": provenance_authority_acl_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]

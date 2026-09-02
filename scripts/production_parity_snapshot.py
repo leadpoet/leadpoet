@@ -65,6 +65,9 @@ _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
 _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
     "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
 )
+_SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
+    "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
+)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -165,12 +168,18 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
         "sequence": 176,
-        "sha256": "sha256:6bcb245b22b50de3a2ca8f41719055acdaf4dd1fa1ebd92c862e6edfea94f61c",
+        "sha256": "sha256:9ec8d3d9bc9412c285ac780c42fd9aa283d3705cd54a155dac65313cc051d1f8",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
+        "sequence": 177,
+        "sha256": "sha256:4842b34fdae0f2fb8b8296b945e57c988ba783946d65bd9842770dda8fef4571",
         "transaction_mode": "candidate-file",
     },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_acl.v4"
+    "leadpoet.production_parity.schema_only_source_add_acl.v5"
 )
 _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
@@ -293,6 +302,7 @@ _SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS = tuple(
         _SOURCE_ADD_RESTART_STATE_MIGRATION,
         _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
         _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
+        _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
     }
 )
 _POSTGRES_MOUNT_TARGETS = frozenset(
@@ -851,6 +861,9 @@ def _schema_only_source_add_acl_sql(
     provenance_origin_repair_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
     )
+    provenance_authority_acl_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -1031,6 +1044,7 @@ SELECT pg_catalog.json_build_object(
     'migration_171_sha256', '{duplicate_privacy_migration['sha256']}',
     'migration_175_sha256', '{provenance_leg1_migration['sha256']}',
     'migration_176_sha256', '{provenance_origin_repair_migration['sha256']}',
+    'migration_177_sha256', '{provenance_authority_acl_migration['sha256']}',
     'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
@@ -1206,12 +1220,16 @@ def restore_schema_only_source_add_acl_contract(
     provenance_origin_repair_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
     )
+    provenance_authority_acl_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
         "migration_175_sha256": provenance_leg1_migration["sha256"],
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
+        "migration_177_sha256": provenance_authority_acl_migration["sha256"],
         "function_signature_count": len(expected_inventory),
         "service_role_function_count": (
             len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)

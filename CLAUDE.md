@@ -10,6 +10,7 @@ Applies to this repository unless a deeper `AGENTS.md` overrides it.
    weight submission unless they are explicitly in scope.
 3. Prefer the smallest correct diff. Do not refactor unrelated code.
 4. Communicate immediately when scope or expected duration materially grows.
+5. Only report to me in ASD-STE100 Simplified Technical English.
 
 ## Push-now override
 

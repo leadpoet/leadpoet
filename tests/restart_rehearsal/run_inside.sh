@@ -627,6 +627,7 @@ final = asyncio.run(
         s3_client=s3_client,
         load_allocation_graphs=no_active_graphs,
         load_sourcing_graphs=no_active_graphs,
+        load_source_add_graphs=no_active_graphs,
     )
 )
 initial_requirements = validate_active_release_requirements_v2(

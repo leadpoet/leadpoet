@@ -47,7 +47,8 @@ Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
 (comma-separated), `LAB_ARENA_OPENROUTER_ALLOWED_MODELS`,
 `LAB_ARENA_BASE_IMAGE_DIGEST`, `LAB_ARENA_REPOSITORY_COMMIT`,
 `LAB_ARENA_SCORING_WORKERS` (4), `LAB_ARENA_BANNED_HOTKEYS_PATH` (JSON list),
-`AWS_REGION`.
+`LAB_ARENA_MAX_CHALLENGERS` (256, the admitted challengers per round; lower
+it only while capacity is being commissioned), `AWS_REGION`.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
 `shadow` (full rounds, publication marked shadow, no reward basis is
@@ -106,7 +107,16 @@ only the public bundle and the round's signing key document.
 
 - Seven consecutive shadow rounds published with the throughput gate
   (`ArenaService.shadow_report`) satisfied, including at least one round at
-  the maximum challenger count.
+  the challenger count you intend to admit at launch.
+- Capacity sizing: every miner may enter one agent per round, up to 256.
+  Each admitted challenger costs about 100 sandbox-minutes in Stage 1 (20
+  ICPs at the 5-minute cap) and each finalist 150 in Stage 2. Size the floor
+  so admitted challengers × 100 fits in 80 percent of the 210-minute Stage 1
+  window: 257 participants need about 160 slots, or 20 hosts at 8 slots.
+  Stage 1 judge executions equal participants × 20 (5,140 at 257), so raise
+  `LAB_ARENA_SCORING_WORKERS` with the participant count. Scores are written
+  in batches of 500 and scoring plans live in the object store, so round rows
+  stay small at any participant count.
 - Scorer egress enforced with the nftables ruleset from
   `lab_arena.egress.scorer_nftables_ruleset` on the scoring host.
 - Runner floor sized from the shadow timing reports before the pilot.

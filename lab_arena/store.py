@@ -37,6 +37,8 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 # Parameter order and PostgreSQL casts for every service-callable function.
 # PostgREST matches JSON keys to parameter names; the psycopg transport uses
 # named notation with explicit casts so both transports share this table.
+SCORE_BATCH_SIZE = 500
+
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_hash", "text"), ("p_configuration_doc", "jsonb")),
@@ -451,9 +453,9 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_rounds(self, *, status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_rounds(self, *, status: Optional[str] = None, limit: int = 100, columns: str = "*") -> List[Dict[str, Any]]:
         filters = {"status": status} if status else None
-        return self._transport.select("lab_arena_rounds", filters=filters, order="created_at", descending=True, limit=limit)
+        return self._transport.select("lab_arena_rounds", filters=filters, order="created_at", descending=True, limit=limit, columns=columns)
 
     def published_reward_bases(self, *, limit: int = 200) -> List[Dict[str, Any]]:
         rows = self._transport.select(
@@ -679,14 +681,33 @@ class ArenaStore:
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")
 
-    def record_run_scores(self, round_id: str, stage: int, scores: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-        return _require_mapping(
-            self._transport.rpc(
-                "lab_arena_record_run_scores",
-                {"p_round_id": round_id, "p_stage": int(stage), "p_scores": [dict(item) for item in scores]},
-            ),
-            "record_run_scores",
-        )
+    def record_run_scores(self, round_id: str, stage: int, scores: Sequence[Mapping[str, Any]], *, batch_size: int = SCORE_BATCH_SIZE) -> Dict[str, Any]:
+        """Record per-run scores in bounded batches.
+
+        The SQL function is idempotent per run (an equal score counts as
+        existing, a different one is refused), so a stage of thousands of
+        runs is written in batches that stay within request-size limits and a
+        retry after a partial write completes the remainder.
+        """
+
+        items = [dict(item) for item in scores]
+        if batch_size < 1:
+            raise ArenaStoreError("score batch size must be positive")
+        totals = {"status": "ok", "recorded": 0, "existing": 0, "batches": 0}
+        for start in range(0, len(items), batch_size) or (0,):
+            result = _require_mapping(
+                self._transport.rpc(
+                    "lab_arena_record_run_scores",
+                    {"p_round_id": round_id, "p_stage": int(stage), "p_scores": items[start:start + batch_size]},
+                ),
+                "record_run_scores",
+            )
+            if result.get("status") != "ok":
+                return dict(result)
+            totals["recorded"] += int(result.get("recorded") or 0)
+            totals["existing"] += int(result.get("existing") or 0)
+            totals["batches"] += 1
+        return totals
 
     # -- reads ------------------------------------------------------------
 

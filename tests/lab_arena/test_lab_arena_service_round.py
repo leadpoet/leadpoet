@@ -243,6 +243,7 @@ class Harness:
         self.flavors: Dict[str, str] = {}
         self.broken: set = set()
         self.challengers = challengers
+        self.max_challengers = contracts.MAX_CHALLENGERS
         self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
         self.service = self.build_service()
 
@@ -263,7 +264,7 @@ class Harness:
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
             generation_provider=TapeProvider(load_tape("clean_run.json")), price_table_source=lambda models: price_table(), banned_hotkeys_source=lambda: [],
             broker_factory=broker_factory, scorer_factory=lambda policy: deterministic_scorer,
-            defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False),
+            defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers),
             clock=self.clock, scoring_workers=4,
         )
         return svc.ArenaService(config)
@@ -273,7 +274,7 @@ class Harness:
         store.credit_deposit(miner_hotkey=hotkey, payment_reference="finney:0x" + hashlib.sha256(hotkey.encode()).hexdigest() + ":1", amount_microusd=balance, deposit_doc={"test": True})
         store.upsert_account_credential(hotkey, "ciphertext-" + hotkey[:8], hashlib.sha256(hotkey.encode()).hexdigest(), {"preflight_status": preflight, "key_hash": hashlib.sha256(hotkey.encode()).hexdigest(), "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
 
-    def submit(self, flavor: str, round_id: str) -> str:
+    def submit(self, flavor: str, round_id: str, *, balance: int = 5_000_000, preflight: str = "ok") -> str:
         miner = keypair("svc-miner-" + flavor)
         archive = package_bytes(flavor)
         envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body={"package_hash": contracts.hash_bytes(archive), "consent": {"source_publication": True, "public_rerun": True}}, timestamp=int(self.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
@@ -283,7 +284,7 @@ class Harness:
         self.flavors[digest] = flavor
         accepted = self.service.accept_built_submission(round_id, result["submission_id"], image_digest=digest, source_tree_hash=result["source_tree_hash"], scan_result={"mode": "raise", "findings": 0}, screening_result={"accepted": True})
         assert accepted["status"] == "ok", accepted
-        self.fund_and_register(miner.ss58_address)
+        self.fund_and_register(miner.ss58_address, balance=balance, preflight=preflight)
         return result["submission_id"]
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
@@ -336,6 +337,15 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     assert len(runs) == 60 and all(run["status"] == "accepted" for run in runs)
     closed = service.advance_round(round_id)  # every assignment terminal -> close + plan
     assert closed["status"] == "ok" and closed["work_items"] == 60 and harness.status() == "stage1_closed"
+    # The row carries a plan header; the signed plan with its work items lives in the object store.
+    header_row = service.store.get_round(round_id)
+    header = header_row["stage1_scoring_plan_doc"]
+    assert "work_items" not in header and header["work_item_count"] == 60 and header["work_items_ref"] == "arena/%s/scoring/stage1_plan.json" % round_id
+    stored_plan = json.loads(harness.objects.get(header["work_items_ref"]).decode())
+    assert stored_plan["plan_hash"] == header_row["stage1_scoring_plan_hash"] == header["plan_hash"] and len(stored_plan["work_items"]) == 60
+    # A repeated commit (a crash between the object write and the row transition) reuses the stored signature.
+    again = service.commit_scoring_plan(round_id, 1)
+    assert again["plan_hash"] == header["plan_hash"] and json.loads(harness.objects.get(header["work_items_ref"]).decode()) == stored_plan
     scored = service.advance_round(round_id)
     assert scored["status"] == "ok" and scored["judge_executions"] == 60 and harness.status() == "stage1_scored"
     finalists = service.store.get_round(round_id)["finalists"]
@@ -790,3 +800,30 @@ def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_r
     assert all(r["cause"] == "preflight_failed" for r in final["rows"] if r["submission_id"] == king["submission_id"])
     # Restore the old king's preflight so later tests are unaffected.
     service.store.record_preflight(king_hotkey, {"preflight_status": "ok", "key_hash": service.store.get_account(king_hotkey)["openrouter_key_hash"], "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
+
+
+def test_freeze_checks_eligibility_before_the_cap_and_records_every_exclusion(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Zulu-1", "Zulu-2", "Zulu-3", "Zulu-4", "Zulu-5"], runners=["alpha"])
+    harness.max_challengers = 2
+    harness.chain.epoch = 29000
+    service = harness.service
+    configuration = service.create_round(datetime(2026, 10, 7, 0, 0, tzinfo=timezone.utc))
+    assert configuration["max_challengers"] == 2
+    harness.round_id = configuration["round_id"]
+    round_id = harness.round_id
+    unfunded = harness.submit("Zulu-1", round_id, balance=contracts.MIN_FUNDED_BALANCE_MICROUSD - 1)
+    unpreflighted = harness.submit("Zulu-2", round_id, preflight="failed")
+    entered_a = harness.submit("Zulu-3", round_id)
+    entered_b = harness.submit("Zulu-4", round_id)
+    overflow = harness.submit("Zulu-5", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    committed = service.advance_round(round_id)
+    assert committed["status"] == "ok"
+    participants = service.store.get_round(round_id)["participants"]
+    assert {p["submission_id"] for p in participants if not p["is_king"]} == {entered_a, entered_b}
+    by_id = {row["submission_id"]: row for row in service.store.list_submissions(round_id)}
+    assert (by_id[unfunded]["status"], by_id[unfunded]["rejection_rule"]) == ("rejected", "funding.insufficient")
+    assert (by_id[unpreflighted]["status"], by_id[unpreflighted]["rejection_rule"]) == ("rejected", "credential.preflight_not_ok")
+    assert (by_id[overflow]["status"], by_id[overflow]["rejection_rule"]) == ("rejected", "capacity.round_full")
+    assert by_id[entered_a]["status"] == by_id[entered_b]["status"] == "frozen"
+    service.store.cancel_round(round_id, "operator_abort")

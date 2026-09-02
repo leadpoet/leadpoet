@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from lab_arena.runner import cost_record, provider_call_record, worker_release_i
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 
 MODES = ("off", "shadow", "live")
+HOT_ROUND_TTL_SECONDS = 2.0
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 210,
@@ -162,6 +164,7 @@ class RoundDefaults:
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
     base_image_digest: str = "sha256:" + "0" * 64
     repository_commit: str = "0" * 40
+    max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
 
 
 @dataclass
@@ -215,6 +218,8 @@ class ArenaService:
         self._signer = config.signer
         self._clock = config.clock
         self._lock = threading.RLock()
+        self._hot_round_lock = threading.Lock()
+        self._hot_round: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
         self._scorer_policy = scoring.build_scorer_policy()
         self._worker_release = worker_release_identity(repository_commit=config.defaults.repository_commit, runtime_lock_hash=config.runtime_lock_hash)
         self._brokers: Dict[str, broker_module.Broker] = {}
@@ -356,7 +361,7 @@ class ArenaService:
             "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
             "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
             "finalist_count": contracts.FINALIST_COUNT,
-            "max_challengers": contracts.MAX_CHALLENGERS,
+            "max_challengers": int(defaults.max_challengers),
             "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
             "lease_ttl_seconds": contracts.LEASE_TTL_SECONDS,
@@ -402,10 +407,29 @@ class ArenaService:
         return configuration
 
     def current_round(self) -> Optional[Dict[str, Any]]:
-        for row in self._store.list_rounds(limit=20):
+        # Scan ids and statuses only; a full row can be large at hundreds of participants.
+        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at"):
             if row["status"] not in ("published", "cancelled"):
-                return row
+                return self._round(row["round_id"])
         return None
+
+    def _hot_current_round(self) -> Optional[Dict[str, Any]]:
+        """The current round for runner-facing handlers, cached for a few seconds.
+
+        Claims and completions arrive by the thousand per stage; the SQL
+        functions remain the authority for status, so a briefly stale row
+        only yields a structured refusal.
+        """
+
+        now = time.monotonic()
+        with self._hot_round_lock:
+            cached = self._hot_round
+            if cached is not None and now - cached[0] < HOT_ROUND_TTL_SECONDS:
+                return cached[1]
+        row = self.current_round()
+        with self._hot_round_lock:
+            self._hot_round = (now, row)
+        return row
 
     def latest_published_round(self) -> Optional[Dict[str, Any]]:
         rows = self._store.published_reward_bases(limit=1)
@@ -518,13 +542,24 @@ class ArenaService:
         participants: List[Dict[str, Any]] = []
         accepted = [row for row in self._store.list_submissions(round_id, status="accepted") if not row.get("is_king")]
         king = self._entering_king(round_id)
-        for row in accepted[: contracts.MAX_CHALLENGERS]:
+        cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
+        # Eligibility is checked before the cap so an unfunded or unpreflighted
+        # miner never consumes an admission slot; freeze order (acceptance
+        # order) decides who enters when the cap binds, and every exclusion
+        # is recorded under a published rule.
+        frozen_count = 0
+        for row in accepted:
             account = self._store.get_account(row["miner_hotkey"]) or {}
             if int(account.get("balance_microusd") or 0) < contracts.MIN_FUNDED_BALANCE_MICROUSD:
-                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "funding.insufficient"}) if False else None
+                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "funding.insufficient"})
                 continue
             if account.get("preflight_status") != "ok":
+                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "credential.preflight_not_ok"})
                 continue
+            if frozen_count >= cap:
+                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "capacity.round_full"})
+                continue
+            frozen_count += 1
             result = self._store.update_submission(round_id, row["submission_id"], "accepted", "frozen", {})
             if result.get("status") in ("ok", "stale"):
                 participants.append({"submission_id": row["submission_id"], "miner_hotkey": row["miner_hotkey"], "image_digest": row["image_digest"], "source_tree_hash": row["source_tree_hash"], "is_king": False, "preflight_failed": False})
@@ -643,10 +678,47 @@ class ArenaService:
             round_id=round_id, stage=stage, configuration_hash=round_row["configuration_hash"], commitment_hash=round_row["commitment_hash"],
             scorer_policy_hash=self._scorer_policy["policy_hash"], runs=self._store.list_runs(round_id, stage=stage), icp_hashes_by_position=dict(enumerate(hashes)),
         )
-        signed = self._sign(plan, "plan_hash")
+        plan_ref = "arena/%s/scoring/stage%d_plan.json" % (round_id, stage)
+        signed = self._put_signed(plan_ref, plan, "plan_hash")
+        # The row holds a header only: at hundreds of participants the work
+        # items run to megabytes, and the row is read on every driver tick.
+        header = {key: value for key, value in signed.items() if key != "work_items"}
+        header.update({"work_items_ref": plan_ref, "work_item_count": len(plan["work_items"])})
         status = "stage%d_closed" % stage
-        result = self._store.transition_round(round_id, status, status, {"stage%d_scoring_plan_hash" % stage: signed["plan_hash"], "stage%d_scoring_plan_doc" % stage: signed})
+        result = self._store.transition_round(round_id, status, status, {"stage%d_scoring_plan_hash" % stage: signed["plan_hash"], "stage%d_scoring_plan_doc" % stage: header})
         return {"status": result.get("status"), "plan_hash": signed["plan_hash"], "work_items": len(plan["work_items"])}
+
+    def _put_signed(self, ref: str, document: Mapping[str, Any], hash_field: str) -> Dict[str, Any]:
+        """Sign and store a document once; a retry reuses the stored signature.
+
+        Signatures are not deterministic, so a retry after a crash between
+        the object write and the row transition would otherwise collide with
+        the write-once object store. The stored copy is accepted only when
+        its hash equals this document's hash and its signature verifies.
+        """
+
+        signed = self._sign(document, hash_field)
+        try:
+            self._objects.put(ref, contracts.canonical_json(signed).encode("utf-8"))
+            return signed
+        except contracts.ArenaContractError:
+            stored = json.loads(self._objects.get(ref).decode("utf-8"))
+            if stored.get(hash_field) != signed[hash_field] or contracts.verify_hashed_document(stored, hash_field) != signed[hash_field]:
+                raise ServiceError("signed_object_conflict", 500)
+            signing.verify_document_signature(stored, hash_field=hash_field, public_key_der=self._signer.public_key_der, expected_public_key_hash=self._signer.public_key_hash)
+            return stored
+
+    def _load_scoring_plan(self, round_row: Mapping[str, Any], stage: int) -> Dict[str, Any]:
+        header = round_row.get("stage%d_scoring_plan_doc" % stage)
+        if not header:
+            raise ServiceError("scoring_plan_missing", 409)
+        ref = header.get("work_items_ref") if isinstance(header, Mapping) else None
+        if not isinstance(ref, str):
+            raise ServiceError("scoring_plan_ref_missing", 500)
+        plan = json.loads(self._objects.get(ref).decode("utf-8"))
+        if contracts.verify_hashed_document(plan, "plan_hash") != round_row.get("stage%d_scoring_plan_hash" % stage):
+            raise ServiceError("scoring_plan_hash_mismatch", 500)
+        return plan
 
     def _outputs_by_hash(self, round_id: str, stage: int) -> Dict[str, List[Dict[str, Any]]]:
         outputs: Dict[str, List[Dict[str, Any]]] = {}
@@ -661,9 +733,7 @@ class ArenaService:
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         round_row = self._round(round_id)
-        plan = round_row.get("stage%d_scoring_plan_doc" % stage)
-        if not plan:
-            raise ServiceError("scoring_plan_missing", 409)
+        plan = self._load_scoring_plan(round_row, stage)
         icps, _hashes = self.benchmark_icps(round_id)
         outputs = self._outputs_by_hash(round_id, stage)
         existing = self._scoring_results.get((round_id, stage), {})
@@ -680,12 +750,12 @@ class ArenaService:
             stage_1_bundle = json.loads(self._objects.get(round_row["stage1_scores_ref"]).decode("utf-8"))
             stage_1_rows = stage_1_bundle["rows"]
             stage_1_bundle_hash = stage_1_bundle["bundle_hash"]
-        bundle = self._sign(
+        ref = "arena/%s/scores/stage%d.json" % (round_id, stage)
+        bundle = self._put_signed(
+            ref,
             scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=results.breakdowns_by_item, stage_1_rows=stage_1_rows, stage_1_bundle_hash=stage_1_bundle_hash),
             "bundle_hash",
         )
-        ref = "arena/%s/scores/stage%d.json" % (round_id, stage)
-        self._objects.put(ref, contracts.canonical_json(bundle).encode("utf-8"))
         runs = self._store.list_runs(round_id, stage=stage)
         self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(bundle, runs, score_ref=ref))
         if stage == 1:
@@ -761,7 +831,7 @@ class ArenaService:
             "benchmark_ref": round_row["benchmark_ref"],
             "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "image_digest": p["image_digest"], "source_tree_hash": p["source_tree_hash"], "is_king": bool(p.get("is_king")), "package_ref": (self._store.get_submission(p["submission_id"]) or {}).get("package_ref")} for p in round_row.get("participants") or []],
             "scorer_policy": self._scorer_policy,
-            "stage_plans": {"stage_1": round_row["stage1_scoring_plan_doc"], "stage_2": round_row["stage2_scoring_plan_doc"]},
+            "stage_plans": {"stage_1": self._load_scoring_plan(round_row, 1), "stage_2": self._load_scoring_plan(round_row, 2)},
             "score_bundles": {"stage_1": stage_1_bundle, "final": final_bundle},
             "stage1_ranking": stage1_ranking,
             "finalists": finalists,
@@ -854,7 +924,7 @@ class ArenaService:
         return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
 
     def handle_claim(self, envelope: Any) -> Dict[str, Any]:
-        round_row = self.current_round()
+        round_row = self._hot_current_round()
         if round_row is None:
             raise ServiceError("no_open_round", 409)
         round_id = round_row["round_id"]
@@ -915,7 +985,7 @@ class ArenaService:
         return self._store.append_events(run_id=run_id, lease_token_hash=hash_lease_token(lease_token), events=events)
 
     def handle_complete(self, envelope: Any) -> Dict[str, Any]:
-        round_row = self.current_round()
+        round_row = self._hot_current_round()
         if round_row is None:
             raise ServiceError("no_open_round", 409)
         round_id = round_row["round_id"]

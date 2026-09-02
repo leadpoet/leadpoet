@@ -150,6 +150,21 @@ def banned_hotkeys_from_environment() -> List[str]:
     return [str(item) for item in document]
 
 
+def _max_challengers_from_environment() -> int:
+    """LAB_ARENA_MAX_CHALLENGERS: the admitted challenger ceiling per round, 1..MAX_CHALLENGERS."""
+
+    raw = os.environ.get("LAB_ARENA_MAX_CHALLENGERS", "").strip()
+    if not raw:
+        return contracts.MAX_CHALLENGERS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError("LAB_ARENA_MAX_CHALLENGERS must be an integer", 500) from None
+    if value < 1 or value > contracts.MAX_CHALLENGERS:
+        raise ServiceError("LAB_ARENA_MAX_CHALLENGERS must be between 1 and %d" % contracts.MAX_CHALLENGERS, 500)
+    return value
+
+
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -171,6 +186,7 @@ def build_service_from_environment(mode: str):
         openrouter_allowed_models=tuple(item for item in os.environ.get("LAB_ARENA_OPENROUTER_ALLOWED_MODELS", "openai/gpt-4o-mini").split(",") if item.strip()),
         base_image_digest=os.environ.get("LAB_ARENA_BASE_IMAGE_DIGEST", "sha256:" + "0" * 64),
         repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40),
+        max_challengers=_max_challengers_from_environment(),
     )
 
     def openrouter_key_for(miner_hotkey: str) -> credentials.RuntimeKeyHandle:

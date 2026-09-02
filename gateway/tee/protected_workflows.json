@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "34156be00fbc86a19c473329bb8dc28f70df69bb",
+  "baseline_commit": "bd3407cd8981ab36c3bd0a57bb4a47ba99f3c7a2",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -7022,6 +7022,11 @@
       "symbol": "_allocate_source_add"
     },
     {
+      "ast_sha256": "sha256:5b1110afa70945f3ae48c2d3a2c9f1fb1b640e1e2fdd27879500881ca96cc573",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_canonical_source_add_created_at"
+    },
+    {
       "ast_sha256": "sha256:ff2a7f25d2190d2ffbe96c88b6ff527756546ea781c7f058e7fae89cd48ae139",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_champion_desired_alpha_percent"
@@ -8697,7 +8702,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:06f981cd58d9916bfb2ab7157594c680e9cf9efe70541c7bd0638752095bc627",
-  "protected_source_commit": "34156be00fbc86a19c473329bb8dc28f70df69bb",
+  "manifest_hash": "sha256:557136b2d1a029b7d8db4e5b28141583eeaf72ccc44156d3d13f37c692f787fb",
+  "protected_source_commit": "bd3407cd8981ab36c3bd0a57bb4a47ba99f3c7a2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

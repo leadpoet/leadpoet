@@ -6,7 +6,7 @@ Arena never touches enclave, validator, or weight code paths.
 
 ## 1. Database
 
-1. Apply `scripts/174-lab-arena-v1.sql` once to the hosted Supabase project
+1. Apply `scripts/178-lab-arena-v1.sql` once to the hosted Supabase project
    with an owner connection. It is idempotent and creates the
    `lab_arena_owner` and `lab_arena_service` roles, six `lab_arena_*` tables,
    append-only and write-once triggers, RLS, and the SECURITY DEFINER

@@ -21,7 +21,7 @@ import pytest
 
 from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
 
-LAB_ARENA_MIGRATION = "174-lab-arena-v1.sql"
+LAB_ARENA_MIGRATION = "178-lab-arena-v1.sql"
 DEFAULT_MIGRATIONS = (LAB_ARENA_MIGRATION,)
 
 _SHIM_SQL = """

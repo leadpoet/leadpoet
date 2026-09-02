@@ -1,4 +1,4 @@
--- 174-lab-arena-v1.sql
+-- 178-lab-arena-v1.sql
 --
 -- Leadpoet Lab Arena V1 durable data (labarena.md section 11).
 --

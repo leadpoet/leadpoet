@@ -1,4 +1,4 @@
-"""Text-level gates for scripts/174-lab-arena-v1.sql (no database needed)."""
+"""Text-level gates for scripts/178-lab-arena-v1.sql (no database needed)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
-MIGRATION = SCRIPTS / "174-lab-arena-v1.sql"
+MIGRATION = SCRIPTS / "178-lab-arena-v1.sql"
 SQL = MIGRATION.read_text(encoding="utf-8")
 
 SERVICE_FUNCTIONS = (
@@ -49,13 +49,13 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
-    assert numbered[174] == ["174-lab-arena-v1.sql"]
-    tracked = [n for n in numbered if n != 174]
-    assert max(tracked) == 173, "174 must sit directly above the production frontier"
+    assert numbered[178] == ["178-lab-arena-v1.sql"]
+    tracked = [n for n in numbered if n != 178]
+    assert max(tracked) == 177, "178 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
-    assert SQL.lstrip().startswith("-- 174-lab-arena-v1.sql")
+    assert SQL.lstrip().startswith("-- 178-lab-arena-v1.sql")
     assert "\nBEGIN;\n" in SQL
     assert SQL.rstrip().endswith("COMMIT;")
     assert "NOTIFY pgrst, 'reload schema';" in SQL

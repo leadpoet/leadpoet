@@ -1,4 +1,4 @@
-"""Disposable-PostgreSQL behavior of scripts/174-lab-arena-v1.sql through
+"""Disposable-PostgreSQL behavior of scripts/178-lab-arena-v1.sql through
 ``lab_arena.store`` (labarena.md sections 18.1, 18.2, 18.3).
 
 Every write goes through the SECURITY DEFINER functions as ``lab_arena_service``

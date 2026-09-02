@@ -30,7 +30,7 @@ every case no credit exists. The reference is normalized to
 formatting variant can never create a second credit.
 
 The real ``DepositStore`` is the SQL function ``lab_arena_credit_deposit``
-(migration 174), which claims the reference and credits the miner's single
+(migration 178), which claims the reference and credits the miner's single
 account under a row lock; tests use an in-memory fake.
 """
 

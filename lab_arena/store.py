@@ -2,7 +2,7 @@
 
 The service reaches the six ``lab_arena_*`` tables only through the
 dedicated ``lab_arena_service`` role over PostgREST: every write is one of
-the SECURITY DEFINER functions in ``scripts/174-lab-arena-v1.sql`` and reads
+the SECURITY DEFINER functions in ``scripts/178-lab-arena-v1.sql`` and reads
 are plain selects. The HTTP/1.1-pinned client construction is copied from
 ``gateway/db/client.py`` (never imported: the validator enclave image copies
 that file). The operator-minted JWT is sent as the ``Authorization`` header

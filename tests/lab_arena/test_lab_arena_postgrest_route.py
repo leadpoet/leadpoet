@@ -109,7 +109,7 @@ def stack():
                 CREATE TABLE public.lab_arena_test_other_table (id INT);
                 """
             )
-            cursor.execute((SCRIPTS / "174-lab-arena-v1.sql").read_text(encoding="utf-8"))
+            cursor.execute((SCRIPTS / "178-lab-arena-v1.sql").read_text(encoding="utf-8"))
             cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'authenticator' ORDER BY 1")
             memberships = [row[0] for row in cursor.fetchall()]
         assert "lab_arena_service" in memberships, memberships

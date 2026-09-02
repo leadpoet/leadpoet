@@ -174,7 +174,7 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
         "sequence": 177,
-        "sha256": "sha256:4842b34fdae0f2fb8b8296b945e57c988ba783946d65bd9842770dda8fef4571",
+        "sha256": "sha256:5589d4e10c0932c2b85913df425f4f19eb7542c5a8cc5560573e3c797f223b32",
         "transaction_mode": "candidate-file",
     },
 )

@@ -547,7 +547,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ("approval_kind",),
     ),
     (
-        "scripts/176-research-lab-source-add-provenance-origin-repair.sql",
+        "scripts/177-research-lab-source-add-provenance-authority-acl.sql",
         "research_lab_source_add_provenance_leg1_authority_v1",
         (
             "submission_id",

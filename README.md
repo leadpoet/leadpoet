@@ -96,12 +96,14 @@ Choose **Submit API Source** in the miner menu. You only need to provide the API
 
 Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.
 
-The gateway checks that the source is valid, usable, novel, and not already in
-the active model. Duplicate, already-integrated, and invalid submissions receive
-the same generic failure response and do not earn rewards. A finally approved
-new source receives **0.2% of emissions per epoch for 20 epochs**. Leg 1 is
-processed FIFO and currently allows up to 50 approvals per UTC day; separate
-per-hotkey anti-spam limits also apply.
+The gateway checks that the source manifest is credible, novel, and not already
+in the active model. Duplicate, already-integrated, and invalid submissions
+receive the same generic failure response and do not earn rewards. A submission
+that passes the measured provenance precheck automatically receives **0.2% of
+emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
+allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
+apply. Operator testing and catalog provisioning happen later and do not gate
+Leg 1; only provisioned catalog sources can be used by improvement loops.
 
 #### Auto Research
 

@@ -105,38 +105,100 @@ def _leased_work(kind: str, **overrides):
     return value
 
 
+def _provenance_outcome(
+    precheck: SourceAddProvenanceResult,
+    *,
+    receipt_hash: str = "sha256:" + "8" * 64,
+):
+    result = {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": precheck.precheck_status,
+        "reasons": list(precheck.reasons),
+        "precheck_doc": precheck.to_record_doc(),
+    }
+    return {
+        "result": result,
+        "receipt": {
+            "receipt_hash": receipt_hash,
+            "output_root": sha256_json(result),
+        },
+    }
+
+
 @pytest.mark.asyncio
-async def test_provenance_pass_only_queues_functional_probe(monkeypatch):
+async def test_provenance_pass_queues_probe_and_automatic_leg1(monkeypatch):
     finished = {}
     observed = {}
+    queued = {}
+    receipt_hash = "sha256:" + "9" * 64
+    precheck = SourceAddProvenanceResult(
+        PRECHECK_PASSED,
+        ("provenance_reference_backed",),
+        {"docs_completeness": {"score": 5}},
+    )
+    provenance_result = {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": PRECHECK_PASSED,
+        "reasons": list(precheck.reasons),
+        "precheck_doc": precheck.to_record_doc(),
+    }
+    artifact_hash = sha256_json(provenance_result)
 
     async def fake_provenance(**kwargs):
         observed.update(kwargs)
         return (
-            SourceAddProvenanceResult(
-                PRECHECK_PASSED,
-                ("provenance_reference_backed",),
-                {"docs_completeness": {"score": 5}},
-            ),
-            {"receipt": {"receipt_hash": "sha256:" + "9" * 64}},
+            precheck,
+            {
+                "result": provenance_result,
+                "receipt": {
+                    "receipt_hash": receipt_hash,
+                    "output_root": artifact_hash,
+                }
+            },
         )
 
     async def fake_finish(_work, **kwargs):
         finished.update(kwargs)
         return {"status": "completed"}
 
+    async def fake_rpc(name, params):
+        queued.update({"name": name, "params": params})
+        return {"status": "queued"}
+
     monkeypatch.setattr(workflow, "_load_submission", lambda _sid: _async_value(_submission_row()))
     monkeypatch.setattr(workflow, "evaluate_source_add_provenance_v2", fake_provenance)
     monkeypatch.setattr(workflow, "_finish_work", fake_finish)
+    monkeypatch.setattr(workflow, "_rpc", fake_rpc)
 
     result = await workflow._process_provenance(_leased_work("provenance"), config=_config())
 
-    assert result == {"status": "completed"}
+    assert result == {"status": "completed", "leg1_reward_status": "queued"}
     assert finished["stage"] == "functional_probe_queued"
     assert "reward_intent" not in finished
     assert finished["next_work"]["work_kind"] == "functional_probe"
     assert finished["probe_config"]["credential_envelope"] == {}
     assert finished["precheck_status"] == PRECHECK_PASSED
+    assert finished["submission_doc"]["provenance_receipt_hash"] == receipt_hash
+    assert finished["submission_doc"]["provenance_artifact_hash"] == artifact_hash
+    assert finished["submission_doc"]["provenance_result"] == provenance_result
+    assert queued == {
+        "name": "research_lab_source_add_enqueue_leg1_after_provenance_v1",
+        "params": {
+            "p_submission_id": SUBMISSION_ID,
+            "p_intent_id": workflow.source_add_reward_intent_id(
+                SUBMISSION_ID, ADAPTER_ID
+            ),
+            "p_reward_work_id": workflow.source_add_work_id(
+                SUBMISSION_ID,
+                "leg1_reward",
+                workflow.source_add_reward_intent_id(SUBMISSION_ID, ADAPTER_ID),
+            ),
+            "p_provenance_receipt_hash": receipt_hash,
+            "p_provenance_artifact_hash": artifact_hash,
+        },
+    }
     assert observed["sequence"] == 1
 
 
@@ -369,14 +431,12 @@ async def test_manual_provenance_never_queues_probe_or_reward(monkeypatch):
     finished = {}
 
     async def fake_provenance(**_kwargs):
-        return (
-            SourceAddProvenanceResult(
-                PRECHECK_MANUAL,
-                ("documentation_provider_error",),
-                {},
-            ),
-            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        precheck = SourceAddProvenanceResult(
+            PRECHECK_MANUAL,
+            ("documentation_provider_error",),
+            {},
         )
+        return precheck, _provenance_outcome(precheck)
 
     async def fake_finish(_work, **kwargs):
         finished.update(kwargs)
@@ -414,14 +474,12 @@ async def test_documentation_fetch_retries_only_transient_statuses(
     finished = {}
 
     async def fake_provenance(**_kwargs):
-        return (
-            SourceAddProvenanceResult(
-                PRECHECK_MANUAL,
-                ("documentation_fetch_failed",),
-                {"docs_fetch": {"provider_status": "ok", "status": http_status}},
-            ),
-            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        precheck = SourceAddProvenanceResult(
+            PRECHECK_MANUAL,
+            ("documentation_fetch_failed",),
+            {"docs_fetch": {"provider_status": "ok", "status": http_status}},
         )
+        return precheck, _provenance_outcome(precheck)
 
     async def fake_finish(_work, **kwargs):
         finished.update(kwargs)
@@ -463,20 +521,18 @@ async def test_terminal_documentation_provider_errors_do_not_retry(
     finished = {}
 
     async def fake_provenance(**_kwargs):
-        return (
-            SourceAddProvenanceResult(
-                PRECHECK_MANUAL,
-                ("documentation_provider_error",),
-                {
-                    "docs_fetch": {
-                        "provider_status": "error",
-                        "status": 0,
-                        "error_type": error_type,
-                    }
-                },
-            ),
-            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        precheck = SourceAddProvenanceResult(
+            PRECHECK_MANUAL,
+            ("documentation_provider_error",),
+            {
+                "docs_fetch": {
+                    "provider_status": "error",
+                    "status": 0,
+                    "error_type": error_type,
+                }
+            },
         )
+        return precheck, _provenance_outcome(precheck)
 
     async def fake_finish(_work, **kwargs):
         finished.update(kwargs)
@@ -503,7 +559,9 @@ async def test_terminal_documentation_provider_errors_do_not_retry(
 
 
 @pytest.mark.asyncio
-async def test_exact_functional_pass_waits_for_final_acceptance(monkeypatch):
+async def test_exact_functional_pass_does_not_create_another_leg1_reward(
+    monkeypatch,
+):
     config_ref = "source_add_probe_config:0123456789abcdef"
     result_doc = {
         "schema_version": "leadpoet.source_add_functional_probe_result.v2",
@@ -690,7 +748,7 @@ async def test_generic_dns_failure_exhaustion_requires_manual_review(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_disabled_functional_rewards_remain_retryable(monkeypatch):
+async def test_disabled_source_add_rewards_remain_retryable(monkeypatch):
     finished = {}
 
     async def fake_finish(_work, **kwargs):
@@ -701,12 +759,44 @@ async def test_disabled_functional_rewards_remain_retryable(monkeypatch):
 
     result = await workflow._process_leg1_reward(
         _leased_work("leg1_reward"),
-        config=_config(source_add_functional_rewards_enabled=False),
+        config=_config(source_add_rewards_enabled=False),
     )
 
     assert result == {"status": "retry_wait"}
     assert finished["disposition"] == "retry"
-    assert finished["result_doc"]["status"] == "functional_rewards_disabled"
+    assert finished["result_doc"]["status"] == "rewards_disabled"
+
+
+@pytest.mark.asyncio
+async def test_disabled_functional_rewards_do_not_block_provenance_leg1(
+    monkeypatch,
+):
+    work = _leased_work(
+        "leg1_reward",
+        job_doc={"intent_id": "source_add_reward_intent:0123456789abcdef"},
+    )
+
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_reward_intents"
+        return {"intent_id": work["job_doc"]["intent_id"]}
+
+    async def fake_rpc(name, _params):
+        assert name == "research_lab_source_add_reserve_leg1_slot_v4"
+        return {"status": "fifo_wait"}
+
+    async def fail_finish(*_args, **_kwargs):
+        raise AssertionError("functional reward control must not gate Leg 1")
+
+    monkeypatch.setattr(workflow, "select_one", fake_select_one)
+    monkeypatch.setattr(workflow, "_rpc", fake_rpc)
+    monkeypatch.setattr(workflow, "_finish_work", fail_finish)
+
+    result = await workflow._process_leg1_reward(
+        work,
+        config=_config(source_add_functional_rewards_enabled=False),
+    )
+
+    assert result == {"status": "fifo_wait"}
 
 
 @pytest.mark.asyncio
@@ -721,7 +811,7 @@ async def test_leg1_fifo_wait_is_returned_without_reward_side_effects(monkeypatc
         return {"intent_id": work["job_doc"]["intent_id"]}
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_reserve_leg1_slot_v3"
+        assert name == "research_lab_source_add_reserve_leg1_slot_v4"
         assert params["p_work_id"] == work["work_id"]
         assert params["p_work_lease_token"] == work["lease_token"]
         return {"status": "fifo_wait", "available_at": "2026-08-31T00:00:00Z"}
@@ -769,20 +859,20 @@ async def test_reward_worker_exception_never_dead_letters(monkeypatch):
 async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
     monkeypatch,
 ):
-    functional_result = {
-        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
-        "evaluator_version": "leadpoet.source_add_functional_probe_evaluator.v2.1",
-        "result_status": "passed",
-        "route_hash": "sha256:" + "2" * 64,
+    precheck_doc = {
+        "precheck_status": PRECHECK_PASSED,
+        "reasons": ["provenance_reference_backed"],
+        "docs_completeness": {"score": 5},
     }
-    functional_hash = sha256_json(functional_result)
-    functional_receipt = "sha256:" + "3" * 64
-    smoke_result = {
-        **functional_result,
-        "evaluation_mode": "provisioning_smoke",
+    provenance_result = {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": SUBMISSION_ID,
+        "precheck_status": PRECHECK_PASSED,
+        "reasons": ["provenance_reference_backed"],
+        "precheck_doc": precheck_doc,
     }
-    smoke_hash = sha256_json(smoke_result)
-    smoke_receipt = "sha256:" + "6" * 64
+    provenance_hash = sha256_json(provenance_result)
+    provenance_receipt = "sha256:" + "3" * 64
     decision_receipt = "sha256:" + "4" * 64
     decision_artifacts = []
     existing_decision = {"available": False}
@@ -794,41 +884,9 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
         if table == "research_lab_source_add_reward_intents":
             return {
                 "intent_id": "source_add_reward_intent:0123456789abcdef",
-                "functional_receipt_hash": functional_receipt,
-                "business_artifact_hash": functional_hash,
-            }
-        if table == "research_lab_source_add_functional_probe_current":
-            return {
-                "submission_id": SUBMISSION_ID,
-                "adapter_id": ADAPTER_ID,
-                "attempt_ref": "source_add_probe_attempt:0123456789abcdef",
-                "config_ref": "source_add_probe_config:0123456789abcdef",
-                "result_status": "passed",
-                "receipt_hash": functional_receipt,
-                "business_artifact_hash": functional_hash,
-                "result_doc": functional_result,
-            }
-        if table == "research_lab_source_add_provisioning_smoke_current":
-            return {
-                "submission_id": SUBMISSION_ID,
-                "adapter_id": ADAPTER_ID,
-                "attempt_ref": "source_add_probe_attempt:fedcba9876543210",
-                "evaluation_mode": "provisioning_smoke",
-                "config_ref": "source_add_probe_config:0123456789abcdef",
-                "result_status": "passed",
-                "receipt_hash": smoke_receipt,
-                "business_artifact_hash": smoke_hash,
-                "result_doc": smoke_result,
-            }
-        if table == "research_lab_source_add_provisioning_current":
-            return {
-                "submission_id": SUBMISSION_ID,
-                "adapter_id": ADAPTER_ID,
-                "miner_hotkey": MINER_HOTKEY,
-                "provision_ref": "source_add_provision:0123456789abcdef",
-                "catalog_id": "source_catalog:0123456789abcdef",
-                "registry_provider_id": "credible_api",
-                "provision_status": "provisioned_autoresearch_eligible",
+                "approval_kind": PRECHECK_PASSED,
+                "provenance_receipt_hash": provenance_receipt,
+                "provenance_artifact_hash": provenance_hash,
             }
         if table == "research_lab_source_add_reward_current":
             return None
@@ -842,12 +900,12 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
         raise AssertionError(table)
 
     async def fake_rpc(name, params):
-        if name == "research_lab_source_add_reserve_leg1_slot_v3":
+        if name == "research_lab_source_add_reserve_leg1_slot_v4":
             return {
                 "status": "reserved",
                 "slot_lease_token": "22222222-2222-2222-2222-222222222222",
             }
-        if name == "research_lab_source_add_finalize_leg1_v3":
+        if name == "research_lab_source_add_finalize_leg1_v4":
             finalized_payload.update(params)
             return {
                 "status": finalize_status["value"],
@@ -875,7 +933,21 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
     monkeypatch.setattr(
         workflow,
         "_load_submission",
-        lambda _sid: _async_value(_submission_row(stage="accepted")),
+        lambda _sid: _async_value(
+            _submission_row(
+                stage="leg1_queued",
+                precheck_status=PRECHECK_PASSED,
+                precheck_doc=precheck_doc,
+                submission_doc={
+                    **_submission_row()["submission_doc"],
+                    "precheck_status": PRECHECK_PASSED,
+                    "precheck_doc": precheck_doc,
+                    "provenance_receipt_hash": provenance_receipt,
+                    "provenance_artifact_hash": provenance_hash,
+                    "provenance_result": provenance_result,
+                },
+            )
+        ),
     )
     monkeypatch.setattr(workflow, "select_one", fake_select_one)
     monkeypatch.setattr(workflow, "_rpc", fake_rpc)
@@ -886,10 +958,24 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
         lambda _epoch: _async_value((700, 0, "test")),
     )
     async def load_graph(**kwargs):
-        if kwargs["artifact_kind"] == "source_add_functional_probe":
-            return {"root_receipt_hash": functional_receipt}
-        if kwargs["artifact_kind"] == "source_add_provisioning_smoke":
-            return {"root_receipt_hash": smoke_receipt}
+        if kwargs["artifact_kind"] == "source_add_provenance":
+            assert kwargs == {
+                "artifact_kind": "source_add_provenance",
+                "artifact_ref": SUBMISSION_ID,
+                "artifact_hash": provenance_hash,
+            }
+            return {
+                "root_receipt_hash": provenance_receipt,
+                "receipts": [
+                    {
+                        "receipt_hash": provenance_receipt,
+                        "role": "gateway_coordinator",
+                        "purpose": "research_lab.source_add_provenance.v2",
+                        "status": "succeeded",
+                        "output_root": provenance_hash,
+                    }
+                ],
+            }
         assert kwargs == {
             "artifact_kind": "source_add_reward_decision",
             "artifact_ref": finalized_payload["p_reward"]["reward_ref"],
@@ -902,9 +988,7 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
                     "receipt_hash": decision_receipt,
                     "purpose": "research_lab.reward_decision.v2",
                     "output_root": decision_artifacts[0],
-                    "parent_receipt_hashes": sorted(
-                        (functional_receipt, smoke_receipt)
-                    ),
+                    "parent_receipt_hashes": [provenance_receipt],
                 }
             ],
         }
@@ -949,29 +1033,17 @@ async def test_leg1_finalization_binds_and_recovers_exact_decision_receipt(
     assert finalized_payload["p_daily_cap"] == 50
     assert tuple(
         graph["root_receipt_hash"] for graph in authorize_payload["parent_graphs"]
-    ) == (functional_receipt, smoke_receipt)
-    assert authorize_payload["decision_payload"]["provisioning_smoke_result"] == (
-        smoke_result
+    ) == (provenance_receipt,)
+    assert authorize_payload["decision_payload"]["provenance_result"] == (
+        provenance_result
     )
     assert finalized_payload["p_reward"]["trigger_evidence_doc"] == {
-        "functional_probe_passed": True,
-        "attempt_ref": "source_add_probe_attempt:0123456789abcdef",
-        "functional_probe_receipt_hash": functional_receipt,
-        "business_artifact_hash": functional_hash,
-        "functional_probe_result_hash": functional_hash,
-        "evaluator_version": functional_result["evaluator_version"],
-        "route_hash": functional_result["route_hash"],
-        "provisioning_smoke_passed": True,
-        "provisioning_smoke_attempt_ref": "source_add_probe_attempt:fedcba9876543210",
-        "provisioning_smoke_receipt_hash": smoke_receipt,
-        "provisioning_smoke_business_artifact_hash": smoke_hash,
-        "provisioning_smoke_result_hash": smoke_hash,
+        "provenance_precheck_passed": True,
         "submission_id": SUBMISSION_ID,
-        "final_acceptance_stage": "accepted",
-        "provision_ref": "source_add_provision:0123456789abcdef",
-        "catalog_id": "source_catalog:0123456789abcdef",
-        "registry_provider_id": "credible_api",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "precheck_status": PRECHECK_PASSED,
+        "provenance_receipt_hash": provenance_receipt,
+        "provenance_artifact_hash": provenance_hash,
+        "provenance_result_hash": provenance_hash,
     }
 
 

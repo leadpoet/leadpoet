@@ -248,7 +248,8 @@ QUERY_POLICIES = {
         table="research_lab_source_add_submission_current",
         select=(
             "submission_id,adapter_id,miner_hotkey,stage,precheck_status,"
-            "source_identity_hash,source_identity_version"
+            "precheck_doc,submission_doc,source_identity_hash,"
+            "source_identity_version"
         ),
         parameter_names=("submission_id",),
         max_pages=1,

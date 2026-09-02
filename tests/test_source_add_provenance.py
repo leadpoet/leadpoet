@@ -847,3 +847,54 @@ def test_precheck_sanitizer_redacts_builtwith_key_placeholder():
         "VERDICT: CREDIBLE"
     )
     assert source_add_contains_credential_material(sanitized) is False
+
+
+def test_rebuild_attested_provenance_result_strips_only_host_routing_reason():
+    submission_id = "source_add_submission:1234567890abcdef"
+    signed_precheck = {
+        "precheck_status": provenance.PRECHECK_PASSED,
+        "reasons": ["provenance_reference_backed"],
+        "docs_completeness": {"score": 5},
+    }
+    stored_precheck = {
+        **signed_precheck,
+        "reasons": [
+            "automatic_safe_get_selected",
+            "provenance_reference_backed",
+        ],
+    }
+
+    assert provenance.rebuild_attested_provenance_result_v2(
+        submission_id=submission_id,
+        precheck_status=provenance.PRECHECK_PASSED,
+        precheck_doc=stored_precheck,
+        submission_doc={},
+    ) == {
+        "schema_version": provenance.SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": submission_id,
+        "precheck_status": provenance.PRECHECK_PASSED,
+        "reasons": ["provenance_reference_backed"],
+        "precheck_doc": signed_precheck,
+    }
+
+
+def test_rebuild_attested_provenance_result_prefers_exact_stored_result():
+    submission_id = "source_add_submission:1234567890abcdef"
+    signed_precheck = {
+        "precheck_status": provenance.PRECHECK_PASSED,
+        "reasons": ["operator_credential_required"],
+    }
+    exact = {
+        "schema_version": provenance.SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": submission_id,
+        "precheck_status": provenance.PRECHECK_PASSED,
+        "reasons": ["operator_credential_required"],
+        "precheck_doc": signed_precheck,
+    }
+
+    assert provenance.rebuild_attested_provenance_result_v2(
+        submission_id=submission_id,
+        precheck_status=provenance.PRECHECK_PASSED,
+        precheck_doc={**signed_precheck, "reasons": ["display-only"]},
+        submission_doc={"provenance_result": exact},
+    ) == exact

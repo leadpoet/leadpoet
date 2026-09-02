@@ -59,6 +59,9 @@ _POSTGRES_MIGRATION_TARGET = "/leadpoet-parity.migration.sql"
 _SOURCE_ADD_RESTART_STATE_MIGRATION = (
     "scripts/174-research-lab-source-add-restart-state-restore.sql"
 )
+_SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
+    "scripts/175-research-lab-source-add-provenance-leg1.sql"
+)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -150,15 +153,27 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
         "sha256": "sha256:766c06dc0de169e065a3114d6d4ed554d13bfcb063fd7d428a2644b5a861cb0b",
         "transaction_mode": "candidate-file",
     },
+    {
+        "path": _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
+        "sequence": 175,
+        "sha256": "sha256:184ac6053229c1504df29bdb08180a6b00e4536041f1346c1b014d2ef3ac0e59",
+        "transaction_mode": "candidate-file",
+    },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_acl.v2"
+    "leadpoet.production_parity.schema_only_source_add_acl.v3"
 )
 _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
 )
 _SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256 = (
-    "sha256:6c09aa3c6b82b3fe666c6739c4f71a51ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+    "sha256:fe7df9f9336217f3e738f420fae0d9720959042080df431c1bcb2d4baa8ee954"
+)
+_SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256 = (
+    "sha256:208de2069d2b44826fe466de01a2d1a91f4c762869227b39bdba969c8586be16"
+)
+_SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256 = (
+    "sha256:19f67626677803ff84f92196adeb9731d415c643247c603e41512a88c3f6291b"
 )
 _SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:1082a75d70849b072299929ff00999b5c78a69adc9c7b03e544640ed60b02ff8"
@@ -175,10 +190,17 @@ _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_claim_control_contract_v2()",
     "public.research_lab_source_add_claim_work(text,integer)",
     "public.research_lab_source_add_configure_probe_v2(text,text,jsonb,jsonb,text,text,text)",
+    "public.research_lab_source_add_configure_probe_v3(text,text,jsonb,jsonb,text,text,text)",
     "public.research_lab_source_add_duplicate_privacy_contract_v1()",
+    "public.research_lab_source_add_enqueue_leg1_after_provenance_v1(text,text,text,text,text)",
     "public.research_lab_source_add_enqueue_provision_smoke(text,text,text,text,jsonb,jsonb)",
+    "public.research_lab_source_add_enqueue_provision_smoke_v2(text,text,text,text,jsonb,jsonb)",
+    "public.research_lab_source_add_finalize_leg1_v4(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_v2(text,jsonb,jsonb,jsonb)",
+    "public.research_lab_source_add_finalize_provision_v3(text,jsonb,jsonb,jsonb)",
+    "public.research_lab_source_add_finalize_provision_smoke_v3(text,uuid,text,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_reject_current_builtin_v2(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)",
+    "public.research_lab_source_add_reject_current_builtin_v3(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_reserve_leg1_slot_v2(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_finalize_leg1_v2(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)",
@@ -186,12 +208,15 @@ _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_reserve_leg1_slot_v3(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_finalize_leg1_v3(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_post_accept_leg1_contract_v2()",
+    "public.research_lab_source_add_post_accept_leg1_contract_v3()",
     "public.research_lab_source_add_provider_origin_contract_v1()",
     "public.research_lab_source_add_finish_work(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,timestamp with time zone,boolean)",
     "public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)",
     "public.research_lab_source_add_release_restart_guard_v2(text,text,bigint,text)",
     "public.research_lab_source_add_requeue_provenance(text,text,text,text,text,text)",
     "public.research_lab_source_add_requeue_provenance_v2(text,text,text,text,text,text,text)",
+    "public.research_lab_source_add_reconcile_provenance_leg1_v1()",
+    "public.research_lab_source_add_reserve_leg1_slot_v4(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_restart_guard_state_v1()",
     "public.research_lab_source_add_restart_guard_state_v2()",
     "public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)",
@@ -210,16 +235,22 @@ _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS = (
     "public.enforce_research_lab_source_add_acceptance_v2()",
     "public.enforce_research_lab_source_add_admission_control()",
     "public.enforce_research_lab_source_add_eligible_v2()",
+    "public.enforce_research_lab_source_add_eligible_v3()",
+    "public.enforce_research_lab_source_add_leg1_initial_event_v3()",
     "public.enforce_research_lab_source_add_leg1_initial_event_v2()",
     "public.enforce_research_lab_source_add_leg1_obligation_v2()",
+    "public.enforce_research_lab_source_add_leg1_obligation_v3()",
     "public.enforce_research_lab_source_add_leg1_slot_v2()",
+    "public.enforce_research_lab_source_add_leg1_slot_v3()",
     "public.enforce_research_lab_source_add_leg1_work_v2()",
+    "public.enforce_research_lab_source_add_leg1_work_v3()",
     "public.enforce_research_lab_source_add_provider_origin_submission()",
     "public.enforce_research_lab_source_add_provision_provider_origin()",
     "public.enforce_research_lab_source_catalog_provider_origin()",
     "public.enforce_source_add_restart_restore_pause_v2()",
     "public.prevent_research_lab_source_add_provider_origin_mutation()",
     "public.release_research_lab_source_add_provider_origin_terminal()",
+    "public.research_lab_source_add_enqueue_provenance_leg1_trigger_v1()",
     "public.research_lab_source_add_canonical_jsonb_v2(jsonb)",
     "public.research_lab_source_add_configure_probe(text,text,jsonb,jsonb,text,text,text)",
     "public.research_lab_source_add_final_approval_catalog_v2(text)",
@@ -230,6 +261,7 @@ _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_jsonb_hash_v2(jsonb)",
     "public.research_lab_source_add_provider_origin_hash_v1(text)",
     "public.research_lab_source_add_provider_origin_host_v1(text)",
+    "public.research_lab_source_add_provenance_leg1_authority_matches_v1(text,text,text,text,text)",
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION = (
     "leadpoet.production_parity.schema_only_source_add_maintenance.v1"
@@ -775,6 +807,9 @@ def _schema_only_source_add_acl_sql(
     duplicate_privacy_migration = _schema_only_source_add_acl_migration(
         "scripts/171-research-lab-source-add-duplicate-privacy.sql"
     )
+    provenance_leg1_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -918,8 +953,8 @@ WITH contracts AS (
     SELECT
         public.research_lab_source_add_duplicate_privacy_contract_v1()
             AS duplicate_privacy,
-        public.research_lab_source_add_post_accept_leg1_contract_v2()
-            AS post_accept_leg1,
+        public.research_lab_source_add_post_accept_leg1_contract_v3()
+            AS provenance_leg1,
         public.research_lab_source_add_claim_control_contract_v2()
             AS claim_control
 ), actual_acl AS (
@@ -953,6 +988,7 @@ SELECT pg_catalog.json_build_object(
     'schema_version', '{_SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION}',
     'migration_count', {len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS)},
     'migration_171_sha256', '{duplicate_privacy_migration['sha256']}',
+    'migration_175_sha256', '{provenance_leg1_migration['sha256']}',
     'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
@@ -994,14 +1030,70 @@ SELECT pg_catalog.json_build_object(
             'authenticated_callable', FALSE
         ),
     'post_accept_leg1_authority_bound',
-        contracts.post_accept_leg1->>'function_authority_sha256'
+        contracts.provenance_leg1->>'function_authority_sha256'
             = '{_SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256}',
+    'provenance_leg1_trigger_authority_bound',
+        contracts.provenance_leg1->>'trigger_authority_sha256'
+            = '{_SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256}',
+    'provenance_leg1_view_authority_bound',
+        contracts.provenance_leg1->>'view_authority_sha256'
+            = '{_SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256}',
+    'provenance_leg1_policy_bound',
+        contracts.provenance_leg1->'public_trigger_fields'
+            = pg_catalog.jsonb_build_array(
+                'precheck_status',
+                'provenance_artifact_hash',
+                'provenance_precheck_passed',
+                'provenance_receipt_hash',
+                'provenance_result_hash',
+                'submission_id'
+            )
+        AND contracts.provenance_leg1->>'schema_version'
+            = 'leadpoet.source_add_post_accept_leg1_contract.v3'
+        AND (contracts.provenance_leg1->>'daily_cap')::INTEGER = 50
+        AND (contracts.provenance_leg1->>'leg1_alpha_percent')::NUMERIC = 0.2
+        AND (contracts.provenance_leg1->>'leg1_reward_epochs')::INTEGER = 20
+        AND contracts.provenance_leg1->>'approval_boundary'
+            = 'provenance_precheck_passed'
+        AND contracts.provenance_leg1->>'backfill_policy'
+            = 'all_exact_attested_provenance'
+        AND contracts.provenance_leg1->>'authority_view'
+            = 'research_lab_source_add_provenance_leg1_authority_v1'
+        AND contracts.provenance_leg1->'functions'
+            = pg_catalog.jsonb_build_object(
+                'configure_probe_v3', TRUE,
+                'enqueue_leg1_after_provenance_v1', TRUE,
+                'enqueue_provision_smoke_v2', TRUE,
+                'finalize_leg1_v4', TRUE,
+                'finalize_provision_smoke_v3', TRUE,
+                'finalize_provision_v3', TRUE,
+                'reject_current_builtin_v3', TRUE,
+                'reconcile_provenance_leg1_v1', TRUE,
+                'reserve_leg1_slot_v4', TRUE
+            )
+        AND contracts.provenance_leg1->'triggers'
+            = pg_catalog.jsonb_build_object(
+                'automatic_enqueue', TRUE,
+                'eligible_v2', TRUE,
+                'eligible_v3', TRUE,
+                'leg1_initial_event_v3', TRUE,
+                'leg1_obligation_v3', TRUE,
+                'leg1_slot_v3', TRUE,
+                'leg1_work_v3', TRUE
+            )
+        AND contracts.provenance_leg1->'columns'
+            = pg_catalog.jsonb_build_object(
+                'intent_approval_kind', TRUE,
+                'intent_provenance_artifact_hash', TRUE,
+                'intent_provenance_receipt_hash', TRUE,
+                'slot_approval_kind', TRUE
+            ),
     'post_accept_leg1_permissions_bound',
-        contracts.post_accept_leg1->'permissions' = pg_catalog.jsonb_build_object(
+        contracts.provenance_leg1->'permissions' = pg_catalog.jsonb_build_object(
             'service_role_exists', TRUE,
             'candidate_callable', TRUE,
             'rollback_v2_callable', TRUE,
-            'legacy_not_callable', TRUE
+            'internal_not_callable', TRUE
         ),
     'claim_control_authority_bound',
         contracts.claim_control->>'function_authority_sha256'
@@ -1053,10 +1145,14 @@ def restore_schema_only_source_add_acl_contract(
     duplicate_privacy_migration = _schema_only_source_add_acl_migration(
         "scripts/171-research-lab-source-add-duplicate-privacy.sql"
     )
+    provenance_leg1_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
+        "migration_175_sha256": provenance_leg1_migration["sha256"],
         "function_signature_count": len(expected_inventory),
         "service_role_function_count": (
             len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)
@@ -1075,6 +1171,9 @@ def restore_schema_only_source_add_acl_contract(
         "duplicate_privacy_authority_bound": True,
         "duplicate_privacy_permissions_bound": True,
         "post_accept_leg1_authority_bound": True,
+        "provenance_leg1_trigger_authority_bound": True,
+        "provenance_leg1_view_authority_bound": True,
+        "provenance_leg1_policy_bound": True,
         "post_accept_leg1_permissions_bound": True,
         "claim_control_authority_bound": True,
         "claim_control_permissions_bound": True,

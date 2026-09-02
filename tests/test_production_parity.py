@@ -932,6 +932,12 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         )
     )
     assert duplicate_privacy_migration["sha256"] in sql
+    provenance_leg1_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/175-research-lab-source-add-provenance-leg1.sql"
+        )
+    )
+    assert provenance_leg1_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -940,12 +946,17 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     assert "public.research_lab_source_add_begin_provider_execution" in sql
     assert "public.research_lab_source_add_requeue_provenance_v2" in sql
     assert "public.enforce_research_lab_source_add_leg1_obligation_v2()" in sql
+    assert "public.research_lab_source_add_finalize_leg1_v4" in sql
+    assert "public.research_lab_source_add_post_accept_leg1_contract_v3()" in sql
+    assert "provenance_leg1_trigger_authority_bound" in sql
+    assert "provenance_leg1_view_authority_bound" in sql
+    assert "provenance_leg1_policy_bound" in sql
     assert "schema-only SOURCE_ADD ACL function inventory differs" in sql
     assert "schema-only SOURCE_ADD ACL readback differs" in sql
     assert "pg_catalog.aclexplode" in sql
     assert "FROM PUBLIC, anon, authenticated, service_role" in sql
     assert "TO PUBLIC" in sql
-    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 59
+    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 76
 
     rewritten = [dict(item) for item in migrations]
     next(
@@ -960,7 +971,10 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     ):
         parity_snapshot._schema_only_source_add_acl_sql(rewritten)
 
-    extended = [*migrations, {**migrations[-1], "path": "scripts/175-next.sql", "sequence": 175}]
+    extended = [
+        *migrations,
+        {**migrations[-1], "path": "scripts/176-next.sql", "sequence": 176},
+    ]
     with pytest.raises(
         ProductionParityError,
         match="not bound to the latest candidate migration",
@@ -977,12 +991,18 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
             "scripts/171-research-lab-source-add-duplicate-privacy.sql"
         )
     )
+    provenance_leg1_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/175-research-lab-source-add-provenance-leg1.sql"
+        )
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
             parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
         ),
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
+        "migration_175_sha256": provenance_leg1_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]
@@ -1006,6 +1026,9 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "duplicate_privacy_authority_bound": True,
         "duplicate_privacy_permissions_bound": True,
         "post_accept_leg1_authority_bound": True,
+        "provenance_leg1_trigger_authority_bound": True,
+        "provenance_leg1_view_authority_bound": True,
+        "provenance_leg1_policy_bound": True,
         "post_accept_leg1_permissions_bound": True,
         "claim_control_authority_bound": True,
         "claim_control_permissions_bound": True,
@@ -2771,6 +2794,66 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
                 "authenticated_callable": False,
             },
         }
+        source_add_provenance_leg1_contract = {
+            "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
+            "daily_cap": 50,
+            "leg1_alpha_percent": 0.2,
+            "leg1_reward_epochs": 20,
+            "approval_boundary": "provenance_precheck_passed",
+            "backfill_policy": "all_exact_attested_provenance",
+            "public_trigger_fields": [
+                "precheck_status",
+                "provenance_artifact_hash",
+                "provenance_precheck_passed",
+                "provenance_receipt_hash",
+                "provenance_result_hash",
+                "submission_id",
+            ],
+            "authority_view": (
+                "research_lab_source_add_provenance_leg1_authority_v1"
+            ),
+            "function_authority_sha256": (
+                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+            ),
+            "trigger_authority_sha256": (
+                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
+            ),
+            "view_authority_sha256": (
+                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
+            ),
+            "functions": {
+                "configure_probe_v3": True,
+                "enqueue_leg1_after_provenance_v1": True,
+                "enqueue_provision_smoke_v2": True,
+                "finalize_leg1_v4": True,
+                "finalize_provision_smoke_v3": True,
+                "finalize_provision_v3": True,
+                "reject_current_builtin_v3": True,
+                "reconcile_provenance_leg1_v1": True,
+                "reserve_leg1_slot_v4": True,
+            },
+            "triggers": {
+                "automatic_enqueue": True,
+                "eligible_v2": True,
+                "eligible_v3": True,
+                "leg1_initial_event_v3": True,
+                "leg1_obligation_v3": True,
+                "leg1_slot_v3": True,
+                "leg1_work_v3": True,
+            },
+            "columns": {
+                "intent_approval_kind": True,
+                "intent_provenance_artifact_hash": True,
+                "intent_provenance_receipt_hash": True,
+                "slot_approval_kind": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "candidate_callable": True,
+                "internal_not_callable": True,
+                "rollback_v2_callable": True,
+            },
+        }
         contract_functions = {
             "research_lab_compact_weight_settlement_contract_v1": compact_contract,
             "research_lab_candidate_hybrid_purpose_contract_v1": purpose_contract,
@@ -2779,6 +2862,9 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             ),
             "research_lab_source_add_duplicate_privacy_contract_v1": (
                 source_add_duplicate_privacy_contract
+            ),
+            "research_lab_source_add_post_accept_leg1_contract_v3": (
+                source_add_provenance_leg1_contract
             ),
         }
         for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS:

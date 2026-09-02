@@ -268,37 +268,63 @@ def _source_add_duplicate_privacy_contract_fixture() -> dict[str, Any]:
 
 def _source_add_post_accept_leg1_contract_fixture() -> dict[str, Any]:
     return {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v2",
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
         "daily_cap": 50,
         "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
+        "approval_boundary": "provenance_precheck_passed",
+        "backfill_policy": "all_exact_attested_provenance",
+        "public_trigger_fields": [
+            "precheck_status",
+            "provenance_artifact_hash",
+            "provenance_precheck_passed",
+            "provenance_receipt_hash",
+            "provenance_result_hash",
+            "submission_id",
+        ],
+        "authority_view": (
+            "research_lab_source_add_provenance_leg1_authority_v1"
+        ),
         "function_authority_sha256": (
             rehearsal_sitecustomize._candidate_post_accept_leg1_function_authority()
         ),
+        "trigger_authority_sha256": (
+            rehearsal_sitecustomize._candidate_provenance_leg1_trigger_authority()
+        ),
+        "view_authority_sha256": (
+            rehearsal_sitecustomize._candidate_provenance_leg1_view_authority()
+        ),
         "functions": {
-            "configure_probe_v2": True,
-            "finalize_provision_v2": True,
-            "reject_current_builtin_v2": True,
-            "post_accept_contract_v1": True,
-            "reserve_leg1_slot_v2": True,
-            "finalize_leg1_v2": True,
-            "reserve_leg1_slot_v3": True,
-            "finalize_leg1_v3": True,
-            "finalize_provision_smoke_v2": True,
+            "configure_probe_v3": True,
+            "enqueue_leg1_after_provenance_v1": True,
+            "enqueue_provision_smoke_v2": True,
+            "finalize_leg1_v4": True,
+            "finalize_provision_smoke_v3": True,
+            "finalize_provision_v3": True,
+            "reject_current_builtin_v3": True,
+            "reconcile_provenance_leg1_v1": True,
+            "reserve_leg1_slot_v4": True,
         },
         "triggers": {
-            "acceptance": True,
-            "eligible": True,
-            "leg1_work": True,
-            "leg1_slot": True,
-            "leg1_obligation": True,
-            "leg1_initial_event": True,
+            "automatic_enqueue": True,
+            "eligible_v2": True,
+            "eligible_v3": True,
+            "leg1_initial_event_v3": True,
+            "leg1_obligation_v3": True,
+            "leg1_slot_v3": True,
+            "leg1_work_v3": True,
+        },
+        "columns": {
+            "intent_approval_kind": True,
+            "intent_provenance_artifact_hash": True,
+            "intent_provenance_receipt_hash": True,
+            "slot_approval_kind": True,
         },
         "permissions": {
             "service_role_exists": True,
             "candidate_callable": True,
+            "internal_not_callable": True,
             "rollback_v2_callable": True,
-            "legacy_not_callable": True,
         },
     }
 
@@ -386,7 +412,7 @@ def test_local_schema_adapter_returns_full_source_add_leg1_contract(
     request = urllib.request.Request(
         (
             "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
-            "research_lab_source_add_post_accept_leg1_contract_v2"
+            "research_lab_source_add_post_accept_leg1_contract_v3"
         ),
         data=b"{}",
         headers={
@@ -1517,6 +1543,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_model_unit_terminals",
             "research_lab_candidate_waterfall_receipts",
             "research_lab_candidate_waterfall_metrics",
+            "research_lab_source_add_provenance_leg1_authority_v1",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1573,6 +1600,16 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_add_duplicate_privacy_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v2",
+            "research_lab_source_add_post_accept_leg1_contract_v3",
+            "research_lab_source_add_configure_probe_v3",
+            "research_lab_source_add_enqueue_leg1_after_provenance_v1",
+            "research_lab_source_add_enqueue_provision_smoke_v2",
+            "research_lab_source_add_finalize_leg1_v4",
+            "research_lab_source_add_finalize_provision_smoke_v3",
+            "research_lab_source_add_finalize_provision_v3",
+            "research_lab_source_add_reject_current_builtin_v3",
+            "research_lab_source_add_reconcile_provenance_leg1_v1",
+            "research_lab_source_add_reserve_leg1_slot_v4",
             "research_lab_source_add_reserve_leg1_slot_v3",
             "research_lab_source_add_finalize_leg1_v3",
             "research_lab_routing_exact_model_transition_contract_v1",
@@ -1873,6 +1910,16 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_duplicate_privacy_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v1",
             "research_lab_source_add_post_accept_leg1_contract_v2",
+            "research_lab_source_add_post_accept_leg1_contract_v3",
+            "research_lab_source_add_configure_probe_v3",
+            "research_lab_source_add_enqueue_leg1_after_provenance_v1",
+            "research_lab_source_add_enqueue_provision_smoke_v2",
+            "research_lab_source_add_finalize_leg1_v4",
+            "research_lab_source_add_finalize_provision_smoke_v3",
+            "research_lab_source_add_finalize_provision_v3",
+            "research_lab_source_add_reject_current_builtin_v3",
+            "research_lab_source_add_reconcile_provenance_leg1_v1",
+            "research_lab_source_add_reserve_leg1_slot_v4",
             "research_lab_source_add_reserve_leg1_slot_v3",
             "research_lab_source_add_finalize_leg1_v3",
             "research_lab_routing_exact_model_transition_contract_v1",

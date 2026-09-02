@@ -841,7 +841,7 @@ class CoordinatorExecutorV2:
             return
         expected_purpose = {
             "champion": "research_lab.promotion_decision.v2",
-            "source_add_leg1": "research_lab.source_add_functional_probe.v2",
+            "source_add_leg1": "research_lab.source_add_provenance.v2",
             "source_add_leg2": "research_lab.source_add_judge.v2",
             "reimbursement": "research_lab.candidate_decision.v2",
         }.get(kind)
@@ -854,48 +854,6 @@ class CoordinatorExecutorV2:
         decision_payload = payload.get("decision_payload")
         if not isinstance(decision_payload, Mapping):
             raise ValueError("reward decision input is invalid")
-        if kind == "source_add_leg1":
-            if len(graphs) != 2 or len(context.parent_receipt_hashes) != 2:
-                raise ValueError(
-                    "SOURCE_ADD Leg 1 reward requires functional and smoke parents"
-                )
-            functional_result = decision_payload.get("functional_probe_result")
-            smoke_result = decision_payload.get("provisioning_smoke_result")
-            if not isinstance(functional_result, Mapping) or not isinstance(
-                smoke_result, Mapping
-            ):
-                raise ValueError("SOURCE_ADD Leg 1 approval results are invalid")
-            expected_outputs = {
-                sha256_json(dict(functional_result)),
-                sha256_json(dict(smoke_result)),
-            }
-            roots = {}
-            for graph in graphs:
-                root_hash = str(graph.get("root_receipt_hash") or "")
-                root = next(
-                    (
-                        receipt
-                        for receipt in graph.get("receipts") or ()
-                        if isinstance(receipt, Mapping)
-                        and receipt.get("receipt_hash") == root_hash
-                    ),
-                    None,
-                )
-                if (
-                    not isinstance(root, Mapping)
-                    or root.get("purpose") != expected_purpose
-                    or not isinstance(root.get("output_root"), str)
-                ):
-                    raise ValueError("reward decision parent purpose is invalid")
-                roots[root_hash] = str(root["output_root"])
-            if (
-                len(roots) != 2
-                or set(roots) != set(context.parent_receipt_hashes)
-                or set(roots.values()) != expected_outputs
-                or len(expected_outputs) != 2
-            ):
-                raise ValueError("SOURCE_ADD Leg 1 approval parent output differs")
-            return
         if len(graphs) != 1 or len(context.parent_receipt_hashes) != 1:
             raise ValueError("reward decision requires exactly one parent graph")
         graph = graphs[0]
@@ -917,6 +875,8 @@ class CoordinatorExecutorV2:
             promotion_decision = decision_payload.get("promotion_decision")
             if isinstance(promotion_decision, Mapping):
                 bound_result = {"decision": dict(promotion_decision)}
+        elif kind == "source_add_leg1":
+            bound_result = decision_payload.get("provenance_result")
         elif kind == "source_add_leg2":
             bound_result = decision_payload.get("judge_result")
         elif kind == "reimbursement":

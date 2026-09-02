@@ -13,6 +13,104 @@ from gateway.tee.reward_executor_v2 import (
 from leadpoet_canonical.attested_v2 import sha256_json
 
 
+def _leg1_provenance_result():
+    precheck_doc = {
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
+    }
+    return {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": "source_add_submission:1234567890abcdef",
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": list(precheck_doc["reasons"]),
+        "precheck_doc": precheck_doc,
+    }
+
+
+def _leg1_payload():
+    provenance = _leg1_provenance_result()
+    provenance_hash = sha256_json(provenance)
+    return {
+        "decision_kind": "source_add_leg1",
+        "decision_payload": {
+            "adapter_id": "adapter:test",
+            "miner_ref": "miner",
+            "start_epoch": 101,
+            "existing_rewards": [],
+            "alpha_percent": 0.2,
+            "reward_epochs": 20,
+            "provenance_result": provenance,
+            "trigger_evidence": {
+                "provenance_precheck_passed": True,
+                "submission_id": provenance["submission_id"],
+                "precheck_status": provenance["precheck_status"],
+                "provenance_receipt_hash": "sha256:" + "1" * 64,
+                "provenance_artifact_hash": provenance_hash,
+                "provenance_result_hash": provenance_hash,
+            },
+        },
+    }
+
+
+def test_leg1_reward_accepts_exact_credible_provenance_without_probe_or_catalog():
+    payload = _leg1_payload()
+
+    result = execute_reward_decision_v2(payload)
+
+    assert result["decision_kind"] == "source_add_leg1"
+    assert result["reward"]["alpha_percent"] == pytest.approx(0.2)
+    assert result["reward"]["reward_epochs"] == 20
+    assert result["reward"]["trigger_evidence"] == (
+        payload["decision_payload"]["trigger_evidence"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ("nonpassing", "result_hash", "probe_field"))
+def test_leg1_reward_rejects_noncredible_or_legacy_approval_evidence(mutation):
+    payload = _leg1_payload()
+    if mutation == "nonpassing":
+        payload["decision_payload"]["provenance_result"]["precheck_status"] = (
+            "needs_manual_review"
+        )
+    elif mutation == "result_hash":
+        payload["decision_payload"]["trigger_evidence"][
+            "provenance_result_hash"
+        ] = "sha256:" + "f" * 64
+    else:
+        payload["decision_payload"]["functional_probe_result"] = {
+            "result_status": "passed"
+        }
+
+    with pytest.raises(RewardExecutorV2Error):
+        execute_reward_decision_v2(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("extra_trigger", "invalid_receipt", "artifact_hash", "extra_result"),
+)
+def test_leg1_reward_rejects_noncanonical_provenance_authority(mutation):
+    payload = _leg1_payload()
+    if mutation == "extra_trigger":
+        payload["decision_payload"]["trigger_evidence"]["unexpected"] = True
+    elif mutation == "invalid_receipt":
+        payload["decision_payload"]["trigger_evidence"][
+            "provenance_receipt_hash"
+        ] = "invalid"
+    elif mutation == "artifact_hash":
+        payload["decision_payload"]["trigger_evidence"][
+            "provenance_artifact_hash"
+        ] = "sha256:" + "f" * 64
+    else:
+        payload["decision_payload"]["provenance_result"]["unexpected"] = True
+
+    with pytest.raises(
+        RewardExecutorV2Error,
+        match="credible provenance result is invalid",
+    ):
+        execute_reward_decision_v2(payload)
+
+
 def test_leg2_reward_rejects_nonapproving_signed_judge():
     payload = {
         "decision_kind": "source_add_leg2",

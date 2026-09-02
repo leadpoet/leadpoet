@@ -607,6 +607,87 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_case",
+    (
+        "miner_credential_field",
+        "declared_domains",
+        "source_identity",
+        "manifest_intake",
+    ),
+)
+async def test_invalid_source_add_route_failures_are_generic_and_never_persist(
+    monkeypatch,
+    invalid_case,
+):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def fail_rpc(*_args, **_kwargs):
+        raise AssertionError("invalid SOURCE_ADD submissions must not persist")
+
+    monkeypatch.setattr(api, "_source_add_rpc", fail_rpc)
+    manifest = _manifest_doc()
+    source_metadata = ResearchLabSourceMetadata.model_validate(
+        _source_metadata_doc()
+    )
+    payload_fields = {}
+    if invalid_case == "miner_credential_field":
+        payload_fields["adapter_credential"] = "redacted-test-value"
+    elif invalid_case == "declared_domains":
+        manifest["declared_base_domains"] = "api.test-source.example"
+    elif invalid_case == "source_identity":
+        source_metadata = source_metadata.model_copy(
+            update={"api_base_url": "not-a-provider-origin"}
+        )
+    else:
+        manifest["source_kind"] = "unsupported-source-kind"
+
+    payload = ResearchLabSourceAdapterSubmissionRequest.model_construct(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key=f"source-submit-invalid-{invalid_case}",
+        manifest=manifest,
+        source_metadata=source_metadata,
+        **payload_fields,
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == api.SOURCE_ADD_SUBMISSION_FAILED_DETAIL
+    assert JSONResponse(
+        status_code=exc_info.value.status_code,
+        content={"detail": exc_info.value.detail},
+    ).body == b'{"detail":"Submission failed"}'
+
+
+@pytest.mark.asyncio
 async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
@@ -955,7 +1036,7 @@ async def test_exact_operator_probe_config_is_one_logical_work_across_retries(mo
     work_ids = []
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_configure_probe_v2"
+        assert name == "research_lab_source_add_configure_probe_v3"
         work_ids.append(params["p_work_id"])
         if len(work_ids) == 3:
             return {"status": "final_approval_frozen"}
@@ -1000,10 +1081,8 @@ async def test_exact_operator_probe_config_is_one_logical_work_across_retries(mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ("accepted", "leg1_queued", "leg1_created"))
 async def test_operator_probe_config_rejects_frozen_final_approval_stage(
     monkeypatch,
-    stage,
 ):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
     monkeypatch.setattr(
@@ -1020,7 +1099,7 @@ async def test_operator_probe_config_rejects_frozen_final_approval_stage(
     monkeypatch.setattr(
         api,
         "select_one",
-        lambda *_args, **_kwargs: _async_value({"stage": stage}),
+        lambda *_args, **_kwargs: _async_value({"stage": "accepted"}),
     )
 
     async def fail_rpc(*_args, **_kwargs):
@@ -1052,10 +1131,78 @@ async def test_operator_probe_config_rejects_frozen_final_approval_stage(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ("accepted", "leg1_queued", "leg1_created"))
+@pytest.mark.parametrize("stage", ("leg1_queued", "leg1_created"))
+async def test_operator_probe_config_allows_leg1_stage(monkeypatch, stage):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+    submission_id = "source_add_submission:" + "d" * 16
+    monkeypatch.setattr(
+        api,
+        "select_one",
+        lambda *_args, **_kwargs: _async_value(
+            {
+                "submission_id": submission_id,
+                "adapter_id": "adapter:test-source",
+                "miner_hotkey": "hk-owner",
+                "stage": stage,
+                "seq": 9,
+                "submission_doc": {
+                    "manifest": _manifest_doc(),
+                    "source_metadata": _source_metadata_doc(),
+                },
+                "precheck_status": PRECHECK_PASSED,
+                "precheck_doc": {"reasons": ["provenance_reference_backed"]},
+                "source_identity_hash": "sha256:" + "1" * 64,
+            }
+        ),
+    )
+    observed = {}
+
+    async def fake_rpc(name, params):
+        observed.update({"name": name, "params": params})
+        return {
+            "status": "queued",
+            "stage": "functional_probe_queued",
+            "work_id": params["p_work_id"],
+        }
+
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
+    payload = ResearchLabSourceAdapterProbeConfigureRequest(
+        base_url="https://api.test-source.example",
+        auth_kind="none",
+        probes=[
+            {
+                "method": "GET",
+                "path": "/search",
+                "query": {"q": "test"},
+                "body_json": None,
+            }
+        ],
+    )
+
+    response = await api.configure_research_lab_source_adapter_test(
+        submission_id,
+        payload,
+        authorization="Bearer service-role-test",
+    )
+
+    assert response.queue_status == "queued"
+    assert observed["name"] == "research_lab_source_add_configure_probe_v3"
+
+
+@pytest.mark.asyncio
 async def test_owner_provision_rejects_frozen_final_approval_stage(
     monkeypatch,
-    stage,
 ):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
     monkeypatch.setattr(
@@ -1072,7 +1219,7 @@ async def test_owner_provision_rejects_frozen_final_approval_stage(
     monkeypatch.setattr(
         api,
         "select_one",
-        lambda *_args, **_kwargs: _async_value({"stage": stage}),
+        lambda *_args, **_kwargs: _async_value({"stage": "accepted"}),
     )
 
     async def fail_rpc(*_args, **_kwargs):
@@ -1095,7 +1242,14 @@ async def test_owner_provision_rejects_frozen_final_approval_stage(
 
 
 @pytest.mark.asyncio
-async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atomically(monkeypatch):
+@pytest.mark.parametrize(
+    "stage",
+    ("provenance_precheck_passed", "leg1_queued", "leg1_created"),
+)
+async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atomically(
+    monkeypatch,
+    stage,
+):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
@@ -1127,7 +1281,7 @@ async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atom
                 "submission_id": "source_add_submission:" + "a" * 16,
                 "adapter_id": "adapter:test-source",
                 "miner_hotkey": "hk-owner",
-                "stage": "provenance_precheck_passed",
+                "stage": stage,
                 "submission_doc": submission_doc,
                 "precheck_status": PRECHECK_PASSED,
                 "precheck_doc": {"reasons": ["provenance_reference_backed"]},
@@ -1169,7 +1323,7 @@ async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atom
     finalized = {}
 
     async def fake_rpc(name, params):
-        assert name == "research_lab_source_add_finalize_provision_v2"
+        assert name == "research_lab_source_add_finalize_provision_v3"
         finalized.update(params)
         return {
             "status": "provisioned",
@@ -1331,7 +1485,7 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
 
     async def fake_rpc(name, params):
         rpc_calls.append((name, params))
-        if name == "research_lab_source_add_finalize_provision_v2":
+        if name == "research_lab_source_add_finalize_provision_v3":
             if freeze_final_approval["enabled"]:
                 return {"status": "final_approval_frozen"}
             assert params["p_provision_row"]["provision_status"] == (
@@ -1346,7 +1500,7 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
                 "catalog_id": params["p_catalog_row"]["catalog_id"],
                 "provision_ref": params["p_provision_row"]["provision_ref"],
             }
-        assert name == "research_lab_source_add_enqueue_provision_smoke"
+        assert name == "research_lab_source_add_enqueue_provision_smoke_v2"
         assert params["p_config_ref"] == config_ref
         assert params["p_provision_row"]["provision_status"] == (
             PROVISION_STATUS_ELIGIBLE
@@ -1420,8 +1574,8 @@ async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(
     )
 
     assert [name for name, _params in rpc_calls] == [
-        "research_lab_source_add_finalize_provision_v2",
-        "research_lab_source_add_enqueue_provision_smoke",
+        "research_lab_source_add_finalize_provision_v3",
+        "research_lab_source_add_enqueue_provision_smoke_v2",
     ]
     assert response.provision_status == PROVISION_STATUS_APPROVED_PENDING
     assert response.requested_provision_status == PROVISION_STATUS_ELIGIBLE

@@ -28,6 +28,10 @@ from tests.test_source_add_leg1_release_policy_postgres import (
 
 MIGRATION = "174-research-lab-source-add-restart-state-restore.sql"
 MIGRATIONS = PRE_RESTORE_MIGRATIONS + (MIGRATION,)
+PROVENANCE_LEG1_MIGRATION = (
+    "175-research-lab-source-add-provenance-leg1.sql"
+)
+ACL_MIGRATIONS = MIGRATIONS + (PROVENANCE_LEG1_MIGRATION,)
 GUARD_A = "source_add_restart_guard:" + "a" * 64
 GUARD_B = "source_add_restart_guard:" + "b" * 64
 GUARD_C = "source_add_restart_guard:" + "c" * 64
@@ -60,6 +64,11 @@ def database():
     yield from _database_with_migrations(MIGRATIONS)
 
 
+@pytest.fixture(scope="module")
+def acl_database():
+    yield from _database_with_migrations(ACL_MIGRATIONS)
+
+
 def _set_paused(cursor, paused: bool, reason: str, actor: str) -> dict:
     cursor.execute(
         "SELECT public.research_lab_source_add_set_paused(%s, %s, %s)",
@@ -83,7 +92,7 @@ def _source_add_acl_contracts(cursor) -> dict:
                 public.research_lab_source_add_duplicate_privacy_contract_v1()
                     -> 'permissions',
             'post_accept_leg1',
-                public.research_lab_source_add_post_accept_leg1_contract_v2()
+                public.research_lab_source_add_post_accept_leg1_contract_v3()
                     -> 'permissions',
             'claim_control',
                 public.research_lab_source_add_claim_control_contract_v2()
@@ -417,6 +426,11 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
 
             cursor.execute(migration_path.read_text(encoding="utf-8"))
             cursor.execute(
+                (SCRIPTS / PROVENANCE_LEG1_MIGRATION).read_text(
+                    encoding="utf-8"
+                )
+            )
+            cursor.execute(
                 "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role"
             )
             cursor.execute(
@@ -474,7 +488,7 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
                 "service_role_exists": True,
                 "candidate_callable": True,
                 "rollback_v2_callable": True,
-                "legacy_not_callable": True,
+                "internal_not_callable": True,
             }
             assert repaired_contracts["claim_control"] == {
                 "service_role_exists": True,
@@ -492,9 +506,9 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
 
 
 def test_schema_only_acl_repair_rejects_unreviewed_function_surface(
-    database,
+    acl_database,
 ) -> None:
-    psycopg2, dsn = database
+    psycopg2, dsn = acl_database
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
     try:

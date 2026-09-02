@@ -50,6 +50,9 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_SCHEMA,
     SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256,
     SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
 )
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
@@ -299,6 +302,9 @@ SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION = (
 SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION = (
     "174-research-lab-source-add-restart-state-restore.sql"
 )
+SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
+    "175-research-lab-source-add-provenance-leg1.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -373,6 +379,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_CLAIM_CONTROL_MIGRATION,
     SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION,
     SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION,
+    SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -419,6 +426,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_172_source_add_claim_control_valid",
     "post_173_source_add_leg1_release_policy_valid",
     "post_174_source_add_restart_state_restore_valid",
+    "post_175_source_add_provenance_leg1_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6694,6 +6702,92 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise PostgresContractProbeError(
                 "post-174 SOURCE_ADD restored durable state differs"
+            )
+        database.psql(
+            """
+            SELECT public.research_lab_source_add_set_paused(
+                TRUE, 'restart_rehearsal_provenance_leg1_migration',
+                'operator:restart-rehearsal-v2-provenance-leg1'
+            );
+            """
+        )
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVENANCE_LEG1_MIGRATION)
+        source_add_provenance_leg1_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v3()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_provenance_leg1_contract != {
+            "schema_version": (
+                "leadpoet.source_add_post_accept_leg1_contract.v3"
+            ),
+            "daily_cap": 50,
+            "leg1_alpha_percent": 0.2,
+            "leg1_reward_epochs": 20,
+            "approval_boundary": "provenance_precheck_passed",
+            "backfill_policy": "all_exact_attested_provenance",
+            "public_trigger_fields": [
+                "precheck_status",
+                "provenance_artifact_hash",
+                "provenance_precheck_passed",
+                "provenance_receipt_hash",
+                "provenance_result_hash",
+                "submission_id",
+            ],
+            "authority_view": (
+                "research_lab_source_add_provenance_leg1_authority_v1"
+            ),
+            "function_authority_sha256": (
+                SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+            ),
+            "trigger_authority_sha256": (
+                SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
+            ),
+            "view_authority_sha256": (
+                SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
+            ),
+            "functions": {
+                "configure_probe_v3": True,
+                "enqueue_leg1_after_provenance_v1": True,
+                "enqueue_provision_smoke_v2": True,
+                "finalize_leg1_v4": True,
+                "finalize_provision_smoke_v3": True,
+                "finalize_provision_v3": True,
+                "reject_current_builtin_v3": True,
+                "reconcile_provenance_leg1_v1": True,
+                "reserve_leg1_slot_v4": True,
+            },
+            "triggers": {
+                "automatic_enqueue": True,
+                "eligible_v2": True,
+                "eligible_v3": True,
+                "leg1_initial_event_v3": True,
+                "leg1_obligation_v3": True,
+                "leg1_slot_v3": True,
+                "leg1_work_v3": True,
+            },
+            "columns": {
+                "intent_approval_kind": True,
+                "intent_provenance_artifact_hash": True,
+                "intent_provenance_receipt_hash": True,
+                "slot_approval_kind": True,
+            },
+            "permissions": {
+                "service_role_exists": True,
+                "candidate_callable": True,
+                "internal_not_callable": True,
+                "rollback_v2_callable": True,
+            },
+        }:
+            raise PostgresContractProbeError(
+                "post-175 SOURCE_ADD provenance Leg 1 contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

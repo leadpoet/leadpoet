@@ -135,7 +135,7 @@ def _initial_gateway_secret_string() -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 
-def _candidate_post_accept_leg1_function_authority() -> str:
+def _candidate_source_add_leg1_authority(constant_name: str) -> str:
     path = SOURCE_ROOT / "gateway/tee/supabase_schema_preflight_v2.py"
     if not path.is_file():
         path = (
@@ -149,8 +149,7 @@ def _candidate_post_accept_leg1_function_authority() -> str:
         if isinstance(node, ast.Assign)
         and any(
             isinstance(target, ast.Name)
-            and target.id
-            == "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
+            and target.id == constant_name
             for target in node.targets
         )
     ]
@@ -161,6 +160,24 @@ def _candidate_post_accept_leg1_function_authority() -> str:
     ):
         raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
     return values[0]
+
+
+def _candidate_post_accept_leg1_function_authority() -> str:
+    return _candidate_source_add_leg1_authority(
+        "SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256"
+    )
+
+
+def _candidate_provenance_leg1_trigger_authority() -> str:
+    return _candidate_source_add_leg1_authority(
+        "SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256"
+    )
+
+
+def _candidate_provenance_leg1_view_authority() -> str:
+    return _candidate_source_add_leg1_authority(
+        "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256"
+    )
 
 
 def _source_add_claim_control_contract() -> dict[str, Any]:
@@ -4743,52 +4760,79 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
-        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
+        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
     ):
         if str(getattr(request, "method", None) or "GET").upper() != "POST":
             raise ValueError(
-                "SOURCE_ADD post-accept Leg 1 contract method differs"
+                "SOURCE_ADD automatic provenance Leg 1 contract method "
+                "differs"
             )
         request_body = getattr(request, "data", None)
         if request_body not in {b"{}", None}:
             raise ValueError(
-                "SOURCE_ADD post-accept Leg 1 contract body differs"
+                "SOURCE_ADD automatic provenance Leg 1 contract body differs"
             )
         body = json.dumps(
             {
                 "schema_version": (
-                    "leadpoet.source_add_post_accept_leg1_contract.v2"
+                    "leadpoet.source_add_post_accept_leg1_contract.v3"
                 ),
                 "daily_cap": 50,
                 "leg1_alpha_percent": 0.2,
                 "leg1_reward_epochs": 20,
+                "approval_boundary": "provenance_precheck_passed",
+                "backfill_policy": "all_exact_attested_provenance",
+                "public_trigger_fields": [
+                    "precheck_status",
+                    "provenance_artifact_hash",
+                    "provenance_precheck_passed",
+                    "provenance_receipt_hash",
+                    "provenance_result_hash",
+                    "submission_id",
+                ],
+                "authority_view": (
+                    "research_lab_source_add_provenance_leg1_authority_v1"
+                ),
                 "function_authority_sha256": (
                     _candidate_post_accept_leg1_function_authority()
                 ),
+                "trigger_authority_sha256": (
+                    _candidate_provenance_leg1_trigger_authority()
+                ),
+                "view_authority_sha256": (
+                    _candidate_provenance_leg1_view_authority()
+                ),
                 "functions": {
-                    "configure_probe_v2": True,
-                    "finalize_provision_v2": True,
-                    "reject_current_builtin_v2": True,
-                    "post_accept_contract_v1": True,
-                    "reserve_leg1_slot_v2": True,
-                    "finalize_leg1_v2": True,
-                    "reserve_leg1_slot_v3": True,
-                    "finalize_leg1_v3": True,
-                    "finalize_provision_smoke_v2": True,
+                    "configure_probe_v3": True,
+                    "enqueue_leg1_after_provenance_v1": True,
+                    "enqueue_provision_smoke_v2": True,
+                    "finalize_leg1_v4": True,
+                    "finalize_provision_smoke_v3": True,
+                    "finalize_provision_v3": True,
+                    "reject_current_builtin_v3": True,
+                    "reconcile_provenance_leg1_v1": True,
+                    "reserve_leg1_slot_v4": True,
                 },
                 "triggers": {
-                    "acceptance": True,
-                    "eligible": True,
-                    "leg1_work": True,
-                    "leg1_slot": True,
-                    "leg1_obligation": True,
-                    "leg1_initial_event": True,
+                    "automatic_enqueue": True,
+                    "eligible_v2": True,
+                    "eligible_v3": True,
+                    "leg1_initial_event_v3": True,
+                    "leg1_obligation_v3": True,
+                    "leg1_slot_v3": True,
+                    "leg1_work_v3": True,
+                },
+                "columns": {
+                    "intent_approval_kind": True,
+                    "intent_provenance_artifact_hash": True,
+                    "intent_provenance_receipt_hash": True,
+                    "slot_approval_kind": True,
                 },
                 "permissions": {
                     "service_role_exists": True,
                     "candidate_callable": True,
+                    "internal_not_callable": True,
                     "rollback_v2_callable": True,
-                    "legacy_not_callable": True,
                 },
             },
             sort_keys=True,

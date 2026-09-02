@@ -320,11 +320,7 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
     expected = common | (
         {"trigger_evidence", "judge_result"}
         if kind == "source_add_leg2"
-        else {
-            "functional_probe_result",
-            "provisioning_smoke_result",
-            "trigger_evidence",
-        }
+        else {"provenance_result", "trigger_evidence"}
     )
     if set(value) != expected:
         raise RewardExecutorV2Error("SOURCE_ADD reward fields are invalid")
@@ -341,21 +337,57 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
         "reward_epochs": int(value.get("reward_epochs") or 0),
     }
     if kind == "source_add_leg1":
-        functional_probe = value.get("functional_probe_result")
-        provisioning_smoke = value.get("provisioning_smoke_result")
+        provenance = value.get("provenance_result")
         trigger = value.get("trigger_evidence")
+        provenance_hash = (
+            sha256_json(dict(provenance))
+            if isinstance(provenance, Mapping)
+            else ""
+        )
         if (
-            not isinstance(functional_probe, Mapping)
-            or functional_probe.get("result_status") != "passed"
-            or not isinstance(provisioning_smoke, Mapping)
-            or provisioning_smoke.get("evaluation_mode") != "provisioning_smoke"
-            or provisioning_smoke.get("result_status") != "passed"
+            not isinstance(provenance, Mapping)
+            or set(provenance)
+            != {
+                "schema_version",
+                "submission_id",
+                "precheck_status",
+                "reasons",
+                "precheck_doc",
+            }
+            or provenance.get("schema_version")
+            != "leadpoet.source_add_provenance_result.v2"
+            or provenance.get("precheck_status")
+            != "provenance_precheck_passed"
+            or not isinstance(provenance.get("reasons"), list)
+            or any(not isinstance(item, str) for item in provenance["reasons"])
+            or not isinstance(provenance.get("precheck_doc"), Mapping)
+            or provenance["precheck_doc"].get("precheck_status")
+            != provenance.get("precheck_status")
+            or list(provenance["precheck_doc"].get("reasons") or [])
+            != list(provenance["reasons"])
             or not isinstance(trigger, Mapping)
-            or trigger.get("functional_probe_passed") is not True
-            or trigger.get("provisioning_smoke_passed") is not True
+            or set(trigger)
+            != {
+                "provenance_precheck_passed",
+                "submission_id",
+                "precheck_status",
+                "provenance_receipt_hash",
+                "provenance_artifact_hash",
+                "provenance_result_hash",
+            }
+            or trigger.get("provenance_precheck_passed") is not True
+            or trigger.get("submission_id") != provenance.get("submission_id")
+            or trigger.get("precheck_status")
+            != provenance.get("precheck_status")
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(trigger.get("provenance_receipt_hash") or ""),
+            )
+            or trigger.get("provenance_artifact_hash") != provenance_hash
+            or trigger.get("provenance_result_hash") != provenance_hash
         ):
             raise RewardExecutorV2Error(
-                "SOURCE_ADD Leg 1 final approval evidence is invalid"
+                "SOURCE_ADD Leg 1 credible provenance result is invalid"
             )
         reward = create_leg1_reward(
             miner_ref=str(value.get("miner_ref") or ""),

@@ -13,9 +13,8 @@ from leadpoet_canonical.attested_v2 import sha256_json
 
 SUBMISSION_ID = "source_add_submission:1234567890abcdef"
 HASH = "sha256:" + "a" * 64
-FUNCTIONAL_RECEIPT_HASH = "sha256:" + "b" * 64
+PROVENANCE_RECEIPT_HASH = "sha256:" + "b" * 64
 JUDGE_RECEIPT_HASH = "sha256:" + "c" * 64
-SMOKE_RECEIPT_HASH = "sha256:" + "d" * 64
 
 
 class FakeReader:
@@ -69,21 +68,16 @@ def _config():
 
 def _context(
     *,
-    with_leg1_parents=False,
-    with_leg1_proofs=False,
+    with_leg1_parent=False,
+    with_leg1_proof=False,
     with_judge_parent=False,
 ):
-    functional = _functional_result()
-    functional_receipt = {
-        "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-        "purpose": "research_lab.source_add_functional_probe.v2",
-        "output_root": sha256_json(functional),
-    }
-    smoke = _smoke_result()
-    smoke_receipt = {
-        "receipt_hash": SMOKE_RECEIPT_HASH,
-        "purpose": "research_lab.source_add_functional_probe.v2",
-        "output_root": sha256_json(smoke),
+    provenance_receipt = {
+        "receipt_hash": PROVENANCE_RECEIPT_HASH,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.source_add_provenance.v2",
+        "status": "succeeded",
+        "output_root": sha256_json(_provenance_result()),
     }
     judge_receipt = {
         "receipt_hash": JUDGE_RECEIPT_HASH,
@@ -100,8 +94,8 @@ def _context(
             (JUDGE_RECEIPT_HASH,)
             if with_judge_parent
             else (
-                tuple(sorted((FUNCTIONAL_RECEIPT_HASH, SMOKE_RECEIPT_HASH)))
-                if with_leg1_parents or with_leg1_proofs
+                (PROVENANCE_RECEIPT_HASH,)
+                if with_leg1_parent or with_leg1_proof
                 else ()
             )
         ),
@@ -116,15 +110,11 @@ def _context(
             else (
                 [
                     {
-                        "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-                        "receipts": [functional_receipt],
-                    },
-                    {
-                        "root_receipt_hash": SMOKE_RECEIPT_HASH,
-                        "receipts": [smoke_receipt],
-                    },
+                        "root_receipt_hash": PROVENANCE_RECEIPT_HASH,
+                        "receipts": [provenance_receipt],
+                    }
                 ]
-                if with_leg1_parents
+                if with_leg1_parent
                 else []
             )
         ),
@@ -134,136 +124,66 @@ def _context(
                     "certificate": {
                         "claim": {
                             "lineage_id": "gateway:test",
-                            "output_root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+                            "output_root_receipt_hash": PROVENANCE_RECEIPT_HASH,
                         }
                     },
                     "disclosed_boot_identities": [],
-                    "disclosed_receipts": [functional_receipt],
-                },
-                {
-                    "certificate": {
-                        "claim": {
-                            "lineage_id": "gateway:test",
-                            "output_root_receipt_hash": SMOKE_RECEIPT_HASH,
-                        }
-                    },
-                    "disclosed_boot_identities": [],
-                    "disclosed_receipts": [smoke_receipt],
-                },
+                    "disclosed_receipts": [provenance_receipt],
+                }
             ]
-            if with_leg1_proofs
+            if with_leg1_proof
             else []
         ),
     )
 
 
-def _functional_result():
+def _precheck_doc():
     return {
-        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
-        "evaluator_version": "source-add-functional-probe-v2",
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
+        "docs_completeness": {"score": 5},
+    }
+
+
+def _provenance_result():
+    return {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
         "submission_id": SUBMISSION_ID,
-        "adapter_id": "adapter:test",
-        "config_ref": "source_add_probe_config:1234567890abcdef",
-        "evaluation_mode": "functional_probe",
-        "result_status": "passed",
-        "route_hash": HASH,
-    }
-
-
-def _functional_row():
-    functional = _functional_result()
-    return {
-        "attempt_ref": "source_add_probe_attempt:1234567890abcdef",
-        "adapter_id": "adapter:test",
-        "evaluation_mode": "functional_probe",
-        "config_ref": functional["config_ref"],
-        "result_status": "passed",
-        "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-        "business_artifact_hash": sha256_json(functional),
-        "result_doc": functional,
-    }
-
-
-def _smoke_result():
-    return {
-        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
-        "evaluator_version": "source-add-functional-probe-v2",
-        "submission_id": SUBMISSION_ID,
-        "adapter_id": "adapter:test",
-        "config_ref": "source_add_probe_config:1234567890abcdef",
-        "evaluation_mode": "provisioning_smoke",
-        "result_status": "passed",
-        "route_hash": HASH,
-    }
-
-
-def _smoke_row():
-    smoke = _smoke_result()
-    return {
-        "attempt_ref": "source_add_probe_attempt:fedcba0987654321",
-        "adapter_id": "adapter:test",
-        "evaluation_mode": "provisioning_smoke",
-        "config_ref": smoke["config_ref"],
-        "result_status": "passed",
-        "receipt_hash": SMOKE_RECEIPT_HASH,
-        "business_artifact_hash": sha256_json(smoke),
-        "result_doc": smoke,
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
+        "precheck_doc": _precheck_doc(),
     }
 
 
 def _leg1_trigger():
-    functional = _functional_result()
-    measured = _functional_row()
-    smoke = _smoke_result()
-    measured_smoke = _smoke_row()
+    provenance_hash = sha256_json(_provenance_result())
     return {
-        "functional_probe_passed": True,
-        "attempt_ref": measured["attempt_ref"],
-        "functional_probe_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
-        "business_artifact_hash": measured["business_artifact_hash"],
-        "functional_probe_result_hash": sha256_json(functional),
-        "evaluator_version": functional["evaluator_version"],
-        "route_hash": functional["route_hash"],
-        "provisioning_smoke_passed": True,
-        "provisioning_smoke_attempt_ref": measured_smoke["attempt_ref"],
-        "provisioning_smoke_receipt_hash": SMOKE_RECEIPT_HASH,
-        "provisioning_smoke_business_artifact_hash": measured_smoke[
-            "business_artifact_hash"
-        ],
-        "provisioning_smoke_result_hash": sha256_json(smoke),
+        "provenance_precheck_passed": True,
         "submission_id": SUBMISSION_ID,
-        "final_acceptance_stage": "accepted",
-        "provision_ref": "source_add_provision:1234567890abcdef",
-        "catalog_id": "source_catalog:1234567890abcdef",
-        "registry_provider_id": "provider:test",
-        "provision_status": "provisioned_autoresearch_eligible",
+        "precheck_status": "provenance_precheck_passed",
+        "provenance_receipt_hash": PROVENANCE_RECEIPT_HASH,
+        "provenance_artifact_hash": provenance_hash,
+        "provenance_result_hash": provenance_hash,
     }
 
 
-def _leg1_authority_rows(*, miner_hotkey: str = "miner", stage: str = "accepted"):
+def _leg1_authority_rows(*, miner_hotkey: str = "miner"):
     return {
         "source_add_submission_by_id": [
             {
                 "submission_id": SUBMISSION_ID,
                 "adapter_id": "adapter:test",
                 "miner_hotkey": miner_hotkey,
-                "stage": stage,
                 "precheck_status": "provenance_precheck_passed",
+                "precheck_doc": _precheck_doc(),
+                "submission_doc": {
+                    "provenance_receipt_hash": PROVENANCE_RECEIPT_HASH,
+                    "provenance_artifact_hash": sha256_json(
+                        _provenance_result()
+                    ),
+                },
             }
         ],
-        "source_add_provisioning_by_adapter": [
-            {
-                "provision_ref": "source_add_provision:1234567890abcdef",
-                "catalog_id": "source_catalog:1234567890abcdef",
-                "submission_id": SUBMISSION_ID,
-                "adapter_id": "adapter:test",
-                "miner_hotkey": miner_hotkey,
-                "registry_provider_id": "provider:test",
-                "provision_status": "provisioned_autoresearch_eligible",
-            }
-        ],
-        "source_add_functional_probe_by_submission": [_functional_row()],
-        "source_add_provisioning_smoke_by_submission": [_smoke_row()],
     }
 
 
@@ -277,8 +197,7 @@ def _leg1_payload():
             "existing_rewards": [],
             "alpha_percent": 0.2,
             "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "provisioning_smoke_result": _smoke_result(),
+            "provenance_result": _provenance_result(),
             "trigger_evidence": _leg1_trigger(),
         },
     }
@@ -384,28 +303,27 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
             "existing_rewards": [{"adapter_id": "forged", "leg": 1}],
             "alpha_percent": 0.2,
             "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "provisioning_smoke_result": _smoke_result(),
+            "provenance_result": _provenance_result(),
             "trigger_evidence": _leg1_trigger(),
         },
     }
 
     resolved = resolver.resolve(
         payload=payload,
-        context=_context(with_leg1_parents=True),
+        context=_context(with_leg1_parent=True),
     )
 
     assert resolved["decision_payload"]["existing_rewards"] == authenticated
     assert reader.calls == [
         ("source_add_rewards_by_adapter", {"adapter_id": "adapter:test"}),
-        ("source_add_submission_by_id", {"submission_id": SUBMISSION_ID}),
-        ("source_add_provisioning_by_adapter", {"adapter_id": "adapter:test"}),
-        ("source_add_functional_probe_by_submission", {"submission_id": SUBMISSION_ID}),
-        ("source_add_provisioning_smoke_by_submission", {"submission_id": SUBMISSION_ID}),
+        (
+            "source_add_submission_by_id",
+            {"submission_id": SUBMISSION_ID},
+        ),
     ]
 
 
-def test_leg1_accepts_checkpointed_functional_and_smoke_parent_proofs():
+def test_leg1_accepts_checkpointed_provenance_parent_proof():
     reader = FakeReader(
         {
             "source_add_rewards_by_adapter": [],
@@ -428,22 +346,25 @@ def test_leg1_accepts_checkpointed_functional_and_smoke_parent_proofs():
                 "existing_rewards": [],
                 "alpha_percent": 0.2,
                 "reward_epochs": 20,
-                "functional_probe_result": _functional_result(),
-                "provisioning_smoke_result": _smoke_result(),
+                "provenance_result": _provenance_result(),
                 "trigger_evidence": _leg1_trigger(),
             },
         },
-        context=_context(with_leg1_proofs=True),
+        context=_context(with_leg1_proof=True),
     )
 
     assert resolved["decision_kind"] == "source_add_leg1"
 
 
-def test_leg1_rejects_functional_pass_before_final_acceptance():
+def test_leg1_rejects_nonpassing_provenance_authority():
+    authority = _leg1_authority_rows()
+    authority["source_add_submission_by_id"][0]["precheck_status"] = (
+        "needs_manual_review"
+    )
     reader = FakeReader(
         {
             "source_add_rewards_by_adapter": [],
-            **_leg1_authority_rows(stage="functional_probe_passed"),
+            **authority,
         }
     )
     resolver = CoordinatorRewardSourceV2(
@@ -454,17 +375,17 @@ def test_leg1_rejects_functional_pass_before_final_acceptance():
 
     with pytest.raises(
         CoordinatorRewardSourceV2Error,
-        match="owner or status",
+        match="durable provenance result is invalid",
     ):
         resolver.resolve(
             payload=_leg1_payload(),
-            context=_context(with_leg1_parents=True),
+            context=_context(with_leg1_parent=True),
         )
 
 
-def test_leg1_rejects_acceptance_without_eligible_provisioning():
+def test_leg1_rejects_missing_provenance_authority():
     authority = _leg1_authority_rows()
-    authority["source_add_provisioning_by_adapter"] = []
+    authority["source_add_submission_by_id"] = []
     reader = FakeReader({"source_add_rewards_by_adapter": [], **authority})
     resolver = CoordinatorRewardSourceV2(
         reader=reader,
@@ -474,18 +395,18 @@ def test_leg1_rejects_acceptance_without_eligible_provisioning():
 
     with pytest.raises(
         CoordinatorRewardSourceV2Error,
-        match="final approval is missing or ambiguous",
+        match="submission owner",
     ):
         resolver.resolve(
             payload=_leg1_payload(),
-            context=_context(with_leg1_parents=True),
+            context=_context(with_leg1_parent=True),
         )
 
 
-def test_leg1_rejects_provisioning_owned_by_another_submission():
+def test_leg1_rejects_mismatched_provenance_receipt():
     authority = _leg1_authority_rows()
-    authority["source_add_provisioning_by_adapter"][0]["submission_id"] = (
-        "source_add_submission:fedcba0987654321"
+    authority["source_add_submission_by_id"][0]["submission_doc"] = (
+        {"provenance_receipt_hash": "sha256:" + "f" * 64}
     )
     reader = FakeReader({"source_add_rewards_by_adapter": [], **authority})
     resolver = CoordinatorRewardSourceV2(
@@ -496,11 +417,33 @@ def test_leg1_rejects_provisioning_owned_by_another_submission():
 
     with pytest.raises(
         CoordinatorRewardSourceV2Error,
-        match="final approval differs",
+        match="provenance",
     ):
         resolver.resolve(
             payload=_leg1_payload(),
-            context=_context(with_leg1_parents=True),
+            context=_context(with_leg1_parent=True),
+        )
+
+
+def test_leg1_rejects_mismatched_durable_provenance_artifact_hash():
+    authority = _leg1_authority_rows()
+    authority["source_add_submission_by_id"][0]["submission_doc"][
+        "provenance_artifact_hash"
+    ] = "sha256:" + "f" * 64
+    reader = FakeReader({"source_add_rewards_by_adapter": [], **authority})
+    resolver = CoordinatorRewardSourceV2(
+        reader=reader,
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+
+    with pytest.raises(
+        CoordinatorRewardSourceV2Error,
+        match="provenance receipt differs",
+    ):
+        resolver.resolve(
+            payload=_leg1_payload(),
+            context=_context(with_leg1_parent=True),
         )
 
 
@@ -659,18 +602,19 @@ def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
             "existing_rewards": [],
             "alpha_percent": 0.2,
             "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "provisioning_smoke_result": _smoke_result(),
+            "provenance_result": _provenance_result(),
             "trigger_evidence": _leg1_trigger(),
         },
     }
 
     resolved = resolver.resolve(
         payload=payload,
-        context=_context(with_leg1_parents=True),
+        context=_context(with_leg1_parent=True),
     )
 
-    assert resolved["decision_payload"]["functional_probe_result"]["result_status"] == "passed"
+    assert resolved["decision_payload"]["provenance_result"] == (
+        _provenance_result()
+    )
     assert all(call[0] != "source_add_leg1_events_since" for call in reader.calls)
 
 
@@ -809,8 +753,11 @@ def test_leg1_rejects_host_substituted_miner():
                     "submission_id": SUBMISSION_ID,
                     "adapter_id": "adapter:test",
                     "miner_hotkey": "real-owner",
-                    "stage": "accepted",
                     "precheck_status": "provenance_precheck_passed",
+                    "precheck_doc": _precheck_doc(),
+                    "submission_doc": {
+                        "provenance_receipt_hash": PROVENANCE_RECEIPT_HASH,
+                    },
                 }
             ],
         }
@@ -829,15 +776,14 @@ def test_leg1_rejects_host_substituted_miner():
             "existing_rewards": [],
             "alpha_percent": 0.2,
             "reward_epochs": 20,
-            "functional_probe_result": _functional_result(),
-            "provisioning_smoke_result": _smoke_result(),
+            "provenance_result": _provenance_result(),
             "trigger_evidence": _leg1_trigger(),
         },
     }
     with pytest.raises(CoordinatorRewardSourceV2Error, match="owner or status"):
         resolver.resolve(
             payload=payload,
-            context=_context(with_leg1_parents=True),
+            context=_context(with_leg1_parent=True),
         )
 
 

@@ -149,8 +149,9 @@ def _candidate_hybrid_constraint_definition() -> str:
     return "CHECK (%s)" % " OR ".join(clauses)
 
 
-def _candidate_post_accept_leg1_function_authority(
+def _candidate_source_add_leg1_authority(
     source_root: Path,
+    constant_name: str,
 ) -> str:
     path = source_root / "gateway/tee/supabase_schema_preflight_v2.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -160,8 +161,7 @@ def _candidate_post_accept_leg1_function_authority(
         if isinstance(node, ast.Assign)
         and any(
             isinstance(target, ast.Name)
-            and target.id
-            == "SOURCE_ADD_POST_ACCEPT_LEG1_FUNCTION_AUTHORITY_SHA256"
+            and target.id == constant_name
             for target in node.targets
         )
     ]
@@ -172,6 +172,33 @@ def _candidate_post_accept_leg1_function_authority(
     ):
         raise ValueError("candidate SOURCE_ADD Leg 1 authority is invalid")
     return values[0]
+
+
+def _candidate_post_accept_leg1_function_authority(
+    source_root: Path,
+) -> str:
+    return _candidate_source_add_leg1_authority(
+        source_root,
+        "SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256",
+    )
+
+
+def _candidate_provenance_leg1_trigger_authority(
+    source_root: Path,
+) -> str:
+    return _candidate_source_add_leg1_authority(
+        source_root,
+        "SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256",
+    )
+
+
+def _candidate_provenance_leg1_view_authority(
+    source_root: Path,
+) -> str:
+    return _candidate_source_add_leg1_authority(
+        source_root,
+        "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256",
+    )
 
 
 def _candidate_source_add_claim_control_v2_function_authority(
@@ -626,6 +653,7 @@ def _migration_schema_contract(
             "172-research-lab-source-add-claim-control.sql",
             "173-research-lab-source-add-leg1-release-policy.sql",
             "174-research-lab-source-add-restart-state-restore.sql",
+            "175-research-lab-source-add-provenance-leg1.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -706,6 +734,7 @@ def _migration_schema_contract(
         "research_lab_candidate_model_unit_terminals",
         "research_lab_candidate_waterfall_receipts",
         "research_lab_candidate_waterfall_metrics",
+        "research_lab_source_add_provenance_leg1_authority_v1",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -738,6 +767,16 @@ def _migration_schema_contract(
         "research_lab_source_add_duplicate_privacy_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v2",
+        "research_lab_source_add_post_accept_leg1_contract_v3",
+        "research_lab_source_add_configure_probe_v3",
+        "research_lab_source_add_enqueue_leg1_after_provenance_v1",
+        "research_lab_source_add_enqueue_provision_smoke_v2",
+        "research_lab_source_add_finalize_leg1_v4",
+        "research_lab_source_add_finalize_provision_smoke_v3",
+        "research_lab_source_add_finalize_provision_v3",
+        "research_lab_source_add_reject_current_builtin_v3",
+        "research_lab_source_add_reconcile_provenance_leg1_v1",
+        "research_lab_source_add_reserve_leg1_slot_v4",
         "research_lab_source_add_reserve_leg1_slot_v3",
         "research_lab_source_add_finalize_leg1_v3",
         "research_lab_routing_exact_model_transition_contract_v1",
@@ -1208,6 +1247,12 @@ class LocalPostgRESTState:
         self.durable_schema_sha = durable_schema_sha
         self.source_add_post_accept_leg1_function_authority = (
             _candidate_post_accept_leg1_function_authority(source_root)
+        )
+        self.source_add_provenance_leg1_trigger_authority = (
+            _candidate_provenance_leg1_trigger_authority(source_root)
+        )
+        self.source_add_provenance_leg1_view_authority = (
+            _candidate_provenance_leg1_view_authority(source_root)
         )
         self.durable_revision = 0
         self._provider_outcome_locks: dict[
@@ -3991,46 +4036,73 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 }
             elif name == (
-                "research_lab_source_add_post_accept_leg1_contract_v2"
+                "research_lab_source_add_post_accept_leg1_contract_v3"
             ):
                 if body not in ({}, None):
                     raise ValueError(
-                        "SOURCE_ADD post-accept Leg 1 contract body is invalid"
+                        "SOURCE_ADD automatic provenance Leg 1 contract body "
+                        "is invalid"
                     )
                 response = {
                     "schema_version": (
-                        "leadpoet.source_add_post_accept_leg1_contract.v2"
+                        "leadpoet.source_add_post_accept_leg1_contract.v3"
                     ),
                     "daily_cap": 50,
                     "leg1_alpha_percent": 0.2,
                     "leg1_reward_epochs": 20,
+                    "approval_boundary": "provenance_precheck_passed",
+                    "backfill_policy": "all_exact_attested_provenance",
+                    "public_trigger_fields": [
+                        "precheck_status",
+                        "provenance_artifact_hash",
+                        "provenance_precheck_passed",
+                        "provenance_receipt_hash",
+                        "provenance_result_hash",
+                        "submission_id",
+                    ],
+                    "authority_view": (
+                        "research_lab_source_add_provenance_leg1_authority_v1"
+                    ),
                     "function_authority_sha256": (
                         self.server.state.source_add_post_accept_leg1_function_authority
                     ),
+                    "trigger_authority_sha256": (
+                        self.server.state.source_add_provenance_leg1_trigger_authority
+                    ),
+                    "view_authority_sha256": (
+                        self.server.state.source_add_provenance_leg1_view_authority
+                    ),
                     "functions": {
-                        "configure_probe_v2": True,
-                        "finalize_provision_v2": True,
-                        "reject_current_builtin_v2": True,
-                        "post_accept_contract_v1": True,
-                        "reserve_leg1_slot_v2": True,
-                        "finalize_leg1_v2": True,
-                        "reserve_leg1_slot_v3": True,
-                        "finalize_leg1_v3": True,
-                        "finalize_provision_smoke_v2": True,
+                        "configure_probe_v3": True,
+                        "enqueue_leg1_after_provenance_v1": True,
+                        "enqueue_provision_smoke_v2": True,
+                        "finalize_leg1_v4": True,
+                        "finalize_provision_smoke_v3": True,
+                        "finalize_provision_v3": True,
+                        "reject_current_builtin_v3": True,
+                        "reconcile_provenance_leg1_v1": True,
+                        "reserve_leg1_slot_v4": True,
                     },
                     "triggers": {
-                        "acceptance": True,
-                        "eligible": True,
-                        "leg1_work": True,
-                        "leg1_slot": True,
-                        "leg1_obligation": True,
-                        "leg1_initial_event": True,
+                        "automatic_enqueue": True,
+                        "eligible_v2": True,
+                        "eligible_v3": True,
+                        "leg1_initial_event_v3": True,
+                        "leg1_obligation_v3": True,
+                        "leg1_slot_v3": True,
+                        "leg1_work_v3": True,
+                    },
+                    "columns": {
+                        "intent_approval_kind": True,
+                        "intent_provenance_artifact_hash": True,
+                        "intent_provenance_receipt_hash": True,
+                        "slot_approval_kind": True,
                     },
                     "permissions": {
                         "service_role_exists": True,
                         "candidate_callable": True,
+                        "internal_not_callable": True,
                         "rollback_v2_callable": True,
-                        "legacy_not_callable": True,
                     },
                 }
             elif name == (

@@ -32,6 +32,20 @@ PRECHECK_PASSED = "provenance_precheck_passed"
 PRECHECK_MANUAL = "needs_manual_review"
 PRECHECK_REJECTED = "rejected_precheck"
 
+SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION = (
+    "leadpoet.source_add_provenance_result.v2"
+)
+POST_PROVENANCE_ROUTING_REASONS = frozenset(
+    {
+        "automatic_safe_get_selected",
+        "endpoint_examples_missing",
+        "https_api_base_url_required",
+        "invalid_api_base_url",
+        "operator_credential_required",
+        "operator_probe_configuration_required",
+    }
+)
+
 _SD_BASE_URL = "https://api.scrapingdog.com"
 _MAX_DOC_EXCERPT = 1200
 # The measured provider broker already enforces this one-MiB ceiling.  Keep
@@ -106,6 +120,71 @@ class SourceAddProvenanceResult:
             "reasons": list(self.reasons),
             **self.doc,
         }
+
+
+def rebuild_attested_provenance_result_v2(
+    *,
+    submission_id: str,
+    precheck_status: str,
+    precheck_doc: Mapping[str, Any],
+    submission_doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recover the exact signed provenance result from durable state.
+
+    New rows retain the signed result verbatim. Before automatic Leg 1, the
+    display precheck document appended exactly one host-only probe-routing
+    reason after attestation. The closed-list fallback removes only those
+    values; callers must still compare the resulting hash with the signed
+    receipt output before authorizing a reward.
+    """
+
+    normalized_submission_id = str(submission_id or "")
+    normalized_status = str(precheck_status or "")
+    exact_result = submission_doc.get("provenance_result")
+    if isinstance(exact_result, Mapping):
+        result = dict(exact_result)
+    else:
+        if not isinstance(precheck_doc.get("reasons"), list) or any(
+            not isinstance(item, str) for item in precheck_doc.get("reasons", [])
+        ):
+            raise ValueError("SOURCE_ADD durable provenance reasons are invalid")
+        reasons = [
+            item
+            for item in precheck_doc["reasons"]
+            if isinstance(item, str)
+            and item not in POST_PROVENANCE_ROUTING_REASONS
+        ]
+        signed_precheck_doc = {**dict(precheck_doc), "reasons": reasons}
+        result = {
+            "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+            "submission_id": normalized_submission_id,
+            "precheck_status": normalized_status,
+            "reasons": reasons,
+            "precheck_doc": signed_precheck_doc,
+        }
+    if (
+        set(result)
+        != {
+            "schema_version",
+            "submission_id",
+            "precheck_status",
+            "reasons",
+            "precheck_doc",
+        }
+        or result.get("schema_version")
+        != SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION
+        or result.get("submission_id") != normalized_submission_id
+        or result.get("precheck_status") != normalized_status
+        or normalized_status != PRECHECK_PASSED
+        or not isinstance(result.get("reasons"), list)
+        or any(not isinstance(item, str) for item in result["reasons"])
+        or not isinstance(result.get("precheck_doc"), Mapping)
+        or result["precheck_doc"].get("precheck_status") != normalized_status
+        or list(result["precheck_doc"].get("reasons") or [])
+        != list(result["reasons"])
+    ):
+        raise ValueError("SOURCE_ADD durable provenance result is invalid")
+    return result
 
 
 def sanitize_source_add_precheck_doc(doc: Mapping[str, Any]) -> dict[str, Any]:

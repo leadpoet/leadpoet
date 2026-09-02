@@ -734,9 +734,7 @@ async def _source_add_rpc(name: str, params: Mapping[str, Any]) -> dict[str, Any
     return dict(value)
 
 
-_SOURCE_ADD_FINAL_APPROVAL_STAGES = frozenset(
-    {"accepted", "leg1_queued", "leg1_created"}
-)
+_SOURCE_ADD_FINAL_APPROVAL_STAGES = frozenset({"accepted"})
 
 
 def _require_source_add_final_approval_mutable(row: Mapping[str, Any]) -> None:
@@ -789,9 +787,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     await _verify_signed_miner(payload)
 
     if payload.adapter_credential is not None or payload.adapter_credential_v2 is not None:
+        logger.warning("SOURCE_ADD_MINER_CREDENTIAL_FIELDS_REJECTED")
         raise HTTPException(
             status_code=400,
-            detail="miners must not submit SOURCE_ADD API credentials",
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
         )
 
     source_metadata = payload.source_metadata.model_dump(mode="json")
@@ -822,9 +821,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     if not isinstance(declared_domains, list) or any(
         not isinstance(item, str) for item in declared_domains
     ):
+        logger.warning("SOURCE_ADD_DECLARED_DOMAINS_REJECTED")
         raise HTTPException(
             status_code=400,
-            detail="SOURCE_ADD declared_base_domains must be a list of domains",
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
         )
     try:
         source_identity_ref = source_identity_hash_from_metadata(
@@ -848,9 +848,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         if not provider_origin_host or not provider_origin_ref:
             raise ValueError("provider origin is unavailable")
     except ValueError as exc:
+        logger.warning("SOURCE_ADD_IDENTITY_REJECTED")
         raise HTTPException(
             status_code=400,
-            detail="SOURCE_ADD source identity is invalid",
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
         ) from exc
 
     record, errors = await asyncio.to_thread(
@@ -868,7 +869,14 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         submissions_last_30d_for_hotkey=0,
     )
     if errors or record is None:
-        raise HTTPException(status_code=400, detail="; ".join(errors or ["submission rejected"]))
+        logger.warning(
+            "SOURCE_ADD_INTAKE_REJECTED reason_count=%d",
+            len(errors or ()),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
+        )
     record_doc = record.to_dict()
     record_doc["source_metadata"] = source_metadata
     record_doc["source_identity_version"] = SOURCE_ADD_IDENTITY_VERSION
@@ -1223,7 +1231,7 @@ async def configure_research_lab_source_adapter_test(
         "operator-config:%s" % config_ref,
     )
     queued = await _source_add_rpc(
-        "research_lab_source_add_configure_probe_v2",
+        "research_lab_source_add_configure_probe_v3",
         {
             "p_submission_id": submission_id,
             "p_config_ref": config_ref,
@@ -1604,7 +1612,7 @@ async def provision_research_lab_source_adapter(
             pending_catalog_id = str(existing_provision.get("catalog_id") or catalog_id)
         else:
             pending = await _source_add_rpc(
-                "research_lab_source_add_finalize_provision_v2",
+                "research_lab_source_add_finalize_provision_v3",
                 {
                     "p_submission_id": submission_id,
                     "p_catalog_row": pending_catalog_row,
@@ -1646,7 +1654,7 @@ async def provision_research_lab_source_adapter(
             provision_ref,
         )
         queued = await _source_add_rpc(
-            "research_lab_source_add_enqueue_provision_smoke",
+            "research_lab_source_add_enqueue_provision_smoke_v2",
             {
                 "p_work_id": smoke_work_id,
                 "p_submission_id": submission_id,
@@ -1692,7 +1700,7 @@ async def provision_research_lab_source_adapter(
         )
 
     finalized = await _source_add_rpc(
-        "research_lab_source_add_finalize_provision_v2",
+        "research_lab_source_add_finalize_provision_v3",
         {
             "p_submission_id": submission_id,
             "p_catalog_row": catalog_row,

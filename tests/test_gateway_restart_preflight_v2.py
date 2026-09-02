@@ -676,38 +676,63 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
 
 def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
     contract = {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v2",
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
         "daily_cap": 50,
         "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
+        "approval_boundary": "provenance_precheck_passed",
+        "backfill_policy": "all_exact_attested_provenance",
+        "public_trigger_fields": [
+            "precheck_status",
+            "provenance_artifact_hash",
+            "provenance_precheck_passed",
+            "provenance_receipt_hash",
+            "provenance_result_hash",
+            "submission_id",
+        ],
+        "authority_view": (
+            "research_lab_source_add_provenance_leg1_authority_v1"
+        ),
         "function_authority_sha256": (
-            "sha256:6c09aa3c6b82b3fe666c6739c4f71a51"
-            "ea8d6445e3e5a52ab08a4e2f8fa8d9ec"
+            schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+        ),
+        "trigger_authority_sha256": (
+            schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
+        ),
+        "view_authority_sha256": (
+            schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
         ),
         "functions": {
-            "configure_probe_v2": True,
-            "finalize_provision_v2": True,
-            "reject_current_builtin_v2": True,
-            "post_accept_contract_v1": True,
-            "reserve_leg1_slot_v2": True,
-            "finalize_leg1_v2": True,
-            "reserve_leg1_slot_v3": True,
-            "finalize_leg1_v3": True,
-            "finalize_provision_smoke_v2": True,
+            "configure_probe_v3": True,
+            "enqueue_leg1_after_provenance_v1": True,
+            "enqueue_provision_smoke_v2": True,
+            "finalize_leg1_v4": True,
+            "finalize_provision_smoke_v3": True,
+            "finalize_provision_v3": True,
+            "reject_current_builtin_v3": True,
+            "reconcile_provenance_leg1_v1": True,
+            "reserve_leg1_slot_v4": True,
         },
         "triggers": {
-            "acceptance": True,
-            "eligible": True,
-            "leg1_work": True,
-            "leg1_slot": True,
-            "leg1_obligation": True,
-            "leg1_initial_event": True,
+            "automatic_enqueue": True,
+            "eligible_v2": True,
+            "eligible_v3": True,
+            "leg1_initial_event_v3": True,
+            "leg1_obligation_v3": True,
+            "leg1_slot_v3": True,
+            "leg1_work_v3": True,
+        },
+        "columns": {
+            "intent_approval_kind": True,
+            "intent_provenance_artifact_hash": True,
+            "intent_provenance_receipt_hash": True,
+            "slot_approval_kind": True,
         },
         "permissions": {
             "service_role_exists": True,
             "candidate_callable": True,
+            "internal_not_callable": True,
             "rollback_v2_callable": True,
-            "legacy_not_callable": True,
         },
     }
     contract.update(overrides)
@@ -756,7 +781,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -885,7 +910,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         request
         for request in table_requests
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
         )
     ]
     claim_control_contract_requests = [
@@ -1011,7 +1036,7 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1118,7 +1143,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v2"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1286,28 +1311,33 @@ def test_source_add_claim_control_contract_rejects_drift(overrides) -> None:
 @pytest.mark.parametrize(
     ("section", "field"),
     (
-        ("functions", "configure_probe_v2"),
-        ("functions", "finalize_provision_v2"),
-        ("functions", "reject_current_builtin_v2"),
-        ("functions", "post_accept_contract_v1"),
-        ("functions", "reserve_leg1_slot_v2"),
-        ("functions", "finalize_leg1_v2"),
-        ("functions", "reserve_leg1_slot_v3"),
-        ("functions", "finalize_leg1_v3"),
-        ("functions", "finalize_provision_smoke_v2"),
-        ("triggers", "acceptance"),
-        ("triggers", "eligible"),
-        ("triggers", "leg1_work"),
-        ("triggers", "leg1_slot"),
-        ("triggers", "leg1_obligation"),
-        ("triggers", "leg1_initial_event"),
+        ("functions", "configure_probe_v3"),
+        ("functions", "enqueue_leg1_after_provenance_v1"),
+        ("functions", "enqueue_provision_smoke_v2"),
+        ("functions", "finalize_leg1_v4"),
+        ("functions", "finalize_provision_smoke_v3"),
+        ("functions", "finalize_provision_v3"),
+        ("functions", "reject_current_builtin_v3"),
+        ("functions", "reconcile_provenance_leg1_v1"),
+        ("functions", "reserve_leg1_slot_v4"),
+        ("triggers", "automatic_enqueue"),
+        ("triggers", "eligible_v2"),
+        ("triggers", "eligible_v3"),
+        ("triggers", "leg1_initial_event_v3"),
+        ("triggers", "leg1_obligation_v3"),
+        ("triggers", "leg1_slot_v3"),
+        ("triggers", "leg1_work_v3"),
+        ("columns", "intent_approval_kind"),
+        ("columns", "intent_provenance_artifact_hash"),
+        ("columns", "intent_provenance_receipt_hash"),
+        ("columns", "slot_approval_kind"),
         ("permissions", "service_role_exists"),
         ("permissions", "candidate_callable"),
+        ("permissions", "internal_not_callable"),
         ("permissions", "rollback_v2_callable"),
-        ("permissions", "legacy_not_callable"),
     ),
 )
-def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
+def test_source_add_automatic_provenance_leg1_contract_rejects_safety_drift(
     section,
     field,
 ) -> None:
@@ -1320,9 +1350,9 @@ def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="SOURCE_ADD post-accept Leg 1 contract differs",
+        match="SOURCE_ADD automatic provenance Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v2(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v3(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,
@@ -1330,10 +1360,28 @@ def test_source_add_post_accept_leg1_contract_rejects_safety_drift(
         )
 
 
-def test_source_add_post_accept_leg1_contract_rejects_function_authority_drift(
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_version", "leadpoet.source_add_post_accept_leg1_contract.v2"),
+        ("daily_cap", 49),
+        ("leg1_alpha_percent", 0.3),
+        ("leg1_reward_epochs", 19),
+        ("approval_boundary", "post_accept_functional_probe"),
+        ("backfill_policy", "none"),
+        ("public_trigger_fields", ["submission_id"]),
+        ("authority_view", "research_lab_source_add_submission_current"),
+        ("function_authority_sha256", "sha256:" + "0" * 64),
+        ("trigger_authority_sha256", "sha256:" + "0" * 64),
+        ("view_authority_sha256", "sha256:" + "0" * 64),
+    ),
+)
+def test_source_add_automatic_provenance_leg1_contract_rejects_policy_drift(
+    field,
+    value,
 ) -> None:
     contract = json.loads(_source_add_post_accept_leg1_contract_response())
-    contract["function_authority_sha256"] = "sha256:" + "0" * 64
+    contract[field] = value
 
     def opener(_request, *, timeout):
         assert timeout == 10.0
@@ -1341,9 +1389,9 @@ def test_source_add_post_accept_leg1_contract_rejects_function_authority_drift(
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="SOURCE_ADD post-accept Leg 1 contract differs",
+        match="SOURCE_ADD automatic provenance Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v2(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v3(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,

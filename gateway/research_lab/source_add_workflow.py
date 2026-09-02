@@ -1,4 +1,4 @@
-"""Restart-safe SOURCE_ADD queue, functional probe, and Leg 1 orchestration."""
+"""Restart-safe SOURCE_ADD provenance, catalog, and reward orchestration."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ from urllib.parse import parse_qsl, urlsplit
 
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.source_add_provenance import (
+    rebuild_attested_provenance_result_v2,
+)
 from gateway.research_lab.store import call_rpc, select_many, select_one
 from gateway.research_lab.v2_authority import (
     authorize_reward_decision_v2,
@@ -129,6 +132,30 @@ def source_add_probe_attempt_ref(
 
 def source_add_reward_intent_id(submission_id: str, adapter_id: str) -> str:
     return source_add_ref("source_add_reward_intent", submission_id, adapter_id, 1)
+
+
+def _provenance_result_from_submission(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild the exact attested provenance result from durable state."""
+
+    submission_doc = row.get("submission_doc")
+    precheck_doc = row.get("precheck_doc")
+    if not isinstance(submission_doc, Mapping) or not isinstance(
+        precheck_doc, Mapping
+    ):
+        raise SourceAddWorkflowError(
+            "SOURCE_ADD credible provenance authority is missing"
+        )
+    try:
+        return rebuild_attested_provenance_result_v2(
+            submission_id=str(row.get("submission_id") or ""),
+            precheck_status=str(row.get("precheck_status") or ""),
+            precheck_doc=precheck_doc,
+            submission_doc=submission_doc,
+        )
+    except ValueError as exc:
+        raise SourceAddWorkflowError(str(exc)) from exc
 
 
 def source_add_host_hash(base_url: str) -> str:
@@ -339,6 +366,10 @@ async def _process_provenance(
         timeout_seconds=int(config.source_add_probe_timeout_seconds),
     )
     precheck_doc = precheck.to_record_doc()
+    provenance_result = outcome.get("result")
+    if not isinstance(provenance_result, Mapping):
+        raise SourceAddWorkflowError("SOURCE_ADD provenance result is missing")
+    provenance_result = dict(provenance_result)
     reasons = {str(item) for item in precheck.reasons}
     docs_fetch = precheck_doc.get("docs_fetch")
     docs_http_status = docs_fetch.get("status", 0) if isinstance(
@@ -459,6 +490,8 @@ async def _process_provenance(
                 )
                 or ""
             ),
+            "provenance_artifact_hash": sha256_json(provenance_result),
+            "provenance_result": provenance_result,
         },
         precheck_status=precheck.precheck_status,
         precheck_doc=precheck_doc,
@@ -467,12 +500,64 @@ async def _process_provenance(
         next_work=next_work,
         release_identity=release_identity,
     )
+    leg1_status = "not_eligible"
+    if precheck.precheck_status == "provenance_precheck_passed":
+        receipt = outcome.get("execution_receipt") or outcome.get("receipt") or {}
+        receipt_hash = str(receipt.get("receipt_hash") or "")
+        business_hash = str(receipt.get("output_root") or "")
+        if not _HASH_RE.fullmatch(receipt_hash) or not _HASH_RE.fullmatch(
+            business_hash
+        ):
+            raise SourceAddWorkflowError(
+                "SOURCE_ADD provenance reward authority is invalid"
+            )
+        intent_id = source_add_reward_intent_id(
+            str(current["submission_id"]), str(current["adapter_id"])
+        )
+        reward_work_id = source_add_work_id(
+            str(current["submission_id"]), "leg1_reward", intent_id
+        )
+        try:
+            queued = await _rpc(
+                "research_lab_source_add_enqueue_leg1_after_provenance_v1",
+                {
+                    "p_submission_id": str(current["submission_id"]),
+                    "p_intent_id": intent_id,
+                    "p_reward_work_id": reward_work_id,
+                    "p_provenance_receipt_hash": receipt_hash,
+                    "p_provenance_artifact_hash": business_hash,
+                },
+            )
+            leg1_status = str(queued.get("status") or "")
+            if leg1_status not in {
+                "queued",
+                "already_queued",
+                "already_created",
+            }:
+                raise SourceAddWorkflowError(
+                    "SOURCE_ADD provenance Leg 1 enqueue returned %s"
+                    % (leg1_status or "an empty status")
+                )
+        except Exception as exc:
+            # Provenance completion is already durable. Reconciliation repairs
+            # this bounded transaction gap from the same attested receipt,
+            # without rerunning a paid provider call.
+            leg1_status = "reconciliation_pending"
+            logger.warning(
+                "SOURCE_ADD_PROVENANCE_LEG1_RECONCILIATION_PENDING "
+                "submission_id=%s type=%s",
+                current["submission_id"],
+                type(exc).__name__,
+            )
     logger.info(
-        "SOURCE_ADD_PROVENANCE_FINISHED submission_id=%s stage=%s",
+        "SOURCE_ADD_PROVENANCE_FINISHED submission_id=%s stage=%s leg1_status=%s",
         current["submission_id"],
         stage,
+        leg1_status,
     )
-    return result
+    if leg1_status == "not_eligible":
+        return result
+    return {**result, "leg1_reward_status": leg1_status}
 
 
 async def _process_functional_probe(
@@ -692,7 +777,7 @@ async def _process_provisioning_smoke(
                 current["submission_id"],
             )
             rejected = await _rpc(
-                "research_lab_source_add_reject_current_builtin_v2",
+                "research_lab_source_add_reject_current_builtin_v3",
                 {
                     "p_work_id": str(work["work_id"]),
                     "p_lease_token": str(work["lease_token"]),
@@ -734,14 +819,8 @@ async def _process_provisioning_smoke(
             raise SourceAddWorkflowError(
                 "SOURCE_ADD accepted functional proof is missing"
             )
-        intent_id = source_add_reward_intent_id(
-            str(current["submission_id"]), str(current["adapter_id"])
-        )
-        reward_work_id = source_add_work_id(
-            str(current["submission_id"]), "leg1_reward", intent_id
-        )
         finalized = await _rpc(
-            "research_lab_source_add_finalize_provision_smoke_v2",
+            "research_lab_source_add_finalize_provision_smoke_v3",
             {
                 "p_work_id": str(work["work_id"]),
                 "p_lease_token": str(work["lease_token"]),
@@ -749,23 +828,6 @@ async def _process_provisioning_smoke(
                 "p_catalog_row": dict(catalog_row),
                 "p_provision_row": dict(provision_row),
                 "p_smoke_attempt": smoke_attempt,
-                "p_reward_intent": {
-                    "intent_id": intent_id,
-                    "miner_hotkey": str(current["miner_hotkey"]),
-                    "functional_receipt_hash": str(functional["receipt_hash"]),
-                    "business_artifact_hash": str(
-                        functional["business_artifact_hash"]
-                    ),
-                },
-                "p_reward_work": {
-                    "work_id": reward_work_id,
-                    "work_kind": "leg1_reward",
-                    "priority": 30,
-                    "job_doc": {
-                        "intent_id": intent_id,
-                        "attempt_ref": str(functional.get("attempt_ref") or ""),
-                    },
-                },
             },
         )
         final_status = str(finalized.get("status") or "")
@@ -845,14 +907,11 @@ def _functional_attempt_doc(
 async def _process_leg1_reward(
     work: Mapping[str, Any], *, config: ResearchLabGatewayConfig
 ) -> dict[str, Any]:
-    if not (
-        config.source_add_rewards_enabled
-        and config.source_add_functional_rewards_enabled
-    ):
+    if not config.source_add_rewards_enabled:
         return await _finish_work(
             work,
             disposition="retry",
-            result_doc={"status": "functional_rewards_disabled"},
+            result_doc={"status": "rewards_disabled"},
             available_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
     job_doc = work.get("job_doc") if isinstance(work.get("job_doc"), Mapping) else {}
@@ -864,7 +923,7 @@ async def _process_leg1_reward(
     if not isinstance(intent, Mapping):
         raise SourceAddWorkflowError("SOURCE_ADD reward intent is missing")
     slot = await _rpc(
-        "research_lab_source_add_reserve_leg1_slot_v3",
+        "research_lab_source_add_reserve_leg1_slot_v4",
         {
             "p_intent_id": intent_id,
             "p_work_id": str(work["work_id"]),
@@ -889,104 +948,35 @@ async def _process_leg1_reward(
 
     current = await _load_submission(str(work.get("submission_id") or ""))
     document = _submission_document(current)
-    functional = await select_one(
-        "research_lab_source_add_functional_probe_current",
-        filters=(("submission_id", str(current["submission_id"])),),
-    )
-    if not isinstance(functional, Mapping) or functional.get("result_status") != "passed":
-        raise SourceAddWorkflowError("SOURCE_ADD reward functional proof is missing")
-    functional_result = functional.get("result_doc")
-    if not isinstance(functional_result, Mapping):
-        raise SourceAddWorkflowError("SOURCE_ADD functional result document is missing")
-    receipt_hash = str(functional.get("receipt_hash") or "")
-    business_hash = str(functional.get("business_artifact_hash") or "")
+    provenance_result = _provenance_result_from_submission(current)
+    receipt_hash = str(document.get("provenance_receipt_hash") or "")
+    business_hash = sha256_json(provenance_result)
     if (
-        receipt_hash != str(intent.get("functional_receipt_hash") or "")
-        or business_hash != str(intent.get("business_artifact_hash") or "")
-        or business_hash != sha256_json(dict(functional_result))
+        str(intent.get("approval_kind") or "")
+        != "provenance_precheck_passed"
+        or not _HASH_RE.fullmatch(receipt_hash)
+        or receipt_hash != str(intent.get("provenance_receipt_hash") or "")
+        or business_hash != str(intent.get("provenance_artifact_hash") or "")
     ):
-        raise SourceAddWorkflowError("SOURCE_ADD reward intent proof differs")
-    smoke = await select_one(
-        "research_lab_source_add_provisioning_smoke_current",
-        filters=(("submission_id", str(current["submission_id"])),),
-    )
-    smoke_result = smoke.get("result_doc") if isinstance(smoke, Mapping) else None
-    smoke_receipt_hash = (
-        str(smoke.get("receipt_hash") or "") if isinstance(smoke, Mapping) else ""
-    )
-    smoke_business_hash = (
-        str(smoke.get("business_artifact_hash") or "")
-        if isinstance(smoke, Mapping)
-        else ""
-    )
-    if (
-        not isinstance(smoke, Mapping)
-        or not isinstance(smoke_result, Mapping)
-        or str(smoke.get("adapter_id") or "") != str(current["adapter_id"])
-        or str(smoke.get("evaluation_mode") or "") != "provisioning_smoke"
-        or str(smoke.get("result_status") or "") != "passed"
-        or str(smoke.get("config_ref") or "")
-        != str(functional.get("config_ref") or "")
-        or not _HASH_RE.fullmatch(smoke_receipt_hash)
-        or smoke_business_hash != sha256_json(dict(smoke_result))
-    ):
-        raise SourceAddWorkflowError(
-            "SOURCE_ADD reward provisioning smoke proof is missing"
-        )
-    provision = await select_one(
-        "research_lab_source_add_provisioning_current",
-        filters=(
-            ("submission_id", str(current["submission_id"])),
-            ("adapter_id", str(current["adapter_id"])),
-            ("provision_status", "provisioned_autoresearch_eligible"),
-        ),
-    )
-    if (
-        not isinstance(provision, Mapping)
-        or str(provision.get("miner_hotkey") or "")
-        != str(current["miner_hotkey"])
-        or not str(provision.get("provision_ref") or "")
-        or not str(provision.get("catalog_id") or "")
-        or not str(provision.get("registry_provider_id") or "")
-    ):
-        raise SourceAddWorkflowError(
-            "SOURCE_ADD reward final approval proof is missing"
-        )
+        raise SourceAddWorkflowError("SOURCE_ADD provenance reward intent differs")
     from gateway.research_lab.attested_v2_store import load_business_artifact_graph_v2
 
-    functional_graph = await load_business_artifact_graph_v2(
-        artifact_kind="source_add_functional_probe",
-        artifact_ref=str(functional.get("attempt_ref") or ""),
+    provenance_graph = await load_business_artifact_graph_v2(
+        artifact_kind="source_add_provenance",
+        artifact_ref=str(current["submission_id"]),
         artifact_hash=business_hash,
-    )
-    smoke_graph = await load_business_artifact_graph_v2(
-        artifact_kind="source_add_provisioning_smoke",
-        artifact_ref=str(smoke.get("attempt_ref") or ""),
-        artifact_hash=smoke_business_hash,
     )
     current_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(
         getattr(config, "evaluation_epoch", 0)
     )
     start_epoch = max(0, int(current_epoch)) + 1
     trigger = {
-        "functional_probe_passed": True,
-        "attempt_ref": str(functional.get("attempt_ref") or ""),
-        "functional_probe_receipt_hash": receipt_hash,
-        "business_artifact_hash": business_hash,
-        "functional_probe_result_hash": sha256_json(dict(functional_result)),
-        "evaluator_version": str(functional_result.get("evaluator_version") or ""),
-        "route_hash": str(functional_result.get("route_hash") or ""),
-        "provisioning_smoke_passed": True,
-        "provisioning_smoke_attempt_ref": str(smoke.get("attempt_ref") or ""),
-        "provisioning_smoke_receipt_hash": smoke_receipt_hash,
-        "provisioning_smoke_business_artifact_hash": smoke_business_hash,
-        "provisioning_smoke_result_hash": sha256_json(dict(smoke_result)),
+        "provenance_precheck_passed": True,
         "submission_id": str(current["submission_id"]),
-        "final_acceptance_stage": str(current.get("stage") or ""),
-        "provision_ref": str(provision.get("provision_ref") or ""),
-        "catalog_id": str(provision.get("catalog_id") or ""),
-        "registry_provider_id": str(provision.get("registry_provider_id") or ""),
-        "provision_status": str(provision.get("provision_status") or ""),
+        "precheck_status": "provenance_precheck_passed",
+        "provenance_receipt_hash": receipt_hash,
+        "provenance_artifact_hash": business_hash,
+        "provenance_result_hash": sha256_json(provenance_result),
     }
     existing_rewards = []
     existing = await select_one(
@@ -1040,8 +1030,7 @@ async def _process_leg1_reward(
             != "research_lab.reward_decision.v2"
             or decision_receipt.get("output_root")
             != expected_decision_artifact_hash
-            or decision_receipt.get("parent_receipt_hashes")
-            != sorted((receipt_hash, smoke_receipt_hash))
+            or decision_receipt.get("parent_receipt_hashes") != [receipt_hash]
         ):
             raise SourceAddWorkflowError(
                 "SOURCE_ADD recovered reward decision differs"
@@ -1057,8 +1046,7 @@ async def _process_leg1_reward(
                 "existing_rewards": existing_rewards,
                 "alpha_percent": float(config.source_add_leg1_alpha_percent),
                 "reward_epochs": int(config.lab_reward_epochs),
-                "functional_probe_result": dict(functional_result),
-                "provisioning_smoke_result": dict(smoke_result),
+                "provenance_result": provenance_result,
                 "trigger_evidence": trigger,
             },
             expected_result={
@@ -1067,7 +1055,7 @@ async def _process_leg1_reward(
             },
             artifact_kind="source_add_reward_decision",
             artifact_ref=leg1.reward_ref,
-            parent_graphs=(functional_graph, smoke_graph),
+            parent_graphs=(provenance_graph,),
         )
         decision_receipt = authority.get("execution_receipt") or authority.get(
             "receipt"
@@ -1082,7 +1070,7 @@ async def _process_leg1_reward(
     ):
         raise SourceAddWorkflowError("SOURCE_ADD reward decision receipt is invalid")
     finalized = await _rpc(
-        "research_lab_source_add_finalize_leg1_v3",
+        "research_lab_source_add_finalize_leg1_v4",
         {
             "p_intent_id": intent_id,
             "p_work_id": str(work["work_id"]),
@@ -1133,6 +1121,7 @@ async def run_source_add_dispatcher(
     worker_id = "source-add:%s:%s" % (os.getpid(), id(asyncio.current_task()))
     logger.info("SOURCE_ADD_DISPATCHER_STARTED worker_id=%s", worker_id)
     queue_paused = False
+    next_leg1_reconciliation_at = 0.0
     while True:
         poll_seconds = 2.0
         try:
@@ -1146,6 +1135,16 @@ async def run_source_add_dispatcher(
             ):
                 await asyncio.sleep(poll_seconds)
                 continue
+            now = asyncio.get_running_loop().time()
+            if now >= next_leg1_reconciliation_at:
+                reconciled = await _rpc(
+                    "research_lab_source_add_reconcile_provenance_leg1_v1", {}
+                )
+                if str(reconciled.get("status") or "") != "reconciled":
+                    raise SourceAddWorkflowError(
+                        "SOURCE_ADD Leg 1 reconciliation returned an invalid status"
+                    )
+                next_leg1_reconciliation_at = now + 30.0
             claim = await _rpc(
                 "research_lab_source_add_claim_work",
                 {

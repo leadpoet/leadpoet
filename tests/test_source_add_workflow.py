@@ -155,7 +155,10 @@ async def test_dispatcher_logs_durable_pause_once_and_resume(monkeypatch, caplog
     )
     sleep_calls = 0
 
-    async def fake_rpc(*_args, **_kwargs):
+    async def fake_rpc(name, _params):
+        if name == "research_lab_source_add_reconcile_provenance_leg1_v1":
+            return {"status": "reconciled"}
+        assert name == "research_lab_source_add_claim_work"
         return next(claims)
 
     async def fake_sleep(_seconds: float) -> None:
@@ -180,6 +183,36 @@ async def test_dispatcher_logs_durable_pause_once_and_resume(monkeypatch, caplog
 
     assert caplog.text.count("SOURCE_ADD_DISPATCHER_PAUSED") == 1
     assert caplog.text.count("SOURCE_ADD_DISPATCHER_RESUMED") == 1
+
+
+def test_historical_leg1_rebuild_removes_only_host_routing_reason():
+    row = {
+        "submission_id": "source_add_submission:" + "a" * 16,
+        "precheck_status": "provenance_precheck_passed",
+        "precheck_doc": {
+            "precheck_status": "provenance_precheck_passed",
+            "reasons": [
+                "provenance_reference_backed",
+                "automatic_safe_get_selected",
+            ],
+            "docs_completeness": {"score": 5},
+        },
+        "submission_doc": {},
+    }
+
+    result = source_add_workflow._provenance_result_from_submission(row)
+
+    assert result == {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": row["submission_id"],
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
+        "precheck_doc": {
+            "precheck_status": "provenance_precheck_passed",
+            "reasons": ["provenance_reference_backed"],
+            "docs_completeness": {"score": 5},
+        },
+    }
 
 
 def _smoke_result(status: str) -> dict:
@@ -316,7 +349,7 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     )
 
     assert response["status"] == "provisioned"
-    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke_v2"
+    assert observed["name"] == "research_lab_source_add_finalize_provision_smoke_v3"
     assert observed["params"]["p_work_id"] == work["work_id"]
     assert observed["params"]["p_lease_token"] == work["lease_token"]
     smoke = observed["params"]["p_smoke_attempt"]
@@ -325,15 +358,15 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     assert smoke["evaluation_mode"] == "provisioning_smoke"
     assert smoke["receipt_hash"] == "sha256:" + "4" * 64
     assert smoke["business_artifact_hash"] == sha256_json(result)
-    assert observed["params"]["p_reward_intent"] == {
-        "intent_id": source_add_workflow.source_add_reward_intent_id(
-            work["submission_id"], work["adapter_id"]
-        ),
-        "miner_hotkey": "hk-owner",
-        "functional_receipt_hash": "sha256:" + "6" * 64,
-        "business_artifact_hash": "sha256:" + "7" * 64,
+    assert set(observed["params"]) == {
+        "p_work_id",
+        "p_lease_token",
+        "p_submission_id",
+        "p_catalog_row",
+        "p_provision_row",
+        "p_smoke_attempt",
     }
-    assert observed["params"]["p_reward_work"]["work_kind"] == "leg1_reward"
+    assert "reward" not in str(observed["params"])
 
 
 @pytest.mark.asyncio
@@ -449,7 +482,7 @@ async def test_current_model_domain_added_after_admission_blocks_final_acceptanc
         )
         assert response == {"status": "not_eligible"}
 
-    assert observed["name"] == "research_lab_source_add_reject_current_builtin_v2"
+    assert observed["name"] == "research_lab_source_add_reject_current_builtin_v3"
     params = observed["params"]
     assert params["p_work_id"] == work["work_id"]
     assert params["p_lease_token"] == work["lease_token"]

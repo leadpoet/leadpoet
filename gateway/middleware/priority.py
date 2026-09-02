@@ -97,6 +97,7 @@ MINER_EXACT = {
     "/fulfillment/requests/active",
     "/fulfillment/commit",
     "/fulfillment/reveal",
+    "/research-lab/source-adapters",
 }
 MINER_PREFIXES = (
     "/fulfillment/excluded-now/",

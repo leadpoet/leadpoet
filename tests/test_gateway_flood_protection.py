@@ -17,6 +17,7 @@ def test_priority_route_classification_is_explicit():
     assert classify_path("/fulfillment/requests/active") == "miner"
     assert classify_path("/fulfillment/commit") == "miner"
     assert classify_path("/fulfillment/reveal") == "miner"
+    assert classify_path("/research-lab/source-adapters") == "miner"
     assert classify_path("/fulfillment/results/abc") == "validator"
     assert classify_path("/health") == "other"
     assert classify_path("/not-weights/submit") == "other"

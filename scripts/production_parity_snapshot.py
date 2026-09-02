@@ -61,9 +61,69 @@ _SOURCE_ADD_RESTART_STATE_MIGRATION = (
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
+        "path": "scripts/72-research-lab-source-experiments.sql",
+        "sequence": 72,
+        "sha256": "sha256:9335ab9ab320d0b95783f585626e010a69e0be74ac5d10aa55bc388d0a2df0a9",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/74-research-lab-source-add-provenance-precheck.sql",
+        "sequence": 74,
+        "sha256": "sha256:c802039521fb85f222605cc2dd081f63e1b83676080ce19147a2ace954898196",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/78-research-lab-source-add-catalog-provisioning.sql",
+        "sequence": 78,
+        "sha256": "sha256:7693418cc05410d8b674d76ef9f571c01121d90e53160773a2e81729dd430c9b",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/79-research-lab-source-add-llm-leg2-evidence.sql",
+        "sequence": 79,
+        "sha256": "sha256:641c369aad18087a93b0f203abec295f2e8a155b7d6291127e830680f2975b27",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/82-research-lab-source-add-llm-only-leg2.sql",
+        "sequence": 82,
+        "sha256": "sha256:b18b7fbc350a4e597875ee167f99dfa12b2d3e212f4ef148f2562fab86144b42",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/84-expand-source-add-source-kinds.sql",
+        "sequence": 84,
+        "sha256": "sha256:c646f66bedb25182542c574917c166626a47020c2a0bb4c3289eff512c6e4c56",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/86-research-lab-attested-v2-authority.sql",
+        "sequence": 86,
+        "sha256": "sha256:71dfeac1bcad6c0532cd7412d2ce2530a5a8020de579b4701856329c8210a80e",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/96-research-lab-source-add-functional-workflow.sql",
+        "sequence": 96,
+        "sha256": "sha256:4ffe42ea3265d5ec65f94d4ae58e01e095db02969e058302227987b42115cdc0",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/145-research-lab-source-add-admission-control.sql",
+        "sequence": 145,
+        "sha256": "sha256:cc249443e62bd9868ada13fc12be84222fe2beb649e909c726f0bdd7f343ef21",
+        "transaction_mode": "candidate-file",
+    },
+    {
         "path": "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "sequence": 169,
         "sha256": "sha256:bd811a7d909e6bac3a007ad0dc560aa6d872aad037bdb2fed978a9d2614a1add",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
+        "sequence": 170,
+        "sha256": "sha256:cc79c740d3a4dfa4da2e7e2072c3ac7aa0d76529c9db0f40d49dce40a5f904fc",
         "transaction_mode": "candidate-file",
     },
     {
@@ -92,7 +152,7 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_acl.v1"
+    "leadpoet.production_parity.schema_only_source_add_acl.v2"
 )
 _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
@@ -104,39 +164,72 @@ _SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:1082a75d70849b072299929ff00999b5c78a69adc9c7b03e544640ed60b02ff8"
 )
 _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
+    "public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)",
+    "public.research_lab_source_add_acquire_restart_guard_v2(text,text,bigint,integer,text)",
+    "public.research_lab_source_add_admission_control_contract_v1()",
+    "public.research_lab_source_add_admit(jsonb,text,text,text,text,integer,integer,integer)",
+    "public.research_lab_source_add_admit_v2(jsonb,text,text,text,text,text,integer,integer,integer)",
+    "public.research_lab_source_add_admit_v3(jsonb,text,text,text,text,text,integer,integer,integer,integer)",
+    "public.research_lab_source_add_begin_provider_execution(text,uuid)",
+    "public.research_lab_source_add_claim_control_contract_v1()",
+    "public.research_lab_source_add_claim_control_contract_v2()",
+    "public.research_lab_source_add_claim_work(text,integer)",
     "public.research_lab_source_add_configure_probe_v2(text,text,jsonb,jsonb,text,text,text)",
+    "public.research_lab_source_add_duplicate_privacy_contract_v1()",
+    "public.research_lab_source_add_enqueue_provision_smoke(text,text,text,text,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_v2(text,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_reject_current_builtin_v2(text,uuid,text,jsonb,text,jsonb,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_reserve_leg1_slot_v2(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_finalize_leg1_v2(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_smoke_v2(text,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_post_accept_leg1_contract_v1()",
-    "public.research_lab_source_add_admit_v3(jsonb,text,text,text,text,text,integer,integer,integer,integer)",
-    "public.research_lab_source_add_admit_v2(jsonb,text,text,text,text,text,integer,integer,integer)",
-    "public.research_lab_source_add_duplicate_privacy_contract_v1()",
-    "public.research_lab_source_add_claim_work(text,integer)",
-    "public.research_lab_source_add_acquire_restart_guard_v1(text,text,bigint,integer,text)",
-    "public.research_lab_source_add_set_paused(boolean,text,text)",
-    "public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)",
-    "public.research_lab_source_add_restart_guard_state_v1()",
-    "public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)",
-    "public.research_lab_source_add_claim_control_contract_v1()",
     "public.research_lab_source_add_reserve_leg1_slot_v3(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_finalize_leg1_v3(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_post_accept_leg1_contract_v2()",
-    "public.research_lab_source_add_acquire_restart_guard_v2(text,text,bigint,integer,text)",
+    "public.research_lab_source_add_provider_origin_contract_v1()",
+    "public.research_lab_source_add_finish_work(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,timestamp with time zone,boolean)",
+    "public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)",
     "public.research_lab_source_add_release_restart_guard_v2(text,text,bigint,text)",
+    "public.research_lab_source_add_requeue_provenance(text,text,text,text,text,text)",
+    "public.research_lab_source_add_requeue_provenance_v2(text,text,text,text,text,text,text)",
+    "public.research_lab_source_add_restart_guard_state_v1()",
     "public.research_lab_source_add_restart_guard_state_v2()",
-    "public.research_lab_source_add_claim_control_contract_v2()",
+    "public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)",
+    "public.research_lab_source_add_set_paused(boolean,text,text)",
+)
+# These trigger-only functions retain PostgreSQL's default PUBLIC EXECUTE in
+# the exact migration chain.  Parity must reproduce that effective ACL rather
+# than silently hardening the clone into behavior production does not have.
+_SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS = (
+    "public.prevent_research_lab_source_add_history_mutation()",
+    "public.prevent_research_lab_source_add_provisioning_mutation()",
+    "public.prevent_research_lab_source_add_reward_mutation()",
 )
 _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS = (
+    "public.assert_research_lab_source_add_provider_origin_owner(text,text,text)",
+    "public.enforce_research_lab_source_add_acceptance_v2()",
+    "public.enforce_research_lab_source_add_admission_control()",
+    "public.enforce_research_lab_source_add_eligible_v2()",
+    "public.enforce_research_lab_source_add_leg1_initial_event_v2()",
+    "public.enforce_research_lab_source_add_leg1_obligation_v2()",
+    "public.enforce_research_lab_source_add_leg1_slot_v2()",
+    "public.enforce_research_lab_source_add_leg1_work_v2()",
+    "public.enforce_research_lab_source_add_provider_origin_submission()",
+    "public.enforce_research_lab_source_add_provision_provider_origin()",
+    "public.enforce_research_lab_source_catalog_provider_origin()",
+    "public.enforce_source_add_restart_restore_pause_v2()",
+    "public.prevent_research_lab_source_add_provider_origin_mutation()",
+    "public.release_research_lab_source_add_provider_origin_terminal()",
+    "public.research_lab_source_add_canonical_jsonb_v2(jsonb)",
     "public.research_lab_source_add_configure_probe(text,text,jsonb,jsonb,text,text,text)",
+    "public.research_lab_source_add_final_approval_catalog_v2(text)",
     "public.research_lab_source_add_finalize_provision(text,jsonb,jsonb,jsonb)",
     "public.research_lab_source_add_reserve_leg1_slot(text,text,uuid,integer,integer)",
     "public.research_lab_source_add_finalize_leg1(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_finalize_provision_smoke(text,uuid,text,jsonb,jsonb,jsonb)",
-    "public.enforce_research_lab_source_add_leg1_initial_event_v2()",
-    "public.enforce_source_add_restart_restore_pause_v2()",
+    "public.research_lab_source_add_jsonb_hash_v2(jsonb)",
+    "public.research_lab_source_add_provider_origin_hash_v1(text)",
+    "public.research_lab_source_add_provider_origin_host_v1(text)",
 )
 _SCHEMA_ONLY_SOURCE_ADD_MAINTENANCE_SCHEMA_VERSION = (
     "leadpoet.production_parity.schema_only_source_add_maintenance.v1"
@@ -590,43 +683,114 @@ def _require_schema_only_source_add_acl_migrations(
         )
 
 
+def _schema_only_source_add_acl_expectations() -> dict[str, dict[str, bool]]:
+    groups = (
+        (
+            _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS,
+            {
+                "service_role_callable": True,
+                "public_callable": False,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        ),
+        (
+            _SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS,
+            {
+                "service_role_callable": True,
+                "public_callable": True,
+                "anon_callable": True,
+                "authenticated_callable": True,
+            },
+        ),
+        (
+            _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS,
+            {
+                "service_role_callable": False,
+                "public_callable": False,
+                "anon_callable": False,
+                "authenticated_callable": False,
+            },
+        ),
+    )
+    expectations: dict[str, dict[str, bool]] = {}
+    for signatures, privileges in groups:
+        for signature in signatures:
+            if signature in expectations:
+                raise ProductionParityError(
+                    "schema-only SOURCE_ADD ACL inventory is duplicated"
+                )
+            expectations[signature] = dict(privileges)
+    return expectations
+
+
+def _schema_only_source_add_acl_migration(
+    path: str,
+) -> Mapping[str, Any]:
+    matches = [
+        migration
+        for migration in _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+        if migration["path"] == path
+    ]
+    if len(matches) != 1:
+        raise ProductionParityError(
+            "schema-only SOURCE_ADD ACL migration inventory differs"
+        )
+    return matches[0]
+
+
 def _schema_only_source_add_acl_sql(
     candidate_migrations: Sequence[Mapping[str, Any]],
 ) -> bytes:
-    """Recreate only ACLs intentionally omitted from the bounded schema dump."""
+    """Recreate every migration-bound SOURCE_ADD function ACL in the clone."""
 
     _require_schema_only_source_add_acl_migrations(candidate_migrations)
-    all_functions = (
-        *_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS,
-        *_SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS,
+    expectations = _schema_only_source_add_acl_expectations()
+    expected_rows = ",\n    ".join(
+        "(" + ", ".join(
+            (
+                f"'{signature}'",
+                str(privileges["service_role_callable"]).upper(),
+                str(privileges["public_callable"]).upper(),
+                str(privileges["anon_callable"]).upper(),
+                str(privileges["authenticated_callable"]).upper(),
+            )
+        ) + ")"
+        for signature, privileges in expectations.items()
     )
-    signatures = ",\n        ".join(
-        f"('{signature}')" for signature in all_functions
-    )
-    revoke_public = "\n".join(
-        f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC, anon, authenticated;"
+    all_functions = tuple(expectations)
+    revoke_all = "\n".join(
+        f"REVOKE ALL ON FUNCTION {signature} "
+        "FROM PUBLIC, anon, authenticated, service_role;"
         for signature in all_functions
     )
     grant_service = "\n".join(
         f"GRANT EXECUTE ON FUNCTION {signature} TO service_role;"
         for signature in _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS
     )
-    revoke_service = "\n".join(
-        f"REVOKE ALL ON FUNCTION {signature} FROM service_role;"
-        for signature in _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS
+    grant_public = "\n".join(
+        f"GRANT EXECUTE ON FUNCTION {signature} TO PUBLIC;"
+        for signature in _SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS
     )
-    service_signatures = ", ".join(
-        f"'{signature}'" for signature in _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS
+    duplicate_privacy_migration = _schema_only_source_add_acl_migration(
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql"
     )
-    non_service_signatures = ", ".join(
-        f"'{signature}'"
-        for signature in _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS
-    )
-    all_signatures = ", ".join(f"'{signature}'" for signature in all_functions)
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
-DO $schema_only_source_add_acl$
+CREATE TEMPORARY TABLE schema_only_source_add_expected_acl (
+    signature TEXT PRIMARY KEY,
+    service_role_callable BOOLEAN NOT NULL,
+    public_callable BOOLEAN NOT NULL,
+    anon_callable BOOLEAN NOT NULL,
+    authenticated_callable BOOLEAN NOT NULL
+) ON COMMIT DROP;
+INSERT INTO schema_only_source_add_expected_acl (
+    signature, service_role_callable, public_callable,
+    anon_callable, authenticated_callable
+) VALUES
+    {expected_rows};
+DO $schema_only_source_add_acl_inventory$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'service_role'
@@ -637,20 +801,119 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'schema-only SOURCE_ADD ACL roles are unavailable';
     END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM (VALUES
-        {signatures}
-        ) AS required(signature)
-        WHERE pg_catalog.to_regprocedure(required.signature) IS NULL
-    ) THEN
-        RAISE EXCEPTION 'schema-only SOURCE_ADD ACL function signatures differ';
+    IF (SELECT COUNT(*) FROM schema_only_source_add_expected_acl)
+           <> {len(expectations)}
+       OR EXISTS (
+            SELECT 1
+            FROM schema_only_source_add_expected_acl AS expected
+            WHERE pg_catalog.to_regprocedure(expected.signature) IS NULL
+       )
+       OR (
+            SELECT COUNT(*)
+            FROM pg_catalog.pg_proc AS function_row
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = function_row.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND (
+                    pg_catalog.strpos(function_row.proname, 'source_add') > 0
+                    OR function_row.proname =
+                        'enforce_research_lab_source_catalog_provider_origin'
+              )
+       ) <> {len(expectations)}
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_proc AS function_row
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = function_row.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND (
+                    pg_catalog.strpos(function_row.proname, 'source_add') > 0
+                    OR function_row.proname =
+                        'enforce_research_lab_source_catalog_provider_origin'
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM schema_only_source_add_expected_acl AS expected
+                    WHERE pg_catalog.to_regprocedure(expected.signature)
+                        = function_row.oid
+              )
+       ) THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD ACL function inventory differs';
     END IF;
 END;
-$schema_only_source_add_acl$;
-{revoke_public}
+$schema_only_source_add_acl_inventory$;
+{revoke_all}
 {grant_service}
-{revoke_service}
+{grant_public}
+DO $schema_only_source_add_acl_readback$
+BEGIN
+    IF (SELECT COUNT(*) FROM schema_only_source_add_expected_acl)
+           <> {len(expectations)}
+       OR EXISTS (
+            SELECT 1
+            FROM schema_only_source_add_expected_acl AS expected
+            WHERE pg_catalog.to_regprocedure(expected.signature) IS NULL
+       )
+       OR (
+            SELECT COUNT(*)
+            FROM pg_catalog.pg_proc AS function_row
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = function_row.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND (
+                    pg_catalog.strpos(function_row.proname, 'source_add') > 0
+                    OR function_row.proname =
+                        'enforce_research_lab_source_catalog_provider_origin'
+              )
+       ) <> {len(expectations)}
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_proc AS function_row
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = function_row.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND (
+                    pg_catalog.strpos(function_row.proname, 'source_add') > 0
+                    OR function_row.proname =
+                        'enforce_research_lab_source_catalog_provider_origin'
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM schema_only_source_add_expected_acl AS expected
+                    WHERE pg_catalog.to_regprocedure(expected.signature)
+                        = function_row.oid
+              )
+       )
+       OR EXISTS (
+        SELECT 1
+        FROM schema_only_source_add_expected_acl AS expected
+        JOIN pg_catalog.pg_proc AS function_row
+          ON function_row.oid = pg_catalog.to_regprocedure(expected.signature)
+        WHERE pg_catalog.has_function_privilege(
+                  'service_role', function_row.oid, 'EXECUTE'
+              ) <> expected.service_role_callable
+           OR EXISTS (
+                SELECT 1
+                FROM pg_catalog.aclexplode(
+                    COALESCE(
+                        function_row.proacl,
+                        pg_catalog.acldefault('f', function_row.proowner)
+                    )
+                ) AS privilege
+                WHERE privilege.grantee = 0
+                  AND privilege.privilege_type = 'EXECUTE'
+           ) <> expected.public_callable
+           OR pg_catalog.has_function_privilege(
+                  'anon', function_row.oid, 'EXECUTE'
+              ) <> expected.anon_callable
+           OR pg_catalog.has_function_privilege(
+                  'authenticated', function_row.oid, 'EXECUTE'
+              ) <> expected.authenticated_callable
+    ) THEN
+        RAISE EXCEPTION 'schema-only SOURCE_ADD ACL readback differs';
+    END IF;
+END;
+$schema_only_source_add_acl_readback$;
 WITH contracts AS (
     SELECT
         public.research_lab_source_add_duplicate_privacy_contract_v1()
@@ -659,42 +922,64 @@ WITH contracts AS (
             AS post_accept_leg1,
         public.research_lab_source_add_claim_control_contract_v2()
             AS claim_control
+), actual_acl AS (
+    SELECT
+        expected.signature,
+        pg_catalog.has_function_privilege(
+            'service_role', function_row.oid, 'EXECUTE'
+        ) AS service_role_callable,
+        EXISTS (
+            SELECT 1
+            FROM pg_catalog.aclexplode(
+                COALESCE(
+                    function_row.proacl,
+                    pg_catalog.acldefault('f', function_row.proowner)
+                )
+            ) AS privilege
+            WHERE privilege.grantee = 0
+              AND privilege.privilege_type = 'EXECUTE'
+        ) AS public_callable,
+        pg_catalog.has_function_privilege(
+            'anon', function_row.oid, 'EXECUTE'
+        ) AS anon_callable,
+        pg_catalog.has_function_privilege(
+            'authenticated', function_row.oid, 'EXECUTE'
+        ) AS authenticated_callable
+    FROM schema_only_source_add_expected_acl AS expected
+    JOIN pg_catalog.pg_proc AS function_row
+      ON function_row.oid = pg_catalog.to_regprocedure(expected.signature)
 )
 SELECT pg_catalog.json_build_object(
     'schema_version', '{_SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION}',
     'migration_count', {len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS)},
-    'migration_171_sha256',
-        '{_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[1]['sha256']}',
-    'function_signature_count', (
-        SELECT COUNT(*)
-        FROM pg_catalog.unnest(ARRAY[{all_signatures}]::TEXT[]) AS signature
-        WHERE pg_catalog.to_regprocedure(signature) IS NOT NULL
-    ),
+    'migration_171_sha256', '{duplicate_privacy_migration['sha256']}',
+    'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
-        SELECT COUNT(*)
-        FROM pg_catalog.unnest(ARRAY[{service_signatures}]::TEXT[]) AS signature
-        WHERE pg_catalog.has_function_privilege(
-            'service_role', signature, 'EXECUTE'
-        )
+        SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
     ),
     'non_service_role_function_count', (
-        SELECT COUNT(*)
-        FROM pg_catalog.unnest(ARRAY[{non_service_signatures}]::TEXT[]) AS signature
-        WHERE NOT pg_catalog.has_function_privilege(
-            'service_role', signature, 'EXECUTE'
-        )
+        SELECT COUNT(*) FROM actual_acl WHERE NOT service_role_callable
     ),
-    'anon_callable', EXISTS (
-        SELECT 1
-        FROM pg_catalog.unnest(ARRAY[{all_signatures}]::TEXT[]) AS signature
-        WHERE pg_catalog.has_function_privilege('anon', signature, 'EXECUTE')
+    'public_function_count', (
+        SELECT COUNT(*) FROM actual_acl WHERE public_callable
     ),
-    'authenticated_callable', EXISTS (
-        SELECT 1
-        FROM pg_catalog.unnest(ARRAY[{all_signatures}]::TEXT[]) AS signature
-        WHERE pg_catalog.has_function_privilege(
-            'authenticated', signature, 'EXECUTE'
+    'anon_callable_function_count', (
+        SELECT COUNT(*) FROM actual_acl WHERE anon_callable
+    ),
+    'authenticated_callable_function_count', (
+        SELECT COUNT(*) FROM actual_acl WHERE authenticated_callable
+    ),
+    'function_acl_inventory', (
+        SELECT pg_catalog.jsonb_object_agg(
+            signature,
+            pg_catalog.jsonb_build_object(
+                'service_role_callable', service_role_callable,
+                'public_callable', public_callable,
+                'anon_callable', anon_callable,
+                'authenticated_callable', authenticated_callable
+            )
         )
+        FROM actual_acl
     ),
     'duplicate_privacy_authority_bound',
         contracts.duplicate_privacy->>'function_authority_sha256'
@@ -763,24 +1048,30 @@ def restore_schema_only_source_add_acl_contract(
         raise ProductionParityError(
             "schema-only SOURCE_ADD ACL readback is invalid"
         ) from exc
+    observed_inventory = observed.pop("function_acl_inventory", None)
+    expected_inventory = _schema_only_source_add_acl_expectations()
+    duplicate_privacy_migration = _schema_only_source_add_acl_migration(
+        "scripts/171-research-lab-source-add-duplicate-privacy.sql"
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
-        "migration_171_sha256": _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[1][
-            "sha256"
-        ],
-        "function_signature_count": len(
-            _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS
-            + _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS
-        ),
-        "service_role_function_count": len(
-            _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS
+        "migration_171_sha256": duplicate_privacy_migration["sha256"],
+        "function_signature_count": len(expected_inventory),
+        "service_role_function_count": (
+            len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)
+            + len(_SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS)
         ),
         "non_service_role_function_count": len(
             _SCHEMA_ONLY_SOURCE_ADD_NON_SERVICE_FUNCTIONS
         ),
-        "anon_callable": False,
-        "authenticated_callable": False,
+        "public_function_count": len(_SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS),
+        "anon_callable_function_count": len(
+            _SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS
+        ),
+        "authenticated_callable_function_count": len(
+            _SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS
+        ),
         "duplicate_privacy_authority_bound": True,
         "duplicate_privacy_permissions_bound": True,
         "post_accept_leg1_authority_bound": True,
@@ -788,11 +1079,16 @@ def restore_schema_only_source_add_acl_contract(
         "claim_control_authority_bound": True,
         "claim_control_permissions_bound": True,
     }
-    if observed != expected:
+    if observed != expected or observed_inventory != expected_inventory:
         raise ProductionParityError(
             "schema-only SOURCE_ADD ACL readback differs"
         )
-    return expected
+    return {
+        **expected,
+        "function_acl_inventory_sha256": sha256_json(
+            {"functions": expected_inventory}
+        ),
+    }
 
 
 def _stage_schema_only_source_add_maintenance(

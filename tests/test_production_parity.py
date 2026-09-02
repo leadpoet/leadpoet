@@ -926,20 +926,34 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         "utf-8"
     )
 
-    assert migrations[1]["path"] == (
-        "scripts/171-research-lab-source-add-duplicate-privacy.sql"
+    duplicate_privacy_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/171-research-lab-source-add-duplicate-privacy.sql"
+        )
     )
-    assert migrations[1]["sha256"] in sql
+    assert duplicate_privacy_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
     ) in sql
-    assert "schema-only SOURCE_ADD ACL function signatures differ" in sql
-    assert "FROM PUBLIC, anon, authenticated" in sql
-    assert "FROM service_role" in sql
+    assert "public.research_lab_source_add_finish_work" in sql
+    assert "public.research_lab_source_add_begin_provider_execution" in sql
+    assert "public.research_lab_source_add_requeue_provenance_v2" in sql
+    assert "public.enforce_research_lab_source_add_leg1_obligation_v2()" in sql
+    assert "schema-only SOURCE_ADD ACL function inventory differs" in sql
+    assert "schema-only SOURCE_ADD ACL readback differs" in sql
+    assert "pg_catalog.aclexplode" in sql
+    assert "FROM PUBLIC, anon, authenticated, service_role" in sql
+    assert "TO PUBLIC" in sql
+    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 59
 
     rewritten = [dict(item) for item in migrations]
-    rewritten[1]["sha256"] = "sha256:" + "0" * 64
+    next(
+        item
+        for item in rewritten
+        if item["path"]
+        == "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql"
+    )["sha256"] = "sha256:" + "0" * 64
     with pytest.raises(
         ProductionParityError,
         match="schema-only SOURCE_ADD ACL migration identity differs",
@@ -952,6 +966,98 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         match="not bound to the latest candidate migration",
     ):
         parity_snapshot._schema_only_source_add_acl_sql(extended)
+
+
+def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
+    monkeypatch,
+):
+    expectations = parity_snapshot._schema_only_source_add_acl_expectations()
+    duplicate_privacy_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/171-research-lab-source-add-duplicate-privacy.sql"
+        )
+    )
+    readback = {
+        "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
+        "migration_count": len(
+            parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+        ),
+        "migration_171_sha256": duplicate_privacy_migration["sha256"],
+        "function_signature_count": len(expectations),
+        "service_role_function_count": sum(
+            privileges["service_role_callable"]
+            for privileges in expectations.values()
+        ),
+        "non_service_role_function_count": sum(
+            not privileges["service_role_callable"]
+            for privileges in expectations.values()
+        ),
+        "public_function_count": sum(
+            privileges["public_callable"] for privileges in expectations.values()
+        ),
+        "anon_callable_function_count": sum(
+            privileges["anon_callable"] for privileges in expectations.values()
+        ),
+        "authenticated_callable_function_count": sum(
+            privileges["authenticated_callable"]
+            for privileges in expectations.values()
+        ),
+        "function_acl_inventory": expectations,
+        "duplicate_privacy_authority_bound": True,
+        "duplicate_privacy_permissions_bound": True,
+        "post_accept_leg1_authority_bound": True,
+        "post_accept_leg1_permissions_bound": True,
+        "claim_control_authority_bound": True,
+        "claim_control_permissions_bound": True,
+    }
+
+    monkeypatch.setattr(parity_snapshot, "safe_database_target", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        parity_snapshot,
+        "_postgres_env",
+        lambda *_a, **_k: ({}, "127.0.0.1"),
+    )
+
+    def postgres_readback(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            (), 0, stdout=json.dumps(readback).encode("utf-8"), stderr=b""
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", postgres_readback)
+    evidence = parity_snapshot.restore_schema_only_source_add_acl_contract(
+        target_dsn="postgresql://postgres:x@127.0.0.1/leadpoet_parity_test",
+        production_host="db.production.example",
+        candidate_migrations=parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS,
+    )
+    assert "function_acl_inventory" not in evidence
+    assert evidence["function_acl_inventory_sha256"] == sha256_json(
+        {"functions": expectations}
+    )
+
+    readback["function_acl_inventory"] = {
+        **expectations,
+        "public.research_lab_source_add_finish_work"
+        "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
+        "timestamp with time zone,boolean)": {
+            **expectations[
+                "public.research_lab_source_add_finish_work"
+                "(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,"
+                "timestamp with time zone,boolean)"
+            ],
+            "anon_callable": True,
+        },
+    }
+    with pytest.raises(
+        ProductionParityError,
+        match="schema-only SOURCE_ADD ACL readback differs",
+    ):
+        parity_snapshot.restore_schema_only_source_add_acl_contract(
+            target_dsn="postgresql://postgres:x@127.0.0.1/leadpoet_parity_test",
+            production_host="db.production.example",
+            candidate_migrations=(
+                parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+            ),
+        )
 
 
 def test_full_restore_does_not_stage_schema_only_source_add_state(

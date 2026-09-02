@@ -584,6 +584,7 @@ def test_validator_active_release_handoff_survives_reexec_and_cleans_exact_files
         assert f'{name}="${name}"' in candidate_reexec
         assert f'{name}="${name}"' in supersession
         assert f'"{name}"' in script[script.index("skip_keys = {") : script.index("exports = []")]
+    assert script.count("reset_standalone_active_release_handoff_for_reexec") == 3
 
     cleanup_start = script.index("cleanup_validator_restart_preparation() {")
     cleanup_end = script.index("\n}\n", cleanup_start)
@@ -647,34 +648,41 @@ def _run_forward_restart_fixture(
     *,
     expected_commit: str,
     launcher: Path,
+    include_paired_handoff: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "repo"
     handoff_prefix = f"/tmp/leadpoet-{tmp_path.name}"
+    environment = {
+        **os.environ,
+        "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
+        "VALIDATOR_ROOT": str(repo),
+        "VALIDATOR_RESTART_CONTROLLER_ROOT": str(tmp_path / "controller"),
+        "VALIDATOR_HOST_RESTART_SCRIPT": str(tmp_path / "installed-host.sh"),
+        "VALIDATOR_ENV_FILE": str(tmp_path / "validator.env"),
+        "VALIDATOR_ENV_BACKUP_DIR": str(tmp_path / "env-backups"),
+        "VALIDATOR_COORDINATED_EXPECTED_COMMIT": expected_commit,
+    }
+    if include_paired_handoff:
+        environment.update(
+            {
+                "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT": (
+                    handoff_prefix + "-initial.json"
+                ),
+                "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT": (
+                    handoff_prefix + "-final-requirements.json"
+                ),
+                "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT": (
+                    handoff_prefix + "-final-lineage.json"
+                ),
+            }
+        )
     return subprocess.run(
         ["bash", str(launcher)],
         check=False,
         capture_output=True,
         text=True,
         timeout=20,
-        env={
-            **os.environ,
-            "PATH": str(tmp_path / "bin") + os.pathsep + os.environ["PATH"],
-            "VALIDATOR_ROOT": str(repo),
-            "VALIDATOR_RESTART_CONTROLLER_ROOT": str(tmp_path / "controller"),
-            "VALIDATOR_HOST_RESTART_SCRIPT": str(tmp_path / "installed-host.sh"),
-            "VALIDATOR_ENV_FILE": str(tmp_path / "validator.env"),
-            "VALIDATOR_ENV_BACKUP_DIR": str(tmp_path / "env-backups"),
-            "VALIDATOR_COORDINATED_EXPECTED_COMMIT": expected_commit,
-            "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT": (
-                handoff_prefix + "-initial.json"
-            ),
-            "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT": (
-                handoff_prefix + "-final-requirements.json"
-            ),
-            "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT": (
-                handoff_prefix + "-final-lineage.json"
-            ),
-        },
+        env=environment,
     )
 
 
@@ -704,6 +712,36 @@ def test_coordinated_forward_retry_reexecs_changed_launcher_once(
         == 1
     )
     assert "Preparing validator runtime env from Secrets Manager" in result.stdout
+
+
+def test_standalone_forward_retry_rederives_internal_handoff_after_reexec(
+    tmp_path: Path,
+) -> None:
+    repo, commit, _ = _make_forward_restart_fixture(tmp_path)
+    installed = tmp_path / "installed-validator_restart.sh"
+    installed.write_text(
+        (repo / "validator_restart.sh").read_text(encoding="utf-8")
+        + "\n# stale installed launcher fixture\n",
+        encoding="utf-8",
+    )
+    installed.chmod(0o755)
+
+    result = _run_forward_restart_fixture(
+        tmp_path,
+        expected_commit=commit,
+        launcher=installed,
+        include_paired_handoff=False,
+    )
+
+    assert result.returncode == 1
+    assert (
+        result.stdout.count(
+            "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
+        )
+        == 1
+    )
+    assert "standalone validator compact-lineage fallback is unavailable" in result.stderr
+    assert "must be one exact controller-owned" not in result.stderr
 
 
 def test_coordinated_forward_rejects_moved_candidate_before_preparation(

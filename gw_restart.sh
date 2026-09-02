@@ -3543,10 +3543,15 @@ fi
 echo "Rechecking guarded SOURCE_ADD quiescence at the destructive boundary"
 GATEWAY_DEPLOY_STAGE="source_add_shutdown_quiescence"
 export GATEWAY_DEPLOY_STAGE
-if ! run_prepared_gateway_module \
-    gateway.tee.gateway_miner_maintenance_restart_v1 \
-    --verify-shutdown-quiescence \
-    --expected-commit "$PREPARED_GATEWAY_SHA"; then
+if ! (
+    set -a
+    . "$ENV_CLONE"
+    set +a
+    run_prepared_gateway_module \
+      gateway.tee.gateway_miner_maintenance_restart_v1 \
+      --verify-shutdown-quiescence \
+      --expected-commit "$PREPARED_GATEWAY_SHA"
+  ); then
   echo "ERROR: guarded SOURCE_ADD quiescence changed before shutdown" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1

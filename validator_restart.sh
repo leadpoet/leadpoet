@@ -230,6 +230,15 @@ if [ "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" = "$VALIDATOR_FINAL_RELEASE
   echo "ERROR: validator active release handoff paths must be distinct" >&2
   exit 2
 fi
+
+reset_standalone_active_release_handoff_for_reexec() {
+  if [ "$active_release_handoff_count" -eq 0 ]; then
+    VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=""
+    VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=""
+    VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=""
+  fi
+}
+
 for stable_path in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
   "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"; do
@@ -610,6 +619,7 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
         || [ "$restart_script_differs" = "1" ]; } \
    && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
   echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
+  reset_standalone_active_release_handoff_for_reexec
   exec env \
     VALIDATOR_RESTART_REEXECED=1 \
     VALIDATOR_COORDINATED_EXPECTED_COMMIT="$REQUESTED_COORDINATED_EXPECTED_COMMIT" \
@@ -785,6 +795,7 @@ follow_superseding_validator_release() {
     return 1
   fi
 
+  reset_standalone_active_release_handoff_for_reexec
   exec env \
     VALIDATOR_ROOT="$VALIDATOR_ROOT" \
     VALIDATOR_ENV_FILE="$VALIDATOR_ENV_FILE" \

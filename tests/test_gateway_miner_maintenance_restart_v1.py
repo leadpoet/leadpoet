@@ -4496,6 +4496,8 @@ def test_candidate_restart_rechecks_guard_immediately_before_first_shutdown_acti
     )
 
     assert long_wait < handoff < lineage < boundary < boundary_rpc < shutdown
+    boundary_environment = restart[boundary:boundary_rpc]
+    assert 'set -a\n    . "$ENV_CLONE"\n    set +a' in boundary_environment
     assert shutdown < first_action < preflight_cleanup
     between_boundary_and_shutdown = restart[boundary_rpc:shutdown]
     assert "wait_for_" not in between_boundary_and_shutdown

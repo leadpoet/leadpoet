@@ -217,15 +217,16 @@ def connect(database):
 _SHARED_OBJECTS: Dict[str, Path] = {}
 
 
-def shared_objects_root(tmp_path: Path) -> Path:
+def shared_objects_root(tmp_path: Path, key: str = "psycopg") -> Path:
     """One object store per database, like production's single bucket: a king
-    entering from an earlier round must find that round's package objects."""
+    entering from an earlier round must find that round's package objects.
+    ``key`` separates harness families that use different databases."""
 
-    root = _SHARED_OBJECTS.get("root")
+    root = _SHARED_OBJECTS.get(key)
     if root is None or not root.exists():
-        root = tmp_path.parent / "lab-arena-shared-objects"
+        root = tmp_path.parent / ("lab-arena-shared-objects-" + key)
         root.mkdir(parents=True, exist_ok=True)
-        _SHARED_OBJECTS["root"] = root
+        _SHARED_OBJECTS[key] = root
     return root
 
 
@@ -235,7 +236,7 @@ class Harness:
         self.tmp = tmp_path
         self.clock = FakeClock(datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc))
         self.signer = signing.LocalSigner.generate()
-        self.objects_root = shared_objects_root(tmp_path)
+        self.objects_root = shared_objects_root(tmp_path, self.objects_key())
         self.objects = svc.LocalObjectStore(self.objects_root)
         self.runner_keys = [keypair("svc-runner-" + name).ss58_address for name in runners]
         self.chain = FakeChain(self.runner_keys)
@@ -245,8 +246,14 @@ class Harness:
         self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
         self.service = self.build_service()
 
+    def objects_key(self) -> str:
+        return "psycopg"
+
+    def make_store(self) -> ArenaStore:
+        return ArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+
     def build_service(self) -> svc.ArenaService:
-        store = ArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+        store = self.make_store()
         harness = self
 
         def broker_factory(service, round_row):

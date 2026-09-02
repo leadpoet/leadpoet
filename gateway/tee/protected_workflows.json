@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "1a82c9f351be42f7f27b3ccfdecafa163c37e971",
+  "baseline_commit": "3132ecaec2f3abee9917ad42b3ac649fc5457d35",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2947,17 +2947,17 @@
       "symbol": "_process_functional_probe"
     },
     {
-      "ast_sha256": "sha256:0031ef8b820d8acd3a95ddb0ee6db454582dc591d3af5bc3578a7259176713c3",
+      "ast_sha256": "sha256:fb1ad547d3e7fa4689455bf98b019bc6bf089a5733e3dd3c7eb437f64e4e0089",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_leg1_reward"
     },
     {
-      "ast_sha256": "sha256:433d81ce699cca7e5546e0c55c91c3548cb12a099c9e34f0b0990e1ea3a5c063",
+      "ast_sha256": "sha256:914f0aa45eb29a56b7eeb8e8fefe99729b5323f39d76202b5f00565737d93e49",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provenance"
     },
     {
-      "ast_sha256": "sha256:888e07e13532efac524e3d9119a193d95e651d1a80acae20f00cf2d22ebd3f44",
+      "ast_sha256": "sha256:5cf6004cad122c5120c4640be2b7170487dce69d1218f4820c5e8157252eab2e",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provisioning_smoke"
     },
@@ -3402,7 +3402,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:a71cf1dff8d6e6562440e87e781f07968200f6fd2978e1b850aa3675c29e18c4",
+      "ast_sha256": "sha256:474e7f7087f649ca131aad143e4d31ea8f1dc34959a15888244ede33dd8daf10",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -3412,7 +3412,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:b2a1502de159a235249f774e605e934f76d9ba418779fe6eb32d72da1b84b2f7",
+      "ast_sha256": "sha256:93f8ad8ba1c41f0afb006ad1539a3dbf78ae7ddb9ce6874d5f355051c569b01e",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -5972,6 +5972,21 @@
       "symbol": "SOURCE_ADD_POST_ACCEPT_LEG1_ROLLBACK_V1_FUNCTION_AUTHORITY_SHA256"
     },
     {
+      "ast_sha256": "sha256:74b3c37a6243060219b118f8371261909a833fe10b2f594b2f6219b432e6ab6a",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256"
+    },
+    {
+      "ast_sha256": "sha256:bba9b22130a3b332a40c2d9dd70405d5602aff17d05885f4dfeb364da5cd9eda",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256"
+    },
+    {
+      "ast_sha256": "sha256:6461f04a3f8c8883d15b8da5dbc20c055b115ef16eca0cc441f4ba4709fe10a9",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256"
+    },
+    {
       "ast_sha256": "sha256:b90d2cb937a0a6c63f3c4f1e9b9a87efd78f10f88a3f46b21949cea6dfab3ebe",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_source_add_leg1_release_environment_policy_v1"
@@ -5992,12 +6007,17 @@
       "symbol": "_verify_source_add_post_accept_leg1_contract_v2"
     },
     {
-      "ast_sha256": "sha256:3840be1ed617f7c07121ed98ce3db48e53fbc4dc79d2524e09d5260c972376ba",
+      "ast_sha256": "sha256:037be5f64317c0e62815c970b84b8f0e90f754a046222151a1e0b580796d972a",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "_verify_source_add_post_accept_leg1_contract_v3"
+    },
+    {
+      "ast_sha256": "sha256:0995ca7e9d47b45500315d632f0217f381e42483b78d643afbae3f2530c1b329",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
     {
-      "ast_sha256": "sha256:514ea0ceabe0bf86fd78ed5a1d3235840009aef9f4f6d1c68aebd412858a2853",
+      "ast_sha256": "sha256:807d28b62482771424566147533913ab000123b2aa545bba612dc8614c7c899d",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -8662,7 +8682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c97a8af9f65e72d527eecf6250da68b43b6608d38f944c968333b4487d491ea5",
-  "protected_source_commit": "1a82c9f351be42f7f27b3ccfdecafa163c37e971",
+  "manifest_hash": "sha256:4d60c2ad5c7cf911dd11c3b4ecce591c01a6a56e9c99687b1e7f2b17d24acd3b",
+  "protected_source_commit": "3132ecaec2f3abee9917ad42b3ac649fc5457d35",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

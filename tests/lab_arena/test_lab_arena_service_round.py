@@ -319,7 +319,8 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     final = bundle["score_bundles"]["final"]
     winner = bundle["king_decision"]["winner_submission_id"]
     assert final["submission_scores"][winner] == max(final["submission_scores"].values())
-    assert set(bundle["runner_fractions"]) <= set(harness.runner_keys) and abs(sum(v["executed_fraction"] for v in bundle["runner_fractions"].values()) - 1.0) < 1e-6
+    assert {entry["runner_hotkey"] for entry in bundle["runner_fractions"]} <= set(harness.runner_keys)
+    assert abs(sum(entry["executed_fraction"] for entry in bundle["runner_fractions"]) - 1.0) < 1e-6
     assert all(cost["providers"] == ["exa"] and cost["total_microusd"] == 50 * 5000 for cost in bundle["cost_totals"].values())
     # Public reads and the reward-basis lookup.
     assert service.public_reward_basis(24801)["reward_basis_hash"] == row["reward_basis_hash"]
@@ -336,9 +337,11 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     assert len(results["receipts"]) == 50 and len(results["outputs"]) == 50
     # The public verifier rebuilds the round from published material only.
     outputs = {}
-    for run_id, ref in bundle["outputs"].items():
-        document = json.loads(harness.objects.get(ref).decode())
-        outputs[contracts.document_hash(document)] = document
+    assert len(bundle["outputs"]) == 150 and all(entry["output_hash"] for entry in bundle["outputs"])
+    for entry in bundle["outputs"]:
+        document = json.loads(harness.objects.get(entry["output_ref"]).decode())
+        assert contracts.document_hash(document) == entry["output_hash"]
+        outputs[entry["output_hash"]] = document
     verifier_bundle = {
         "round_configuration": bundle["round_configuration"], "benchmark_commitment": bundle["benchmark_commitment"], "benchmark": benchmark["icps"],
         "participants": bundle["participants"], "scorer_policy": bundle["scorer_policy"], "stage_plans": {"1": bundle["stage_plans"]["stage_1"], "2": bundle["stage_plans"]["stage_2"]},
@@ -446,3 +449,75 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     assert stage1["submission_scores"][foxtrot[0]] == 0.0
     assert all(row["cause"] == "model_error" for row in stage1["rows"] if row["submission_id"] == foxtrot[0])
     assert all(score > 0 for sid, score in stage1["submission_scores"].items() if sid != foxtrot[0])
+
+
+def test_twelve_challengers_cut_to_ten_finalists_with_a_restart_before_every_step(connect, tmp_path):
+    """Section 18.7 finalist cut and section 18.8 restart safety at the service level."""
+
+    flavors = ["Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra"]
+    harness = Harness(connect, tmp_path, challengers=flavors, runners=["alpha", "beta", "gamma"])
+    harness.chain.epoch = 25000
+    service = harness.service
+    cutoff = datetime(2026, 9, 10, 0, 0, tzinfo=timezone.utc)
+    configuration = service.create_round(cutoff)
+    harness.round_id = configuration["round_id"]
+    round_id = harness.round_id
+    for flavor in flavors:
+        harness.submit(flavor, round_id)
+
+    def step(expect_status: str) -> Dict[str, Any]:
+        # A fresh service instance over the same store performs every transition.
+        harness.service = harness.build_service()
+        result = None
+        for _ in range(3):
+            if harness.status() == expect_status:
+                break
+            result = harness.service.advance_round(round_id)
+        assert harness.status() == expect_status, (result, harness.status())
+        # Replaying the driver never repeats a transition: either nothing happens
+        # (same status, same generation) or the round legitimately moves forward.
+        before = (service_row()["status"], service_row()["status_generation"])
+        harness.service.advance_round(round_id)
+        after = (service_row()["status"], service_row()["status_generation"])
+        assert after == before or after[0] != before[0], (before, after)
+        return result
+
+    def service_row():
+        return harness.service.store.get_round(round_id)
+
+    latest = service.latest_published_round()
+    entering_king = 1 if latest and latest.get("king_outcome") in ("crowned", "defended") else 0
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    committed = step("committed")
+    assert committed["participants"] == 12 + entering_king  # MAX_CHALLENGERS admits all twelve; the published king enters automatically
+    participants = service_row()["participants"]
+    for participant in participants:
+        harness.flavors.setdefault(participant["image_digest"], "King")
+    king_count = sum(1 for p in participants if p["is_king"])
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    opened = step("stage1")
+    assert opened["assignments"] == 20 * (12 + king_count)
+    harness.run_stage_with_runners(3)
+    step("stage1_closed")
+    step("stage1_scored")
+    row = service_row()
+    assert len(row["finalists"]) == 10
+    stage1 = json.loads(harness.objects.get(row["stage1_scores_ref"]).decode())
+    challenger_scores = {sid: score for sid, score in stage1["submission_scores"].items() if not any(p["submission_id"] == sid and p["is_king"] for p in participants)}
+    top_ten = sorted(challenger_scores, key=lambda sid: -challenger_scores[sid])[:10]
+    assert set(row["finalists"]) == set(top_ten)
+    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+    opened2 = step("stage2")
+    assert opened2["assignments"] == 30 * (10 + king_count)
+    runs2 = harness.service.store.list_runs(round_id, stage=2)
+    assert {run["submission_id"] for run in runs2} == set(row["finalists"]) | {p["submission_id"] for p in participants if p["is_king"]}
+    harness.run_stage_with_runners(3)
+    step("stage2_closed")
+    step("scored")
+    step("published")
+    assert service_row()["king_outcome"] in ("crowned", "defended")
+    assert service_row()["effective_reward_epoch"] == 25001
+    final = json.loads(harness.objects.get(service_row()["final_scores_ref"]).decode())
+    assert set(final["submission_scores"]) == set(row["finalists"]) | {p["submission_id"] for p in participants if p["is_king"]}
+    assert all(len([r for r in final["rows"] if r["submission_id"] == sid]) == 30 for sid in final["submission_scores"])
+    assert all(len([r for r in stage1["rows"] if r["submission_id"] == sid]) == 20 for sid in stage1["submission_scores"])

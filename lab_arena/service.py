@@ -682,7 +682,13 @@ class ArenaService:
             "final_ranking": verify.final_ranking(final_entries, salt),
             "king_decision": decision,
             "receipts": [run["receipt_doc"] for run in runs if run.get("receipt_doc")],
-            "outputs": {run["run_id"]: run["output_ref"] for run in runs if run.get("output_ref")},
+            # Lists, not maps keyed by run: a round holds up to 650 runs and the
+            # publication schema bounds object keys far below that.
+            "outputs": [
+                {"run_id": run["run_id"], "submission_id": run["submission_id"], "stage": int(run["stage"]), "icp_position": int(run["icp_position"]), "output_hash": run["output_hash"], "output_ref": run["output_ref"]}
+                for run in sorted(runs, key=lambda r: (r["submission_id"], int(r["stage"]), int(r["icp_position"]), int(r["attempt"])))
+                if run.get("output_ref")
+            ],
             "runner_fractions": runner_fractions,
             "cost_totals": ledger_totals,
             "signing_key": self.signing_key_document(),
@@ -712,7 +718,7 @@ class ArenaService:
         })
         return {"status": transition.get("status"), "result_bundle_hash": result_bundle_hash, "king_outcome": decision["outcome"], "king_hotkey": basis["king_hotkey"], "effective_reward_epoch": effective_epoch}
 
-    def _runner_fractions(self, runs: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    def _runner_fractions(self, runs: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         executed: Dict[str, int] = {}
         abandoned: Dict[str, int] = {}
         for run in runs:
@@ -724,7 +730,11 @@ class ArenaService:
             elif run.get("terminal_cause") in ("lease_expired", "worker_lost", "stage_closed", "receipt_rejected"):
                 abandoned[hotkey] = abandoned.get(hotkey, 0) + 1
         total = sum(executed.values()) or 1
-        return {hotkey: {"executed_fraction": round(count / total, 6), "abandoned": abandoned.get(hotkey, 0)} for hotkey, count in sorted(executed.items())} | {hotkey: {"executed_fraction": 0.0, "abandoned": count} for hotkey, count in abandoned.items() if hotkey not in executed}
+        hotkeys = sorted(set(executed) | set(abandoned))
+        return [
+            {"runner_hotkey": hotkey, "executed_fraction": round(executed.get(hotkey, 0) / total, 6), "executed": executed.get(hotkey, 0), "abandoned": abandoned.get(hotkey, 0)}
+            for hotkey in hotkeys
+        ]
 
     def _cost_totals(self, round_id: str) -> Dict[str, Any]:
         totals: Dict[str, Dict[str, int]] = {}

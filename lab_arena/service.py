@@ -455,8 +455,16 @@ class ArenaService:
         rules = round_row["configuration_doc"]["artifact_rules"]
         if len(archive) > int(rules["max_package_bytes"]):
             raise ServiceError("package.too_large", 413)
-        submission_id = "sub-%s" % package_hash[7:39]
-        registration = self._store.register_submission(round_id, submission_id, validated["hotkey"], {"package_hash": package_hash, "package_ref": "arena/%s/packages/%s.tar.gz" % (round_id, submission_id), "consent": dict(body.get("consent") or {})})
+        # One submission id per (round, miner, package): the same bytes from a
+        # second miner register separately and are rejected at acceptance under
+        # the duplicate-artifact rule, never as a server error.
+        submission_id = "sub-%s" % contracts.document_hash({"round_id": round_id, "miner_hotkey": validated["hotkey"], "package_hash": package_hash})[7:39]
+        try:
+            registration = self._store.register_submission(round_id, submission_id, validated["hotkey"], {"package_hash": package_hash, "package_ref": "arena/%s/packages/%s.tar.gz" % (round_id, submission_id), "consent": dict(body.get("consent") or {})})
+        except ArenaStoreError as exc:
+            if "lab_arena_submission_conflict" in str(exc):
+                raise ServiceError("submission_conflict", 409) from exc
+            raise
         if registration.get("status") == "window_closed":
             raise ServiceError("submission_window_closed", 409)
         self._objects.put("arena/%s/packages/%s.tar.gz" % (round_id, submission_id), archive)
@@ -476,7 +484,9 @@ class ArenaService:
             return self._store.update_submission(round_id, submission_id, "uploaded", "rejected", {"rejection_rule": str(screening_result.get("rule") or "screening.rejected"), "screening_result": dict(screening_result)})
         result = self._store.update_submission(round_id, submission_id, "uploaded", "accepted", {"image_digest": image_digest, "source_tree_hash": source_tree_hash, "scan_result": dict(scan_result), "screening_result": dict(screening_result)})
         if result.get("status") == "duplicate_artifact":
+            # One artifact competes once (section 6.2): the later submission is rejected under a published rule.
             self._store.update_submission(round_id, submission_id, "uploaded", "rejected", {"rejection_rule": "package.duplicate_artifact"})
+            return {"status": "duplicate_artifact", "submission_status": "rejected", "rejection_rule": "package.duplicate_artifact"}
         return result
 
     def handle_funding(self, envelope: Any, *, confirm: Callable[[str, Mapping[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
@@ -771,7 +781,16 @@ class ArenaService:
         }
         try:
             build.scan_document_raise(public_bundle)
-        except build.SecretMaterialFound:
+            # The raise-mode secret scan runs again on every published source
+            # archive (section 6.3 step 3) before anything becomes public.
+            for participant in round_row.get("participants") or []:
+                submission = self._store.get_submission(participant["submission_id"]) or {}
+                package_ref = submission.get("package_ref")
+                if not package_ref:
+                    continue
+                inspection = build.inspect_package(self._objects.get(package_ref))
+                build.scan_source_archive_raise(inspection.files)
+        except (build.SecretMaterialFound, build.PackageRejected):
             raise ServiceError("publication_sanitizer_failed", 500)
         contracts.check_strict_document(public_bundle, contracts.PUBLICATION_LIMITS)
         result_bundle_hash = contracts.document_hash(public_bundle)

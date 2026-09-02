@@ -26,6 +26,26 @@ from tests.lab_arena.lab_arena_benchmark_tape import TapeProvider, load_tape
 from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
 
 KEYS: Dict[str, Keypair] = {}
+CANARY_EXA_KEY = "exa-canary-" + "x" * 30
+CANARY_DOG_KEY = "dog-canary-" + "y" * 30
+
+
+def assert_canary_absent(harness, connect) -> None:
+    """Section 18.5: the provider keys never reach rows, objects, events, or bundles."""
+
+    for path in harness.objects_root.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            assert CANARY_EXA_KEY.encode() not in data and CANARY_DOG_KEY.encode() not in data, path
+    connection = connect()
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_events", "lab_arena_accounts", "lab_arena_ledger"):
+                cursor.execute("SELECT count(*) FROM public.%s WHERE row_to_json(%s)::text LIKE %%s OR row_to_json(%s)::text LIKE %%s" % (table, table, table), ("%" + CANARY_EXA_KEY + "%", "%" + CANARY_DOG_KEY + "%"))
+                assert cursor.fetchone()[0] == 0, table
+    finally:
+        connection.close()
 
 
 def keypair(label: str) -> Keypair:
@@ -194,13 +214,29 @@ def connect(database):
     return lambda: psycopg2.connect(**dsn)
 
 
+_SHARED_OBJECTS: Dict[str, Path] = {}
+
+
+def shared_objects_root(tmp_path: Path) -> Path:
+    """One object store per database, like production's single bucket: a king
+    entering from an earlier round must find that round's package objects."""
+
+    root = _SHARED_OBJECTS.get("root")
+    if root is None or not root.exists():
+        root = tmp_path.parent / "lab-arena-shared-objects"
+        root.mkdir(parents=True, exist_ok=True)
+        _SHARED_OBJECTS["root"] = root
+    return root
+
+
 class Harness:
     def __init__(self, connect, tmp_path: Path, *, challengers: List[str], runners: List[str]):
         self.connect = connect
         self.tmp = tmp_path
         self.clock = FakeClock(datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc))
         self.signer = signing.LocalSigner.generate()
-        self.objects = svc.LocalObjectStore(tmp_path / "objects")
+        self.objects_root = shared_objects_root(tmp_path)
+        self.objects = svc.LocalObjectStore(self.objects_root)
         self.runner_keys = [keypair("svc-runner-" + name).ss58_address for name in runners]
         self.chain = FakeChain(self.runner_keys)
         self.flavors: Dict[str, str] = {}
@@ -214,7 +250,7 @@ class Harness:
         harness = self
 
         def broker_factory(service, round_row):
-            return br.Broker(store=store, credentials=br.ArenaProviderCredentials("exa-key-" + "x" * 30, "dog-key-" + "y" * 30), openrouter_key_for=lambda hotkey: None, price_table=price_table(), allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=FakeProviderTransport(), clock=harness.clock)
+            return br.Broker(store=store, credentials=br.ArenaProviderCredentials(CANARY_EXA_KEY, CANARY_DOG_KEY), openrouter_key_for=lambda hotkey: None, price_table=price_table(), allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=FakeProviderTransport(), clock=harness.clock)
 
         config = svc.ServiceConfig(
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
@@ -307,8 +343,18 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     harness.run_stage_with_runners(2)
     assert service.advance_round(round_id)["status"] == "ok" and harness.status() == "stage2_closed"
     assert service.advance_round(round_id)["status"] == "ok" and harness.status() == "scored"
+    # A sanitizer failure keeps the round unpublished (section 17) instead of publishing.
+    original_scan = svc.build.scan_source_archive_raise
+    svc.build.scan_source_archive_raise = lambda files: (_ for _ in ()).throw(svc.build.SecretMaterialFound("secret.value", "model/main.py"))
+    try:
+        with pytest.raises(svc.ServiceError, match="publication_sanitizer_failed"):
+            service.advance_round(round_id)
+    finally:
+        svc.build.scan_source_archive_raise = original_scan
+    assert harness.status() == "scored"
     published = service.advance_round(round_id)
     assert published["status"] == "ok" and published["king_outcome"] == "crowned" and harness.status() == "published"
+    assert_canary_absent(harness, connect)
     assert service.advance_round(round_id)["status"] == "terminal"
     row = service.store.get_round(round_id)
     basis = row["reward_basis_doc"]

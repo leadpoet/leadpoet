@@ -34,6 +34,7 @@ DEFAULT_MAX_PARALLEL_RUNS = 1
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 LOG_EVENT_CHUNK_BYTES = 8192
 DEFAULT_SOCKET_ROOT = "/tmp"
+IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
 MAX_SOCKET_PATH_BYTES = 100
 EVENT_APPEND_RETRIES = 3
 API_TIMEOUT_SECONDS = 30.0
@@ -148,13 +149,14 @@ class ImageCache:
         self._ready: Dict[str, Path] = {}
 
     def rootfs_for(self, image_digest: str) -> Path:
-        if not isinstance(image_digest, str) or not image_digest.startswith("sha256:") or len(image_digest) != 71:
+        if not isinstance(image_digest, str) or not IMAGE_DIGEST_RE.match(image_digest):
             raise RunnerError("image digest is invalid")
         with self._lock:
             path = self._ready.get(image_digest)
             if path is not None:
                 return path
-            target = self._root / image_digest.replace(":", "-")
+            # Cache directories are keyed by the content digest alone.
+            target = self._root / ("sha256-" + image_digest.rsplit("sha256:", 1)[1])
             if not (target / ".exported").exists():
                 if target.exists():
                     shutil.rmtree(target)

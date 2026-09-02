@@ -53,6 +53,8 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256,
 )
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
@@ -305,6 +307,9 @@ SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION = (
 SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
     "175-research-lab-source-add-provenance-leg1.sql"
 )
+SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
+    "176-research-lab-source-add-provenance-origin-repair.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -380,6 +385,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_LEG1_RELEASE_POLICY_MIGRATION,
     SOURCE_ADD_RESTART_STATE_RESTORE_MIGRATION,
     SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
+    SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -427,6 +433,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_173_source_add_leg1_release_policy_valid",
     "post_174_source_add_restart_state_restore_valid",
     "post_175_source_add_provenance_leg1_valid",
+    "post_176_source_add_provenance_origin_repair_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6788,6 +6795,55 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }:
             raise PostgresContractProbeError(
                 "post-175 SOURCE_ADD provenance Leg 1 contract differs"
+            )
+        database.apply_migration(
+            scripts / SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
+        )
+        applied.append(SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION)
+        source_add_provenance_origin_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_post_accept_leg1_contract_v4()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_provenance_origin_contract = dict(
+            source_add_provenance_leg1_contract
+        )
+        expected_provenance_origin_contract.update(
+            {
+                "schema_version": (
+                    "leadpoet.source_add_post_accept_leg1_contract.v4"
+                ),
+                "required_migration": (
+                    "scripts/176-research-lab-source-add-provenance-origin-"
+                    "repair.sql"
+                ),
+                "backfill_policy": (
+                    "earliest_exact_attested_provenance_per_provider_origin"
+                ),
+                "provider_origin_scope": "normalized_exact_host",
+                "provider_origin_winner_order": [
+                    "provenance_created_at",
+                    "submission_id",
+                ],
+                "cancelled_intents_are_authority": False,
+                "view_authority_sha256": (
+                    SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
+                ),
+                "repair_function_authority_sha256": (
+                    SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
+                ),
+            }
+        )
+        if (
+            source_add_provenance_origin_contract
+            != expected_provenance_origin_contract
+        ):
+            raise PostgresContractProbeError(
+                "post-176 SOURCE_ADD provenance-origin contract differs"
             )
         routing_purpose_contract = json.loads(
             database.psql(

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "3132ecaec2f3abee9917ad42b3ac649fc5457d35",
+  "baseline_commit": "35a89fe35b7bf6430393483c95b97ab5ef6e7be5",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -5987,6 +5987,16 @@
       "symbol": "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256"
     },
     {
+      "ast_sha256": "sha256:299d66478b5184e50e2ea42fdf43df663d5be0029e4823bc83ebdf07487e8289",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256"
+    },
+    {
+      "ast_sha256": "sha256:24982bae25f1b5aa3cbc8931f1ebb34bab22feed04e2d79aadc777dea41abaf4",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256"
+    },
+    {
       "ast_sha256": "sha256:b90d2cb937a0a6c63f3c4f1e9b9a87efd78f10f88a3f46b21949cea6dfab3ebe",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "_source_add_leg1_release_environment_policy_v1"
@@ -6012,7 +6022,12 @@
       "symbol": "_verify_source_add_post_accept_leg1_contract_v3"
     },
     {
-      "ast_sha256": "sha256:0995ca7e9d47b45500315d632f0217f381e42483b78d643afbae3f2530c1b329",
+      "ast_sha256": "sha256:a8a6064dd75356d3617766aa1ea6938cd11e6dcb908a6497aad9b05bc6aa183b",
+      "path": "gateway/tee/supabase_schema_preflight_v2.py",
+      "symbol": "_verify_source_add_post_accept_leg1_contract_v4"
+    },
+    {
+      "ast_sha256": "sha256:2d04188589aa9e59f6af9637f0c238569d46e4afe3bac22582612163ef0be71e",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
@@ -8682,7 +8697,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4d60c2ad5c7cf911dd11c3b4ecce591c01a6a56e9c99687b1e7f2b17d24acd3b",
-  "protected_source_commit": "3132ecaec2f3abee9917ad42b3ac649fc5457d35",
+  "manifest_hash": "sha256:ca1b1e8e9a98c143685bc0630d1bb9b0eb9a92d37380c3bbc23758e096cc3cce",
+  "protected_source_commit": "35a89fe35b7bf6430393483c95b97ab5ef6e7be5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

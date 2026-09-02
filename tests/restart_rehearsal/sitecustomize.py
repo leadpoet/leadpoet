@@ -176,7 +176,13 @@ def _candidate_provenance_leg1_trigger_authority() -> str:
 
 def _candidate_provenance_leg1_view_authority() -> str:
     return _candidate_source_add_leg1_authority(
-        "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256"
+        "SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256"
+    )
+
+
+def _candidate_provenance_origin_repair_function_authority() -> str:
+    return _candidate_source_add_leg1_authority(
+        "SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256"
     )
 
 
@@ -4760,7 +4766,7 @@ def _local_urlopen(
         operation = "rpc"
     elif (
         parsed.path
-        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
+        == "/rest/v1/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
     ):
         if str(getattr(request, "method", None) or "GET").upper() != "POST":
             raise ValueError(
@@ -4775,13 +4781,25 @@ def _local_urlopen(
         body = json.dumps(
             {
                 "schema_version": (
-                    "leadpoet.source_add_post_accept_leg1_contract.v3"
+                    "leadpoet.source_add_post_accept_leg1_contract.v4"
+                ),
+                "required_migration": (
+                    "scripts/176-research-lab-source-add-provenance-origin-"
+                    "repair.sql"
                 ),
                 "daily_cap": 50,
                 "leg1_alpha_percent": 0.2,
                 "leg1_reward_epochs": 20,
                 "approval_boundary": "provenance_precheck_passed",
-                "backfill_policy": "all_exact_attested_provenance",
+                "backfill_policy": (
+                    "earliest_exact_attested_provenance_per_provider_origin"
+                ),
+                "provider_origin_scope": "normalized_exact_host",
+                "provider_origin_winner_order": [
+                    "provenance_created_at",
+                    "submission_id",
+                ],
+                "cancelled_intents_are_authority": False,
                 "public_trigger_fields": [
                     "precheck_status",
                     "provenance_artifact_hash",
@@ -4801,6 +4819,9 @@ def _local_urlopen(
                 ),
                 "view_authority_sha256": (
                     _candidate_provenance_leg1_view_authority()
+                ),
+                "repair_function_authority_sha256": (
+                    _candidate_provenance_origin_repair_function_authority()
                 ),
                 "functions": {
                     "configure_probe_v3": True,

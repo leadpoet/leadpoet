@@ -31,7 +31,13 @@ MIGRATIONS = PRE_RESTORE_MIGRATIONS + (MIGRATION,)
 PROVENANCE_LEG1_MIGRATION = (
     "175-research-lab-source-add-provenance-leg1.sql"
 )
-ACL_MIGRATIONS = MIGRATIONS + (PROVENANCE_LEG1_MIGRATION,)
+PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
+    "176-research-lab-source-add-provenance-origin-repair.sql"
+)
+ACL_MIGRATIONS = MIGRATIONS + (
+    PROVENANCE_LEG1_MIGRATION,
+    PROVENANCE_ORIGIN_REPAIR_MIGRATION,
+)
 GUARD_A = "source_add_restart_guard:" + "a" * 64
 GUARD_B = "source_add_restart_guard:" + "b" * 64
 GUARD_C = "source_add_restart_guard:" + "c" * 64
@@ -432,6 +438,11 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
             cursor.execute(migration_path.read_text(encoding="utf-8"))
             cursor.execute(
                 (SCRIPTS / PROVENANCE_LEG1_MIGRATION).read_text(
+                    encoding="utf-8"
+                )
+            )
+            cursor.execute(
+                (SCRIPTS / PROVENANCE_ORIGIN_REPAIR_MIGRATION).read_text(
                     encoding="utf-8"
                 )
             )

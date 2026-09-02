@@ -992,11 +992,13 @@ def test_schema_only_restore_stages_source_add_cutover_only_once(
     assert [call["command"][0] for call in calls] == [
         "pg_restore",
         "psql",
-        "psql",
-        "psql",
+        *(["psql"] * len(migrations)),
     ]
     assert "-f" not in calls[1]["command"]
-    assert [calls[index]["mounts"][0].source for index in (2, 3)] == migration_paths
+    assert [
+        calls[index]["mounts"][0].source
+        for index in range(2, 2 + len(migrations))
+    ] == migration_paths
     assert evidence["clone_migration_preconditions"] == [
         {
             **maintenance,
@@ -1044,6 +1046,12 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         )
     )
     assert provenance_leg1_migration["sha256"] in sql
+    provenance_origin_repair_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+        )
+    )
+    assert provenance_origin_repair_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -1053,16 +1061,17 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     assert "public.research_lab_source_add_requeue_provenance_v2" in sql
     assert "public.enforce_research_lab_source_add_leg1_obligation_v2()" in sql
     assert "public.research_lab_source_add_finalize_leg1_v4" in sql
-    assert "public.research_lab_source_add_post_accept_leg1_contract_v3()" in sql
+    assert "public.research_lab_source_add_post_accept_leg1_contract_v4()" in sql
     assert "provenance_leg1_trigger_authority_bound" in sql
     assert "provenance_leg1_view_authority_bound" in sql
+    assert "provenance_origin_repair_authority_bound" in sql
     assert "provenance_leg1_policy_bound" in sql
     assert "schema-only SOURCE_ADD ACL function inventory differs" in sql
     assert "schema-only SOURCE_ADD ACL readback differs" in sql
     assert "pg_catalog.aclexplode" in sql
     assert "FROM PUBLIC, anon, authenticated, service_role" in sql
     assert "TO PUBLIC" in sql
-    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 76
+    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 77
 
     rewritten = [dict(item) for item in migrations]
     next(
@@ -1079,7 +1088,7 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
 
     extended = [
         *migrations,
-        {**migrations[-1], "path": "scripts/176-next.sql", "sequence": 176},
+        {**migrations[-1], "path": "scripts/177-next.sql", "sequence": 177},
     ]
     with pytest.raises(
         ProductionParityError,
@@ -1102,6 +1111,11 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
             "scripts/175-research-lab-source-add-provenance-leg1.sql"
         )
     )
+    provenance_origin_repair_migration = (
+        parity_snapshot._schema_only_source_add_acl_migration(
+            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+        )
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
@@ -1109,6 +1123,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         ),
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
         "migration_175_sha256": provenance_leg1_migration["sha256"],
+        "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]
@@ -1134,6 +1149,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "post_accept_leg1_authority_bound": True,
         "provenance_leg1_trigger_authority_bound": True,
         "provenance_leg1_view_authority_bound": True,
+        "provenance_origin_repair_authority_bound": True,
         "provenance_leg1_policy_bound": True,
         "post_accept_leg1_permissions_bound": True,
         "claim_control_authority_bound": True,
@@ -2896,12 +2912,23 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             },
         }
         source_add_provenance_leg1_contract = {
-            "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
+            "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v4",
+            "required_migration": (
+                "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+            ),
             "daily_cap": 50,
             "leg1_alpha_percent": 0.2,
             "leg1_reward_epochs": 20,
             "approval_boundary": "provenance_precheck_passed",
-            "backfill_policy": "all_exact_attested_provenance",
+            "backfill_policy": (
+                "earliest_exact_attested_provenance_per_provider_origin"
+            ),
+            "provider_origin_scope": "normalized_exact_host",
+            "provider_origin_winner_order": [
+                "provenance_created_at",
+                "submission_id",
+            ],
+            "cancelled_intents_are_authority": False,
             "public_trigger_fields": [
                 "precheck_status",
                 "provenance_artifact_hash",
@@ -2920,7 +2947,10 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
                 schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
             ),
             "view_authority_sha256": (
-                schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
+                schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
+            ),
+            "repair_function_authority_sha256": (
+                schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
             ),
             "functions": {
                 "configure_probe_v3": True,
@@ -2964,7 +2994,7 @@ ALTER TABLE public.research_lab_chain_realized_settlement_activation_v1
             "research_lab_source_add_duplicate_privacy_contract_v1": (
                 source_add_duplicate_privacy_contract
             ),
-            "research_lab_source_add_post_accept_leg1_contract_v3": (
+            "research_lab_source_add_post_accept_leg1_contract_v4": (
                 source_add_provenance_leg1_contract
             ),
         }

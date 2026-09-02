@@ -62,6 +62,9 @@ _SOURCE_ADD_RESTART_STATE_MIGRATION = (
 _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION = (
     "scripts/175-research-lab-source-add-provenance-leg1.sql"
 )
+_SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
+    "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -159,9 +162,15 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
         "sha256": "sha256:aac95bcdd7ea7dfb263b721e879bb8f2332ea0015415ed3631ce09429843ac50",
         "transaction_mode": "candidate-file",
     },
+    {
+        "path": _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
+        "sequence": 176,
+        "sha256": "sha256:9ec8d3d9bc9412c285ac780c42fd9aa283d3705cd54a155dac65313cc051d1f8",
+        "transaction_mode": "candidate-file",
+    },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_acl.v3"
+    "leadpoet.production_parity.schema_only_source_add_acl.v4"
 )
 _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
@@ -173,7 +182,10 @@ _SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256 = (
     "sha256:208de2069d2b44826fe466de01a2d1a91f4c762869227b39bdba969c8586be16"
 )
 _SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256 = (
-    "sha256:19f67626677803ff84f92196adeb9731d415c643247c603e41512a88c3f6291b"
+    "sha256:36380661634fee55bbdb69631d81ee0872f96de9d1373a253d1b02db242f037a"
+)
+_SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:700345ac44ebad77f4568e6c80458238129fd4af6c9ada66d7558d1bca5c9491"
 )
 _SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:1082a75d70849b072299929ff00999b5c78a69adc9c7b03e544640ed60b02ff8"
@@ -209,6 +221,7 @@ _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_finalize_leg1_v3(text,text,uuid,uuid,integer,jsonb,jsonb)",
     "public.research_lab_source_add_post_accept_leg1_contract_v2()",
     "public.research_lab_source_add_post_accept_leg1_contract_v3()",
+    "public.research_lab_source_add_post_accept_leg1_contract_v4()",
     "public.research_lab_source_add_provider_origin_contract_v1()",
     "public.research_lab_source_add_finish_work(text,uuid,text,text,jsonb,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,timestamp with time zone,boolean)",
     "public.research_lab_source_add_release_restart_guard_v1(text,text,bigint,text)",
@@ -279,6 +292,7 @@ _SCHEMA_ONLY_SOURCE_ADD_CUTOVER_MIGRATIONS = tuple(
     in {
         _SOURCE_ADD_RESTART_STATE_MIGRATION,
         _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
+        _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     }
 )
 _POSTGRES_MOUNT_TARGETS = frozenset(
@@ -834,6 +848,9 @@ def _schema_only_source_add_acl_sql(
     provenance_leg1_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
     )
+    provenance_origin_repair_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -977,7 +994,7 @@ WITH contracts AS (
     SELECT
         public.research_lab_source_add_duplicate_privacy_contract_v1()
             AS duplicate_privacy,
-        public.research_lab_source_add_post_accept_leg1_contract_v3()
+        public.research_lab_source_add_post_accept_leg1_contract_v4()
             AS provenance_leg1,
         public.research_lab_source_add_claim_control_contract_v2()
             AS claim_control
@@ -1013,6 +1030,7 @@ SELECT pg_catalog.json_build_object(
     'migration_count', {len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS)},
     'migration_171_sha256', '{duplicate_privacy_migration['sha256']}',
     'migration_175_sha256', '{provenance_leg1_migration['sha256']}',
+    'migration_176_sha256', '{provenance_origin_repair_migration['sha256']}',
     'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
@@ -1062,6 +1080,9 @@ SELECT pg_catalog.json_build_object(
     'provenance_leg1_view_authority_bound',
         contracts.provenance_leg1->>'view_authority_sha256'
             = '{_SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256}',
+    'provenance_origin_repair_authority_bound',
+        contracts.provenance_leg1->>'repair_function_authority_sha256'
+            = '{_SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256}',
     'provenance_leg1_policy_bound',
         contracts.provenance_leg1->'public_trigger_fields'
             = pg_catalog.jsonb_build_array(
@@ -1073,14 +1094,24 @@ SELECT pg_catalog.json_build_object(
                 'submission_id'
             )
         AND contracts.provenance_leg1->>'schema_version'
-            = 'leadpoet.source_add_post_accept_leg1_contract.v3'
+            = 'leadpoet.source_add_post_accept_leg1_contract.v4'
+        AND contracts.provenance_leg1->>'required_migration'
+            = 'scripts/176-research-lab-source-add-provenance-origin-repair.sql'
         AND (contracts.provenance_leg1->>'daily_cap')::INTEGER = 50
         AND (contracts.provenance_leg1->>'leg1_alpha_percent')::NUMERIC = 0.2
         AND (contracts.provenance_leg1->>'leg1_reward_epochs')::INTEGER = 20
         AND contracts.provenance_leg1->>'approval_boundary'
             = 'provenance_precheck_passed'
         AND contracts.provenance_leg1->>'backfill_policy'
-            = 'all_exact_attested_provenance'
+            = 'earliest_exact_attested_provenance_per_provider_origin'
+        AND contracts.provenance_leg1->>'provider_origin_scope'
+            = 'normalized_exact_host'
+        AND contracts.provenance_leg1->'provider_origin_winner_order'
+            = pg_catalog.jsonb_build_array(
+                'provenance_created_at', 'submission_id'
+            )
+        AND (contracts.provenance_leg1->>'cancelled_intents_are_authority')
+            ::BOOLEAN IS FALSE
         AND contracts.provenance_leg1->>'authority_view'
             = 'research_lab_source_add_provenance_leg1_authority_v1'
         AND contracts.provenance_leg1->'functions'
@@ -1172,11 +1203,15 @@ def restore_schema_only_source_add_acl_contract(
     provenance_leg1_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_LEG1_MIGRATION
     )
+    provenance_origin_repair_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
         "migration_171_sha256": duplicate_privacy_migration["sha256"],
         "migration_175_sha256": provenance_leg1_migration["sha256"],
+        "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "function_signature_count": len(expected_inventory),
         "service_role_function_count": (
             len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)
@@ -1197,6 +1232,7 @@ def restore_schema_only_source_add_acl_contract(
         "post_accept_leg1_authority_bound": True,
         "provenance_leg1_trigger_authority_bound": True,
         "provenance_leg1_view_authority_bound": True,
+        "provenance_origin_repair_authority_bound": True,
         "provenance_leg1_policy_bound": True,
         "post_accept_leg1_permissions_bound": True,
         "claim_control_authority_bound": True,

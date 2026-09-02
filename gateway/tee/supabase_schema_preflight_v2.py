@@ -547,7 +547,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ("approval_kind",),
     ),
     (
-        "scripts/175-research-lab-source-add-provenance-leg1.sql",
+        "scripts/176-research-lab-source-add-provenance-origin-repair.sql",
         "research_lab_source_add_provenance_leg1_authority_v1",
         (
             "submission_id",
@@ -1166,6 +1166,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/175-research-lab-source-add-provenance-leg1.sql",
         "research_lab_source_add_post_accept_leg1_contract_v3",
+    ),
+    (
+        "scripts/176-research-lab-source-add-provenance-origin-repair.sql",
+        "research_lab_source_add_post_accept_leg1_contract_v4",
     ),
     (
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
@@ -2183,6 +2187,14 @@ SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256 = (
     "sha256:19f67626677803ff84f92196adeb9731d415c643247c603e41512a88c3f6291b"
 )
 
+SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256 = (
+    "sha256:36380661634fee55bbdb69631d81ee0872f96de9d1373a253d1b02db242f037a"
+)
+
+SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256 = (
+    "sha256:700345ac44ebad77f4568e6c80458238129fd4af6c9ada66d7558d1bca5c9491"
+)
+
 
 def _verify_source_add_post_accept_leg1_contract_v2(
     *,
@@ -2373,6 +2385,129 @@ def _verify_source_add_post_accept_leg1_contract_v3(
     if contract != expected:
         raise SupabaseSchemaPreflightV2Error(
             "SOURCE_ADD automatic provenance Leg 1 contract differs"
+        )
+    return dict(contract)
+
+
+def _verify_source_add_post_accept_leg1_contract_v4(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_post_accept_leg1_contract_v4"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provenance-origin Leg 1 contract is unavailable; "
+            "apply scripts/176-research-lab-source-add-provenance-origin-"
+            f"repair.sql before restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provenance-origin Leg 1 contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provenance-origin Leg 1 contract is unavailable; "
+            "apply scripts/176-research-lab-source-add-provenance-origin-"
+            f"repair.sql before restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provenance-origin Leg 1 contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v4",
+        "required_migration": (
+            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+        ),
+        "daily_cap": 50,
+        "leg1_alpha_percent": 0.2,
+        "leg1_reward_epochs": 20,
+        "approval_boundary": "provenance_precheck_passed",
+        "backfill_policy": (
+            "earliest_exact_attested_provenance_per_provider_origin"
+        ),
+        "provider_origin_scope": "normalized_exact_host",
+        "provider_origin_winner_order": [
+            "provenance_created_at",
+            "submission_id",
+        ],
+        "cancelled_intents_are_authority": False,
+        "public_trigger_fields": [
+            "precheck_status",
+            "provenance_artifact_hash",
+            "provenance_precheck_passed",
+            "provenance_receipt_hash",
+            "provenance_result_hash",
+            "submission_id",
+        ],
+        "authority_view": (
+            "research_lab_source_add_provenance_leg1_authority_v1"
+        ),
+        "function_authority_sha256": (
+            SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256
+        ),
+        "trigger_authority_sha256": (
+            SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
+        ),
+        "view_authority_sha256": (
+            SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
+        ),
+        "repair_function_authority_sha256": (
+            SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
+        ),
+        "functions": {
+            "configure_probe_v3": True,
+            "enqueue_leg1_after_provenance_v1": True,
+            "enqueue_provision_smoke_v2": True,
+            "finalize_leg1_v4": True,
+            "finalize_provision_smoke_v3": True,
+            "finalize_provision_v3": True,
+            "reject_current_builtin_v3": True,
+            "reconcile_provenance_leg1_v1": True,
+            "reserve_leg1_slot_v4": True,
+        },
+        "triggers": {
+            "automatic_enqueue": True,
+            "eligible_v2": True,
+            "eligible_v3": True,
+            "leg1_initial_event_v3": True,
+            "leg1_obligation_v3": True,
+            "leg1_slot_v3": True,
+            "leg1_work_v3": True,
+        },
+        "columns": {
+            "intent_approval_kind": True,
+            "intent_provenance_artifact_hash": True,
+            "intent_provenance_receipt_hash": True,
+            "slot_approval_kind": True,
+        },
+        "permissions": {
+            "service_role_exists": True,
+            "candidate_callable": True,
+            "internal_not_callable": True,
+            "rollback_v2_callable": True,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD provenance-origin Leg 1 contract differs"
         )
     return dict(contract)
 
@@ -2629,7 +2764,7 @@ def verify_required_supabase_v2_schema(
         )
     )
     source_add_post_accept_leg1_contract = (
-        _verify_source_add_post_accept_leg1_contract_v3(
+        _verify_source_add_post_accept_leg1_contract_v4(
             headers=headers,
             supabase_url=supabase_url,
             opener=opener,

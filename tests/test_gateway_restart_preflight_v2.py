@@ -676,12 +676,23 @@ def _source_add_claim_control_contract_response(**overrides) -> bytes:
 
 def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
     contract = {
-        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v3",
+        "schema_version": "leadpoet.source_add_post_accept_leg1_contract.v4",
+        "required_migration": (
+            "scripts/176-research-lab-source-add-provenance-origin-repair.sql"
+        ),
         "daily_cap": 50,
         "leg1_alpha_percent": 0.2,
         "leg1_reward_epochs": 20,
         "approval_boundary": "provenance_precheck_passed",
-        "backfill_policy": "all_exact_attested_provenance",
+        "backfill_policy": (
+            "earliest_exact_attested_provenance_per_provider_origin"
+        ),
+        "provider_origin_scope": "normalized_exact_host",
+        "provider_origin_winner_order": [
+            "provenance_created_at",
+            "submission_id",
+        ],
+        "cancelled_intents_are_authority": False,
         "public_trigger_fields": [
             "precheck_status",
             "provenance_artifact_hash",
@@ -700,7 +711,10 @@ def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
             schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256
         ),
         "view_authority_sha256": (
-            schema_preflight.SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256
+            schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256
+        ),
+        "repair_function_authority_sha256": (
+            schema_preflight.SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256
         ),
         "functions": {
             "configure_probe_v3": True,
@@ -781,7 +795,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -910,7 +924,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         request
         for request in table_requests
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
         )
     ]
     claim_control_contract_requests = [
@@ -1036,7 +1050,7 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1143,7 +1157,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
                 body=_source_add_duplicate_privacy_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v3"
+            "/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
         ):
             return _SchemaResponse(
                 body=_source_add_post_accept_leg1_contract_response()
@@ -1350,9 +1364,9 @@ def test_source_add_automatic_provenance_leg1_contract_rejects_safety_drift(
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="SOURCE_ADD automatic provenance Leg 1 contract differs",
+        match="SOURCE_ADD provenance-origin Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v3(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v4(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,
@@ -1364,16 +1378,24 @@ def test_source_add_automatic_provenance_leg1_contract_rejects_safety_drift(
     ("field", "value"),
     (
         ("schema_version", "leadpoet.source_add_post_accept_leg1_contract.v2"),
+        (
+            "required_migration",
+            "scripts/175-research-lab-source-add-provenance-leg1.sql",
+        ),
         ("daily_cap", 49),
         ("leg1_alpha_percent", 0.3),
         ("leg1_reward_epochs", 19),
         ("approval_boundary", "post_accept_functional_probe"),
         ("backfill_policy", "none"),
+        ("provider_origin_scope", "full_url"),
+        ("provider_origin_winner_order", ["submission_id"]),
+        ("cancelled_intents_are_authority", True),
         ("public_trigger_fields", ["submission_id"]),
         ("authority_view", "research_lab_source_add_submission_current"),
         ("function_authority_sha256", "sha256:" + "0" * 64),
         ("trigger_authority_sha256", "sha256:" + "0" * 64),
         ("view_authority_sha256", "sha256:" + "0" * 64),
+        ("repair_function_authority_sha256", "sha256:" + "0" * 64),
     ),
 )
 def test_source_add_automatic_provenance_leg1_contract_rejects_policy_drift(
@@ -1389,9 +1411,9 @@ def test_source_add_automatic_provenance_leg1_contract_rejects_policy_drift(
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="SOURCE_ADD automatic provenance Leg 1 contract differs",
+        match="SOURCE_ADD provenance-origin Leg 1 contract differs",
     ):
-        schema_preflight._verify_source_add_post_accept_leg1_contract_v3(
+        schema_preflight._verify_source_add_post_accept_leg1_contract_v4(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,

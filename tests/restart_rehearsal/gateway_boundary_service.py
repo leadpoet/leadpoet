@@ -197,7 +197,16 @@ def _candidate_provenance_leg1_view_authority(
 ) -> str:
     return _candidate_source_add_leg1_authority(
         source_root,
-        "SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256",
+        "SOURCE_ADD_PROVENANCE_ORIGIN_VIEW_AUTHORITY_SHA256",
+    )
+
+
+def _candidate_provenance_origin_repair_function_authority(
+    source_root: Path,
+) -> str:
+    return _candidate_source_add_leg1_authority(
+        source_root,
+        "SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_FUNCTION_AUTHORITY_SHA256",
     )
 
 
@@ -654,6 +663,7 @@ def _migration_schema_contract(
             "173-research-lab-source-add-leg1-release-policy.sql",
             "174-research-lab-source-add-restart-state-restore.sql",
             "175-research-lab-source-add-provenance-leg1.sql",
+            "176-research-lab-source-add-provenance-origin-repair.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -768,6 +778,7 @@ def _migration_schema_contract(
         "research_lab_source_add_post_accept_leg1_contract_v1",
         "research_lab_source_add_post_accept_leg1_contract_v2",
         "research_lab_source_add_post_accept_leg1_contract_v3",
+        "research_lab_source_add_post_accept_leg1_contract_v4",
         "research_lab_source_add_configure_probe_v3",
         "research_lab_source_add_enqueue_leg1_after_provenance_v1",
         "research_lab_source_add_enqueue_provision_smoke_v2",
@@ -1253,6 +1264,11 @@ class LocalPostgRESTState:
         )
         self.source_add_provenance_leg1_view_authority = (
             _candidate_provenance_leg1_view_authority(source_root)
+        )
+        self.source_add_provenance_origin_repair_function_authority = (
+            _candidate_provenance_origin_repair_function_authority(
+                source_root
+            )
         )
         self.durable_revision = 0
         self._provider_outcome_locks: dict[
@@ -4036,7 +4052,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 }
             elif name == (
-                "research_lab_source_add_post_accept_leg1_contract_v3"
+                "research_lab_source_add_post_accept_leg1_contract_v4"
             ):
                 if body not in ({}, None):
                     raise ValueError(
@@ -4045,13 +4061,25 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 response = {
                     "schema_version": (
-                        "leadpoet.source_add_post_accept_leg1_contract.v3"
+                        "leadpoet.source_add_post_accept_leg1_contract.v4"
+                    ),
+                    "required_migration": (
+                        "scripts/176-research-lab-source-add-provenance-"
+                        "origin-repair.sql"
                     ),
                     "daily_cap": 50,
                     "leg1_alpha_percent": 0.2,
                     "leg1_reward_epochs": 20,
                     "approval_boundary": "provenance_precheck_passed",
-                    "backfill_policy": "all_exact_attested_provenance",
+                    "backfill_policy": (
+                        "earliest_exact_attested_provenance_per_provider_origin"
+                    ),
+                    "provider_origin_scope": "normalized_exact_host",
+                    "provider_origin_winner_order": [
+                        "provenance_created_at",
+                        "submission_id",
+                    ],
+                    "cancelled_intents_are_authority": False,
                     "public_trigger_fields": [
                         "precheck_status",
                         "provenance_artifact_hash",
@@ -4071,6 +4099,9 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     "view_authority_sha256": (
                         self.server.state.source_add_provenance_leg1_view_authority
+                    ),
+                    "repair_function_authority_sha256": (
+                        self.server.state.source_add_provenance_origin_repair_function_authority
                     ),
                     "functions": {
                         "configure_probe_v3": True,

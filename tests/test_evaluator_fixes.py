@@ -960,7 +960,7 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
         ("10001", "10,001+"),
     ],
 )
-async def test_exact_employee_count_is_bucketed_without_rewriting_company(
+async def test_exact_employee_count_preserves_full_icp_range_without_rewriting_company(
     monkeypatch,
     observed,
     expected_bucket,
@@ -1022,7 +1022,21 @@ async def test_exact_employee_count_is_bucketed_without_rewriting_company(
     assert results == [{"final_score": 10.0}]
     assert len(scored_calls) == 1
     assert scored_calls[0]["company"].kwargs["employee_count"] == observed
-    assert scored_calls[0]["icp"].kwargs["employee_count"] == expected_bucket
+    scoring_buckets = tuple(
+        scored_calls[0]["icp"].kwargs["employee_count"].split("|")
+    )
+    assert expected_bucket in scoring_buckets
+    assert scoring_buckets == (
+        "0-1",
+        "2-10",
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000",
+        "5,001-10,000",
+        "10,001+",
+    )
 
 
 async def test_infrastructure_judgments_are_not_reused_or_cached(monkeypatch):

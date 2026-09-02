@@ -6,6 +6,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    evaluate_company_identity,
 )
 
 
@@ -209,7 +210,7 @@ def test_homepage_numeric_linkedin_id_vs_vanity_slug_is_unavailable(monkeypatch)
     )
 
 
-def test_missing_submitted_linkedin_identity_is_mismatch(monkeypatch):
+def test_missing_submitted_linkedin_uses_exact_name_and_domain(monkeypatch):
     import asyncio
 
     result = asyncio.run(
@@ -220,8 +221,35 @@ def test_missing_submitted_linkedin_identity_is_mismatch(monkeypatch):
             company_linkedin="",
         )
     )
-    assert result.decision == COMPANY_FIT_MISMATCH
-    assert "submitted company identity" in (result.reason or "")
+    assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_matching_domain_without_linkedin_does_not_bind_a_name_alias():
+    receipt = evaluate_company_identity(
+        submitted_name="Modulr",
+        submitted_website="https://modulrfinance.com",
+        submitted_linkedin="",
+        observed_name="Modulr Finance",
+        observed_website="https://www.modulrfinance.com/about",
+        observed_linkedin="https://www.linkedin.com/company/modulr-finance/",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_matching_domain_and_linkedin_bind_common_name_alias():
+    receipt = evaluate_company_identity(
+        submitted_name="Modulr",
+        submitted_website="https://modulrfinance.com",
+        submitted_linkedin="https://www.linkedin.com/company/modulr-finance/",
+        observed_name="Modulr Finance",
+        observed_website="https://www.modulrfinance.com/about",
+        observed_linkedin="https://www.linkedin.com/company/modulr-finance/",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
 
 
 def test_domain_name_alone_is_not_a_match(monkeypatch):

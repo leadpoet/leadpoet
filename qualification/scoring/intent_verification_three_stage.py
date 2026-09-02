@@ -66,7 +66,7 @@ import re
 import time
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -185,6 +185,27 @@ _WORKABLE_EXACT_POSTING_PATH_RE = re.compile(
     r"^/(?P<account>[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?)/j/"
     r"(?P<posting>[A-Za-z0-9]{6,64})/?$"
 )
+_GREENHOUSE_EXACT_POSTING_HOST_RE = re.compile(
+    r"^(?:boards|job-boards(?:\.[a-z0-9-]+)?)\.greenhouse\.io$"
+)
+_GREENHOUSE_EXACT_POSTING_PATH_RE = re.compile(
+    r"^/(?P<board>[A-Za-z0-9_-]{1,100})/jobs/"
+    r"(?P<posting>[0-9]{5,20})/?$"
+)
+_ASHBY_EXACT_POSTING_PATH_RE = re.compile(
+    r"^/(?P<board>[A-Za-z0-9_-]{1,100})/"
+    r"(?P<posting>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12})/?$",
+    re.IGNORECASE,
+)
+_LEVER_EXACT_POSTING_HOST_RE = re.compile(
+    r"^jobs(?:\.eu)?\.lever\.co$"
+)
+_LEVER_EXACT_POSTING_PATH_RE = re.compile(
+    r"^/(?P<tenant>[A-Za-z0-9._-]{1,100})/"
+    r"(?P<posting>(?:[0-9a-f]{8}-[0-9a-f-]{4,}|[0-9a-f]{16,64}))/?$",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_job_body(text: str) -> bool:
@@ -302,6 +323,388 @@ def _workable_markdown_url(source_url: str) -> str:
         "",
         "",
     ))
+
+
+def _greenhouse_posting_identity(source_url: str) -> tuple[str, str] | None:
+    """Return one exact Greenhouse board/posting identity."""
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "intent_signal.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return None
+    if (
+        _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(
+            (parsed.hostname or "").casefold()
+        )
+        is None
+        or parsed.fragment
+    ):
+        return None
+    match = _GREENHOUSE_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return None
+    posting = match.group("posting")
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if query and query != [("gh_jid", posting)]:
+        return None
+    return match.group("board"), posting
+
+
+def _greenhouse_job_api_url(source_url: str) -> str:
+    """Return Greenhouse's exact public board/posting representation."""
+
+    identity = _greenhouse_posting_identity(source_url)
+    if identity is None:
+        return ""
+    board, posting = identity
+    return urlunsplit((
+        "https",
+        "boards-api.greenhouse.io",
+        (
+            "/v1/boards/"
+            + quote(board, safe="-._~")
+            + "/jobs/"
+            + quote(posting, safe="")
+        ),
+        "content=true",
+        "",
+    ))
+
+
+def _ashby_posting_identity(source_url: str) -> tuple[str, str] | None:
+    """Return one exact Ashby tenant/posting identity."""
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "intent_signal.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return None
+    if (
+        (parsed.hostname or "").casefold() != "jobs.ashbyhq.com"
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    match = _ASHBY_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return None
+    return match.group("board").casefold(), match.group("posting").casefold()
+
+
+def _ashby_job_board_api_url(source_url: str) -> str:
+    """Return Ashby's exact public tenant job-board representation."""
+
+    identity = _ashby_posting_identity(source_url)
+    if identity is None:
+        return ""
+    board, _posting = identity
+    return urlunsplit((
+        "https",
+        "api.ashbyhq.com",
+        "/posting-api/job-board/" + quote(board, safe="-._~"),
+        "",
+        "",
+    ))
+
+
+def _lever_posting_identity(source_url: str) -> tuple[str, str] | None:
+    """Return one exact Lever tenant/posting identity."""
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "intent_signal.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return None
+    if (
+        _LEVER_EXACT_POSTING_HOST_RE.fullmatch(
+            (parsed.hostname or "").casefold()
+        )
+        is None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    match = _LEVER_EXACT_POSTING_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return None
+    return match.group("tenant").casefold(), match.group("posting").casefold()
+
+
+async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
+    """Fetch an exact listed Ashby posting through its public board API."""
+
+    source_identity = _ashby_posting_identity(source_url)
+    transport_url = _ashby_job_board_api_url(source_url)
+    if source_identity is None or not transport_url:
+        return {
+            "routed": False,
+            "ok": False,
+            "stage": "ashby_not_applicable",
+            "content": "",
+            "error": "",
+        }
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {
+            "routed": True,
+            "ok": False,
+            "stage": "ashby_no_sd_key",
+            "content": "",
+            "error": "missing key",
+        }
+    history: List[tuple[str, str]] = []
+    async with httpx.AsyncClient(timeout=SCRAPINGDOG_TERMINAL_TIMEOUT_S) as cli:
+        for attempt, extra in enumerate(({}, {"premium": "true"}), start=1):
+            try:
+                response = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    headers={"Accept": "application/json"},
+                    params={
+                        "api_key": api_key,
+                        "url": transport_url,
+                        "dynamic": "false",
+                        "custom_headers": "true",
+                        **extra,
+                    },
+                )
+            except httpx.TimeoutException:
+                history.append((f"attempt_{attempt}", "client_deadline"))
+                continue
+            except httpx.TransportError as exc:
+                history.append((
+                    f"attempt_{attempt}",
+                    "transport_error:" + type(exc).__name__,
+                ))
+                continue
+            status = int(response.status_code)
+            history.append((f"attempt_{attempt}", f"http_{status}"))
+            if status != 200:
+                if status in {400, 401, 402, 403, 404, 410, 422}:
+                    break
+                continue
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                history[-1] = (f"attempt_{attempt}", "invalid_json")
+                continue
+            jobs = payload.get("jobs") if isinstance(payload, Mapping) else None
+            if not isinstance(jobs, list):
+                history[-1] = (f"attempt_{attempt}", "jobs_missing")
+                continue
+            posting = next((
+                item
+                for item in jobs
+                if isinstance(item, Mapping)
+                and str(item.get("id") or "").casefold() == source_identity[1]
+                and _ashby_posting_identity(item.get("jobUrl")) == source_identity
+            ), None)
+            if not isinstance(posting, Mapping):
+                history[-1] = (f"attempt_{attempt}", "posting_missing")
+                continue
+            title = posting.get("title")
+            description = posting.get("descriptionPlain")
+            if not isinstance(description, str) or not description.strip():
+                description = posting.get("descriptionHtml")
+                if isinstance(description, str):
+                    try:
+                        from qualification.scoring.verification_helpers import (
+                            extract_article_body,
+                        )
+
+                        description = extract_article_body(description)
+                    except Exception:
+                        pass
+            if (
+                posting.get("isListed") is not True
+                or not isinstance(title, str)
+                or not title.strip()
+                or "\x00" in title
+                or not isinstance(description, str)
+                or not description.strip()
+                or "\x00" in description
+            ):
+                history[-1] = (f"attempt_{attempt}", "posting_invalid")
+                continue
+            exact_fields = [title]
+            for field_name in (
+                "publishedAt",
+                "location",
+                "workplaceType",
+                "department",
+                "team",
+                "employmentType",
+            ):
+                value = posting.get(field_name)
+                if isinstance(value, str) and value.strip() and "\x00" not in value:
+                    exact_fields.append(value)
+            exact_fields.append(description)
+            content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
+            if len(content) < 20:
+                history[-1] = (f"attempt_{attempt}", "posting_too_short")
+                continue
+            history[-1] = (f"attempt_{attempt}", "ok")
+            return {
+                "routed": True,
+                "ok": True,
+                "stage": f"sd:ashby_api:{attempt}",
+                "content": content,
+                "error": "",
+                "stage_history": history,
+            }
+    return {
+        "routed": True,
+        "ok": False,
+        "stage": "ashby_api_exhausted",
+        "content": "",
+        "error": history[-1][1] if history else "not_attempted",
+        "stage_history": history,
+    }
+
+
+async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
+    """Fetch an exact live Greenhouse posting through its public API.
+
+    The API route is bound to the same board and numeric posting identifier as
+    the submitted human URL. It supplies source text only; Stage 3 remains the
+    qualification authority. Any failure falls through to the generic cascade.
+    """
+
+    source_identity = _greenhouse_posting_identity(source_url)
+    transport_url = _greenhouse_job_api_url(source_url)
+    if source_identity is None or not transport_url:
+        return {
+            "routed": False,
+            "ok": False,
+            "stage": "greenhouse_not_applicable",
+            "content": "",
+            "error": "",
+        }
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {
+            "routed": True,
+            "ok": False,
+            "stage": "greenhouse_no_sd_key",
+            "content": "",
+            "error": "missing key",
+        }
+    history: List[tuple[str, str]] = []
+    async with httpx.AsyncClient(timeout=SCRAPINGDOG_TERMINAL_TIMEOUT_S) as cli:
+        for attempt, extra in enumerate(({}, {"premium": "true"}), start=1):
+            try:
+                response = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    headers={"Accept": "application/json"},
+                    params={
+                        "api_key": api_key,
+                        "url": transport_url,
+                        "dynamic": "false",
+                        "custom_headers": "true",
+                        **extra,
+                    },
+                )
+            except httpx.TimeoutException:
+                history.append((f"attempt_{attempt}", "client_deadline"))
+                continue
+            except httpx.TransportError as exc:
+                history.append((
+                    f"attempt_{attempt}",
+                    "transport_error:" + type(exc).__name__,
+                ))
+                continue
+            status = int(response.status_code)
+            history.append((f"attempt_{attempt}", f"http_{status}"))
+            if status != 200:
+                if status in {400, 401, 402, 403, 404, 410, 422}:
+                    break
+                continue
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                history[-1] = (f"attempt_{attempt}", "invalid_json")
+                continue
+            if not isinstance(payload, Mapping):
+                history[-1] = (f"attempt_{attempt}", "posting_missing")
+                continue
+            returned_identity = _greenhouse_posting_identity(
+                payload.get("absolute_url")
+            )
+            title = payload.get("title")
+            company_name = payload.get("company_name")
+            description = payload.get("content")
+            if (
+                str(payload.get("id") or "") != source_identity[1]
+                or returned_identity != source_identity
+                or not isinstance(title, str)
+                or not title.strip()
+                or "\x00" in title
+                or not isinstance(company_name, str)
+                or not company_name.strip()
+                or "\x00" in company_name
+                or not isinstance(description, str)
+                or not description.strip()
+                or "\x00" in description
+            ):
+                history[-1] = (f"attempt_{attempt}", "posting_invalid")
+                continue
+            try:
+                from qualification.scoring.verification_helpers import (
+                    extract_article_body,
+                )
+
+                description = extract_article_body(description)
+            except Exception:
+                pass
+            exact_fields = [company_name, title]
+            for field_name in ("first_published", "updated_at"):
+                value = payload.get(field_name)
+                if isinstance(value, str) and value.strip() and "\x00" not in value:
+                    exact_fields.append(value)
+            location = payload.get("location")
+            if isinstance(location, Mapping):
+                location_name = location.get("name")
+                if (
+                    isinstance(location_name, str)
+                    and location_name.strip()
+                    and "\x00" not in location_name
+                ):
+                    exact_fields.append(location_name)
+            exact_fields.append(description)
+            content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
+            if len(content) < 20:
+                history[-1] = (f"attempt_{attempt}", "posting_too_short")
+                continue
+            history[-1] = (f"attempt_{attempt}", "ok")
+            return {
+                "routed": True,
+                "ok": True,
+                "stage": f"sd:greenhouse_api:{attempt}",
+                "content": content,
+                "error": "",
+                "stage_history": history,
+            }
+    return {
+        "routed": True,
+        "ok": False,
+        "stage": "greenhouse_api_exhausted",
+        "content": "",
+        "error": history[-1][1] if history else "not_attempted",
+        "stage_history": history,
+    }
 
 
 async def _scrape_workday_cxs(source_url: str) -> Dict[str, Any]:
@@ -667,6 +1070,70 @@ def _url_on_lead_domain(source_url: str,
     return False
 
 
+def _exact_ats_tenant_binds_company(
+    source_url: str,
+    *,
+    company_domain: str,
+    company_name: str,
+) -> bool:
+    """Apply the model-owned strict ATS tenant/employer identity rule."""
+
+    identity = _ashby_posting_identity(source_url)
+    if identity is None:
+        identity = _greenhouse_posting_identity(source_url)
+    if identity is None:
+        identity = _lever_posting_identity(source_url)
+    if identity is None:
+        return False
+    tenant = re.sub(r"[^a-z0-9]+", "", identity[0].casefold())
+    registrable_label = str(company_domain or "").casefold().split(".", 1)[0]
+    expected = {
+        re.sub(r"[^a-z0-9]+", "", registrable_label),
+        re.sub(r"[^a-z0-9]+", "", str(company_name or "").casefold()),
+    } - {""}
+    return bool(tenant and tenant in expected)
+
+
+def _exact_ats_result_binds_company(
+    *,
+    source_url: str,
+    contents: Mapping[str, Any],
+    company_domain: str,
+    company_name: str,
+) -> bool:
+    """Require an exact fetched job body before trusting an ATS tenant."""
+
+    expected_kind = (
+        "ashby_job" if _ashby_posting_identity(source_url) is not None
+        else "greenhouse_job"
+        if _greenhouse_posting_identity(source_url) is not None
+        else "lever_job" if _lever_posting_identity(source_url) is not None
+        else ""
+    )
+    if not expected_kind or not _exact_ats_tenant_binds_company(
+        source_url,
+        company_domain=company_domain,
+        company_name=company_name,
+    ):
+        return False
+    normalized_source = _normalize_url(source_url)
+    return any(
+        isinstance(result, Mapping)
+        and _normalize_url(str(result.get("url") or "")) == normalized_source
+        and str((result.get("meta") or {}).get("kind") or "") == expected_kind
+        and _looks_like_job_body(str(result.get("text") or ""))
+        for result in (contents.get("results") or [])
+    )
+
+
+def _grounded_exact_text(source_text: str, quote: Any) -> bool:
+    """Whether one nonempty quote is an exact whitespace-normalized span."""
+
+    normalized_source = " ".join(str(source_text or "").casefold().split())
+    normalized_quote = " ".join(str(quote or "").casefold().split())
+    return bool(normalized_quote and normalized_quote in normalized_source)
+
+
 def _normalize_company_for_match(name: str) -> str:
     """Strip legal-suffix tokens AND any preceding/following punctuation so
     the residual matches articles that omit the suffix.
@@ -957,7 +1424,34 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    break
+                    results = data.get("results") or []
+                    if results:
+                        text = (results[0].get("text") or "")[:MAX_SCRAPED_CHARS]
+                        if len(text) >= 300:
+                            return {
+                                "ok": True,
+                                "stage": "exa_scraped",
+                                "content": text,
+                                "error": None,
+                            }
+                        last_error = "<300 chars"
+                        terminal_stage = "exa_thin"
+                    else:
+                        last_error = json.dumps(data.get("statuses") or [])[:120]
+                        terminal_stage = "exa_no_results"
+                    # Exa can return a successful envelope before the exact
+                    # URL content is available. Spend the already bounded
+                    # second attempt on that unavailable observation rather
+                    # than turning it into a persistent semantic rejection.
+                    if attempt == 0:
+                        await asyncio.sleep(0.25)
+                        continue
+                    return {
+                        "ok": False,
+                        "stage": terminal_stage,
+                        "content": "",
+                        "error": last_error,
+                    }
                 last_error = f"HTTP {r.status_code}"
                 # Retry only transient transport/rate-limit responses. A 4xx
                 # result remains a deterministic miss and does not consume
@@ -975,17 +1469,6 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
         else:
             return {"ok": False, "stage": "exa_transient_exhausted",
                     "content": "", "error": last_error}
-
-    results = data.get("results") or []
-    if not results:
-        return {"ok": False, "stage": "exa_no_results",
-                "content": "",
-                "error": (json.dumps(data.get("statuses") or [])[:120])}
-    text = (results[0].get("text") or "")[:MAX_SCRAPED_CHARS]
-    if len(text) < 300:
-        return {"ok": False, "stage": "exa_thin",
-                "content": text, "error": "<300 chars"}
-    return {"ok": True, "stage": "exa_scraped", "content": text, "error": None}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1389,12 +1872,34 @@ def _build_final_judge_prompt(
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
     if row.get("_evidence_type") == "TECHSTACK":
-        return _prompts_techstack.build_final_judge_prompt(row, contents, source_name)
-    if row.get("_evidence_type") == "SOCIAL_POSTING":
-        return _prompts_social.build_final_judge_prompt(row, contents, source_name)
-    if row.get("_evidence_type") == "PODCAST_APPEARANCE":
-        return _prompts_podcast.build_final_judge_prompt(row, contents, source_name)
-    return _prompts_default.build_final_judge_prompt(row, contents, source_name)
+        prompt = _prompts_techstack.build_final_judge_prompt(
+            row, contents, source_name
+        )
+    elif row.get("_evidence_type") == "SOCIAL_POSTING":
+        prompt = _prompts_social.build_final_judge_prompt(
+            row, contents, source_name
+        )
+    elif row.get("_evidence_type") == "PODCAST_APPEARANCE":
+        prompt = _prompts_podcast.build_final_judge_prompt(
+            row, contents, source_name
+        )
+    else:
+        prompt = _prompts_default.build_final_judge_prompt(
+            row, contents, source_name
+        )
+    if row.get("_exact_hiring_employer_binding") is True:
+        prompt += (
+            "\n\nMODEL-OWNED EXACT HIRING EMPLOYER BINDING:\n"
+            "Deterministic checks established that the exact supplied URL is "
+            "a successfully fetched single-posting ATS page whose strict "
+            "tenant binds to the lead. Do not fail same_entity_check or "
+            "return wrong_entity solely because the grounded job text omits "
+            "the employer name. Still return wrong_entity if the fetched "
+            "body explicitly identifies a different employer. Evaluate role "
+            "alignment, source grounding, open/closed state, freshness, and "
+            "every other invariant normally."
+        )
+    return prompt
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1492,6 +1997,57 @@ async def _fetch_sd_then_exa(
                 "workable_error": workable.get("error"),
             })
 
+        # Ashby's human posting may be transiently unavailable to generic
+        # scrapers while the exact tenant-bound public board API remains live.
+        # Select only the row whose UUID and canonical job URL both match.
+        ashby = await _scrape_ashby_job(url)
+        if ashby.get("routed"):
+            if ashby.get("ok") and ashby.get("content"):
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "text": str(ashby["content"])[:max_chars],
+                    "meta": {"kind": "ashby_job"},
+                })
+                statuses.append({
+                    "url": url,
+                    "source": "scrapingdog_ashby_api",
+                    "stage": ashby.get("stage"),
+                })
+                continue
+            statuses.append({
+                "url": url,
+                "source": "scrapingdog_ashby_api_fallback",
+                "ashby_stage": ashby.get("stage"),
+                "ashby_error": ashby.get("error"),
+            })
+
+        # Greenhouse's human posting may be transiently unavailable to generic
+        # scrapers even while its exact board/posting-bound public API remains
+        # live. Read that representation first without changing evidence
+        # identity or qualification authority.
+        greenhouse = await _scrape_greenhouse_job(url)
+        if greenhouse.get("routed"):
+            if greenhouse.get("ok") and greenhouse.get("content"):
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "text": str(greenhouse["content"])[:max_chars],
+                    "meta": {"kind": "greenhouse_job"},
+                })
+                statuses.append({
+                    "url": url,
+                    "source": "scrapingdog_greenhouse_api",
+                    "stage": greenhouse.get("stage"),
+                })
+                continue
+            statuses.append({
+                "url": url,
+                "source": "scrapingdog_greenhouse_api_fallback",
+                "greenhouse_stage": greenhouse.get("stage"),
+                "greenhouse_error": greenhouse.get("error"),
+            })
+
         # Workday's human-facing posting URL is a JavaScript shell. Fetch its
         # exact tenant/site/requisition-bound public CXS representation first,
         # while preserving the original URL as the evidence identity seen by
@@ -1543,6 +2099,11 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": sd["content"][:max_chars],
+                "meta": (
+                    {"kind": "lever_job"}
+                    if _lever_posting_identity(url) is not None
+                    else {}
+                ),
             })
             statuses.append({
                 "url": url, "source": "scrapingdog",
@@ -1554,6 +2115,11 @@ async def _fetch_sd_then_exa(
             results.append({
                 "url": url, "title": "",
                 "text": exa["content"][:max_chars],
+                "meta": (
+                    {"kind": "lever_job"}
+                    if _lever_posting_identity(url) is not None
+                    else {}
+                ),
             })
             statuses.append({
                 "url": url, "source": "exa_fallback",
@@ -2610,10 +3176,28 @@ async def verify_three_stage(
             # "Hive"). Defer to the authoritative Stage-3 entity judge.
             company_check = None
 
-    is_hiring_claim = _is_active_hiring_claim(
-        row.get("claim") or "",
-        row.get("_target_signal_text") or "",
+    evidence_type = str(row.get("_evidence_type") or "").strip().upper()
+    is_hiring_claim = bool(
+        evidence_type == "HIRING"
+        or (
+            not evidence_type
+            and _is_active_hiring_claim(
+                row.get("claim") or "",
+                row.get("_target_signal_text") or "",
+            )
+        )
     )
+    exact_hiring_employer_binding = bool(
+        is_hiring_claim
+        and _exact_ats_result_binds_company(
+            source_url=fetch_source_url,
+            contents=contents,
+            company_domain=prompt_identity["company"],
+            company_name=company_name,
+        )
+    )
+    if exact_hiring_employer_binding:
+        row["_exact_hiring_employer_binding"] = True
     for res in (contents.get("results") or []):
         meta = res.get("meta") or {}
         if meta.get("kind") != "linkedin_job":
@@ -2727,6 +3311,67 @@ async def verify_three_stage(
             "company_check": company_check,
         }
     s3_verdict_raw = (s3_envelope.get("answer") or {})
+    if exact_hiring_employer_binding:
+        combined_exact_source = "\n".join(
+            str(result.get("text") or "")
+            for result in (contents.get("results") or [])
+            if isinstance(result, Mapping)
+        )
+        normalized_source_url = _normalize_url(fetch_source_url)
+        for item in (s3_verdict_raw.get("signal_evaluations") or []):
+            supporting_quotes = [
+                str(value or "").strip()
+                for value in (item.get("supporting_quotes") or [])
+                if str(value or "").strip()
+            ]
+            grounded_contradictions = [
+                value
+                for value in (item.get("contradicting_quotes") or [])
+                if _grounded_exact_text(combined_exact_source, value)
+            ]
+            cited_urls = {
+                _normalize_url(url)
+                for url in (item.get("evidence_urls_used") or [])
+                if str(url or "").strip()
+            }
+            deterministic_exact_hiring_evidence = (
+                item.get("signal_status")
+                in {"supported", "partially_supported", "wrong_entity"}
+                and item.get("verification_mode") == "source_grounded"
+                and item.get("confidence") in {"medium", "high"}
+                and item.get("same_entity_check") in {"pass", "unclear", "fail"}
+                and item.get("claim_matches_miner_date")
+                in {"consistent", "no_date_in_content"}
+                and str(item.get("claim") or "") == str(row.get("claim") or "")
+                and _grounded_exact_text(
+                    combined_exact_source,
+                    row.get("claim") or "",
+                )
+                and supporting_quotes
+                and all(
+                    _grounded_exact_text(combined_exact_source, quote)
+                    for quote in supporting_quotes
+                )
+                and not grounded_contradictions
+                and cited_urls == {normalized_source_url}
+                and str(item.get("source_accessibility") or "")
+                .strip()
+                .casefold()
+                == "accessible"
+                and _LINKEDIN_JOB_CLOSED_RE.search(combined_exact_source) is None
+                and s3_verdict_raw.get("overall_confidence")
+                in {"medium", "high"}
+            )
+            if deterministic_exact_hiring_evidence:
+                item["same_entity_check"] = "pass"
+                item["signal_status"] = "supported"
+                item["confidence"] = "high"
+                item["unsupported_parts"] = []
+                item.setdefault("risk_notes", []).append(
+                    "normalized_exact_hiring_employer_binding"
+                )
+                s3_verdict_raw["overall_verdict"] = "qualified"
+                s3_verdict_raw["overall_confidence"] = "high"
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     s3_decision = _decision(s3_verdict)

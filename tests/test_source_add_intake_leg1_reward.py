@@ -395,19 +395,21 @@ async def test_manual_provenance_never_queues_probe_or_reward(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("http_status", "expected_disposition"),
+    ("http_status", "attempt_count", "expected_disposition"),
     (
-        (400, "retry"),
-        (408, "retry"),
-        (429, "retry"),
-        (503, "retry"),
-        (404, "complete"),
-        (410, "complete"),
+        (400, 1, "retry"),
+        (400, 2, "retry"),
+        (400, 3, "complete"),
+        (408, 3, "retry"),
+        (429, 3, "retry"),
+        (503, 3, "retry"),
+        (404, 1, "complete"),
+        (410, 1, "complete"),
     ),
 )
 @pytest.mark.asyncio
 async def test_documentation_fetch_retries_only_transient_statuses(
-    monkeypatch, http_status, expected_disposition
+    monkeypatch, http_status, attempt_count, expected_disposition
 ):
     finished = {}
 
@@ -439,9 +441,9 @@ async def test_documentation_fetch_retries_only_transient_statuses(
     )
     monkeypatch.setattr(workflow, "_finish_work", fake_finish)
 
-    await workflow._process_provenance(
-        _leased_work("provenance"), config=_config()
-    )
+    work = _leased_work("provenance")
+    work["attempt_count"] = attempt_count
+    await workflow._process_provenance(work, config=_config())
 
     assert finished["disposition"] == expected_disposition
     assert finished["stage"] == PRECHECK_MANUAL

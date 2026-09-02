@@ -50,6 +50,7 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TERMINAL_PROVIDER_FAILURE_TYPES = frozenset(
     {"response_too_large", "tls_failure"}
 )
+_DOCUMENTATION_HTTP_400_MAX_ATTEMPTS = 3
 
 
 class SourceAddWorkflowError(RuntimeError):
@@ -355,16 +356,28 @@ async def _process_provenance(
         )
         if isinstance(section, Mapping)
     )
-    retryable_provider_failure = not terminal_provider_failure and (
-        any(
-            item.endswith("provider_error") or item == "scrapingdog_key_missing"
-            for item in reasons
-        )
-        or (
-            "documentation_fetch_failed" in reasons
-            and (
-                docs_http_status in {400, 408, 425, 429}
-                or 500 <= docs_http_status < 600
+    # ScrapingDog has historically surfaced transient shedding as HTTP 400,
+    # so preserve two retries. A third 400 is deterministic enough to stop
+    # consuming provider credits and leave the source for manual review.
+    documentation_http_400_retryable = (
+        docs_http_status != 400
+        or attempt_count < _DOCUMENTATION_HTTP_400_MAX_ATTEMPTS
+    )
+    retryable_provider_failure = (
+        not terminal_provider_failure
+        and documentation_http_400_retryable
+        and (
+            any(
+                item.endswith("provider_error")
+                or item == "scrapingdog_key_missing"
+                for item in reasons
+            )
+            or (
+                "documentation_fetch_failed" in reasons
+                and (
+                    docs_http_status in {400, 408, 425, 429}
+                    or 500 <= docs_http_status < 600
+                )
             )
         )
     )

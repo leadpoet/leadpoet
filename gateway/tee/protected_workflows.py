@@ -898,6 +898,7 @@ PROTECTED_SYMBOLS = {
         "evaluate_source_add_provenance",
     ),
     "gateway/research_lab/source_add_workflow.py": (
+        "_DOCUMENTATION_HTTP_400_MAX_ATTEMPTS",
         "build_automatic_probe_config",
         "process_source_add_work_item",
         "_process_provenance",

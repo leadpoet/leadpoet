@@ -39,6 +39,7 @@ COMPANY_FIT_PROOF_RECEIPT_EMPLOYEE_SOURCES: Final = (
     "scrapingdog_linkedin_company_profile",
     "cached_structured_acquisition_exact_count",
     "deepline_domain_firmographics",
+    "exact_public_company_qualification_evidence",
 )
 
 
@@ -110,6 +111,9 @@ def company_fit_proof_receipt_contract_identity() -> dict[str, Any]:
         "binding_rules": {
             "company_binding": (
                 "exact_emitted_company_fields_after_declared_normalization"
+            ),
+            "company_linkedin": (
+                "exact_validated_url_or_empty_never_synthesized"
             ),
             "icp_binding": "effective_per_company_qualification_icp_fields",
             "icp_binding_authority": "audit_and_citation_context_only",
@@ -237,7 +241,7 @@ class CompanyFitProofCompanyBinding(BaseModel):
 
     company_name: StrictStr = Field(..., min_length=1, max_length=200)
     company_website: StrictStr = Field(..., min_length=1, max_length=2048)
-    company_linkedin: StrictStr = Field(..., min_length=1, max_length=2048)
+    company_linkedin: StrictStr = Field(..., max_length=2048)
 
     @model_validator(mode="after")
     def _validate_canonical_binding(
@@ -251,8 +255,11 @@ class CompanyFitProofCompanyBinding(BaseModel):
                 normalize_website_binding=True,
             )
             != self.company_website
-            or _credential_free_http_url(self.company_linkedin)
-            != self.company_linkedin
+            or (
+                self.company_linkedin
+                and _credential_free_http_url(self.company_linkedin)
+                != self.company_linkedin
+            )
         ):
             raise ValueError("company-fit company URL binding is invalid")
         return self

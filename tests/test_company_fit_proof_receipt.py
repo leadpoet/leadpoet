@@ -58,7 +58,7 @@ _MODEL_PARITY_RECEIPT = {
         "company_website": "https://acme.example",
     },
     "contract_sha256": (
-        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
     ),
     "decision": "match",
     "dimensions": {
@@ -82,7 +82,7 @@ _MODEL_PARITY_RECEIPT = {
     },
     "outcome_binding": COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
     "receipt_sha256": (
-        "e7caa63d221b488ff7bb1c08cefbb6ba33435337e71e585141c9e9ed493bf965"
+        "e1724876a45a1fd6a07724153badc9aff2b7ce14ce7ff1035acbda89a2966203"
     ),
     "schema_version": "company-fit-proof-receipt:v1",
     "stage_proof": {
@@ -221,7 +221,7 @@ def _complete_web_verdict(*, employee="51-200", stage="Series B"):
 
 def test_contract_identity_and_receipt_round_trip_match_model_fixture():
     assert _sha256_json(company_fit_proof_receipt_contract_identity()) == (
-        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
     )
     receipt = CompanyFitProofReceipt.model_validate(_proof_payload())
     payload = receipt.model_dump(mode="json")

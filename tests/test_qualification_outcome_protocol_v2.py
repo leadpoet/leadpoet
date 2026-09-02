@@ -813,7 +813,7 @@ def test_segmented_model_parity_fixture_joins_outer_and_nested_proofs() -> None:
     receipt = {
         "schema_version": "company-fit-proof-receipt:v1",
         "contract_sha256": (
-            "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+            "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
         ),
         "outcome_binding": (
             "qualification_outcome.route_completion_receipt.extensions."

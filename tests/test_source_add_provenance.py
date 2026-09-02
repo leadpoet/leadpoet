@@ -696,3 +696,48 @@ def test_negated_miner_wrapper_wording_is_credible(monkeypatch):
 
     assert result.precheck_status == provenance.PRECHECK_PASSED
     assert result.doc["ai_legitimacy"]["uncertain_markers"] == []
+
+
+def test_ai_summary_ignores_echoed_query_verdict_examples():
+    summary = provenance._summarize_ai(
+        {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "markdown": (
+                    "Assess the source. Start with VERDICT: CREDIBLE only when established; "
+                    "otherwise use VERDICT: UNCERTAIN or VERDICT: REJECT.\n\n"
+                    "# Shared 0 files\n\n**VERDICT: CREDIBLE**\n"
+                    "The source is an established official API."
+                ),
+                "references": [],
+            },
+        }
+    )
+
+    assert summary["markdown_excerpt"].startswith("VERDICT: CREDIBLE")
+    assert provenance._ai_legitimacy(summary["markdown_excerpt"]) == {
+        "positive_verdict": True,
+        "uncertain_markers": [],
+    }
+
+
+def test_ai_summary_keeps_actual_uncertain_verdict_after_echoed_query():
+    summary = provenance._summarize_ai(
+        {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "markdown": (
+                    "Use VERDICT: CREDIBLE, VERDICT: UNCERTAIN, or VERDICT: REJECT.\n\n"
+                    "**VERDICT: UNCERTAIN**\nThe entity could not be verified."
+                ),
+                "references": [],
+            },
+        }
+    )
+
+    assert summary["markdown_excerpt"].startswith("VERDICT: UNCERTAIN")
+    legitimacy = provenance._ai_legitimacy(summary["markdown_excerpt"])
+    assert legitimacy["positive_verdict"] is False
+    assert "verdict: uncertain" in legitimacy["uncertain_markers"]

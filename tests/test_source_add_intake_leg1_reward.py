@@ -453,6 +453,53 @@ async def test_documentation_fetch_retries_only_transient_statuses(
         assert "reward_intent" not in finished
 
 
+@pytest.mark.parametrize("error_type", ("response_too_large", "tls_failure"))
+@pytest.mark.asyncio
+async def test_terminal_documentation_provider_errors_do_not_retry(
+    monkeypatch, error_type
+):
+    finished = {}
+
+    async def fake_provenance(**_kwargs):
+        return (
+            SourceAddProvenanceResult(
+                PRECHECK_MANUAL,
+                ("documentation_provider_error",),
+                {
+                    "docs_fetch": {
+                        "provider_status": "error",
+                        "status": 0,
+                        "error_type": error_type,
+                    }
+                },
+            ),
+            {"receipt": {"receipt_hash": "sha256:" + "8" * 64}},
+        )
+
+    async def fake_finish(_work, **kwargs):
+        finished.update(kwargs)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(
+        workflow, "_load_submission", lambda _sid: _async_value(_submission_row())
+    )
+    monkeypatch.setattr(
+        workflow, "evaluate_source_add_provenance_v2", fake_provenance
+    )
+    monkeypatch.setattr(workflow, "_finish_work", fake_finish)
+
+    result = await workflow._process_provenance(
+        _leased_work("provenance"), config=_config()
+    )
+
+    assert result == {"status": "completed"}
+    assert finished["disposition"] == "complete"
+    assert finished["stage"] == PRECHECK_MANUAL
+    assert finished["next_work"] == {}
+    assert "available_at" not in finished
+    assert "reward_intent" not in finished
+
+
 @pytest.mark.asyncio
 async def test_exact_functional_pass_waits_for_final_acceptance(monkeypatch):
     config_ref = "source_add_probe_config:0123456789abcdef"

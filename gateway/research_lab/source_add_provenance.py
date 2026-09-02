@@ -72,6 +72,10 @@ _AI_UNCERTAIN_PATTERNS = (
     "unverified",
     "miner-owned wrapper",
 )
+_AI_VERDICT_PATTERN = re.compile(
+    r"verdict\s*:\s*(?:\*{0,2})?(credible|uncertain|reject)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -418,6 +422,13 @@ def _summarize_fetch(result: Mapping[str, Any]) -> dict[str, Any]:
 def _summarize_ai(result: Mapping[str, Any]) -> dict[str, Any]:
     parsed = result.get("json") if isinstance(result.get("json"), Mapping) else {}
     markdown = str(parsed.get("markdown") or parsed.get("answer") or "")
+    # ScrapingDog AI Mode can prefix its answer with an echoed copy of the
+    # query.  That query intentionally names every allowed verdict and must
+    # not be interpreted as the provider's answer.  The response contract
+    # requires an explicit verdict, so retain only the final verdict section.
+    verdicts = list(_AI_VERDICT_PATTERN.finditer(markdown))
+    if verdicts:
+        markdown = markdown[verdicts[-1].start() :]
     references = parsed.get("references") if isinstance(parsed.get("references"), list) else []
     ref_docs: list[dict[str, str]] = []
     for item in references[:12]:

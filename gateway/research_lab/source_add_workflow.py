@@ -47,6 +47,9 @@ _NON_DATA_PATH_PARTS = frozenset(
     }
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_TERMINAL_PROVIDER_FAILURE_TYPES = frozenset(
+    {"response_too_large", "tls_failure"}
+)
 
 
 class SourceAddWorkflowError(RuntimeError):
@@ -342,14 +345,27 @@ async def _process_provenance(
     ) else 0
     if not isinstance(docs_http_status, int):
         docs_http_status = 0
-    retryable_provider_failure = any(
-        item.endswith("provider_error") or item == "scrapingdog_key_missing"
-        for item in reasons
-    ) or (
-        "documentation_fetch_failed" in reasons
-        and (
-            docs_http_status in {400, 408, 425, 429}
-            or 500 <= docs_http_status < 600
+    terminal_provider_failure = any(
+        str(section.get("error_type") or "").strip().lower()
+        in _TERMINAL_PROVIDER_FAILURE_TYPES
+        for section in (
+            precheck_doc.get("docs_fetch"),
+            precheck_doc.get("archive_history"),
+            precheck_doc.get("ai_mode"),
+        )
+        if isinstance(section, Mapping)
+    )
+    retryable_provider_failure = not terminal_provider_failure and (
+        any(
+            item.endswith("provider_error") or item == "scrapingdog_key_missing"
+            for item in reasons
+        )
+        or (
+            "documentation_fetch_failed" in reasons
+            and (
+                docs_http_status in {400, 408, 425, 429}
+                or 500 <= docs_http_status < 600
+            )
         )
     )
     if (

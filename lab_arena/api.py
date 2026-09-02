@@ -108,17 +108,20 @@ def create_app(service: ArenaService, *, recipient_document: Optional[Dict[str, 
             raise HTTPException(status_code=404, detail="unknown submission")
         return {"submission_id": submission_id, "status": row["status"], "rejection_rule": row.get("rejection_rule"), "image_digest": row.get("image_digest")}
 
+    confirm_deposit = funding_confirm
+    register_key = credential_register
+
     @app.post("/arena/v1/funding/confirm")
-    async def funding_confirm(request: Request) -> Any:
-        if funding_confirm is None:
+    async def funding_confirm_route(request: Request) -> Any:
+        if confirm_deposit is None:
             raise HTTPException(status_code=503, detail="funding unavailable")
-        return service.handle_funding(await _read_json(request), confirm=funding_confirm)
+        return service.handle_funding(await _read_json(request), confirm=confirm_deposit)
 
     @app.post("/arena/v1/credentials/openrouter")
-    async def credentials_openrouter(request: Request) -> Any:
-        if credential_register is None:
+    async def credentials_openrouter_route(request: Request) -> Any:
+        if register_key is None:
             raise HTTPException(status_code=503, detail="credential registration unavailable")
-        return service.handle_credential(await _read_json(request), register=credential_register)
+        return service.handle_credential(await _read_json(request), register=register_key)
 
     # -- runner -------------------------------------------------------------
 

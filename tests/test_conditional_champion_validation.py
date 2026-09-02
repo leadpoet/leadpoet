@@ -445,6 +445,77 @@ def test_enforced_baseline_stamps_immutable_v11_assignment() -> None:
     assert doc["category_scores"] == doc["category_assignment"]["category_scores"]
 
 
+def test_enforced_baseline_publishes_attested_all_zero_assignment() -> None:
+    items, summaries = _bank()
+    receipts = []
+    for index, summary in enumerate(summaries):
+        receipt = "sha256:" + f"{index + 100:064x}"
+        receipts.append(receipt)
+        summary.update(
+            {
+                "score": 0.0,
+                "company_count": 0,
+                "diagnostics": {
+                    "sourcing_failed": False,
+                    "empty_result_provider_evidence_validated": True,
+                    "empty_result_authority": (
+                        "immutable_artifact_terminal_model_receipt"
+                    ),
+                    "official_baseline_model_receipt_sha256": receipt,
+                },
+            }
+        )
+
+    assert scoring_worker._baseline_all_zero_distribution_is_attested_terminal(
+        summaries,
+        items,
+        attested_parent_receipt_hashes=reversed(receipts),
+    )
+    result = build_baseline_score_summary(
+        artifact_manifest={
+            "model_artifact_hash": "sha256:" + "1" * 64,
+            "git_commit_sha": "2" * 40,
+            "image_digest": "repo@sha256:" + "3" * 64,
+            "config_hash": "sha256:" + "4" * 64,
+            "component_registry_version": "v1",
+            "scoring_adapter_version": "v1",
+            "manifest_uri": "s3://private/model.json",
+            "manifest_hash": "sha256:" + "5" * 64,
+            "signature_ref": "kms://signature",
+            "build_id": "build-1",
+        },
+        benchmark_date="2026-07-14",
+        benchmark_attempt=1,
+        rolling_window_hash=WINDOW_HASH,
+        evaluation_epoch=42,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=3,
+        public_weak_per_day=2,
+        public_total_icps=10,
+        public_weak_total=7,
+        retried=0,
+        recovered=0,
+        max_unresolved_icps=0,
+        day_jump_points=None,
+        elapsed_seconds=12.0,
+        conditional_validation_policy=_policy().to_dict(),
+    )
+
+    assignment = result["category_assignment"]
+    assert result["aggregate_score"] == 0.0
+    assert assignment["category_counts"] == {
+        "public": 10,
+        "private": 10,
+        "conditional": 20,
+    }
+    assert assignment["category_scores"] == {
+        "public": 0.0,
+        "private": 0.0,
+        "conditional": 0.0,
+    }
+
+
 def test_conditional_mode_off_is_byte_equivalent_to_legacy_baseline() -> None:
     items, summaries = _bank(20)
     kwargs = {

@@ -1176,6 +1176,7 @@ PROTECTED_SYMBOLS = {
         "_baseline_checkpoint_replay_concurrency",
         "_baseline_attempt_reason_code",
         "_baseline_attempt_checkpoint_row",
+        "_baseline_all_zero_distribution_is_attested_terminal",
         "_compatible_baseline_retry_extension",
         "_baseline_scoring_contract_hash",
         "_emit_private_baseline_retry_extension",

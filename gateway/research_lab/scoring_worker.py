@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
@@ -2907,6 +2907,76 @@ def _baseline_distribution_complete(
         and len(expected_refs) == len(benchmark_items)
         and len(rows) == len(benchmark_items)
         and observed_refs == expected_refs
+    )
+
+
+def _baseline_all_zero_distribution_is_attested_terminal(
+    rows: Sequence[Mapping[str, Any]],
+    benchmark_items: Sequence[Mapping[str, Any]],
+    *,
+    attested_parent_receipt_hashes: Iterable[str],
+) -> bool:
+    """Accept a zero distribution only when every empty result is attested.
+
+    The all-zero guard still catches a model that silently returns no work.
+    Exact official-baseline execution is different: each terminal empty result
+    carries one immutable model receipt, and the checkpoint binds the complete
+    receipt frontier. Requiring exact row-to-frontier equality keeps that
+    distinction fail closed while allowing a legitimate zero-score benchmark
+    to reach aggregation and publication.
+    """
+
+    if not _baseline_distribution_complete(rows, benchmark_items):
+        return False
+    normalized_parent_receipts = [
+        str(value or "").strip().lower()
+        for value in attested_parent_receipt_hashes
+    ]
+    if (
+        len(normalized_parent_receipts) != len(rows)
+        or len(set(normalized_parent_receipts)) != len(normalized_parent_receipts)
+        or any(
+            not _SHA256_RE.fullmatch(value)
+            for value in normalized_parent_receipts
+        )
+    ):
+        return False
+
+    row_receipts: list[str] = []
+    for row in rows:
+        if _baseline_summary_nonempty(row):
+            return False
+        try:
+            score = float(row.get("score"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(score) or score != 0.0:
+            return False
+        diagnostics = row.get("diagnostics")
+        if not isinstance(diagnostics, Mapping):
+            return False
+        if diagnostics.get("sourcing_failed") is not False:
+            return False
+        if (
+            diagnostics.get("empty_result_provider_evidence_validated")
+            is not True
+        ):
+            return False
+        if (
+            str(diagnostics.get("empty_result_authority") or "")
+            != "immutable_artifact_terminal_model_receipt"
+        ):
+            return False
+        receipt_hash = str(
+            diagnostics.get("official_baseline_model_receipt_sha256") or ""
+        ).strip().lower()
+        if not _SHA256_RE.fullmatch(receipt_hash):
+            return False
+        row_receipts.append(receipt_hash)
+
+    return (
+        len(set(row_receipts)) == len(row_receipts)
+        and set(row_receipts) == set(normalized_parent_receipts)
     )
 
 
@@ -15663,7 +15733,20 @@ class ResearchLabGatewayScoringWorker:
                 total_icps=total_icps,
                 benchmark_date=today,
             )
-            if nonempty_output_count <= 0:
+            attested_terminal_zero_distribution = (
+                nonempty_output_count <= 0
+                and _baseline_all_zero_distribution_is_attested_terminal(
+                    per_icp_summaries,
+                    window.benchmark_items,
+                    attested_parent_receipt_hashes=(
+                        baseline_progress_parent_receipt_hashes
+                    ),
+                )
+            )
+            if (
+                nonempty_output_count <= 0
+                and not attested_terminal_zero_distribution
+            ):
                 complete_distribution = _baseline_distribution_complete(
                     per_icp_summaries,
                     window.benchmark_items,
@@ -15703,6 +15786,21 @@ class ResearchLabGatewayScoringWorker:
                     )
                 raise PrivateModelRuntimeError(
                     f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
+                )
+            if attested_terminal_zero_distribution:
+                _record_private_baseline_stage(
+                    worker_ref=self.worker_ref,
+                    stage="all_zero_terminal_evidence",
+                    status="passed",
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    epoch_id=evaluation_epoch,
+                    window_hash=window.window_hash,
+                    manifest_hash=artifact.manifest_hash,
+                    selected_icp_count=len(window.benchmark_items),
+                    receipt_count=len(baseline_progress_parent_receipt_hashes),
+                    reason_code="all_icps_immutable_terminal_empty",
+                    duration_seconds=time.time() - start,
                 )
             baseline_health = _build_baseline_health(
                 per_icp_summaries=per_icp_summaries,

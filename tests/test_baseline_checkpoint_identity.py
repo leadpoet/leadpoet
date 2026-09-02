@@ -549,6 +549,91 @@ def test_complete_distribution_requires_every_unique_icp():
     )
 
 
+def _attested_terminal_empty_row(icp_ref: str, receipt_hash: str) -> dict:
+    return {
+        "icp_ref": icp_ref,
+        "score": 0.0,
+        "company_count": 0,
+        "diagnostics": {
+            "sourcing_failed": False,
+            "empty_result_provider_evidence_validated": True,
+            "empty_result_authority": (
+                "immutable_artifact_terminal_model_receipt"
+            ),
+            "official_baseline_model_receipt_sha256": receipt_hash,
+        },
+    }
+
+
+def test_complete_attested_terminal_empty_distribution_is_publishable():
+    receipts = [PARENT_RECEIPT_HASH, OTHER_PARENT_RECEIPT_HASH]
+    rows = [
+        _attested_terminal_empty_row("icp-1", receipts[0]),
+        _attested_terminal_empty_row("icp-2", receipts[1]),
+    ]
+
+    assert sw._baseline_all_zero_distribution_is_attested_terminal(
+        rows,
+        [{"icp_ref": "icp-1"}, {"icp_ref": "icp-2"}],
+        attested_parent_receipt_hashes=reversed(receipts),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "parent_receipts"),
+    (
+        (
+            lambda rows: rows[0]["diagnostics"].pop(
+                "official_baseline_model_receipt_sha256"
+            ),
+            None,
+        ),
+        (
+            lambda rows: rows[0]["diagnostics"].update(
+                {"sourcing_failed": True}
+            ),
+            None,
+        ),
+        (
+            lambda rows: rows[0]["diagnostics"].update(
+                {"empty_result_provider_evidence_validated": False}
+            ),
+            None,
+        ),
+        (
+            lambda rows: rows[0]["diagnostics"].update(
+                {"empty_result_authority": "untrusted_empty"}
+            ),
+            None,
+        ),
+        (lambda rows: rows[0].update({"score": 1.0}), None),
+        (lambda rows: None, [PARENT_RECEIPT_HASH]),
+        (
+            lambda rows: None,
+            [PARENT_RECEIPT_HASH, "sha256:" + "f" * 64],
+        ),
+    ),
+)
+def test_attested_terminal_empty_distribution_fails_closed(
+    mutation,
+    parent_receipts,
+):
+    receipts = [PARENT_RECEIPT_HASH, OTHER_PARENT_RECEIPT_HASH]
+    rows = [
+        _attested_terminal_empty_row("icp-1", receipts[0]),
+        _attested_terminal_empty_row("icp-2", receipts[1]),
+    ]
+    mutation(rows)
+
+    assert not sw._baseline_all_zero_distribution_is_attested_terminal(
+        rows,
+        [{"icp_ref": "icp-1"}, {"icp_ref": "icp-2"}],
+        attested_parent_receipt_hashes=(
+            receipts if parent_receipts is None else parent_receipts
+        ),
+    )
+
+
 def test_retry_extension_recovers_marker_linked_checkpoint_version_history():
     stub, _s3, versions = _versioned_s3_stub()
     clean_environment = {

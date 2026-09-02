@@ -10,6 +10,7 @@ from gateway.tee.active_release_requirements_v2 import (
     build_active_release_requirements_v2,
 )
 from gateway.tee import prepare_active_release_lineage_v2 as prepare
+from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from tests.test_validator_hotkey_authority_v2 import _profile
 
@@ -94,6 +95,195 @@ def _patch_lineage_boundaries(monkeypatch):
         lambda _lineage_value: (lambda identity: identity),
     )
     return fetched
+
+
+def _source_add_graph(*, root: str, purpose: str, output_root: str) -> dict:
+    return {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": root,
+        "boot_identities": [],
+        "receipts": [
+            {
+                "receipt_hash": root,
+                "role": "gateway_coordinator",
+                "purpose": purpose,
+                "status": "succeeded",
+                "output_root": output_root,
+                "parent_receipt_hashes": [],
+            }
+        ],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_add_active_graphs_select_pending_and_reward_authority(
+    monkeypatch,
+) -> None:
+    submission_id = "source_add_submission:1111111111111111"
+    intent_id = "source_add_reward_intent:2222222222222222"
+    reward_ref = "source_add_reward:3333333333333333"
+    provenance_receipt = _hash("7")
+    provenance_artifact = _hash("8")
+    decision_receipt = _hash("9")
+    intent = {
+        "intent_id": intent_id,
+        "submission_id": submission_id,
+        "adapter_id": "adapter-pending",
+        "miner_hotkey": VALIDATOR_HOTKEY,
+        "leg": 1,
+        "intent_status": "retry_wait",
+        "approval_kind": "provenance_precheck_passed",
+        "provenance_receipt_hash": provenance_receipt,
+        "provenance_artifact_hash": provenance_artifact,
+    }
+    authority = {
+        "submission_id": submission_id,
+        "adapter_id": intent["adapter_id"],
+        "miner_hotkey": intent["miner_hotkey"],
+        "precheck_status": "provenance_precheck_passed",
+        "provenance_receipt_hash": provenance_receipt,
+        "provenance_artifact_hash": provenance_artifact,
+    }
+    future_reward = {
+        "reward_ref": reward_ref,
+        "adapter_id": "adapter-future",
+        "miner_hotkey": VALIDATOR_HOTKEY,
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": 0.2,
+        "reward_epochs": 20,
+        "start_epoch": 24_740,
+        "trigger_evidence_doc": {"provenance_precheck_passed": True},
+        "public_label": "Source acceptance reward",
+        "current_reward_status": "active",
+    }
+    expected_decision_hash = sha256_json(
+        source_add_reward_row_projection_v2(
+            "source_add_leg1",
+            {**future_reward, "initial_reward_status": "active"},
+        )
+    )
+    calls = []
+
+    async def select(table, **kwargs):
+        calls.append((table, kwargs))
+        if table == "research_lab_source_add_reward_intents":
+            return [dict(intent)]
+        if table == "research_lab_source_add_reward_current":
+            return [dict(future_reward)]
+        if table == "research_lab_source_add_provenance_leg1_authority_v1":
+            return [dict(authority)]
+        raise AssertionError(table)
+
+    async def load(artifacts):
+        assert set(artifacts) == {
+            ("source_add_provenance", submission_id, provenance_artifact),
+            ("source_add_reward_decision", reward_ref, expected_decision_hash),
+        }
+        return {
+            ("source_add_provenance", submission_id, provenance_artifact): (
+                _source_add_graph(
+                    root=provenance_receipt,
+                    purpose="research_lab.source_add_provenance.v2",
+                    output_root=provenance_artifact,
+                )
+            ),
+            ("source_add_reward_decision", reward_ref, expected_decision_hash): (
+                _source_add_graph(
+                    root=decision_receipt,
+                    purpose="research_lab.reward_decision.v2",
+                    output_root=expected_decision_hash,
+                )
+            ),
+        }
+
+    monkeypatch.setattr(
+        prepare, "validate_receipt_graph", lambda *_args, **_kwargs: None
+    )
+    graphs = await prepare._load_active_source_add_graphs_v2(
+        current_epoch=24_745,
+        select_rows=select,
+        load_business_graphs=load,
+    )
+
+    assert [graph["root_receipt_hash"] for graph in graphs] == sorted(
+        (provenance_receipt, decision_receipt)
+    )
+    intent_query = next(
+        kwargs for table, kwargs in calls if table.endswith("reward_intents")
+    )
+    reward_query = next(
+        kwargs for table, kwargs in calls if table.endswith("reward_current")
+    )
+    assert ("intent_status", "in", ["leased", "queued", "retry_wait"]) in intent_query[
+        "filters"
+    ]
+    assert not any(field == "start_epoch" for field, *_rest in reward_query["filters"])
+
+
+@pytest.mark.asyncio
+async def test_source_add_active_graphs_fail_closed_without_exact_authority() -> None:
+    intent = {
+        "intent_id": "source_add_reward_intent:2222222222222222",
+        "submission_id": "source_add_submission:1111111111111111",
+        "adapter_id": "adapter-pending",
+        "miner_hotkey": VALIDATOR_HOTKEY,
+        "leg": 1,
+        "intent_status": "leased",
+        "approval_kind": "provenance_precheck_passed",
+        "provenance_receipt_hash": _hash("7"),
+        "provenance_artifact_hash": _hash("8"),
+    }
+
+    async def select(table, **_kwargs):
+        if table == "research_lab_source_add_reward_intents":
+            return [intent]
+        return []
+
+    async def load(_artifacts):
+        raise AssertionError("unproved SOURCE_ADD authority must not load a graph")
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="missing or ambiguous",
+    ):
+        await prepare._load_active_source_add_graphs_v2(
+            current_epoch=24_745,
+            select_rows=select,
+            load_business_graphs=load,
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_add_active_graphs_reject_filtered_row_drift() -> None:
+    intent = {
+        "intent_id": "source_add_reward_intent:2222222222222222",
+        "submission_id": "source_add_submission:1111111111111111",
+        "adapter_id": "adapter-pending",
+        "miner_hotkey": VALIDATOR_HOTKEY,
+        "leg": 1,
+        "intent_status": "cancelled",
+        "approval_kind": "provenance_precheck_passed",
+        "provenance_receipt_hash": _hash("7"),
+        "provenance_artifact_hash": _hash("8"),
+    }
+
+    async def select(table, **_kwargs):
+        if table == "research_lab_source_add_reward_intents":
+            return [intent]
+        return []
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="differs from provenance authority",
+    ):
+        await prepare._load_active_source_add_graphs_v2(
+            current_epoch=24_745,
+            select_rows=select,
+            load_business_graphs=lambda _artifacts: {},
+        )
 
 
 def test_validator_initial_freezes_exact_journal_commits_and_verifies_again(
@@ -305,6 +495,7 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
     initial = _requirements(transitions=(RUNNING_VALIDATOR, JOURNAL_COMMIT))
     allocation_calls = []
     sourcing_calls = []
+    source_add_calls = []
 
     async def allocations(**kwargs):
         allocation_calls.append(kwargs)
@@ -312,6 +503,10 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
 
     async def sourcing(**kwargs):
         sourcing_calls.append(kwargs)
+        return []
+
+    async def source_add(**kwargs):
+        source_add_calls.append(kwargs)
         return []
 
     result = await prepare.prepare_gateway_final_active_lineage_v2(
@@ -327,15 +522,17 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
         expected_lineage_id=LINEAGE_ID,
         load_allocation_graphs=allocations,
         load_sourcing_graphs=sourcing,
+        load_source_add_graphs=source_add,
     )
 
     expected = sorted({CANDIDATE, RUNNING_GATEWAY, RUNNING_VALIDATOR, JOURNAL_COMMIT})
     assert fetched == [expected]
     assert result["requirements"]["required_commits"] == expected
-    assert len(allocation_calls) == len(sourcing_calls) == 2
+    assert len(allocation_calls) == len(sourcing_calls) == len(source_add_calls) == 2
     assert {call["epoch_id"] for call in allocation_calls} == {24_745}
     assert {call["current_epoch"] for call in sourcing_calls} == {24_745}
     assert {call["window"] for call in sourcing_calls} == {30}
+    assert {call["current_epoch"] for call in source_add_calls} == {24_745}
 
 
 @pytest.mark.asyncio
@@ -373,6 +570,7 @@ async def test_gateway_final_explicit_standalone_fallback_unions_installed_linea
         expected_lineage_id=LINEAGE_ID,
         load_allocation_graphs=empty,
         load_sourcing_graphs=empty,
+        load_source_add_graphs=empty,
     )
 
     expected = sorted({CANDIDATE, RUNNING_GATEWAY, JOURNAL_COMMIT})
@@ -416,6 +614,7 @@ async def test_gateway_final_fallback_fails_closed_when_union_exceeds_bound(
             expected_lineage_id=LINEAGE_ID,
             load_allocation_graphs=empty,
             load_sourcing_graphs=empty,
+            load_source_add_graphs=empty,
         )
 
 

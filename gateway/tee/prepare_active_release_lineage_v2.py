@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.active_release_requirements_v2 import (
     MAX_ACTIVE_RELEASE_COMMITS,
+    MAX_ACTIVE_RELEASE_ROOTS,
     build_active_release_requirements_v2,
     validate_active_release_requirements_v2,
 )
@@ -38,6 +39,7 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
     validate_boot_identity,
+    validate_receipt_graph,
 )
 from leadpoet_canonical.hotkey_authority_v2 import (
     MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
@@ -52,6 +54,12 @@ _INVOCATION_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 _MAX_SIDECAR_JSON_INPUT_BYTES = 4 * 1024 * 1024
 _MAX_PUBLICATION_JOURNAL_BYTES = MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES
 _FALLBACK_CONTEXTS = frozenset({"standalone", "cutover", "full-parity"})
+_SOURCE_ADD_ACTIVE_INTENT_STATUSES = ("leased", "queued", "retry_wait")
+_SOURCE_ADD_ACTIVE_REWARD_STATUSES = ("active", "partially_paid", "queued")
+_SOURCE_ADD_QUERY_CHUNK = 50
+_SOURCE_ADD_INTENT_RE = re.compile(r"^source_add_reward_intent:[0-9a-f]{16}$")
+_SOURCE_ADD_SUBMISSION_RE = re.compile(r"^source_add_submission:[0-9a-f]{16}$")
+_SOURCE_ADD_REWARD_RE = re.compile(r"^source_add_reward:[0-9a-f]{16}$")
 
 
 class PrepareActiveReleaseLineageV2Error(RuntimeError):
@@ -365,6 +373,290 @@ def _compact_boot_verifier(
     return build_compact_release_lineage_boot_verifier_v2(lineage)
 
 
+async def _load_active_source_add_graphs_v2(
+    *,
+    current_epoch: int,
+    select_rows: Any = None,
+    load_business_graphs: Any = None,
+) -> list[dict[str, Any]]:
+    """Load SOURCE_ADD ancestry that can authorize work after this restart.
+
+    Pending Leg 1 work consumes its provenance receipt. Every nonterminal
+    reward consumes its decision receipt in an allocation. Select the full
+    payment life because a reward can finalize after the current epoch's
+    allocation frontier was already created.
+    """
+
+    _require(
+        isinstance(current_epoch, int)
+        and not isinstance(current_epoch, bool)
+        and current_epoch >= 0,
+        "SOURCE_ADD active release epoch is invalid",
+    )
+    if select_rows is None:
+        from gateway.research_lab.store import select_all
+
+        select_rows = select_all
+    if load_business_graphs is None:
+        from gateway.research_lab.attested_v2_store import (
+            load_business_artifact_graphs_v2,
+        )
+
+        load_business_graphs = load_business_artifact_graphs_v2
+
+    pending_intents, active_rewards = await asyncio.gather(
+        select_rows(
+            "research_lab_source_add_reward_intents",
+            columns=(
+                "intent_id,submission_id,adapter_id,miner_hotkey,leg,"
+                "intent_status,approval_kind,provenance_receipt_hash,"
+                "provenance_artifact_hash"
+            ),
+            filters=(
+                ("leg", 1),
+                ("approval_kind", "provenance_precheck_passed"),
+                (
+                    "intent_status",
+                    "in",
+                    list(_SOURCE_ADD_ACTIVE_INTENT_STATUSES),
+                ),
+            ),
+            order_by=(("intent_id", False),),
+            max_rows=MAX_ACTIVE_RELEASE_ROOTS + 1,
+            allow_partial=False,
+        ),
+        select_rows(
+            "research_lab_source_add_reward_current",
+            columns=(
+                "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,"
+                "alpha_percent,reward_epochs,start_epoch,trigger_evidence_doc,"
+                "public_label,current_reward_status"
+            ),
+            filters=(
+                (
+                    "current_reward_status",
+                    "in",
+                    list(_SOURCE_ADD_ACTIVE_REWARD_STATUSES),
+                ),
+            ),
+            order_by=(("reward_ref", False),),
+            max_rows=MAX_ACTIVE_RELEASE_ROOTS + 1,
+            allow_partial=False,
+        ),
+    )
+    _require(
+        isinstance(pending_intents, list) and isinstance(active_rewards, list),
+        "SOURCE_ADD active release rows are invalid",
+    )
+    _require(
+        len(pending_intents) + len(active_rewards) <= MAX_ACTIVE_RELEASE_ROOTS,
+        "SOURCE_ADD active release root count exceeds bound",
+    )
+
+    pending_by_submission: dict[str, dict[str, Any]] = {}
+    intent_ids: set[str] = set()
+    pending_adapters: set[str] = set()
+    for raw_intent in pending_intents:
+        _require(
+            isinstance(raw_intent, Mapping),
+            "SOURCE_ADD pending reward intent is invalid",
+        )
+        intent = dict(raw_intent)
+        intent_id = str(intent.get("intent_id") or "")
+        submission_id = str(intent.get("submission_id") or "")
+        adapter_id = str(intent.get("adapter_id") or "")
+        miner_hotkey = str(intent.get("miner_hotkey") or "")
+        receipt_hash = str(intent.get("provenance_receipt_hash") or "")
+        artifact_hash = str(intent.get("provenance_artifact_hash") or "")
+        _require(
+            _SOURCE_ADD_INTENT_RE.fullmatch(intent_id) is not None
+            and _SOURCE_ADD_SUBMISSION_RE.fullmatch(submission_id) is not None
+            and bool(adapter_id)
+            and bool(miner_hotkey)
+            and int(intent.get("leg") or 0) == 1
+            and intent.get("approval_kind") == "provenance_precheck_passed"
+            and intent.get("intent_status") in _SOURCE_ADD_ACTIVE_INTENT_STATUSES
+            and _HASH_RE.fullmatch(receipt_hash) is not None
+            and _HASH_RE.fullmatch(artifact_hash) is not None,
+            "SOURCE_ADD pending reward intent differs from provenance authority",
+        )
+        _require(
+            intent_id not in intent_ids
+            and submission_id not in pending_by_submission
+            and adapter_id not in pending_adapters,
+            "SOURCE_ADD pending reward intent is duplicated",
+        )
+        intent_ids.add(intent_id)
+        pending_adapters.add(adapter_id)
+        pending_by_submission[submission_id] = intent
+
+    authority_by_submission: dict[str, dict[str, Any]] = {}
+    pending_submission_ids = sorted(pending_by_submission)
+    for offset in range(0, len(pending_submission_ids), _SOURCE_ADD_QUERY_CHUNK):
+        chunk = pending_submission_ids[offset : offset + _SOURCE_ADD_QUERY_CHUNK]
+        rows = await select_rows(
+            "research_lab_source_add_provenance_leg1_authority_v1",
+            columns=(
+                "submission_id,adapter_id,miner_hotkey,precheck_status,"
+                "provenance_receipt_hash,provenance_artifact_hash"
+            ),
+            filters=(("submission_id", "in", chunk),),
+            order_by=(("submission_id", False),),
+            max_rows=len(chunk) + 1,
+            allow_partial=False,
+        )
+        _require(
+            isinstance(rows, list),
+            "SOURCE_ADD provenance authority rows are invalid",
+        )
+        for raw_authority in rows:
+            _require(
+                isinstance(raw_authority, Mapping),
+                "SOURCE_ADD provenance authority row is invalid",
+            )
+            authority = dict(raw_authority)
+            submission_id = str(authority.get("submission_id") or "")
+            _require(
+                submission_id in chunk and submission_id not in authority_by_submission,
+                "SOURCE_ADD provenance authority is missing or ambiguous",
+            )
+            authority_by_submission[submission_id] = authority
+    _require(
+        set(authority_by_submission) == set(pending_by_submission),
+        "SOURCE_ADD provenance authority is missing or ambiguous",
+    )
+
+    artifact_requests: list[tuple[str, str, str]] = []
+    expected_roots: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for submission_id, intent in pending_by_submission.items():
+        authority = authority_by_submission[submission_id]
+        receipt_hash = str(intent["provenance_receipt_hash"])
+        artifact_hash = str(intent["provenance_artifact_hash"])
+        _require(
+            authority.get("submission_id") == submission_id
+            and authority.get("adapter_id") == intent.get("adapter_id")
+            and authority.get("miner_hotkey") == intent.get("miner_hotkey")
+            and authority.get("precheck_status") == "provenance_precheck_passed"
+            and authority.get("provenance_receipt_hash") == receipt_hash
+            and authority.get("provenance_artifact_hash") == artifact_hash,
+            "SOURCE_ADD pending reward intent differs from provenance authority",
+        )
+        artifact = ("source_add_provenance", submission_id, artifact_hash)
+        artifact_requests.append(artifact)
+        expected_roots[artifact] = (
+            receipt_hash,
+            "research_lab.source_add_provenance.v2",
+        )
+
+    from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
+
+    active_reward_ids: set[str] = set()
+    active_adapter_legs: set[tuple[str, int]] = set()
+    for raw_reward in active_rewards:
+        _require(
+            isinstance(raw_reward, Mapping),
+            "SOURCE_ADD active reward row is invalid",
+        )
+        reward = dict(raw_reward)
+        reward_ref = str(reward.get("reward_ref") or "")
+        adapter_id = str(reward.get("adapter_id") or "")
+        miner_hotkey = str(reward.get("miner_hotkey") or "")
+        try:
+            leg = int(reward.get("leg") or 0)
+            start_epoch = int(reward.get("start_epoch") or -1)
+            projection = source_add_reward_row_projection_v2(
+                "source_add_leg%d" % leg,
+                {**reward, "initial_reward_status": "active"},
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PrepareActiveReleaseLineageV2Error(
+                "SOURCE_ADD active reward row is invalid"
+            ) from exc
+        expected_kind = {
+            1: "source_acceptance",
+            2: "source_implementation",
+        }.get(leg)
+        _require(
+            _SOURCE_ADD_REWARD_RE.fullmatch(reward_ref) is not None
+            and bool(adapter_id)
+            and bool(miner_hotkey)
+            and expected_kind is not None
+            and reward.get("reward_kind") == expected_kind
+            and reward.get("current_reward_status")
+            in _SOURCE_ADD_ACTIVE_REWARD_STATUSES
+            and start_epoch >= 0,
+            "SOURCE_ADD active reward row is invalid",
+        )
+        _require(
+            reward_ref not in active_reward_ids
+            and (adapter_id, leg) not in active_adapter_legs,
+            "SOURCE_ADD active reward row is duplicated",
+        )
+        active_reward_ids.add(reward_ref)
+        active_adapter_legs.add((adapter_id, leg))
+        artifact_hash = sha256_json(projection)
+        artifact = ("source_add_reward_decision", reward_ref, artifact_hash)
+        artifact_requests.append(artifact)
+        expected_roots[artifact] = ("", "research_lab.reward_decision.v2")
+
+    if not artifact_requests:
+        return []
+    try:
+        loaded = await load_business_graphs(tuple(artifact_requests))
+    except Exception as exc:
+        raise PrepareActiveReleaseLineageV2Error(
+            "SOURCE_ADD active release graph lookup failed"
+        ) from exc
+    _require(
+        isinstance(loaded, Mapping) and set(loaded) == set(artifact_requests),
+        "SOURCE_ADD active release graphs are incomplete",
+    )
+
+    selected: dict[str, dict[str, Any]] = {}
+    for artifact in sorted(artifact_requests):
+        raw_graph = loaded[artifact]
+        _require(
+            isinstance(raw_graph, Mapping),
+            "SOURCE_ADD active release graph is invalid",
+        )
+        graph = dict(raw_graph)
+        root_hash = str(graph.get("root_receipt_hash") or "")
+        expected_root, expected_purpose = expected_roots[artifact]
+        try:
+            validate_receipt_graph(graph, required_purposes={expected_purpose})
+        except Exception as exc:
+            raise PrepareActiveReleaseLineageV2Error(
+                "SOURCE_ADD active release graph is invalid"
+            ) from exc
+        roots = [
+            receipt
+            for receipt in graph.get("receipts") or ()
+            if isinstance(receipt, Mapping) and receipt.get("receipt_hash") == root_hash
+        ]
+        root = roots[0] if len(roots) == 1 else None
+        _require(
+            _HASH_RE.fullmatch(root_hash) is not None
+            and isinstance(root, Mapping)
+            and root.get("role") == "gateway_coordinator"
+            and root.get("purpose") == expected_purpose
+            and root.get("status") == "succeeded"
+            and root.get("output_root") == artifact[2]
+            and (not expected_root or root_hash == expected_root)
+            and (
+                expected_purpose != "research_lab.source_add_provenance.v2"
+                or root.get("parent_receipt_hashes") == []
+            ),
+            "SOURCE_ADD active release graph differs from durable authority",
+        )
+        previous = selected.get(root_hash)
+        _require(
+            previous is None or canonical_json(previous) == canonical_json(graph),
+            "SOURCE_ADD active release graph conflicts for one immutable root",
+        )
+        selected[root_hash] = graph
+    return [selected[root] for root in sorted(selected)]
+
+
 def prepare_validator_initial_active_lineage_v2(
     *,
     candidate_commit_sha: str,
@@ -472,6 +764,7 @@ async def prepare_gateway_final_active_lineage_v2(
     s3_client: Any = None,
     load_allocation_graphs: Any = None,
     load_sourcing_graphs: Any = None,
+    load_source_add_graphs: Any = None,
 ) -> Dict[str, Any]:
     """Select active gateway roots twice and build one exact paired lineage."""
 
@@ -542,6 +835,8 @@ async def prepare_gateway_final_active_lineage_v2(
         )
 
         load_sourcing_graphs = load_sourcing_epoch_graphs_v2
+    if load_source_add_graphs is None:
+        load_source_add_graphs = _load_active_source_add_graphs_v2
     transitions = sorted({running_commit, *validator_commits})
     first_graphs = await _select_active_graphs(
         epoch_id=epoch_id,
@@ -549,6 +844,7 @@ async def prepare_gateway_final_active_lineage_v2(
         policy=dict(policy),
         load_allocation_graphs=load_allocation_graphs,
         load_sourcing_graphs=load_sourcing_graphs,
+        load_source_add_graphs=load_source_add_graphs,
     )
     first = build_active_release_requirements_v2(
         candidate_commit_sha=candidate,
@@ -575,6 +871,7 @@ async def prepare_gateway_final_active_lineage_v2(
         policy=dict(policy),
         load_allocation_graphs=load_allocation_graphs,
         load_sourcing_graphs=load_sourcing_graphs,
+        load_source_add_graphs=load_source_add_graphs,
     )
     _require(
         canonical_json(first_graphs) == canonical_json(second_graphs),

@@ -1650,6 +1650,7 @@ PROTECTED_SYMBOLS = {
         "PrepareActiveReleaseLineageV2Error",
         "_atomic_json_documents",
         "_fetch_exact_release_lineage_v2",
+        "_load_active_source_add_graphs_v2",
         "prepare_validator_initial_active_lineage_v2",
         "prepare_gateway_final_active_lineage_v2",
         "prepare_validator_final_active_lineage_v2",

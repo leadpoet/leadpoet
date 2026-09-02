@@ -352,17 +352,23 @@ async def _select_active_graphs(
     policy: Mapping[str, Any],
     load_allocation_graphs: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]],
     load_sourcing_graphs: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]],
+    load_source_add_graphs: (
+        Callable[..., Awaitable[Sequence[Mapping[str, Any]]]] | None
+    ) = None,
 ) -> dict[str, dict[str, Any]]:
-    allocation_graphs, sourcing_graphs = await asyncio.gather(
+    loaders = [
         load_allocation_graphs(
             epoch_id=int(epoch_id),
             netuid=int(netuid),
             policy=dict(policy),
         ),
         load_sourcing_graphs(current_epoch=int(epoch_id), window=30),
-    )
+    ]
+    if load_source_add_graphs is not None:
+        loaders.append(load_source_add_graphs(current_epoch=int(epoch_id)))
+    graph_sets = await asyncio.gather(*loaders)
     selected: dict[str, dict[str, Any]] = {}
-    for raw_graph in [*allocation_graphs, *sourcing_graphs]:
+    for raw_graph in [graph for graphs in graph_sets for graph in graphs]:
         if not isinstance(raw_graph, Mapping):
             raise ActiveAncestryCheckpointBootstrapV2Error(
                 "active receipt graph is not an object"

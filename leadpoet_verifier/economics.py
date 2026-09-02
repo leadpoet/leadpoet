@@ -7,10 +7,11 @@ weight submission. All inputs are anchored/public records or golden fixtures.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
+import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from .aggregation import u16_weights_from_scores
@@ -1483,12 +1484,40 @@ def _canonical_source_add_created_at(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         raise ValueError("source add created_at is required for FIFO ordering")
+    match = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T"
+        r"([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        r"(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})",
+        text,
+    )
+    if match is None:
+        raise ValueError("source add created_at is invalid")
+    fraction = str(match.group(7) or "")
+    zone = str(match.group(8))
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
+        if zone == "Z":
+            offset = timezone.utc
+        else:
+            offset_hour = int(zone[1:3])
+            offset_minute = int(zone[4:6])
+            if offset_hour > 23 or offset_minute > 59 or zone == "-00:00":
+                raise ValueError("invalid RFC3339 offset")
+            offset_delta = timedelta(hours=offset_hour, minutes=offset_minute)
+            if zone[0] == "-":
+                offset_delta = -offset_delta
+            offset = timezone(offset_delta)
+        parsed = datetime(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+            int(match.group(4)),
+            int(match.group(5)),
+            int(match.group(6)),
+            int((fraction + "000000")[:6] or "0"),
+            tzinfo=offset,
+        )
+    except (OverflowError, TypeError, ValueError) as exc:
         raise ValueError("source add created_at is invalid") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("source add created_at must include a timezone")
     return (
         parsed.astimezone(timezone.utc)
         .isoformat(timespec="microseconds")

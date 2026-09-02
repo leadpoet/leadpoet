@@ -521,3 +521,55 @@ def test_twelve_challengers_cut_to_ten_finalists_with_a_restart_before_every_ste
     assert set(final["submission_scores"]) == set(row["finalists"]) | {p["submission_id"] for p in participants if p["is_king"]}
     assert all(len([r for r in final["rows"] if r["submission_id"] == sid]) == 30 for sid in final["submission_scores"])
     assert all(len([r for r in stage1["rows"] if r["submission_id"] == sid]) == 20 for sid in stage1["submission_scores"])
+
+
+def test_shadow_round_runs_every_participant_through_all_fifty_icps_and_reports_the_gate(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Tango", "Uniform", "Victor", "Whiskey"], runners=["alpha", "beta"])
+    harness.chain.epoch = 26000
+    store = harness.service.store
+    config = harness.service.config
+    shadow_config = svc.ServiceConfig(**{**config.__dict__, "mode": "shadow"})
+    harness.service = svc.ArenaService(shadow_config)
+    original_build = harness.build_service
+
+    def build_shadow():
+        live = original_build()
+        return svc.ArenaService(svc.ServiceConfig(**{**live.config.__dict__, "mode": "shadow"}))
+
+    harness.build_service = build_shadow
+    service = harness.service
+    configuration = service.create_round(datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc))
+    assert configuration["mode"] == "shadow" and configuration["all_participants_run_stage_2"] is True
+    harness.round_id = configuration["round_id"]
+    round_id = harness.round_id
+    for flavor in harness.challengers:
+        harness.submit(flavor, round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    committed = service.advance_round(round_id)
+    participants = service.store.get_round(round_id)["participants"]
+    for participant in participants:
+        harness.flavors.setdefault(participant["image_digest"], "King")
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert service.advance_round(round_id)["assignments"] == 20 * len(participants)
+    harness.run_stage_with_runners(2)
+    while harness.status() != "stage1_scored":
+        assert service.advance_round(round_id)["status"] == "ok"
+    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+    opened2 = service.advance_round(round_id)
+    assert opened2["assignments"] == 30 * len(participants)  # every participant, not only finalists
+    harness.run_stage_with_runners(2)
+    while harness.status() != "published":
+        assert service.advance_round(round_id)["status"] == "ok"
+    report = service.shadow_report(round_id)
+    assert report["participants"] == len(participants)
+    gate = report["finalist_gate"]
+    assert gate["actual_winner"] in gate["simulated_finalists"] and gate["contains_winner"] is True
+    assert report["execution_timings"]["stage_1"]["count"] == 20 * len(participants)
+    assert report["execution_timings"]["stage_2"]["count"] == 30 * len(participants)
+    assert report["scoring"]["stage_1"]["judge_executions"] >= 1 and report["scoring"]["stage_2"]["workers"] == 4
+    assert set(report["stage_completion"]) == {"stage_1", "stage_2"}
+    assert report["passes_stage_1_gate"] is True
+    final = json.loads(harness.objects.get(service.store.get_round(round_id)["final_scores_ref"]).decode())
+    assert set(final["submission_scores"]) == {p["submission_id"] for p in participants}
+    with pytest.raises(svc.ServiceError):
+        harness.service.shadow_report("arena-1999-01-01")

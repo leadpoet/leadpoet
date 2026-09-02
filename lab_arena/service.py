@@ -586,8 +586,13 @@ class ArenaService:
         icps, _hashes = self.benchmark_icps(round_id)
         outputs = self._outputs_by_hash(round_id, stage)
         existing = self._scoring_results.get((round_id, stage), {})
+        scoring_started = _iso(self.now())
         results = scoring.run_scoring_plan(plan, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, scorer=self._config.scorer_factory(self._scorer_policy), workers=self._config.scoring_workers, existing=existing)
         self._scoring_results[(round_id, stage)] = results.breakdowns_by_item
+        self._objects.put(
+            "arena/%s/timing/stage%d_scoring.json" % (round_id, stage),
+            contracts.canonical_json({"stage": stage, "started_at": scoring_started, "finished_at": _iso(self.now()), "judge_executions": results.judge_executions, "workers": int(self._config.scoring_workers), "work_items": len(plan["work_items"])}).encode("utf-8"),
+        )
         stage_1_rows = None
         stage_1_bundle_hash = None
         if stage == 2:
@@ -1009,6 +1014,23 @@ class ArenaService:
             raise ServiceError("benchmark_not_public", 403)
         icps, hashes = self.benchmark_icps(round_id)
         return {"round_id": round_id, "icps": icps, "icp_hashes": hashes, "commitment": row.get("commitment_doc")}
+
+    def shadow_report(self, round_id: str) -> Dict[str, Any]:
+        """The section 20 shadow gate report for a published shadow round."""
+
+        from lab_arena import shadow
+
+        row = self._round(round_id)
+        if row["status"] != "published":
+            raise ServiceError("round_not_published", 409)
+        bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
+        timings = []
+        for stage in (1, 2):
+            try:
+                timings.append(json.loads(self._objects.get("arena/%s/timing/stage%d_scoring.json" % (round_id, stage)).decode("utf-8")))
+            except benchmark.BenchmarkReplayError:
+                continue
+        return shadow.shadow_report(round_row=row, public_bundle=bundle, scoring_timings=timings)
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
         row = self._round(round_id)

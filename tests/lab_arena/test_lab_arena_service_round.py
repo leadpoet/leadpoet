@@ -360,6 +360,10 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     basis = row["reward_basis_doc"]
     assert row["effective_reward_epoch"] == 24801 and basis["king_start_epoch"] == 24801 and basis["king_hotkey"] == published["king_hotkey"]
     signing.verify_document_signature(basis, hash_field="reward_basis_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
+    signing.verify_document_signature(row["publication_doc"], hash_field="publication_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
+    assert row["publication_doc"]["reward_basis_hash"] == basis["reward_basis_hash"] and row["publication_doc"]["result_bundle_hash"] == row["result_bundle_hash"]
+    view = service.public_round(round_id)
+    assert view["final_ranking"] and view["stage1_ranking"] and view["runner_fractions"] and view["publication"]["publication_hash"] == row["publication_doc"]["publication_hash"]
     bundle = json.loads(harness.objects.get(row["publication_doc"]["result_bundle_ref"]).decode())
     assert contracts.document_hash(bundle) == row["result_bundle_hash"]
     final = bundle["score_bundles"]["final"]
@@ -669,6 +673,15 @@ def test_startup_checks_fail_closed_and_banned_snapshot_governs_requests(connect
     wrong_release = contracts.build_signed_request(scope=contracts.SCOPE_CLAIM, round_id=harness.round_id, hotkey=good_kp.ss58_address, body={"declared_parallelism": 1, "worker_release_hash": contracts.document_hash("other")}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: good_kp.sign(m.encode()).hex())
     with pytest.raises(svc.ServiceError, match="worker_release_mismatch"):
         service.handle_claim(wrong_release)
+    # Section 17: a benchmark whose root differs from the commitment cancels the round.
+    benchmark_path = harness.objects_root / "arena" / harness.round_id / "benchmark.json"
+    document = json.loads(benchmark_path.read_text())
+    document["icps"][0]["prompt"] = "tampered after commitment"
+    document["icp_hashes"][0] = contracts.document_hash(document["icps"][0])
+    benchmark_path.write_text(json.dumps(document))
+    with pytest.raises(svc.ServiceError, match="benchmark_root_changed"):
+        service.benchmark_icps(harness.round_id)
+    assert harness.status() == "cancelled" and service.store.get_round(harness.round_id)["cancel_reason"] == svc.CANCEL_REASONS["root_changed"]
 
 
 def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_funding_credits_once(connect, tmp_path):
@@ -729,3 +742,44 @@ def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_fun
     assert service.store.get_account(miner.ss58_address)["balance_microusd"] == 1_500_000
     with pytest.raises(svc.ServiceError, match="signature_invalid"):
         service.handle_funding(dict(funding, body={"block_hash": "0x" + "cd" * 32, "extrinsic_index": 2}), confirm=confirm)
+
+
+def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_reward(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Yankee"], runners=["alpha", "beta"])
+    harness.chain.epoch = 28000
+    service = harness.service
+    latest = service.latest_published_round()
+    if latest is None or latest.get("king_outcome") not in ("crowned", "defended"):
+        pytest.skip("this database has no published king yet")
+    king_hotkey = latest["king_hotkey"]
+    service.store.record_preflight(king_hotkey, {"preflight_status": "failed", "key_hash": service.store.get_account(king_hotkey)["openrouter_key_hash"], "limit_microusd": 0, "limit_remaining_microusd": 0, "usage_microusd": 0})
+    configuration = service.create_round(datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc))
+    harness.round_id = configuration["round_id"]
+    round_id = harness.round_id
+    harness.submit("Yankee", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    committed = service.advance_round(round_id)
+    participants = service.store.get_round(round_id)["participants"]
+    king = [p for p in participants if p["is_king"]][0]
+    assert committed["participants"] == 2 and king["miner_hotkey"] == king_hotkey and king["preflight_failed"] is True
+    for participant in participants:
+        harness.flavors.setdefault(participant["image_digest"], "King")
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert service.advance_round(round_id)["assignments"] == 40
+    king_runs = service.store.list_runs(round_id, stage=1, submission_id=king["submission_id"])
+    assert len(king_runs) == 20 and all(run["attempt"] == 0 and run["terminal_cause"] == "preflight_failed" for run in king_runs)
+    harness.run_stage_with_runners(1)
+    while harness.status() != "stage1_scored":
+        assert service.advance_round(round_id)["status"] == "ok"
+    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+    assert service.advance_round(round_id)["assignments"] == 60  # the king enters both stages
+    harness.run_stage_with_runners(1)
+    while harness.status() != "published":
+        assert service.advance_round(round_id)["status"] == "ok"
+    row = service.store.get_round(round_id)
+    assert row["king_outcome"] == "crowned" and row["king_hotkey"] != king_hotkey
+    final = json.loads(harness.objects.get(row["final_scores_ref"]).decode())
+    assert final["submission_scores"][king["submission_id"]] == 0.0
+    assert all(r["cause"] == "preflight_failed" for r in final["rows"] if r["submission_id"] == king["submission_id"])
+    # Restore the old king's preflight so later tests are unaffected.
+    service.store.record_preflight(king_hotkey, {"preflight_status": "ok", "key_hash": service.store.get_account(king_hotkey)["openrouter_key_hash"], "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})

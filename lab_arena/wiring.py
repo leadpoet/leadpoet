@@ -220,6 +220,8 @@ def build_runner_from_environment(args):
     release = runner_module.worker_release_identity(repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40), runtime_lock_hash=lock.runtime_lock_hash)
     cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.docker_image_exporter)
     api = runner_module.HttpArenaApiClient(args.api_base_url)
+    # Fail startup unless this runner's identities are exactly what the round pins.
+    runner_module.verify_release_against_round(api.round(args.round_id).get("configuration") or {}, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=lock.runtime_lock_hash)
     runner_config = runner_module.RunnerConfig(
         round_id=args.round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, worker_release_hash=release["worker_release_hash"],
         work_dir=Path(args.work_dir) / "runs", max_parallel_runs=runner_module.max_parallel_runs_from_environment(), evaluation_date=args.round_id.replace("arena-", "")[:10],

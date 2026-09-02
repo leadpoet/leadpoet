@@ -243,3 +243,20 @@ def test_worker_release_identity_and_parallelism_env():
         rn.HttpArenaApiClient("http://arena.example.com")
     document = output_document_from_bytes(json.dumps([valid_company(1)]).encode())
     assert document["schema_version"] == contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION and len(document["companies"]) == 1
+
+
+def test_runner_refuses_a_round_whose_release_identity_differs():
+    from lab_arena import operations
+
+    release = rn.worker_release_identity(repository_commit="a" * 40, runtime_lock_hash=contracts.document_hash("lock"))
+    configuration = {"release": {"worker_release_hash": release["worker_release_hash"], "runsc_lock_hash": contracts.document_hash("lock"), "shim_hash": shim.shim_source_hash()}, "operation_table_hash": operations.OPERATION_TABLE_HASH}
+    assert rn.verify_release_against_round(configuration, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=contracts.document_hash("lock"))["shim_hash"] == shim.shim_source_hash()
+    for broken in (
+        {**configuration, "release": {**configuration["release"], "worker_release_hash": contracts.document_hash("other")}},
+        {**configuration, "release": {**configuration["release"], "runsc_lock_hash": contracts.document_hash("other")}},
+        {**configuration, "release": {**configuration["release"], "shim_hash": contracts.document_hash("other")}},
+        {**configuration, "operation_table_hash": contracts.document_hash("other")},
+        {"operation_table_hash": operations.OPERATION_TABLE_HASH},
+    ):
+        with pytest.raises(rn.RunnerError):
+            rn.verify_release_against_round(broken, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=contracts.document_hash("lock"))

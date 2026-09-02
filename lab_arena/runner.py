@@ -101,8 +101,38 @@ class HttpArenaApiClient:
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["receipt"]["run_id"], envelope)
 
+    def round(self, round_id: str) -> Dict[str, Any]:
+        try:
+            response = self._client.get(self._base_url + "/arena/v1/rounds/%s" % round_id)
+        except httpx.HTTPError as exc:
+            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+        if response.status_code != 200:
+            raise RunnerError("round %s is unavailable: HTTP %d" % (round_id, response.status_code))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RunnerError("Arena API returned a non-object")
+        return payload
+
     def close(self) -> None:
         self._client.close()
+
+
+def verify_release_against_round(configuration: Mapping[str, Any], *, worker_release_hash: str, runtime_lock_hash: str, operation_table_hash: str = operations.OPERATION_TABLE_HASH) -> Dict[str, str]:
+    """Section 16: a runner fails startup when its worker, runtime, or runsc identity differs from the round."""
+
+    release = configuration.get("release") if isinstance(configuration, Mapping) else None
+    if not isinstance(release, Mapping):
+        raise RunnerError("round configuration carries no release identity")
+    expected = {
+        "worker_release_hash": (release.get("worker_release_hash"), worker_release_hash),
+        "runsc_lock_hash": (release.get("runsc_lock_hash"), runtime_lock_hash),
+        "shim_hash": (release.get("shim_hash"), shim.shim_source_hash()),
+        "operation_table_hash": (configuration.get("operation_table_hash"), operation_table_hash),
+    }
+    for name, (pinned, ours) in expected.items():
+        if not pinned or pinned != ours:
+            raise RunnerError("runner %s differs from the signed round configuration" % name)
+    return {name: ours for name, (_pinned, ours) in expected.items()}
 
 
 # ---------------------------------------------------------------------------

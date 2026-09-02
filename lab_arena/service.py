@@ -798,7 +798,11 @@ class ArenaService:
             round_id=round_id, configuration_hash=round_row["configuration_hash"], commitment_hash=round_row["commitment_hash"], result_bundle_hash=result_bundle_hash,
             published_at=published_at, finalized_epoch=finalized_epoch, king_hotkey=king_hotkey, king_outcome=decision["outcome"], previous_king_start_epoch=previous_start,
         ), "reward_basis_hash")
-        publication = {"schema_version": contracts.PUBLICATION_SCHEMA_VERSION, "round_id": round_id, "result_bundle_hash": result_bundle_hash, "result_bundle_ref": "arena/%s/public/bundle.json" % round_id, "king_decision": decision, "reward_basis_hash": basis["reward_basis_hash"], "published_at": published_at}
+        publication = self._sign(contracts.hashed_document({
+            "schema_version": contracts.PUBLICATION_SCHEMA_VERSION, "round_id": round_id, "configuration_hash": round_row["configuration_hash"],
+            "commitment_hash": round_row["commitment_hash"], "result_bundle_hash": result_bundle_hash, "result_bundle_ref": "arena/%s/public/bundle.json" % round_id,
+            "king_decision": decision, "reward_basis_hash": basis["reward_basis_hash"], "published_at": published_at,
+        }, "publication_hash"), "publication_hash")
         self._objects.put(publication["result_bundle_ref"], contracts.canonical_json(public_bundle).encode("utf-8"))
         self._objects.put("arena/%s/public/reward_basis.json" % round_id, contracts.canonical_json(basis).encode("utf-8"))
         transition = self._store.transition_round(round_id, "scored", "published", {
@@ -1091,12 +1095,17 @@ class ArenaService:
 
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
-        return {
+        view = {
             "round_id": round_id, "status": row["status"], "configuration": row["configuration_doc"], "commitment": row.get("commitment_doc"),
             "participants": row.get("participants") if row["status"] not in ("open",) else None, "finalists": row.get("finalists"),
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
+            "stage1_ranking": None, "final_ranking": None, "runner_fractions": None, "reward_basis": row.get("reward_basis_doc"),
         }
+        if row["status"] == "published":
+            bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
+            view.update({"stage1_ranking": bundle.get("stage1_ranking"), "final_ranking": bundle.get("final_ranking"), "runner_fractions": bundle.get("runner_fractions"), "king_decision": bundle.get("king_decision")})
+        return view
 
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)

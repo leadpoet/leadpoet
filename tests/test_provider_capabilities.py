@@ -293,7 +293,7 @@ def _builtwith_execution_plan() -> dict:
             "identity_field": "name",
             "expected_identity": "Shopify",
             "canonical_url_field": "trends_link",
-            "canonical_url_host": "trends.builtwith.com",
+            "canonical_source_domain": "trends.builtwith.com",
             "canonical_url_path_prefix": "/shop/",
             "excerpt_fields": ["description"],
         },
@@ -426,6 +426,60 @@ def test_source_add_execution_plan_is_bound_to_tested_provisioned_route():
         context,
         existing_runtime_source=_EMPTY_V8_ROUTER_RUNTIME,
     ) != []
+
+
+def test_source_add_execution_plan_canonicalizes_legacy_host_field():
+    legacy_plan = json.loads(json.dumps(_builtwith_execution_plan()))
+    projection = legacy_plan["response_projection"]
+    projection["canonical_url_host"] = projection.pop(
+        "canonical_source_domain"
+    )
+
+    normalized = normalize_source_add_planner_contract(
+        "builtwith_trends",
+        {
+            "stage": "intent_evidence",
+            "cost_class": "free",
+            "unit_cost": 0.0,
+            "max_calls": 1,
+            "max_results": 1,
+            "intent_categories": ["TECHSTACK"],
+            "execution_plan_identity": legacy_plan,
+        },
+        probe_endpoints=[_builtwith_probe_endpoint()],
+        tested_probes=[_builtwith_tested_probe()],
+    )
+
+    canonical_projection = normalized["execution_plan_identity"][
+        "response_projection"
+    ]
+    assert canonical_projection["canonical_source_domain"] == (
+        "trends.builtwith.com"
+    )
+    assert "canonical_url_host" not in canonical_projection
+
+
+def test_source_add_execution_plan_rejects_ambiguous_domain_fields():
+    plan = _builtwith_execution_plan()
+    plan["response_projection"]["canonical_url_host"] = (
+        "trends.builtwith.com"
+    )
+
+    with pytest.raises(ValueError, match="fields differ from the contract"):
+        normalize_source_add_planner_contract(
+            "builtwith_trends",
+            {
+                "stage": "intent_evidence",
+                "cost_class": "free",
+                "unit_cost": 0.0,
+                "max_calls": 1,
+                "max_results": 1,
+                "intent_categories": ["TECHSTACK"],
+                "execution_plan_identity": plan,
+            },
+            probe_endpoints=[_builtwith_probe_endpoint()],
+            tested_probes=[_builtwith_tested_probe()],
+        )
 
 
 @pytest.mark.parametrize(

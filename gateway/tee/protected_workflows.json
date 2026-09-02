@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "a2e7f2ed9ac413711494fb38d29b428e569eced0",
+  "baseline_commit": "ff0367e97959362c3ba4fe86bf1c2e248e611de8",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2932,6 +2932,11 @@
       "symbol": "build_source_add_sandbox_runner"
     },
     {
+      "ast_sha256": "sha256:dccf03f3e67df52064c94540f125c830a7a184638dc34954966d82f0ac842892",
+      "path": "gateway/research_lab/source_add_workflow.py",
+      "symbol": "_DOCUMENTATION_HTTP_400_MAX_ATTEMPTS"
+    },
+    {
       "ast_sha256": "sha256:50864fbc212746bdd4db1bac7da471688aefdf0792f135f42d98af67fe1560b5",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_current_builtin_disabled_provision_row"
@@ -2947,7 +2952,7 @@
       "symbol": "_process_leg1_reward"
     },
     {
-      "ast_sha256": "sha256:7909f3a304ed56ca24f92d5faf920165152b3c71a2de9a0ba9179ce3faee54d3",
+      "ast_sha256": "sha256:433d81ce699cca7e5546e0c55c91c3548cb12a099c9e34f0b0990e1ea3a5c063",
       "path": "gateway/research_lab/source_add_workflow.py",
       "symbol": "_process_provenance"
     },
@@ -8657,7 +8662,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:b6257b158c6e39dc693f7ce26ca2c03c60e7cfc9795f82f104fec6573fd8dc98",
-  "protected_source_commit": "a2e7f2ed9ac413711494fb38d29b428e569eced0",
+  "manifest_hash": "sha256:41321074a7f7e985d41b44d4e549335bbd7be50b93eec3a2b9a529d0ae015ad9",
+  "protected_source_commit": "ff0367e97959362c3ba4fe86bf1c2e248e611de8",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

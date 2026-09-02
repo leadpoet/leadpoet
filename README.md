@@ -96,6 +96,13 @@ Choose **Submit API Source** in the miner menu. The miner will ask for:
 
 Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.
 
+The gateway checks that the source is valid, usable, novel, and not already in
+the active model. Duplicate, already-integrated, and invalid submissions receive
+the same generic failure response and do not earn rewards. A finally approved
+new source receives **0.2% of emissions per epoch for 20 epochs**. Leg 1 is
+processed FIFO and currently allows up to 50 approvals per UTC day; separate
+per-hotkey anti-spam limits also apply.
+
 #### Auto Research
 
 How it works:

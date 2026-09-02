@@ -290,28 +290,25 @@ The latest attempt and last successful deployment records are:
 /home/ec2-user/.config/leadpoet/deployments/gateway-last-good.json
 ```
 
-The restart never restores any workflow automatically. To reopen SOURCE_ADD
-only, first prove the post-start status above, inspect the durable control, and
-then make one deliberate SOURCE_ADD transition:
+The restart does not change scoring or autoresearch maintenance state. Its
+SOURCE_ADD guard is transient: after successful runtime verification it
+atomically restores the exact SOURCE_ADD pause state captured before the
+restart. Verify that restoration without issuing another state transition:
 
 ```bash
-/home/ec2-user/bin/research-lab-admin source-add status
-/home/ec2-user/bin/research-lab-admin resume-source-add \
-  --reason source_add_restart_validation_complete \
-  --actor-ref operator:gateway-restart
 /home/ec2-user/bin/research-lab-admin source-add status
 curl -fsS http://127.0.0.1:8000/research-lab/status
 /home/ec2-user/bin/research-lab-admin status
 ```
 
-That command does not resume scoring or autoresearch and does not change the
-global miner-submission switch. Confirm the final status reports global miner
-submissions disabled while the SOURCE_ADD control is active and SOURCE_ADD
-intake is enabled; the effective intake/dispatcher flags are reported by the
-HTTP status command above. Resume scoring or autoresearch only through their
-separate operator workflows when those workflows independently pass their own
-readiness checks. Pause SOURCE_ADD independently with
-`research-lab-admin pause-source-add --reason <reason> --actor-ref <actor>`.
+When SOURCE_ADD was active before restart, require `paused=false`,
+`intake_enabled=true`, and `effective_dispatcher_enabled=true` afterward. When
+it was paused, require it to remain paused. A failed restart leaves SOURCE_ADD
+paused fail-closed and must not be followed by an automatic or unconditional
+resume. Resume scoring, autoresearch, or SOURCE_ADD only through their separate
+operator workflows when an operator independently intends that state change.
+None of those SOURCE_ADD transitions changes the global miner-submission
+switch.
 
 ## Rollback
 

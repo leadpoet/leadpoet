@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "ff0367e97959362c3ba4fe86bf1c2e248e611de8",
+  "baseline_commit": "1a82c9f351be42f7f27b3ccfdecafa163c37e971",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -2617,7 +2617,7 @@
       "symbol": "ResearchLabGatewayScoringWorker._run_baseline_batch_inner"
     },
     {
-      "ast_sha256": "sha256:a5277d0214af04d3aa9d85791af59d745b745b436537ca540aebf38a077c82ff",
+      "ast_sha256": "sha256:9b4f996454f037af9540b8baffc08f6b6bd0dc090a10cc757d004b4d76aebf20",
       "path": "gateway/research_lab/scoring_worker.py",
       "symbol": "ResearchLabGatewayScoringWorker._run_baseline_icp"
     },
@@ -8662,7 +8662,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:41321074a7f7e985d41b44d4e549335bbd7be50b93eec3a2b9a529d0ae015ad9",
-  "protected_source_commit": "ff0367e97959362c3ba4fe86bf1c2e248e611de8",
+  "manifest_hash": "sha256:c97a8af9f65e72d527eecf6250da68b43b6608d38f944c968333b4487d491ea5",
+  "protected_source_commit": "1a82c9f351be42f7f27b3ccfdecafa163c37e971",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

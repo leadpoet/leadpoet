@@ -52,58 +52,37 @@ from research_lab.eval.promotion_metric import promotion_improvement_metric
 
 
 def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
-    functional_parent_hash = "sha256:" + "1" * 64
-    smoke_parent_hash = "sha256:" + "3" * 64
-    functional_result = {
-        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
-        "evaluation_mode": "functional_probe",
-        "result_status": "passed",
+    provenance_parent_hash = "sha256:" + "1" * 64
+    precheck_doc = {
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
     }
-    smoke_result = {
-        **functional_result,
-        "evaluation_mode": "provisioning_smoke",
+    provenance_result = {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": "source_add_submission:1234567890abcdef",
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": list(precheck_doc["reasons"]),
+        "precheck_doc": precheck_doc,
     }
     context = ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
-        parent_receipt_hashes=tuple(
-            sorted((functional_parent_hash, smoke_parent_hash))
-        ),
+        parent_receipt_hashes=(provenance_parent_hash,),
         external_ancestry_proofs=[
             {
                 "certificate": {
                     "claim": {
                         "lineage_id": "gateway:test",
-                        "output_root_receipt_hash": functional_parent_hash,
+                        "output_root_receipt_hash": provenance_parent_hash,
                     }
                 },
                 "disclosed_boot_identities": [],
                 "disclosed_receipts": [
                     {
-                        "receipt_hash": functional_parent_hash,
-                        "purpose": (
-                            "research_lab.source_add_functional_probe.v2"
-                        ),
-                        "output_root": sha256_json(functional_result),
-                    }
-                ],
-            },
-            {
-                "certificate": {
-                    "claim": {
-                        "lineage_id": "gateway:test",
-                        "output_root_receipt_hash": smoke_parent_hash,
-                    }
-                },
-                "disclosed_boot_identities": [],
-                "disclosed_receipts": [
-                    {
-                        "receipt_hash": smoke_parent_hash,
-                        "purpose": (
-                            "research_lab.source_add_functional_probe.v2"
-                        ),
-                        "output_root": sha256_json(smoke_result),
+                        "receipt_hash": provenance_parent_hash,
+                        "purpose": "research_lab.source_add_provenance.v2",
+                        "output_root": sha256_json(provenance_result),
                     }
                 ],
             },
@@ -114,8 +93,7 @@ def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
         {
             "decision_kind": "source_add_leg1",
             "decision_payload": {
-                "functional_probe_result": functional_result,
-                "provisioning_smoke_result": smoke_result,
+                "provenance_result": provenance_result,
             },
         },
         context,
@@ -123,61 +101,41 @@ def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
 
 
 def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
-    functional_parent_hash = "sha256:" + "1" * 64
-    smoke_parent_hash = "sha256:" + "3" * 64
-    functional_result = {
-        "evaluation_mode": "functional_probe",
-        "result_status": "passed",
+    provenance_parent_hash = "sha256:" + "1" * 64
+    precheck_doc = {
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": ["provenance_reference_backed"],
     }
-    smoke_result = {
-        **functional_result,
-        "evaluation_mode": "provisioning_smoke",
+    provenance_result = {
+        "schema_version": "leadpoet.source_add_provenance_result.v2",
+        "submission_id": "source_add_submission:1234567890abcdef",
+        "precheck_status": "provenance_precheck_passed",
+        "reasons": list(precheck_doc["reasons"]),
+        "precheck_doc": precheck_doc,
     }
     context = ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
-        parent_receipt_hashes=tuple(
-            sorted((functional_parent_hash, smoke_parent_hash))
-        ),
+        parent_receipt_hashes=(provenance_parent_hash,),
         external_ancestry_proofs=[
             {
                 "certificate": {
                     "claim": {
                         "lineage_id": "gateway:test",
-                        "output_root_receipt_hash": functional_parent_hash,
+                        "output_root_receipt_hash": provenance_parent_hash,
                     }
                 },
                 "disclosed_boot_identities": [],
                 "disclosed_receipts": [
                     {
-                            "receipt_hash": functional_parent_hash,
-                        "purpose": (
-                            "research_lab.source_add_functional_probe.v2"
-                        ),
-                            "output_root": "sha256:" + "2" * 64,
-                        }
-                    ],
-                },
-                {
-                    "certificate": {
-                        "claim": {
-                            "lineage_id": "gateway:test",
-                            "output_root_receipt_hash": smoke_parent_hash,
-                        }
-                    },
-                    "disclosed_boot_identities": [],
-                    "disclosed_receipts": [
-                        {
-                            "receipt_hash": smoke_parent_hash,
-                            "purpose": (
-                                "research_lab.source_add_functional_probe.v2"
-                            ),
-                            "output_root": sha256_json(smoke_result),
-                        }
-                    ],
-                },
-            ],
+                        "receipt_hash": provenance_parent_hash,
+                        "purpose": "research_lab.source_add_provenance.v2",
+                        "output_root": "sha256:" + "2" * 64,
+                    }
+                ],
+            },
+        ],
     )
 
     with pytest.raises(ValueError, match="parent output differs"):
@@ -185,8 +143,7 @@ def test_reward_ancestry_rejects_checkpointed_parent_output_mismatch() -> None:
             {
                 "decision_kind": "source_add_leg1",
                 "decision_payload": {
-                    "functional_probe_result": {"result_status": "passed"},
-                    "provisioning_smoke_result": smoke_result,
+                    "provenance_result": provenance_result,
                 },
             },
             context,

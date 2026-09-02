@@ -15,8 +15,6 @@ from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
 from gateway.tee.coordinator_source_add_v2 import (
     CoordinatorSourceAddFunctionalProbeV2,
     CoordinatorSourceAddProvenanceV2,
-    SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION,
-    SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
 )
@@ -680,45 +678,26 @@ def test_functional_probe_can_skip_health_and_pass_later_data_endpoint():
 
 @pytest.mark.asyncio
 async def test_leg1_reward_requires_parent_output_and_exact_purpose():
-    functional = {
-        "schema_version": SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
-        "evaluator_version": SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION,
+    precheck_doc = {
+        "precheck_status": PRECHECK_PASSED,
+        "reasons": ["provenance_reference_backed"],
+    }
+    provenance = {
+        "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
         "submission_id": "source_add_submission:1234567890abcdef",
-        "adapter_id": "adapter:example",
-        "config_ref": "source_add_probe_config:1234567890abcdef",
-        "evaluation_mode": "functional_probe",
-        "result_status": "passed",
-        "route_hash": HASH_B,
-        "selected_probe_index": 0,
-        "response_hash": HASH_A,
-        "status_class": "2xx",
-        "content_type": "application/json",
-        "byte_count": 20,
-        "duration_ms": 10,
-        "retry_after_seconds": 0,
-        "reason_codes": ["bounded_json_data_response"],
-        "probe_summaries": [],
+        "precheck_status": PRECHECK_PASSED,
+        "reasons": list(precheck_doc["reasons"]),
+        "precheck_doc": precheck_doc,
     }
-    smoke = {**functional, "evaluation_mode": "provisioning_smoke"}
-    functional_root_hash = HASH_A
-    smoke_root_hash = "sha256:" + "c" * 64
-    functional_graph = {
-        "root_receipt_hash": functional_root_hash,
+    provenance_hash = sha256_json(provenance)
+    provenance_root_hash = HASH_A
+    provenance_graph = {
+        "root_receipt_hash": provenance_root_hash,
         "receipts": [
             {
-                "receipt_hash": functional_root_hash,
-                "purpose": "research_lab.source_add_functional_probe.v2",
-                "output_root": sha256_json(functional),
-            }
-        ],
-    }
-    smoke_graph = {
-        "root_receipt_hash": smoke_root_hash,
-        "receipts": [
-            {
-                "receipt_hash": smoke_root_hash,
-                "purpose": "research_lab.source_add_functional_probe.v2",
-                "output_root": sha256_json(smoke),
+                "receipt_hash": provenance_root_hash,
+                "purpose": "research_lab.source_add_provenance.v2",
+                "output_root": provenance_hash,
             }
         ],
     }
@@ -726,10 +705,8 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         job_id="reward-job",
         purpose="research_lab.reward_decision.v2",
         epoch_id=10,
-        parent_receipt_hashes=tuple(
-            sorted((functional_root_hash, smoke_root_hash))
-        ),
-        external_receipt_graphs=[functional_graph, smoke_graph],
+        parent_receipt_hashes=(provenance_root_hash,),
+        external_receipt_graphs=[provenance_graph],
     )
     payload = {
         "decision_kind": "source_add_leg1",
@@ -740,13 +717,14 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "existing_rewards": [],
             "alpha_percent": 0.2,
             "reward_epochs": 20,
-            "functional_probe_result": functional,
-            "provisioning_smoke_result": smoke,
+            "provenance_result": provenance,
             "trigger_evidence": {
-                "functional_probe_passed": True,
-                "functional_probe_result_hash": sha256_json(functional),
-                "provisioning_smoke_passed": True,
-                "provisioning_smoke_result_hash": sha256_json(smoke),
+                "provenance_precheck_passed": True,
+                "submission_id": provenance["submission_id"],
+                "precheck_status": provenance["precheck_status"],
+                "provenance_receipt_hash": provenance_root_hash,
+                "provenance_artifact_hash": provenance_hash,
+                "provenance_result_hash": provenance_hash,
             },
         },
     }
@@ -761,8 +739,17 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
     )
     assert outcome.output["reward"]["leg"] == 1
 
-    context.external_receipt_graphs[1]["receipts"][0]["output_root"] = HASH_B
+    context.external_receipt_graphs[0]["receipts"][0]["output_root"] = HASH_B
     with pytest.raises(ValueError, match="parent output"):
+        await executor(OP_RESEARCH_LAB_REWARD_DECISION, payload, context)
+
+    context.external_receipt_graphs[0]["receipts"][0]["output_root"] = (
+        provenance_hash
+    )
+    context.external_receipt_graphs[0]["receipts"][0]["purpose"] = (
+        "research_lab.source_add_functional_probe.v2"
+    )
+    with pytest.raises(ValueError, match="parent purpose"):
         await executor(OP_RESEARCH_LAB_REWARD_DECISION, payload, context)
 
 

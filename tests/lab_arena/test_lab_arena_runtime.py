@@ -146,7 +146,7 @@ def make_spec(tmp_path: Path, **overrides) -> rt.SandboxSpec:
         input_dir=input_dir,
         output_dir=tmp_path / "output",
         socket_path=socket_dir / rt.SANDBOX_SOCKET_NAME,
-        entry_file="main.py",
+        entry_command=("python3", "/model/main.py"),
         evaluation_date="2026-09-02",
         random_seed=12345,
     )
@@ -337,9 +337,12 @@ def test_command_construction(tmp_path):
     [
         {"sandbox_id": "Bad Id"},
         {"sandbox_id": ""},
-        {"entry_file": "/model/main.py"},
-        {"entry_file": "../main.py"},
-        {"entry_file": "main.sh"},
+        {"entry_command": ()},
+        {"entry_command": ("python3", "bad\nline")},
+        {"entry_command": "python3 /model/main.py"},
+        {"image_environment": {"LAB_ARENA_OUTPUT_PATH": "/etc/passwd"}},
+        {"image_environment": {"bad name": "x"}},
+        {"working_dir": "relative/dir"},
         {"evaluation_date": "2026-9-2"},
         {"random_seed": -1},
         {"random_seed": 2 ** 32},
@@ -361,7 +364,21 @@ def test_sandbox_spec_defaults_follow_the_public_constants(tmp_path):
     assert spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS == 300
     assert spec.uid == 65534 and spec.gid == 65534
     assert spec.output_tmpfs_bytes == 64 * 1024 * 1024
-    assert spec.argv == ("python3", "/model/main.py")
+    assert spec.argv == ("python3", "/model/main.py") and spec.cwd == "/tmp"
+
+
+def test_image_process_env_and_workdir_apply_and_the_arena_names_win(tmp_path):
+    """The image's ENTRYPOINT, ENV, and WORKDIR run as pinned; the Arena's own names cannot be overridden."""
+
+    spec = make_spec(tmp_path, entry_command=("node", "agent.js", "--fast"), image_environment={"PATH": "/opt/app/bin:/usr/bin", "APP_MODE": "fast", "TZ": "America/New_York"}, working_dir="/opt/app")
+    document = rt.oci_spec(spec)
+    process = document["process"]
+    assert process["args"] == ["node", "agent.js", "--fast"] and process["cwd"] == "/opt/app"
+    environment = dict(item.split("=", 1) for item in process["env"])
+    assert environment["PATH"] == "/opt/app/bin:/usr/bin" and environment["APP_MODE"] == "fast"
+    assert environment["TZ"] == "UTC" and environment["LAB_ARENA_OUTPUT_PATH"] == rt.SANDBOX_OUTPUT_PATH and environment["HOME"] == "/tmp"
+    plain = rt.oci_spec(make_spec(tmp_path))
+    assert dict(item.split("=", 1) for item in plain["process"]["env"])["PATH"] == rt.PROCESS_ENV["PATH"]
 
 
 # ---------------------------------------------------------------------------

@@ -144,7 +144,7 @@ def apply_policy_to_environment(
 
 
 # ---------------------------------------------------------------------------
-# Scoring plan (section 12.1: one work item per distinct ICP and first-N output)
+# Scoring plan (section 12.1 as revised: one work item per accepted assignment)
 # ---------------------------------------------------------------------------
 
 
@@ -161,10 +161,11 @@ def build_scoring_plan(
     """Plan from the frozen stage result set.
 
     ``runs`` are every attempt row of the stage. An assignment with an
-    accepted attempt contributes to one work item keyed by (ICP, output);
-    every other assignment contributes a zero row named by the cause of its
-    latest attempt (model-caused causes and ``preflight_failed`` only; any
-    other cause means the stage should have cancelled and is refused).
+    accepted attempt contributes exactly one work item keyed by (ICP,
+    submission, output); every other assignment contributes a zero row named
+    by the cause of its latest attempt (model-caused causes and
+    ``preflight_failed`` only; any other cause means the stage should have
+    cancelled and is refused).
     """
 
     positions = tuple(range(0, contracts.STAGE_1_ICP_COUNT)) if stage == 1 else tuple(range(contracts.STAGE_1_ICP_COUNT, contracts.BENCHMARK_ICP_COUNT))
@@ -191,13 +192,21 @@ def build_scoring_plan(
             output_hash = contracts.require_sha256(run.get("output_hash"), "output_hash")
             if run.get("icp_hash") != icp_hash:
                 raise ArenaContractError("run %s binds a different ICP hash" % run.get("run_id"))
-            item_id = contracts.work_item_id(icp_hash, output_hash)
-            item = items.setdefault(item_id, {"work_item_id": item_id, "icp_position": position, "icp_hash": icp_hash, "output_hash": output_hash, "submission_ids": []})
-            item["submission_ids"].append(submission_id)
+            # One work item per miner and ICP: identical outputs from two miners
+            # are judged twice, each on its own miner's keys, so one miner's
+            # key or judge failure can never become another miner's zero.
+            item_id = contracts.work_item_id(icp_hash, submission_id, output_hash)
+            items[item_id] = {"work_item_id": item_id, "icp_position": position, "icp_hash": icp_hash, "output_hash": output_hash, "submission_id": submission_id}
             continue
         cause = str(latest[key].get("terminal_cause") or "")
         if cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES and cause != "preflight_failed":
-            raise ArenaContractError("assignment %s/%d ended for an infrastructure reason (%s); the stage must cancel" % (submission_id, position, cause or "none"))
+            # A confirmation attempt the window closed before it ran leaves the
+            # earlier model-caused failure standing.
+            confirmed = [run for run in runs if (str(run.get("submission_id")), int(run.get("icp_position") or 0)) == key and str(run.get("terminal_cause") or "") in contracts.MODEL_CAUSED_TERMINAL_CAUSES | {"preflight_failed"}]
+            if confirmed:
+                cause = str(max(confirmed, key=lambda run: int(run.get("attempt") or 0))["terminal_cause"])
+            else:
+                raise ArenaContractError("assignment %s/%d ended for an infrastructure reason (%s); the stage must cancel" % (submission_id, position, cause or "none"))
         zero_rows.append({"submission_id": submission_id, "icp_position": position, "cause": cause})
     plan = {
         "schema_version": contracts.SCORING_PLAN_SCHEMA_VERSION,
@@ -206,7 +215,7 @@ def build_scoring_plan(
         "configuration_hash": configuration_hash,
         "commitment_hash": commitment_hash,
         "scorer_policy_hash": scorer_policy_hash,
-        "work_items": [dict(item, submission_ids=sorted(item["submission_ids"])) for _, item in sorted(items.items())],
+        "work_items": [dict(item) for _, item in sorted(items.items())],
         "zero_rows": sorted(zero_rows, key=lambda row: (row["submission_id"], row["icp_position"])),
     }
     return contracts.finalize_scoring_plan(plan)
@@ -360,13 +369,13 @@ def build_score_bundle(
     stage_1_bundle_hash: Optional[str] = None,
     refused_items: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Copy each work item's breakdown to every submission with that output,
-    synthesize zero rows, and compute stage scores (Stage 1 over 20; the
-    Stage 2 bundle carries the final 50-ICP score using the Stage 1 rows).
+    """Turn each work item's breakdown into its submission's row, synthesize
+    zero rows, and compute stage scores (Stage 1 over 20; the Stage 2 bundle
+    carries the final 50-ICP score using the Stage 1 rows).
 
     ``refused_items`` maps a work item whose scoring the scored miner's own
-    key or quota refused to its cause: every submission sharing that output
-    gets a zero row with that cause, and the bundle declares the item.
+    key or quota refused to its cause: that submission gets a zero row with
+    that cause, and the bundle declares the item. No other miner is affected.
     """
 
     validated_plan = contracts.validate_scoring_plan(plan)
@@ -376,16 +385,14 @@ def build_score_bundle(
     rows: List[Dict[str, Any]] = []
     for item in validated_plan["work_items"]:
         if item["work_item_id"] in refused:
-            for submission_id in item["submission_ids"]:
-                rows.append(verify.zero_row(submission_id, item["icp_position"], item["icp_hash"], refused[item["work_item_id"]], output_hash=item["output_hash"]))
+            rows.append(verify.zero_row(item["submission_id"], item["icp_position"], item["icp_hash"], refused[item["work_item_id"]], output_hash=item["output_hash"]))
             continue
         breakdowns = breakdowns_by_item.get(item["work_item_id"])
         if breakdowns is None:
             raise ScoringError("work item %s has no breakdowns" % item["work_item_id"])
         icp = icps_by_position[int(item["icp_position"])]
         companies = outputs_by_hash[item["output_hash"]]
-        for submission_id in item["submission_ids"]:
-            rows.append(verify.scored_row(submission_id, item["icp_position"], item["icp_hash"], item["output_hash"], icp, companies, breakdowns, validated_policy))
+        rows.append(verify.scored_row(item["submission_id"], item["icp_position"], item["icp_hash"], item["output_hash"], icp, companies, breakdowns, validated_policy))
     for zero in validated_plan["zero_rows"]:
         icp_hash = contracts.document_hash(icps_by_position[int(zero["icp_position"])])
         rows.append(verify.zero_row(zero["submission_id"], zero["icp_position"], icp_hash, zero["cause"]))

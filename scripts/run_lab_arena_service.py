@@ -38,6 +38,19 @@ def drive_once(service) -> str:
     tick retries, and the driver thread never dies while the process serves.
     """
 
+    outcome = _advance_current(service)
+    # The published round is no longer current, so its king model release runs
+    # as its own step; a release failure never stops the next round.
+    try:
+        release = service.release_pending()
+    except Exception as exc:
+        return "%s; failed release_pending: %s" % (outcome, type(exc).__name__)
+    if release.get("status") in ("ok", "released") and release.get("round_id") and release.get("status") == "ok":
+        return "%s; released %s" % (outcome, release["round_id"])
+    return outcome
+
+
+def _advance_current(service) -> str:
     try:
         current = service.current_round()
     except Exception as exc:
@@ -77,7 +90,7 @@ def main(argv=None) -> int:
     def driver() -> None:
         while not stop.is_set():
             outcome = drive_once(service)
-            if outcome.startswith("failed"):
+            if "failed" in outcome:
                 print("driver tick", outcome, file=sys.stderr)
             stop.wait(max(5, int(args.tick_seconds)))
 

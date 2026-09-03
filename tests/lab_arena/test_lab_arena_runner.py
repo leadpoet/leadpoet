@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,9 @@ RUNNER = Keypair.create_from_uri("//Runner")
 MINER = Keypair.create_from_uri("//Miner").ss58_address
 ROUND = "arena-2026-09-02"
 IMAGE = "sha256:" + "a" * 64
+ARENA_REPOSITORY = "arena.example/lab-arena/models"
+IMAGE_REFERENCE = ARENA_REPOSITORY + "@" + IMAGE
+ENTRY_COMMAND = ["python3", "/app/main.py"]
 
 
 def sign(message: str) -> str:
@@ -96,6 +101,9 @@ def lease(run_id="r1", position=0):
         "image_digest": IMAGE, "stage": 1, "icp_position": position, "icp_hash": contracts.document_hash({"icp": position}), "attempt": 1,
         "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "event_cursor": 0, "event_head_hash": "", "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
+        # Image by digest: the lease carries the pinned image and its process.
+        "image_reference": IMAGE_REFERENCE, "entry_command": list(ENTRY_COMMAND), "image_environment": {"APP_MODE": "fast"}, "working_dir": "/app",
+        "round_id": ROUND, "evaluation_date": "2026-09-02",
     }
 
 
@@ -123,12 +131,16 @@ class BridgingRuntime:
         return runtime.fake_result(exit_code=self.exit_code, timed_out=self.timed_out, output_bytes=runtime.read_output(spec), stdout=b"model log line\n", stderr=b"")
 
 
+def fake_exporter(reference, digest, target):
+    (target / "rootfs").mkdir()
+
+
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
-    cache = rn.ImageCache(tmp_path / "images", lambda digest, target: (target / "rootfs").mkdir())
+    cache = rn.ImageCache(tmp_path / "images", fake_exporter)
     return rn.RunnerConfig(
         round_id=ROUND, identity=rn.RunnerIdentity(hotkey=RUNNER.ss58_address, sign=sign), api=api, sandbox_runtime=sandbox_runtime,
         image_cache=cache, worker_release_hash=contracts.document_hash("worker"), work_dir=tmp_path / "work", max_parallel_runs=parallel,
-        evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+        evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc), completion_retry_seconds=(0.0, 0.0),
     )
 
 
@@ -155,7 +167,9 @@ def test_accepted_run_bridges_provider_calls_and_signs_a_bound_receipt(tmp_path)
     output = envelope["body"]["output"]
     assert validated["output_hash"] == contracts.document_hash(output) and len(output["companies"]) == 2
     spec = sandbox.specs[0]
-    assert spec.rootfs_path == tmp_path / "images" / IMAGE.replace(":", "-") and spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS
+    assert spec.rootfs_path == tmp_path / "images" / IMAGE.replace(":", "-") / "rootfs" and spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS
+    # The sandbox runs the image's pinned process, environment, and working directory from the lease.
+    assert spec.entry_command == tuple(ENTRY_COMMAND) and dict(spec.image_environment) == {"APP_MODE": "fast"} and spec.working_dir == "/app"
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
 
@@ -189,7 +203,7 @@ def test_local_slots_bound_claims_and_images_export_once(tmp_path):
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)
     exports = []
-    cache = rn.ImageCache(tmp_path / "images", lambda digest, target: exports.append(digest) or (target / "rootfs").mkdir())
+    cache = rn.ImageCache(tmp_path / "images", lambda reference, digest, target: exports.append(digest) or (target / "rootfs").mkdir())
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
     config.image_cache = cache
@@ -245,6 +259,115 @@ def test_worker_release_identity_and_parallelism_env():
     assert document["schema_version"] == contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION and len(document["companies"]) == 1
 
 
+def test_a_lease_whose_image_is_outside_the_rounds_sources_is_refused(tmp_path):
+    """A lease may name only the round's Arena repository (executions) or the round's exact judge (scoring)."""
+
+    foreign = lease("r1")
+    foreign["image_reference"] = "evil.example/models@" + IMAGE
+    mismatched = lease("r2")
+    mismatched["image_reference"] = ARENA_REPOSITORY + "@sha256:" + "b" * 64
+    wrong_judge = scoring_lease("r3")
+    wrong_judge["image_reference"] = "arena.example/lab-arena/other@" + SCORER_IMAGE
+    api = FakeApi([foreign, mismatched, wrong_judge])
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
+    config.adopt_round({"registry_repository": ARENA_REPOSITORY, "release": {"scorer_image_reference": SCORER_IMAGE_REFERENCE}})
+    runner_ = rn.Runner(config)
+    runner_.run_once()
+    assert runner_.abandoned == 3 and api.completions == [] and all(c["error"] == "RunnerError" for c in runner_.completed)
+
+
+class FollowApi(FakeApi):
+    """A fake Arena whose current round can change between polls."""
+
+    def __init__(self, leases, *, rounds):
+        super().__init__(leases)
+        self.rounds = rounds  # round id -> configuration
+        self.current_round = None
+        self.polls = 0
+
+    def current(self):
+        self.polls += 1
+        return {"round": {"round_id": self.current_round, "status": "stage1"} if self.current_round else None}
+
+    def round(self, round_id):
+        return {"round_id": round_id, "configuration": self.rounds[round_id]}
+
+
+def test_a_runner_without_a_pinned_round_follows_the_current_round_and_reverifies_each_new_one(tmp_path):
+    from lab_arena import operations
+
+    lock_hash = contracts.document_hash("lock")
+    release = rn.worker_release_identity(repository_commit="a" * 40, runtime_lock_hash=lock_hash)
+    good = {"release": {"worker_release_hash": release["worker_release_hash"], "runsc_lock_hash": lock_hash, "shim_hash": shim.shim_source_hash(), "scorer_image_reference": SCORER_IMAGE_REFERENCE}, "operation_table_hash": operations.OPERATION_TABLE_HASH, "registry_repository": ARENA_REPOSITORY}
+    bad = {**good, "release": {**good["release"], "worker_release_hash": contracts.document_hash("other")}}
+    api = FollowApi([lease("r1")], rounds={ROUND: good, "arena-2026-09-03": bad, "arena-2026-09-04": good})
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}))
+    config.round_id = None
+    config.worker_release_hash = release["worker_release_hash"]
+    config.runtime_lock_hash = lock_hash
+    runner_ = rn.Runner(config)
+    # No round yet: nothing to claim, nothing signed.
+    assert runner_.run_once() == 0 and runner_.round_id is None and api.claims == []
+    api.current_round = ROUND
+    assert runner_.run_once() == 1 and runner_.round_id == ROUND and config.registry_repository == ARENA_REPOSITORY
+    assert api.claims[-1]["round_id"] == ROUND and api.completions[0]["round_id"] == ROUND and api.completions[0]["body"]["receipt"]["round_id"] == ROUND
+    # The next day's round pins another worker release: the runner refuses it and keeps polling.
+    api.current_round = "arena-2026-09-03"
+    assert runner_.run_once() == 0 and runner_.round_id == ROUND
+    api.current_round = "arena-2026-09-04"
+    api.leases.append(dict(lease("r2"), round_id="arena-2026-09-04", assignment_id="arena-2026-09-04:s1:1:0"))
+    assert runner_.run_once() == 1 and runner_.round_id == "arena-2026-09-04"
+    assert api.claims[-1]["round_id"] == "arena-2026-09-04" and api.completions[-1]["round_id"] == "arena-2026-09-04"
+
+
+def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
+    """The runtime-neutral contract: the provider's own request, sent to the socket without a credential."""
+
+    import http.client
+    import socket as socket_module
+
+    api = FakeApi([])
+    api.cursor["r1"] = {"event_cursor": 0, "event_head_hash": ""}
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1", event_cursor=0, event_head_hash="")
+    events = rn.EventWriter(api, state, lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc))
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    server = rn.WorkerSocketServer(socket_dir / runtime.SANDBOX_SOCKET_NAME, api, state, events)
+    server.start()
+
+    def request(method, host, path, body=None, headers=None):
+        connection = http.client.HTTPConnection(host)
+        connection.sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        connection.sock.connect(str(socket_dir / runtime.SANDBOX_SOCKET_NAME))
+        try:
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    try:
+        status, headers, body = request("GET", "api.scrapingdog.com", "/scrape?url=https%3A%2F%2Fexample.com%2F")
+        assert status == 200 and json.loads(body)["results"] and headers["Connection"] == "close"
+        assert api.provider_frames[-1]["operation_id"] == "scrapingdog.scrape" and state.calls and state.event_hashes
+        # A credential header is refused, an unknown host has no operation, and the frame path still works.
+        status, _headers, body = request("GET", "api.scrapingdog.com", "/scrape?url=https%3A%2F%2Fexample.com%2F", headers={"Authorization": "Bearer leaked"})
+        assert status == 400 and json.loads(body)["error"]["code"] == "forbidden_header"
+        status, _headers, body = request("GET", "evil.example", "/anything")
+        assert status == 400 and json.loads(body)["error"]["code"] == "no_matching_operation"
+        os.environ[shim.WORKER_SOCKET_ENV] = str(socket_dir / runtime.SANDBOX_SOCKET_NAME)
+        try:
+            frame_status, _frame_headers, frame_body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": "fintech"}}, 5000)
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        assert frame_status == 200 and json.loads(frame_body)["results"]
+        assert len(state.calls) == 2  # only the two matched requests reached the Arena
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
 def test_runner_refuses_a_round_whose_release_identity_differs():
     from lab_arena import operations
 
@@ -267,6 +390,8 @@ def test_runner_refuses_a_round_whose_release_identity_differs():
 # ---------------------------------------------------------------------------
 
 SCORER_IMAGE = "sha256:" + "5" * 64
+SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE
+SCORER_ENTRY_COMMAND = ["python3", "/model/scorer_entrypoint.py"]
 
 
 def scoring_lease(run_id="r9", position=3):
@@ -275,7 +400,8 @@ def scoring_lease(run_id="r9", position=3):
     base = lease(run_id, position)
     base.update({
         "assignment_id": "%s:s1:1:%d:score" % (ROUND, position), "kind": "score", "work_item_id": contracts.document_hash("item-%d" % position),
-        "scored_run_id": "r1", "image_digest": SCORER_IMAGE, "scored_output": {"companies": [valid_company(1), valid_company(2)]}, "scorer_policy": scoring.build_scorer_policy(),
+        "scored_run_id": "r1", "image_digest": SCORER_IMAGE, "image_reference": SCORER_IMAGE_REFERENCE, "entry_command": list(SCORER_ENTRY_COMMAND), "image_environment": {}, "working_dir": "",
+        "scored_output": {"companies": [valid_company(1), valid_company(2)]}, "scorer_policy": scoring.build_scorer_policy(),
     })
     return base
 
@@ -297,8 +423,8 @@ def test_scoring_lease_runs_the_judge_image_in_trusted_mode_and_signs_a_breakdow
     assert validated["kind"] == "score" and validated["terminal_status"] == "accepted" and validated["image_digest"] == SCORER_IMAGE
     assert envelope["body"]["output"] == output and validated["output_hash"] == contracts.document_hash(output)
     spec = sandbox.specs[0]
-    assert spec.entry_file == rn.SCORER_ENTRY_FILE and spec.extra_environment[shim.TRUSTED_SCORER_ENV] == "1"
-    assert spec.rootfs_path == tmp_path / "images" / SCORER_IMAGE.replace(":", "-")
+    assert spec.entry_command == tuple(SCORER_ENTRY_COMMAND) and spec.extra_environment[shim.TRUSTED_SCORER_ENV] == "1"
+    assert spec.rootfs_path == tmp_path / "images" / SCORER_IMAGE.replace(":", "-") / "rootfs"
     # The judge sandbox read a scoring input, not an ICP input.
     events = api.events["r9"]
     assert [e["event_type"] for e in events][-1] == "output_validated" and events[-1]["payload"]["breakdown_count"] == 2
@@ -376,3 +502,78 @@ def test_a_refused_key_or_quota_during_judging_is_the_scored_miners_outcome(tmp_
     reasons = [e["payload"].get("reason") for e in api.events["r9"] if e["event_type"] == "output_rejected"]
     assert ("judge_key_refused:" + code in reasons) == (expected == "judge_key_refused")
     assert api.completions[0]["body"]["calls"][0]["error_code"] == code  # the refusal travels with the receipt's calls
+
+
+class FlakyCompletionApi(FakeApi):
+    """The completion call fails a given number of times before the Arena accepts it."""
+
+    def __init__(self, leases, *, failures):
+        super().__init__(leases)
+        self.failures = failures
+        self.attempts = 0
+
+    def complete(self, envelope):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise rn.RunnerError("Arena API failed: HTTP 503")
+        return super().complete(envelope)
+
+
+@pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
+def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
+    """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
+
+    api = FlakyCompletionApi([lease()], failures=failures)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}, calls=1)))
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == expect_abandoned
+    assert api.attempts == min(failures + 1, 3)
+    assert len(api.completions) == (0 if expect_abandoned else 1)
+
+
+
+class RefusingEveryFrameApi(RefusingApi):
+    """Every frame is refused by the Arena: the quota is gone."""
+
+    def __init__(self, leases):
+        super().__init__(leases, code="budget_exhausted")
+
+
+class LoopingRuntime(BridgingRuntime):
+    """A model that keeps calling after its quota is exhausted."""
+
+    def __init__(self, frames):
+        super().__init__(output={"companies": [valid_company(1)]}, calls=0)
+        self.frames = frames
+        self.statuses = []
+
+    def run_icp(self, spec, **_):
+        self.specs.append(spec)
+        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            for _ in range(self.frames):
+                try:
+                    status, _headers, _body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": "fintech"}}, 5000)
+                    self.statuses.append(status)
+                except shim.ShimError as exc:
+                    self.statuses.append(str(exc))
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        spec.output_path.write_bytes(json.dumps(self.output).encode())
+        return runtime.fake_result(exit_code=0, output_bytes=runtime.read_output(spec))
+
+
+def test_after_repeated_refusals_the_worker_answers_frames_locally(tmp_path):
+    """A model looping on a refused quota costs the Arena at most MAX_REFUSED_FRAMES round trips."""
+
+    api = RefusingEveryFrameApi([lease()])
+    runtime_ = LoopingRuntime(frames=rn.MAX_REFUSED_FRAMES + 40)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, runtime_))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    assert len(api.provider_frames) == rn.MAX_REFUSED_FRAMES
+    assert len(runtime_.statuses) == rn.MAX_REFUSED_FRAMES + 40
+    assert all(status == 402 for status in runtime_.statuses[:rn.MAX_REFUSED_FRAMES])
+    assert all("budget_exhausted" in str(status) for status in runtime_.statuses[rn.MAX_REFUSED_FRAMES:])
+    assert len(api.completions[0]["body"]["calls"]) == rn.MAX_REFUSED_FRAMES

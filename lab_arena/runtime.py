@@ -107,6 +107,7 @@ _SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 _SANDBOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_IMAGE_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 ProcessRunner = Callable[..., Any]
 
@@ -268,9 +269,13 @@ class SandboxSpec:
     input_dir: Path
     output_dir: Path
     socket_path: Path
-    entry_file: str
+    # The image's own process, pinned at admission from its config: ENTRYPOINT
+    # plus CMD, its ENV, and its WORKDIR (empty means /tmp).
+    entry_command: Tuple[str, ...]
     evaluation_date: str
     random_seed: int
+    image_environment: Mapping[str, str] = field(default_factory=dict)
+    working_dir: str = ""
     cpu_quota: int = DEFAULT_CPU_QUOTA
     cpu_period: int = DEFAULT_CPU_PERIOD
     memory_limit_bytes: int = DEFAULT_MEMORY_LIMIT_BYTES
@@ -299,15 +304,19 @@ class SandboxSpec:
             object.__setattr__(self, name, value)
         if self.socket_path.name != SANDBOX_SOCKET_NAME:
             raise SandboxSpecError("worker socket must be named %s" % SANDBOX_SOCKET_NAME)
-        entry = str(self.entry_file)
-        if (
-            not entry
-            or entry.startswith("/")
-            or ".." in Path(entry).parts
-            or not entry.endswith(".py")
-            or any(char.isspace() for char in entry)
-        ):
-            raise SandboxSpecError("entry file is invalid")
+        command = tuple(self.entry_command) if isinstance(self.entry_command, (list, tuple)) else ()
+        if not command or len(command) > 64 or any(not isinstance(item, str) or not item or len(item) > 4096 or "\x00" in item or "\n" in item for item in command):
+            raise SandboxSpecError("entry command is invalid")
+        object.__setattr__(self, "entry_command", command)
+        image_env = dict(self.image_environment or {})
+        for name, value in image_env.items():
+            if not _IMAGE_ENV_NAME_RE.match(str(name)) or str(name).startswith("LAB_ARENA_") or not isinstance(value, str) or len(value) > 8192 or any(ord(ch) < 32 for ch in value if ch != "\t"):
+                raise SandboxSpecError("image environment entry is invalid")
+        object.__setattr__(self, "image_environment", MappingProxyType(image_env))
+        working_dir = str(self.working_dir or "")
+        if working_dir and (not working_dir.startswith("/") or len(working_dir) > 4096 or "\x00" in working_dir or "\n" in working_dir):
+            raise SandboxSpecError("working directory is invalid")
+        object.__setattr__(self, "working_dir", working_dir)
         if not _DATE_RE.match(str(self.evaluation_date)):
             raise SandboxSpecError("evaluation date is invalid")
         seed = self.random_seed
@@ -323,7 +332,11 @@ class SandboxSpec:
 
     @property
     def argv(self) -> Tuple[str, ...]:
-        return ("python3", SANDBOX_MODEL_DIR + "/" + self.entry_file)
+        return tuple(self.entry_command)
+
+    @property
+    def cwd(self) -> str:
+        return self.working_dir or "/tmp"
 
     @property
     def socket_dir(self) -> Path:
@@ -335,11 +348,18 @@ class SandboxSpec:
 
 
 def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
-    """The fixed model environment (section 6.1): date, UTC, locale, seed, URLs."""
+    """The model environment: the image's ENV, then the Arena's fixed names.
 
-    environment = {
+    The image's own variables come first (PATH included, with the Arena's
+    default only when the image sets none); the Arena's names for the date,
+    time zone, locale, seed, paths, and provider URLs always win, so a model
+    cannot redirect its own input, output, or socket.
+    """
+
+    environment: Dict[str, str] = dict(spec.image_environment)
+    environment.setdefault("PATH", PROCESS_ENV["PATH"])
+    environment.update({
         "HOME": "/tmp",
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
@@ -351,7 +371,7 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_INPUT_PATH": SANDBOX_INPUT_PATH,
         "LAB_ARENA_OUTPUT_PATH": SANDBOX_OUTPUT_PATH,
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
-    }
+    })
     environment.update(PROVIDER_BASE_URLS)
     for name, value in spec.extra_environment.items():
         environment.setdefault(name, value)  # the fixed model environment always wins
@@ -463,7 +483,7 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
             "user": {"uid": spec.uid, "gid": spec.gid},
             "args": list(spec.argv),
             "env": ["%s=%s" % item for item in sorted(environment.items())],
-            "cwd": "/tmp",
+            "cwd": spec.cwd,
             "capabilities": {
                 "bounding": [],
                 "effective": [],

@@ -399,3 +399,29 @@ def test_provider_rejecting_the_scored_miners_key_is_a_refusal_only_on_a_scoring
     broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and "error_code" not in result.call and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+
+
+def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_dispatched_forever():
+    """A non-JSON reply on a JSON operation (a provider's HTML error page) must not strand the call."""
+
+    broker, store, transport = make_broker(transport=FakeTransport([(200, b"<html>Cloudflare error</html>")]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["outcome"] == "uncertain" and result.call["error_code"] == "provider_unavailable"
+    assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
+    assert b"Cloudflare" not in result.body
+
+
+def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
+    """If the ledger refuses the terminal response, the reservation is still consumed rather than left dispatched."""
+
+    broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": []})]))
+    original = store.settle_call
+
+    def refusing_settle(**kwargs):
+        raise br.ArenaContractError("terminal response rejected")
+
+    store.settle_call = refusing_settle
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and result.call["outcome"] == "uncertain" and store.log[-1] == "uncertain"
+    store.settle_call = original

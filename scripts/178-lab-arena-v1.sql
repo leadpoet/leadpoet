@@ -181,12 +181,17 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_submissions (
   status TEXT NOT NULL DEFAULT 'uploaded'
     CHECK (status IN ('uploaded', 'accepted', 'rejected', 'frozen')),
   is_king BOOLEAN NOT NULL DEFAULT FALSE,
-  package_hash TEXT,
-  package_ref TEXT,
-  source_tree_hash TEXT CHECK (source_tree_hash IS NULL OR source_tree_hash ~ '^sha256:[0-9a-f]{64}$'),
-  image_digest TEXT,
-  scan_result JSONB,
-  screening_result JSONB,
+  -- Image by digest: what the miner named, and what the Arena pinned after
+  -- resolving and mirroring it (the single-platform manifest digest, the
+  -- Arena repository reference, and the process pinned from the image config).
+  submitted_reference TEXT,
+  submitted_digest TEXT CHECK (submitted_digest IS NULL OR submitted_digest ~ '^sha256:[0-9a-f]{64}$'),
+  image_reference TEXT,
+  image_digest TEXT CHECK (image_digest IS NULL OR image_digest ~ '^sha256:[0-9a-f]{64}$'),
+  entry_command JSONB,
+  image_environment JSONB,
+  working_dir TEXT,
+  image_size_bytes BIGINT,
   consent JSONB,
   rejection_rule TEXT,
   submission_doc JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -195,15 +200,23 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_submissions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 
+-- A database created by the package-era shape of this migration gains the image columns.
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS submitted_reference TEXT;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS submitted_digest TEXT;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS image_reference TEXT;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS entry_command JSONB;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS image_environment JSONB;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS working_dir TEXT;
+ALTER TABLE public.lab_arena_submissions ADD COLUMN IF NOT EXISTS image_size_bytes BIGINT;
+
 CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_submissions_one_accepted_per_miner_uq
   ON public.lab_arena_submissions (round_id, miner_hotkey)
   WHERE status IN ('accepted', 'frozen');
+-- Two miners cannot enter the same pinned image: the second is rejected at admission.
 CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_submissions_image_digest_uq
   ON public.lab_arena_submissions (round_id, image_digest)
   WHERE image_digest IS NOT NULL AND status IN ('accepted', 'frozen');
-CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_submissions_source_tree_uq
-  ON public.lab_arena_submissions (round_id, source_tree_hash)
-  WHERE source_tree_hash IS NOT NULL AND status IN ('accepted', 'frozen');
+DROP INDEX IF EXISTS public.lab_arena_submissions_source_tree_uq;
 CREATE INDEX IF NOT EXISTS lab_arena_submissions_round_idx
   ON public.lab_arena_submissions (round_id, status);
 
@@ -223,6 +236,9 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   kind TEXT NOT NULL DEFAULT 'execute' CHECK (kind IN ('execute', 'score')),
   work_item_id TEXT CHECK (work_item_id IS NULL OR work_item_id ~ '^sha256:[0-9a-f]{64}$'),
   scored_run_id TEXT,
+  -- A confirmation attempt remembers who ran the failed attempt before it, so
+  -- another validator confirms the failure when the round has more than one.
+  previous_runner_hotkey TEXT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'leased', 'submitted', 'accepted', 'failed')),
   runner_hotkey TEXT,
@@ -1066,7 +1082,8 @@ DECLARE
 BEGIN
   IF COALESCE(p_submission_id, '') !~ '^[A-Za-z0-9._:-]{1,64}$'
      OR pg_catalog.jsonb_typeof(p_doc) IS DISTINCT FROM 'object'
-     OR (p_doc ->> 'package_hash') !~ '^sha256:[0-9a-f]{64}$' THEN
+     OR (p_doc ->> 'submitted_digest') !~ '^sha256:[0-9a-f]{64}$'
+     OR pg_catalog.char_length(COALESCE(p_doc ->> 'submitted_reference', '')) NOT BETWEEN 1 AND 512 THEN
     RAISE EXCEPTION 'lab_arena_submission_input_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR SHARE;
@@ -1079,17 +1096,17 @@ BEGIN
   SELECT * INTO v_existing FROM public.lab_arena_submissions WHERE submission_id = p_submission_id;
   IF FOUND THEN
     IF v_existing.round_id = p_round_id AND v_existing.miner_hotkey = p_miner_hotkey
-       AND v_existing.package_hash = (p_doc ->> 'package_hash') THEN
+       AND v_existing.submitted_digest = (p_doc ->> 'submitted_digest') THEN
       RETURN pg_catalog.jsonb_build_object('status', 'existing', 'submission_status', v_existing.status);
     END IF;
     RAISE EXCEPTION 'lab_arena_submission_conflict' USING ERRCODE = '23505';
   END IF;
   INSERT INTO public.lab_arena_submissions (
-    submission_id, round_id, miner_hotkey, status, is_king, package_hash, package_ref, consent, submission_doc
+    submission_id, round_id, miner_hotkey, status, is_king, submitted_reference, submitted_digest, consent, submission_doc
   ) VALUES (
     p_submission_id, p_round_id, p_miner_hotkey, 'uploaded',
     COALESCE((p_doc ->> 'is_king')::BOOLEAN, FALSE),
-    p_doc ->> 'package_hash', p_doc ->> 'package_ref', p_doc -> 'consent', p_doc
+    p_doc ->> 'submitted_reference', p_doc ->> 'submitted_digest', p_doc -> 'consent', p_doc
   );
   RETURN pg_catalog.jsonb_build_object('status', 'registered', 'submission_status', 'uploaded');
 END;
@@ -1134,27 +1151,36 @@ BEGIN
   END IF;
   BEGIN
     IF p_expected_status = 'uploaded' AND p_next_status = 'accepted' THEN
-      IF (v_patch ->> 'source_tree_hash') !~ '^sha256:[0-9a-f]{64}$' OR COALESCE(v_patch ->> 'image_digest', '') = '' THEN
+      -- Acceptance pins the resolved image: its digest, the Arena repository
+      -- reference runners pull, and the process from the image config.
+      IF (v_patch ->> 'image_digest') !~ '^sha256:[0-9a-f]{64}$'
+         OR pg_catalog.char_length(COALESCE(v_patch ->> 'image_reference', '')) NOT BETWEEN 1 AND 512
+         OR pg_catalog.jsonb_typeof(v_patch -> 'entry_command') IS DISTINCT FROM 'array' THEN
+        RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
+      END IF;
+      IF pg_catalog.jsonb_array_length(v_patch -> 'entry_command') < 1 THEN
         RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
       END IF;
       UPDATE public.lab_arena_submissions
       SET status = 'accepted',
-          source_tree_hash = v_patch ->> 'source_tree_hash',
           image_digest = v_patch ->> 'image_digest',
-          scan_result = COALESCE(v_patch -> 'scan_result', scan_result),
-          screening_result = COALESCE(v_patch -> 'screening_result', screening_result),
+          image_reference = v_patch ->> 'image_reference',
+          submitted_reference = COALESCE(v_patch ->> 'submitted_reference', submitted_reference),
+          submitted_digest = COALESCE(v_patch ->> 'submitted_digest', submitted_digest),
+          entry_command = v_patch -> 'entry_command',
+          image_environment = COALESCE(v_patch -> 'image_environment', '{}'::JSONB),
+          working_dir = COALESCE(v_patch ->> 'working_dir', ''),
+          image_size_bytes = (v_patch ->> 'image_size_bytes')::BIGINT,
           is_king = COALESCE((v_patch ->> 'is_king')::BOOLEAN, is_king)
       WHERE submission_id = p_submission_id;
     ELSIF p_expected_status IN ('uploaded', 'accepted') AND p_next_status = 'rejected' THEN
-      -- An accepted submission is rejected only at freeze (funding, preflight, or capacity), always under a published rule.
+      -- An accepted submission is rejected only at freeze (preflight or capacity), always under a published rule.
       IF COALESCE(v_patch ->> 'rejection_rule', '') = '' THEN
         RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
       END IF;
       UPDATE public.lab_arena_submissions
       SET status = 'rejected',
-          rejection_rule = v_patch ->> 'rejection_rule',
-          scan_result = COALESCE(v_patch -> 'scan_result', scan_result),
-          screening_result = COALESCE(v_patch -> 'screening_result', screening_result)
+          rejection_rule = v_patch ->> 'rejection_rule'
       WHERE submission_id = p_submission_id;
     ELSIF p_expected_status = 'accepted' AND p_next_status = 'frozen' THEN
       UPDATE public.lab_arena_submissions
@@ -1468,6 +1494,13 @@ BEGIN
   WHERE runs.round_id = p_round_id AND runs.stage = v_stage AND runs.status = 'pending'
     AND runs.stage_generation = v_round.stage_generation
     AND runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
+    -- A confirmation attempt goes to a different validator while another one
+    -- is active in this round; a lone active validator confirms its own.
+    AND (runs.previous_runner_hotkey IS NULL OR runs.previous_runner_hotkey <> p_runner_hotkey
+         OR NOT EXISTS (
+           SELECT 1 FROM public.lab_arena_runs AS others
+           WHERE others.round_id = p_round_id AND others.runner_hotkey IS NOT NULL
+             AND others.runner_hotkey <> p_runner_hotkey))
   ORDER BY runs.icp_position, runs.created_at, runs.assignment_id
   FOR UPDATE SKIP LOCKED
   LIMIT 1;
@@ -1744,7 +1777,7 @@ DECLARE
 BEGIN
   IF COALESCE(p_actual_microusd, -1) < 0
      OR pg_catalog.jsonb_typeof(p_terminal_response) IS DISTINCT FROM 'object'
-     OR pg_catalog.octet_length(p_terminal_response::TEXT) > 1048576
+     OR pg_catalog.octet_length(p_terminal_response::TEXT) > 4194304
      OR COALESCE(p_lease_ttl_seconds, 0) NOT BETWEEN 60 AND 3600 THEN
     RAISE EXCEPTION 'lab_arena_settle_input_invalid' USING ERRCODE = '22023';
   END IF;
@@ -1936,6 +1969,7 @@ SET search_path = pg_catalog, public
 AS $lab_arena_complete_attempt$
 DECLARE
   v_run public.lab_arena_runs;
+  v_round public.lab_arena_rounds;
   v_existing public.lab_arena_runs;
   v_open INTEGER;
   v_status TEXT;
@@ -1986,6 +2020,26 @@ BEGIN
       private_event_root = p_private_event_root,
       cost_root = p_cost_root
   WHERE run_id = p_run_id;
+  -- No single validator's word ends an attempt in a failure: every failure but
+  -- the miner's own quota exhaustion or key refusal gets one confirmation
+  -- attempt, claimable by a different validator when the round has more than
+  -- one. A second failure stands.
+  IF v_status = 'failed' AND p_terminal_cause NOT IN ('budget_exhausted', 'judge_key_refused') AND v_run.attempt < 2 THEN
+    SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = v_run.round_id;
+    IF v_run.stage_generation = v_round.stage_generation THEN
+      INSERT INTO public.lab_arena_runs (
+        run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
+        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id, previous_runner_hotkey
+      ) VALUES (
+        v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
+        v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
+        v_run.attempt + 1, 'pending', v_run.lease_generation, v_round.stage_generation,
+        v_run.kind, v_run.work_item_id, v_run.scored_run_id, v_run.runner_hotkey
+      );
+      RETURN pg_catalog.jsonb_build_object('status', v_status, 'idempotent', FALSE,
+        'run_id', p_run_id, 'attempt', v_run.attempt, 'confirmation_attempt', v_run.attempt + 1);
+    END IF;
+  END IF;
   RETURN pg_catalog.jsonb_build_object('status', v_status, 'idempotent', FALSE,
     'run_id', p_run_id, 'attempt', v_run.attempt);
 END;
@@ -2097,17 +2151,18 @@ BEGIN
           'previous_status', v_run.status)
     WHERE run_id = v_run.run_id;
   END LOOP;
-  -- An assignment is incomplete when no attempt was accepted and its latest
-  -- attempt did not end for a model-caused reason or a preflight failure.
+  -- An assignment is incomplete when no attempt was accepted and no attempt
+  -- ended for a model-caused reason or a preflight failure. A confirmation
+  -- attempt the window did not reach leaves the first failure standing.
   SELECT COUNT(*) INTO v_incomplete FROM (
-    SELECT DISTINCT ON (runs.assignment_id) runs.assignment_id, runs.status, runs.terminal_cause
+    SELECT runs.assignment_id
     FROM public.lab_arena_runs AS runs
     WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'execute'
-    ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
-  ) AS latest
-  WHERE latest.status <> 'accepted'
-    AND COALESCE(latest.terminal_cause, '') NOT IN
-      ('model_timeout', 'invalid_output', 'budget_exhausted', 'model_error', 'preflight_failed');
+    GROUP BY runs.assignment_id
+    HAVING bool_and(runs.status <> 'accepted')
+       AND NOT bool_or(COALESCE(runs.terminal_cause, '') IN
+         ('model_timeout', 'invalid_output', 'budget_exhausted', 'model_error', 'preflight_failed'))
+  ) AS incomplete;
   IF v_incomplete > 0 THEN
     v_next := 'cancelled';
     UPDATE public.lab_arena_rounds
@@ -2445,7 +2500,9 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
-  IF v_round.status <> ('stage' || p_stage::TEXT || '_closed') THEN
+  -- Scores are written while the stage is judged (validators scored it and
+  -- the replay stood); the closed status is the older, pre-judging state.
+  IF v_round.status NOT IN ('stage' || p_stage::TEXT || '_closed', 'stage' || p_stage::TEXT || '_judged') THEN
     RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status);
   END IF;
   FOR v_score IN SELECT value FROM pg_catalog.jsonb_array_elements(p_scores) LOOP

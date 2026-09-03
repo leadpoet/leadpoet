@@ -1,14 +1,19 @@
-"""Arena runner (labarena.md sections 9, 10, 14.3, 15.1).
+"""Arena runner (labarena.md sections 9, 10, 14.3, 15.1; image-by-digest plan).
 
-A runner claims one pending ICP assignment per free local slot, executes the
-frozen miner image in a fresh gVisor sandbox for that single ICP, bridges the
-sandbox's operation frames to the service's provider endpoint, appends the
-private event log, and submits one runner-signed receipt. It never reports a
-score, never holds a database credential, and never chooses a miner or ICP.
+A runner follows the Arena's current round, claims one pending assignment per
+free local slot, materializes the pinned image's root filesystem from the
+Arena registry, executes the image's own entry command in a fresh gVisor
+sandbox for that single ICP, bridges the sandbox's provider requests (plain
+HTTP over the worker socket, or the judge shim's operation frames) to the
+service's provider endpoint, appends the private event log, and submits one
+runner-signed receipt. It never reports a score, never holds a database
+credential, and never chooses a miner or ICP.
 """
 
 from __future__ import annotations
 
+import base64
+import http.server
 import json
 import os
 import shutil
@@ -21,11 +26,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 import httpx
 
-from lab_arena import contracts, operations, runtime, scoring, shim
+from lab_arena import contracts, images, operations, runtime, scoring, shim
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes, output_document_hash
 
@@ -34,7 +39,11 @@ DEFAULT_MAX_PARALLEL_RUNS = 1
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 LOG_EVENT_CHUNK_BYTES = 8192
 DEFAULT_SOCKET_ROOT = "/tmp"
-SCORER_ENTRY_FILE = "scorer_entrypoint.py"  # the judge image's entry file, mounted like a model's
+MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
+# A request on the worker socket is either a length-prefixed operation frame
+# (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
+HTTP_FIRST_BYTES = b"GPHDO"
+HTTP_ERROR_STATUS = {"budget_exhausted": 402, "worker_unavailable": 503, "request_too_large": 413}
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
 MAX_SOCKET_PATH_BYTES = 100
 EVENT_APPEND_RETRIES = 3
@@ -62,6 +71,10 @@ class ArenaApiClient(Protocol):
     def append_events(self, run_id: str, lease_token: str, events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]: ...
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
+
+    def current(self) -> Dict[str, Any]: ...
+
+    def round(self, round_id: str) -> Dict[str, Any]: ...
 
 
 class HttpArenaApiClient:
@@ -103,12 +116,18 @@ class HttpArenaApiClient:
         return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["receipt"]["run_id"], envelope)
 
     def round(self, round_id: str) -> Dict[str, Any]:
+        return self._get("/arena/v1/rounds/%s" % round_id, "round %s" % round_id)
+
+    def current(self) -> Dict[str, Any]:
+        return self._get("/arena/v1/current", "current round")
+
+    def _get(self, path: str, what: str) -> Dict[str, Any]:
         try:
-            response = self._client.get(self._base_url + "/arena/v1/rounds/%s" % round_id)
+            response = self._client.get(self._base_url + path)
         except httpx.HTTPError as exc:
             raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
         if response.status_code != 200:
-            raise RunnerError("round %s is unavailable: HTTP %d" % (round_id, response.status_code))
+            raise RunnerError("%s is unavailable: HTTP %d" % (what, response.status_code))
         payload = response.json()
         if not isinstance(payload, dict):
             raise RunnerError("Arena API returned a non-object")
@@ -167,11 +186,13 @@ class RunnerIdentity:
 
 
 class ImageExporter(Protocol):
-    def __call__(self, image_digest: str, target_dir: Path) -> None: ...
+    """Populate ``target_dir/rootfs`` with the image named by reference and pinned by digest."""
+
+    def __call__(self, image_reference: str, image_digest: str, target_dir: Path) -> None: ...
 
 
 class ImageCache:
-    """Frozen images by digest: each digest is exported at most once per runner."""
+    """Pinned images by digest: each digest is materialized at most once per runner."""
 
     def __init__(self, root: Path, exporter: ImageExporter) -> None:
         self._root = Path(root)
@@ -179,7 +200,7 @@ class ImageCache:
         self._lock = threading.Lock()
         self._ready: Dict[str, Path] = {}
 
-    def rootfs_for(self, image_digest: str) -> Path:
+    def rootfs_for(self, image_digest: str, image_reference: str = "") -> Path:
         if not isinstance(image_digest, str) or not IMAGE_DIGEST_RE.match(image_digest):
             raise RunnerError("image digest is invalid")
         with self._lock:
@@ -192,36 +213,31 @@ class ImageCache:
                 if target.exists():
                     shutil.rmtree(target)
                 target.mkdir(parents=True)
-                self._exporter(image_digest, target)
+                self._exporter(image_reference, image_digest, target)
+                if not (target / "rootfs").is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                    raise RunnerError("image exporter produced no root filesystem")
                 (target / ".exported").write_text(image_digest, encoding="utf-8")
-            self._ready[image_digest] = target
-            return target
+            rootfs = target / "rootfs"
+            self._ready[image_digest] = rootfs
+            return rootfs
 
 
-def docker_image_exporter(image_digest: str, target_dir: Path, *, runner: Callable[..., Any] = None) -> None:
-    """Export a frozen image's filesystem with ``docker create`` + ``docker export``."""
+def registry_image_exporter(client: images.RegistryClient, *, rules: Optional[images.ImageRules] = None) -> ImageExporter:
+    """Materialize a pinned image from the Arena registry with the hardened extractor (no Docker daemon)."""
 
-    import subprocess
+    image_rules = rules or images.ImageRules()
 
-    run = runner or subprocess.run
-    created = run(["docker", "create", "--pull=never", image_digest], capture_output=True, text=True, timeout=120, check=False)
-    if created.returncode != 0:
-        raise RunnerError("docker create failed for the frozen image")
-    container = str(created.stdout).strip()
-    try:
-        archive = target_dir / "rootfs.tar"
-        with open(archive, "wb") as handle:
-            exported = run(["docker", "export", container], stdout=handle, stderr=subprocess.PIPE, timeout=1800, check=False)
-        if exported.returncode != 0:
-            raise RunnerError("docker export failed for the frozen image")
-        rootfs = target_dir / "rootfs"
-        rootfs.mkdir()
-        extracted = run(["tar", "--no-same-owner", "-xf", str(archive), "-C", str(rootfs)], capture_output=True, text=True, timeout=1800, check=False)
-        if extracted.returncode != 0:
-            raise RunnerError("rootfs extraction failed")
-        archive.unlink()
-    finally:
-        run(["docker", "rm", "-f", container], capture_output=True, text=True, timeout=60, check=False)
+    def export(image_reference: str, image_digest: str, target_dir: Path) -> None:
+        try:
+            reference = images.parse_reference(image_reference)
+            if reference.digest != image_digest:
+                raise RunnerError("lease image reference does not name the lease digest")
+            images.materialize_rootfs(client, reference, target_dir, rules=image_rules)
+        except images.ImageError as exc:
+            raise RunnerError("image %s could not be materialized: %s" % (image_digest[:19], exc.rule_id)) from exc
+
+    return export
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +254,7 @@ class RunState:
     event_hashes: List[str] = field(default_factory=list)
     calls: List[Dict[str, Any]] = field(default_factory=list)
     action_sequence: int = 0
+    refusals: int = 0  # refused calls answered by the Arena for this run
     failed: Optional[str] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -312,7 +329,41 @@ class WorkerSocketServer:
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
 
+    def _dispatch(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Bridge one validated operation to the Arena: ``(error_code, None)`` or ``(None, document)``."""
+
+        state = self._state
+        with state.lock:
+            if state.failed:
+                return "worker_unavailable", None
+            sequence = state.action_sequence
+            state.action_sequence += 1
+            refused = state.refusals >= MAX_REFUSED_FRAMES
+        if refused:
+            # The run's quota or key keeps refusing: answer locally instead of
+            # spending an Arena round trip and a ledger row on every request.
+            return "budget_exhausted", None
+        frame = {"operation_id": operation_id, "parameters": dict(parameters), "timeout_ms": int(timeout_ms), "action_sequence": sequence}
+        try:
+            document = self._api.provider(state.lease["run_id"], state.lease_token, frame)
+        except RunnerError:
+            return "worker_unavailable", None
+        if "call" not in document or "body_b64" not in document:
+            return "worker_unavailable", None
+        call = dict(document["call"])
+        with state.lock:
+            state.calls.append(call)
+            if call.get("error_code") in ("budget_refused", "budget_exhausted") or call.get("outcome") == "refused":
+                state.refusals += 1
+        try:
+            self._events.sync_from_call(call)
+        except RunnerError:
+            return "worker_unavailable", None
+        return None, document
+
     def handle_frame(self, raw: bytes) -> bytes:
+        """The judge shim's transport: one length-prefixed operation frame."""
+
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw)
         except shim.OperationFrameError as exc:
@@ -320,35 +371,90 @@ class WorkerSocketServer:
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             return shim.encode_worker_error(code if code in shim.FRAME_ERROR_CODES else "invalid_request")
-        state = self._state
-        with state.lock:
-            if state.failed:
-                return shim.encode_worker_error("worker_unavailable")
-            sequence = state.action_sequence
-            state.action_sequence += 1
-        frame = {"operation_id": operation_id, "parameters": parameters, "timeout_ms": timeout_ms, "action_sequence": sequence}
-        try:
-            document = self._api.provider(state.lease["run_id"], state.lease_token, frame)
-        except RunnerError:
-            return shim.encode_worker_error("worker_unavailable")
-        if "call" not in document or "body_b64" not in document:
-            return shim.encode_worker_error("worker_unavailable")
-        call = dict(document["call"])
-        with state.lock:
-            state.calls.append(call)
-        try:
-            self._events.sync_from_call(call)
-        except RunnerError:
-            return shim.encode_worker_error("worker_unavailable")
+        error, document = self._dispatch(operation_id, parameters, timeout_ms)
+        if error:
+            return shim.encode_worker_error(error)
         return contracts.canonical_json({"status": document["status"], "headers": document["headers"], "body_b64": document["body_b64"]}).encode("utf-8")
+
+    def handle_http(self, method: str, url: str, body: bytes, headers: Mapping[str, str]) -> Tuple[int, Dict[str, str], bytes]:
+        """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
+
+        try:
+            operation_id, parameters = operations.match_request(method, url, body, headers)
+        except operations.OperationError as exc:
+            code = getattr(exc, "code", "invalid_request")
+            return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
+        error, document = self._dispatch(operation_id, parameters, shim.DEFAULT_TIMEOUT_MS)
+        if error:
+            return HTTP_ERROR_STATUS.get(error, 400), {}, _http_error_body(error)
+        response_headers = {str(name): str(value) for name, value in dict(document.get("headers") or {}).items()}
+        try:
+            payload = base64.b64decode(str(document["body_b64"]), validate=True)
+        except (ValueError, TypeError):
+            return 503, {}, _http_error_body("worker_unavailable")
+        return int(document["status"]), response_headers, payload
 
     def start(self) -> None:
         server_self = self
+
+        class HttpBridge(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            server_version = "LabArenaWorker/1"
+            sys_version = ""
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+                return
+
+            def _bridge(self) -> None:
+                self.close_connection = True
+                if self.headers.get("Transfer-Encoding"):
+                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length") or "0")
+                except ValueError:
+                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    return
+                if length < 0 or length > shim.MAX_FRAME_BYTES:
+                    self._answer(413, {}, _http_error_body("request_too_large"))
+                    return
+                body = self.rfile.read(length) if length else b""
+                host = (self.headers.get("Host") or "").strip()
+                if not host or "/" in host or any(ch.isspace() for ch in host):
+                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    return
+                headers = {name: value for name, value in self.headers.items()}
+                status, response_headers, payload = server_self.handle_http(self.command, "https://" + host + self.path, body, headers)
+                self._answer(status, response_headers, payload)
+
+            def _answer(self, status: int, headers: Mapping[str, str], payload: bytes) -> None:
+                self.send_response(status)
+                for name, value in headers.items():
+                    if name.lower() in ("content-length", "transfer-encoding", "connection"):
+                        continue
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(payload)
+
+            do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _bridge
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self) -> None:
                 connection = self.request
                 connection.settimeout(300)
+                try:
+                    first = connection.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    return
+                if first and first[0] in HTTP_FIRST_BYTES:
+                    try:
+                        HttpBridge(connection, self.client_address, self.server)
+                    except (OSError, ValueError):
+                        return
+                    return
                 try:
                     header = _recv_exact(connection, 4)
                     size = int.from_bytes(header, "big")
@@ -378,6 +484,10 @@ class WorkerSocketServer:
             self._path.unlink()
 
 
+def _http_error_body(code: str) -> bytes:
+    return json.dumps({"error": {"code": str(code)}}, sort_keys=True).encode("utf-8")
+
+
 def _recv_exact(connection: socket.socket, size: int) -> bytes:
     output = bytearray()
     while len(output) < size:
@@ -399,7 +509,8 @@ class SandboxRuntime(Protocol):
 
 @dataclass
 class RunnerConfig:
-    round_id: str
+    # None follows the Arena's current round (production); a value pins one round.
+    round_id: Optional[str]
     identity: RunnerIdentity
     api: ArenaApiClient
     sandbox_runtime: SandboxRuntime
@@ -409,10 +520,17 @@ class RunnerConfig:
     max_parallel_runs: int = DEFAULT_MAX_PARALLEL_RUNS
     slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
-    evaluation_date: str = ""
+    # Waits between completion retries after a transport or server failure.
+    completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
-    entry_file: str = "model/main.py"
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
+    # Release identity checked against every round the runner follows.
+    runtime_lock_hash: str = ""
+    # Where leases may point: the round's Arena repository for miner images and
+    # the exact judge reference for scoring assignments (empty: not checked).
+    registry_repository: str = ""
+    scorer_image_reference: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.max_parallel_runs, bool) or not isinstance(self.max_parallel_runs, int) or self.max_parallel_runs < 1:
@@ -420,6 +538,12 @@ class RunnerConfig:
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
         self.socket_root.mkdir(parents=True, exist_ok=True)
+
+    def adopt_round(self, configuration: Mapping[str, Any]) -> None:
+        """Pin the image sources a round's signed configuration names."""
+
+        self.registry_repository = str(configuration.get("registry_repository") or "")
+        self.scorer_image_reference = str((configuration.get("release") or {}).get("scorer_image_reference") or "")
 
 
 def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
@@ -497,38 +621,43 @@ class AssignmentExecutor:
         terminal = "judge_error" if scoring_run else "model_error"
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
+        evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
             if scoring_run:
                 # A scoring assignment runs the Arena judge image on one accepted
                 # output; the judge's provider calls cross the same socket.
                 input_document = scoring.build_scoring_input(
                     work_item_id=str(lease["work_item_id"]), icp=icp, companies=list((lease.get("scored_output") or {}).get("companies") or []),
-                    policy=lease["scorer_policy"], evaluation_date=config.evaluation_date,
+                    policy=lease["scorer_policy"], evaluation_date=evaluation_date,
                 )
                 extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}
-                entry_file = SCORER_ENTRY_FILE
             else:
                 input_document = {
                     "schema_version": "leadpoet.lab_arena.icp_input.v1",
                     "icp": dict(icp),
-                    "evaluation_date": config.evaluation_date,
+                    "evaluation_date": evaluation_date,
                     "company_limit": int(icp.get("max_companies") or 5),
                     "provider_operations": sorted(operations.OPERATIONS),
                 }
                 extra_environment = {}
-                entry_file = config.entry_file
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
-            rootfs = config.image_cache.rootfs_for(str(lease["image_digest"]))
+            # The image and its process come from the lease, pinned by the Arena
+            # at admission; the runner checks them against the round's sources.
+            image_reference = str(lease.get("image_reference") or "")
+            _check_lease_image(config, kind, image_reference, str(lease["image_digest"]))
+            rootfs = config.image_cache.rootfs_for(str(lease["image_digest"]), image_reference)
             spec = runtime.SandboxSpec(
                 sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
                 rootfs_path=rootfs,
                 input_dir=input_dir,
                 output_dir=output_dir,
                 socket_path=socket_path,
-                entry_file=entry_file,
-                evaluation_date=config.evaluation_date,
+                entry_command=tuple(str(item) for item in (lease.get("entry_command") or ())),
+                image_environment={str(name): str(value) for name, value in dict(lease.get("image_environment") or {}).items()},
+                working_dir=str(lease.get("working_dir") or ""),
+                evaluation_date=evaluation_date,
                 random_seed=int(contracts.document_hash(lease["assignment_id"])[7:15], 16) % (2 ** 32),
-                wall_clock_seconds=config.wall_clock_seconds,
+                wall_clock_seconds=contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run else config.wall_clock_seconds,
                 extra_environment=extra_environment,
             )
             server.start()
@@ -581,9 +710,10 @@ class AssignmentExecutor:
             shutil.rmtree(run_dir, ignore_errors=True)
             shutil.rmtree(socket_dir, ignore_errors=True)
         finished_at = _timestamp(config.clock)
+        round_id = str(lease.get("round_id") or config.round_id or "")
         receipt_body = {
             "schema_version": contracts.ICP_RECEIPT_SCHEMA_VERSION,
-            "round_id": config.round_id,
+            "round_id": round_id,
             "submission_id": lease["submission_id"],
             "assignment_id": lease["assignment_id"],
             "attempt": int(lease["attempt"]),
@@ -618,12 +748,27 @@ class AssignmentExecutor:
         body = {"receipt": receipt, "output": output_document, "calls": state.calls, "event_hashes": state.event_hashes, "lease_token": lease_token}
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,
-            round_id=config.round_id,
+            round_id=round_id,
             hotkey=config.identity.hotkey,
             body=body,
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
+
+
+def _check_lease_image(config: RunnerConfig, kind: str, image_reference: str, image_digest: str) -> None:
+    """A lease may only point at the round's Arena repository or the round's exact judge image."""
+
+    if not image_reference:
+        raise RunnerError("lease carries no image reference")
+    reference = images.parse_reference(image_reference)
+    if reference.digest != image_digest:
+        raise RunnerError("lease image reference does not name the lease digest")
+    if kind == "score":
+        if config.scorer_image_reference and image_reference != config.scorer_image_reference:
+            raise RunnerError("scoring lease names an image other than the round's judge")
+    elif config.registry_repository and reference.name != config.registry_repository:
+        raise RunnerError("lease image is outside the round's Arena repository")
 
 
 # ---------------------------------------------------------------------------
@@ -639,12 +784,42 @@ class Runner:
         self._pool = ThreadPoolExecutor(max_workers=config.max_parallel_runs, thread_name_prefix="lab-arena-slot")
         self.completed: List[Dict[str, Any]] = []
         self.abandoned = 0
+        self._pinned = config.round_id is not None
+        self._round_id: Optional[str] = config.round_id
+
+    @property
+    def round_id(self) -> Optional[str]:
+        return self._round_id
+
+    def refresh_round(self) -> Optional[str]:
+        """Follow the Arena's current round; a changed round is re-verified before any claim.
+
+        A runner started without ``--round-id`` asks ``/arena/v1/current`` at
+        every idle poll, so the daily rounds roll over without a restart.
+        """
+
+        if self._pinned:
+            return self._round_id
+        config = self._config
+        current = (config.api.current().get("round") or {}) if True else {}
+        round_id = current.get("round_id") if isinstance(current, Mapping) else None
+        if not round_id:
+            self._round_id = None
+            return None
+        if round_id != self._round_id:
+            configuration = config.api.round(str(round_id)).get("configuration") or {}
+            verify_release_against_round(configuration, worker_release_hash=config.worker_release_hash, runtime_lock_hash=config.runtime_lock_hash)
+            config.adopt_round(configuration)
+            self._round_id = str(round_id)
+        return self._round_id
 
     def claim_one(self) -> Dict[str, Any]:
         config = self._config
+        if self._round_id is None:
+            return {"status": "no_open_round"}
         envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_CLAIM,
-            round_id=config.round_id,
+            round_id=self._round_id,
             hotkey=config.identity.hotkey,
             body={"declared_parallelism": config.max_parallel_runs, "worker_release_hash": config.worker_release_hash},
             timestamp=int(config.clock().timestamp()),
@@ -655,7 +830,7 @@ class Runner:
     def _run_lease(self, lease: Mapping[str, Any]) -> None:
         try:
             envelope = self._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
-            result = self._config.api.complete(envelope)
+            result = self._complete_with_retries(envelope)
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
@@ -663,9 +838,32 @@ class Runner:
         finally:
             self._slots.release()
 
+    def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        """Deliver the signed completion; a transport or server failure is retried briefly.
+
+        The envelope is idempotent, so a lost response or a transient object
+        store failure on the Arena costs a retry, not the whole sandbox run.
+        A rejection the Arena returns as a document is never retried.
+        """
+
+        delays = tuple(self._config.completion_retry_seconds)
+        for attempt in range(len(delays) + 1):
+            try:
+                return self._config.api.complete(envelope)
+            except Exception:
+                if attempt >= len(delays):
+                    raise
+                time.sleep(max(0.0, float(delays[attempt])))
+        raise RunnerError("completion retries exhausted")  # pragma: no cover - the loop returns or raises
+
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""
 
+        if not self._pinned:
+            try:
+                self.refresh_round()
+            except RunnerError:
+                return 0  # the Arena or the round is unavailable: poll again later
         taken = 0
         futures = []
         for _ in range(max_claims):

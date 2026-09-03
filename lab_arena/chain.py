@@ -638,6 +638,21 @@ class ArenaChain:
         self._metagraph_lock = threading.Lock()
         self._cached_metagraph: Optional[Tuple[MetagraphSnapshot, float]] = None
 
+    def close(self) -> None:
+        """Release the substrate client's connection and threads; idempotent.
+
+        A process that read the chain and never closed the client can hang at
+        exit on its websocket threads, so the wiring registers this at exit.
+        """
+
+        client = self._client
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # closing is best effort at shutdown
+                return
+
     @property
     def config(self) -> ArenaChainConfig:
         return self._config

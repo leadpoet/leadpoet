@@ -606,28 +606,48 @@ class Broker:
             secret = ""
             del secret
 
-        sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(operation_id, response.status, response.headers, response.body, parameters=normalized)
-        if operation.provider == "openrouter":
-            actual: Optional[int] = None
-            if 200 <= response.status < 300:
-                try:
-                    actual = actual_openrouter_cost_microusd(self._price_table, normalized["model"], json.loads(response.body.decode("utf-8")))
-                except (UnicodeDecodeError, ValueError):
-                    actual = None
-            # Missing, malformed, stale, or excessive usage retains the full reservation.
-            actual = amount if actual is None or actual > amount else actual
-        elif operation.provider == "deepline" and 200 <= response.status < 300:
-            # Deepline reports the charge in its envelope; record it, floor-rounded.
-            actual = deepline_cost_microusd(response.body)
-        else:
-            actual = 0  # miner-billed providers without a reported charge: the Arena records the call, not a price
-        terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
-        payload = dict(summary, outcome="settled", status=sanitized_status, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
-        settled = self._terminal_with_event(
-            self._store.settle_call, run_state, payload,
-            run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-            actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
-        )
+        try:
+            sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(operation_id, response.status, response.headers, response.body, parameters=normalized)
+            if operation.provider == "openrouter":
+                actual: Optional[int] = None
+                if 200 <= response.status < 300:
+                    try:
+                        actual = actual_openrouter_cost_microusd(self._price_table, normalized["model"], json.loads(response.body.decode("utf-8")))
+                    except (UnicodeDecodeError, ValueError):
+                        actual = None
+                # Missing, malformed, stale, or excessive usage retains the full reservation.
+                actual = amount if actual is None or actual > amount else actual
+            elif operation.provider == "deepline" and 200 <= response.status < 300:
+                # Deepline reports the charge in its envelope; record it, floor-rounded.
+                actual = deepline_cost_microusd(response.body)
+            else:
+                actual = 0  # miner-billed providers without a reported charge: the Arena records the call, not a price
+            terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
+            # The provider's own status travels in the server-written event: a
+            # 401/403 there is the evidence a judge_key_refused receipt needs.
+            payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
+            settled = self._terminal_with_event(
+                self._store.settle_call, run_state, payload,
+                run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
+                actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
+            )
+        except Exception:
+            # A reply the sanitizer refuses (not JSON, oversized) or a settlement
+            # the store rejects must not leave the call dispatched forever, which
+            # would block the attempt's completion and, repeated, cancel the
+            # round: consume the reservation as uncertain and tell the model the
+            # provider was unavailable.
+            payload = dict(summary, outcome="uncertain", status=None)
+            try:
+                result = self._terminal_with_event(
+                    self._store.mark_uncertain, run_state, payload,
+                    run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
+                    call_doc={"reason": "settle_failure"}, lease_ttl_seconds=self._lease_ttl_seconds,
+                )
+                summary.update({"outcome": "uncertain", "actual_microusd": amount, "event_cursor": result.get("event_cursor"), "event_head_hash": result.get("event_head_hash")})
+            except Exception:
+                summary.update({"outcome": "uncertain", "actual_microusd": amount})
+            return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and getattr(context, "kind", "execute") == "score" and response.status in (401, 403):
             # The provider rejected the scored miner's own key while the judge

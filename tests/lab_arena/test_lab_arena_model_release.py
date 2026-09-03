@@ -177,19 +177,23 @@ def client_for(fake: FakeGitHub) -> mr.GitHubClient:
     return mr.GitHubClient(REPO, TOKEN, http_client=httpx.Client(transport=httpx.MockTransport(fake.handler)))
 
 
-def manifest_for(round_id: str, source_files: Dict[str, bytes], *, outcome: str = "crowned", hotkey: str = "5" + "k" * 47) -> Dict[str, Any]:
-    tree_hash = contracts.document_hash({path: contracts.hash_bytes(content) for path, content in sorted(source_files.items())})
+IMAGE_A = {"image_reference": "arena.example/lab-arena/models@sha256:" + "1" * 64, "image_digest": "sha256:" + "1" * 64, "entry_command": ["python3", "/app/main.py"]}
+IMAGE_B = {"image_reference": "arena.example/lab-arena/models@sha256:" + "2" * 64, "image_digest": "sha256:" + "2" * 64, "entry_command": ["node", "agent.js"]}
+# The model tree is a pointer to the pinned image: what the release commits under model/.
+FILES_A = mr.pointer_files(**IMAGE_A)
+FILES_B = mr.pointer_files(**IMAGE_B)
+IMAGE_FOR_FILES = {id(FILES_A): IMAGE_A, id(FILES_B): IMAGE_B}
+
+
+def manifest_for(round_id: str, files: Dict[str, bytes], *, outcome: str = "crowned", hotkey: str = "5" + "k" * 47) -> Dict[str, Any]:
+    image = IMAGE_FOR_FILES.get(id(files)) or (IMAGE_A if files.get("DIGEST") == FILES_A["DIGEST"] else IMAGE_B)
     return mr.release_manifest(
         repository=REPO, branch="main", round_id=round_id, king_hotkey=hotkey, king_outcome=outcome, submission_id="sub-" + "a" * 32,
-        package_hash=contracts.document_hash(round_id + "pkg"), source_tree_hash=tree_hash, image_digest="sha256:" + "1" * 64, entry_point="main.py",
-        dependency_lock=["h11==0.16.0"], base_image_digest="sha256:" + "2" * 64, file_count=len(source_files), configuration_hash=contracts.document_hash("cfg"),
+        image_reference=image["image_reference"], image_digest=image["image_digest"], entry_command=image["entry_command"],
+        file_count=len(files), configuration_hash=contracts.document_hash("cfg"),
         result_bundle_hash=contracts.document_hash("bundle"), publication_hash=contracts.document_hash("pub"), reward_basis_hash=contracts.document_hash("basis"),
         signing_public_key_hash=contracts.document_hash("key"), released_at="2026-09-03T00:10:00+00:00",
     )
-
-
-FILES_A = {"main.py": b"print('a')\n", "model/__init__.py": b"", "model/agent.py": b"AGENT = 'a'\n", "requirements.lock": b"h11==0.16.0\n"}
-FILES_B = {"main.py": b"print('b')\n", "pkg/core.py": b"CORE = 'b'\n", "requirements.lock": b"h11==0.16.0\n"}
 
 
 def test_first_release_bootstraps_the_empty_repository_and_writes_model_and_manifest():
@@ -206,6 +210,10 @@ def test_first_release_bootstraps_the_empty_repository_and_writes_model_and_mani
     modes = {entry[0] for tree in fake.trees.values() for entry in tree.values() if entry[1] == "blob"}
     assert modes == {"100644"}
     assert "crowned king" in fake.commits[receipt.commit_sha]["message"]
+    # The pointer names the exact image and process the Arena ran.
+    assert files["model/IMAGE"] == (IMAGE_A["image_reference"] + "\n").encode() and json.loads(files["model/ENTRYPOINT.json"]) == IMAGE_A["entry_command"]
+    with pytest.raises(mr.ModelReleaseError):
+        mr.pointer_files(image_reference="", image_digest=IMAGE_A["image_digest"], entry_command=IMAGE_A["entry_command"])
 
 
 def test_a_defended_king_makes_no_commit_and_a_retry_is_idempotent():
@@ -242,7 +250,7 @@ def test_a_concurrent_push_is_retried_onto_the_new_head():
     parent = fake.commits[receipt.commit_sha]["parents"][0]
     assert fake.commits[parent]["message"] == "concurrent push"
     files = fake.files_at(receipt.commit_sha)
-    assert files["docs/other.md"] == b"someone else pushed\n" and files["model/main.py"] == FILES_A["main.py"]
+    assert files["docs/other.md"] == b"someone else pushed\n" and files["model/IMAGE"] == FILES_A["IMAGE"]
     # The model tree was built once; only the root tree and commit were redone.
     assert sum(1 for r in fake.requests if r.method == "POST" and r.url.path.endswith("git/blobs")) == len(FILES_A) + 1
 

@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Lab Arena miner helper (labarena.md sections 6.2, 7.2, 7.3, 14.2).
+"""Lab Arena miner helper (labarena.md sections 7.2, 7.3, 14.2; image-by-digest plan).
 
     python3 scripts/lab_arena_miner.py encrypt-key --provider deepline --recipient recipient.json --out envelope.json
-    python3 scripts/lab_arena_miner.py package --source-dir ./model --entry-point model/main.py \\
-        --lock requirements.lock --out package.tar.gz
+    python3 scripts/lab_arena_miner.py submission-body --image ghcr.io/you/agent@sha256:<digest> --out body.json
     python3 scripts/lab_arena_miner.py sign --scope submission --round-id arena-2026-09-02 \\
         --body body.json --out envelope.json [--wallet-name W --hotkey-name H | --hotkey-uri //Alice]
 
-Each provider key is read from ``LAB_ARENA_<PROVIDER>_RUNTIME_KEY`` and never
-written anywhere but the encrypted envelope. Hotkey signing uses the local
-Bittensor wallet; ``--hotkey-uri`` exists for development only.
+A submission names one container image by digest in any public registry; the
+Arena resolves it, checks it against the round's public image rules, mirrors
+it into the Arena repository, and pins the digest. Each provider key is read
+from ``LAB_ARENA_<PROVIDER>_RUNTIME_KEY`` and never written anywhere but the
+encrypted envelope. Hotkey signing uses the local Bittensor wallet;
+``--hotkey-uri`` exists for development only.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import sys
-import tarfile
 import time
 from pathlib import Path
 
@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lab_arena import build, contracts, credentials  # noqa: E402
+from lab_arena import contracts, credentials, images  # noqa: E402
 
 KEY_ENV_TEMPLATE = "LAB_ARENA_%s_RUNTIME_KEY"  # one variable per provider, e.g. LAB_ARENA_DEEPLINE_RUNTIME_KEY
 SCOPES = {
@@ -44,11 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     encrypt.add_argument("--provider", required=True, choices=list(contracts.MINER_KEY_PROVIDERS))
     encrypt.add_argument("--recipient", required=True, help="path to the GET /recipient document")
     encrypt.add_argument("--out", required=True)
-    package = commands.add_parser("package", help="build a deterministic signed-package tarball")
-    package.add_argument("--source-dir", required=True)
-    package.add_argument("--entry-point", required=True)
-    package.add_argument("--lock", required=True, help="requirements lock file with name==version lines")
-    package.add_argument("--out", required=True)
+    body = commands.add_parser("submission-body", help="write the signed-request body that names one image by digest")
+    body.add_argument("--image", required=True, help="registry/repository[:tag]@sha256:<digest>; the registry host is required")
+    body.add_argument("--out", required=True)
     sign = commands.add_parser("sign", help="sign a canonical Arena request document")
     sign.add_argument("--scope", required=True, choices=sorted(SCOPES))
     sign.add_argument("--round-id", required=True)
@@ -74,45 +72,23 @@ def encrypt_key(args) -> int:
     return 0
 
 
-def build_package_bytes(source_dir: Path, *, entry_point: str, lock_lines, consent=None) -> bytes:
-    manifest = {
-        "schema_version": contracts.SUBMISSION_PACKAGE_SCHEMA_VERSION,
-        "entry_point": entry_point,
-        "dependency_lock": [line.strip() for line in lock_lines if line.strip() and not line.startswith("#")],
-        "consent": consent or {"source_publication": True, "public_rerun": True},
-    }
-    files = {}
-    for path in sorted(source_dir.rglob("*")):
-        if path.is_file() and not path.is_symlink():
-            relative = path.relative_to(source_dir).as_posix()
-            if relative == build.MANIFEST_PATH or relative == build.REQUIREMENTS_LOCK_PATH:
-                continue
-            files[relative] = path.read_bytes()
-    files[build.MANIFEST_PATH] = json.dumps(manifest, sort_keys=True).encode("utf-8")
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz", compresslevel=6) as archive:
-        for name in sorted(files):
-            info = tarfile.TarInfo(name)
-            data = files[name]
-            info.size = len(data)
-            info.mode = 0o644
-            info.mtime = 0
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
-            archive.addfile(info, io.BytesIO(data))
-    return buffer.getvalue()
+def submission_body_document(image: str) -> dict:
+    """The body of a submission request: the image reference and both consents."""
+
+    reference = images.parse_reference(image)
+    document = {"image_reference": str(reference), "consent": {"public_rerun": True, "image_publication": True}}
+    contracts.validate_submission_body(document)
+    return document
 
 
-def package(args) -> int:
-    source_dir = Path(args.source_dir)
-    if not source_dir.is_dir():
-        print("source directory not found", file=sys.stderr)
+def submission_body(args) -> int:
+    try:
+        document = submission_body_document(args.image)
+    except images.ImageError as exc:
+        print("image reference refused: %s" % exc.rule_id, file=sys.stderr)
         return 2
-    archive = build_package_bytes(source_dir, entry_point=args.entry_point, lock_lines=Path(args.lock).read_text(encoding="utf-8").splitlines())
-    inspection = build.inspect_package(archive)
-    build.scan_source_archive_raise(inspection.files)
-    Path(args.out).write_bytes(archive)
-    print(json.dumps({"package_hash": contracts.hash_bytes(archive), "source_tree_hash": inspection.source_tree_hash, "bytes": len(archive), "out": args.out}))
+    Path(args.out).write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps({"image_reference": document["image_reference"], "digest": images.parse_reference(document["image_reference"]).digest, "out": args.out}))
     return 0
 
 
@@ -142,8 +118,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "encrypt-key":
         return encrypt_key(args)
-    if args.command == "package":
-        return package(args)
+    if args.command == "submission-body":
+        return submission_body(args)
     if args.command == "sign":
         return sign(args)
     return 2

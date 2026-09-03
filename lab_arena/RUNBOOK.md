@@ -42,26 +42,38 @@ Arena never touches enclave, validator, or weight code paths.
   (Scrapingdog, Deepline, OpenRouter) to it; the Arena holds no provider
   key of its own for miner runs and there is no TAO deposit.
 - Object store: one bucket in `LAB_ARENA_BUCKET`. The `arena/<round>/public/`
-  prefix is the only public prefix; packages, price tables, timing, and
-  score bundles stay private.
+  prefix is the only public prefix; price tables, timing, and score bundles
+  stay private.
+- Registry: one repository in `LAB_ARENA_REGISTRY_REPOSITORY` (for example
+  `ghcr.io/leadpoet/lab-arena-models`) that every accepted miner image is
+  mirrored into by digest, plus the judge image. The Arena pushes with
+  `LAB_ARENA_REGISTRY_USERNAME` and `LAB_ARENA_REGISTRY_PASSWORD`; runners
+  and the public pull anonymously, so choose a registry whose repositories
+  can be public. Nothing is ever unpacked on the Arena host: blobs are copied
+  as bytes and the manifest is written byte-identical, so the digest a miner
+  named is the digest everyone pulls.
 
 ## 3. Service environment
 
 Required: `LAB_ARENA_SUPABASE_URL`, `LAB_ARENA_SUPABASE_ANON_KEY`,
 `LAB_ARENA_SERVICE_JWT`, `LAB_ARENA_SIGNING_KEY_ID`, `LAB_ARENA_BUCKET`,
 `LAB_ARENA_CHAIN_ENDPOINT`, `LAB_ARENA_GENERATION_OPENROUTER_API_KEY`,
-`LAB_ARENA_OPENROUTER_KMS_KEY_ID`, `LAB_ARENA_SCORING_CACHE_DIR`, and one
-scorer credential per name:
+`LAB_ARENA_OPENROUTER_KMS_KEY_ID`, `LAB_ARENA_SCORING_CACHE_DIR`,
+`LAB_ARENA_REGISTRY_REPOSITORY`, `LAB_ARENA_REGISTRY_USERNAME`,
+`LAB_ARENA_REGISTRY_PASSWORD`, `LAB_ARENA_SCORER_IMAGE` (the judge image
+reference with its digest, printed by
+`scripts/build_lab_arena_judge_image.sh`; the service resolves it at startup
+and pins its single-platform digest and entry command on every round), and
+one scorer credential per name:
 `LAB_ARENA_SCORING_OPENROUTER_API_KEY`, `LAB_ARENA_SCORING_QUALIFICATION_OPENROUTER_API_KEY`, `LAB_ARENA_SCORING_SCRAPINGDOG_API_KEY`, `LAB_ARENA_SCORING_EXA_API_KEY`.
 
 Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
 `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`, `LAB_ARENA_FLOOR_RUNNER_HOTKEYS`
 (comma-separated), `LAB_ARENA_OPENROUTER_ALLOWED_MODELS`,
-`LAB_ARENA_BASE_IMAGE_DIGEST`, `LAB_ARENA_REPOSITORY_COMMIT`,
+`LAB_ARENA_MAX_IMAGE_BYTES` (2 GiB of compressed layers), `LAB_ARENA_REPOSITORY_COMMIT`,
 `LAB_ARENA_SCORING_WORKERS` (4), `LAB_ARENA_BANNED_HOTKEYS_PATH` (JSON list),
 `LAB_ARENA_MAX_CHALLENGERS` (256, the admitted challengers per round; lower
-it only while capacity is being commissioned), `AWS_REGION`. Required for validator scoring: `LAB_ARENA_SCORER_IMAGE_DIGEST`,
-the pinned judge image.
+it only while capacity is being commissioned), `AWS_REGION`.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
 `shadow` (full rounds, publication marked shadow, no reward basis is
@@ -70,7 +82,11 @@ section 19 step 9) and is not enabled by this service.
 
 Start: `python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791`.
 The driver thread advances the current round once per `--tick-seconds`; the
-API and the driver share one process and one service role.
+API and the driver share one process and one service role. While a round is
+open, each tick also admits every uploaded submission (resolve, check, mirror,
+pin) for up to five minutes before advancing, and at the cutoff it rejects any
+image that still cannot be resolved. After a round publishes, each tick
+releases the king model (section 7) until its receipt exists.
 
 ### Daily rounds
 
@@ -99,16 +115,67 @@ Runners are Linux x86_64 hosts with the pinned gVisor release from
 `sha256:f373a13e56e2c609eb239121a8f2401fdd33bdc7e0a6cc426a5b815fac8aaea9`). Verify a host before enrolling it:
 `sudo python3 scripts/_lab_arena_runsc_probe_ci.py`.
 
-Each runner needs `LAB_ARENA_API_BASE_URL`, `LAB_ARENA_ROUND_ID`, a Bittensor
-wallet (`LAB_ARENA_WALLET_NAME`, `LAB_ARENA_HOTKEY_NAME`) whose hotkey is
+Each runner needs `LAB_ARENA_API_BASE_URL`, a Bittensor wallet
+(`LAB_ARENA_WALLET_NAME`, `LAB_ARENA_HOTKEY_NAME`) whose hotkey is
 allowlisted for the round, optional `LAB_ARENA_MAX_PARALLEL_RUNS`,
 `LAB_ARENA_RUNNER_WORK_DIR`, `LAB_ARENA_RUNSC_PATH`, and the same
-`LAB_ARENA_REPOSITORY_COMMIT` the service pins. A runner refuses to start
-when its worker release, runtime lock, shim, or operation table differs
-from the signed round configuration. Runners hold no provider credential,
-no database credential, and no signing key.
+`LAB_ARENA_REPOSITORY_COMMIT` the service pins. Without `--round-id` a runner
+follows the Arena's current round: it asks `GET /arena/v1/current` at every
+idle poll, verifies each new round's signed release identity (worker release,
+runtime lock, shim, operation table) before its first claim, and rolls over
+to the next daily round without a restart. `--round-id` (or
+`LAB_ARENA_ROUND_ID`) pins one round instead. A runner refuses a round whose
+identity differs from its own. Runners hold no provider credential, no
+database credential, and no signing key.
 
-Start: `python3 scripts/run_lab_arena_runner.py --round-id <round>`.
+Runners need no Docker daemon. A lease names the image by its Arena
+repository reference and digest; the runner pulls the manifest and layers
+anonymously from the registry, verifies every blob against the manifest and
+the manifest against the pinned digest, and unpacks the layers itself with a
+hardened extractor (path and hard-link escapes refused, setuid bits cleared,
+device nodes skipped, whiteouts applied, a byte budget on the root
+filesystem). A lease whose image lies outside the round's Arena repository,
+or whose judge reference differs from the round's pinned judge, is refused.
+Set `LAB_ARENA_REGISTRY_USERNAME` and `LAB_ARENA_REGISTRY_PASSWORD` on a
+runner only when the Arena repository is not readable anonymously.
+
+Start: `python3 scripts/run_lab_arena_runner.py`.
+
+## 4.1 Miner submissions: image by digest
+
+A miner submits one container image, named by digest, in any public
+registry: `POST /arena/v1/submissions` with a signed body of
+`{"image_reference": "<registry>/<repo>[:tag]@sha256:<digest>", "consent":
+{"public_rerun": true, "image_publication": true}}`
+(`scripts/lab_arena_miner.py submission-body`, then `sign`). The Arena
+builds nothing. The driver resolves the manifest (a multi-platform index is
+resolved to its `linux/amd64` child, whose digest is what gets pinned),
+checks the round's public image rules (compressed size, layer count, gzip or
+plain tar layers, platform, a non-empty `ENTRYPOINT` or `CMD`, no
+`LAB_ARENA_*` names in `ENV`), mirrors the blobs into the Arena repository,
+and records the pinned digest, reference, entry command, environment, and
+working directory on the submission. Rejections carry the public
+`image.*` rule ids; a second miner naming an already accepted digest is
+rejected as `image.duplicate_artifact`. The status is served at
+`GET /arena/v1/submissions/{id}`.
+
+Inside the sandbox the image's own `ENTRYPOINT` plus `CMD` runs as user
+65534 with a read-only root, writable `/tmp` and `/output`, its `ENV` and
+`WORKDIR` honored, and the Arena's names always set: `LAB_ARENA_INPUT_PATH`
+(`/input/icp.json`), `LAB_ARENA_OUTPUT_PATH` (`/output/companies.json`),
+`LAB_ARENA_EVALUATION_DATE`, `LAB_ARENA_RANDOM_SEED`, and
+`LAB_ARENA_WORKER_SOCKET`. There is no network. Providers are reached by
+sending the provider's own HTTP request, with its real `Host` header and no
+credential, over the Unix socket named by `LAB_ARENA_WORKER_SOCKET` (any
+language: `curl --unix-socket`, an `httpx` UDS transport, Node's
+`socketPath`). The broker matches the request to the closed operation table,
+adds the miner's key, enforces the quotas, and answers with the provider's
+status and body; a credential header or an unknown host is refused with a
+JSON `{"error": {"code": ...}}` body. The judge image keeps the shim's frame
+protocol on the same socket.
+
+Every participant's pinned reference is in the public round bundle, so
+anyone can pull the digest and rerun the round.
 
 ## 5. Miner keys and call quotas
 
@@ -153,8 +220,9 @@ Validators run the judge as well as the models, and one validator is enough.
 After a stage closes and the scoring plan is committed, the round enters
 `stageN_scoring`: one scoring assignment per work item is claimable like an
 ICP run by any allowlisted validator, its own executions included. The
-validator runs the Arena-built judge image, whose digest is pinned in the
-round configuration from `LAB_ARENA_SCORER_IMAGE_DIGEST`, in the sandbox with
+validator runs the Arena-built judge image, whose digest, reference, and
+entry command are pinned in the round configuration from
+`LAB_ARENA_SCORER_IMAGE`, in the sandbox with
 the trusted-scorer shim mode; the judge's Exa-compatible (routed to
 Deepline), Scrapingdog, and OpenRouter calls cross the same broker on the
 scored miner's keys under the per-work-item scoring quotas, and the judge models come from the signed
@@ -186,24 +254,23 @@ replay from the ledger and check the rejection; this is the one exception to
 terminal-attempt immutability, and it applies only to accepted score runs. `LAB_ARENA_REPLAY_VERIFICATION=0`
 disables the replay only for local rehearsal; production keeps it on.
 
-Build the judge image from this repository with the scorer entrypoint
-(`lab_arena/scorer_entrypoint.py`) and the evaluator's dependencies, pin its
-digest, and give every validator the same image through the registry the
-runner already pulls miner images from. There is no committed build recipe
-for the judge image yet; until one lands, the image is an operator artifact
-and its digest must be recorded with the round configuration that pins it.
-The image must hold, on the same pinned Python base as miner images:
-`/model/scorer_entrypoint.py` (this repository's `lab_arena/scorer_entrypoint.py`;
-the runner starts `python3 /model/scorer_entrypoint.py` with the input and
-output directories and the worker socket mounted exactly as for a model);
-the packages `lab_arena`, `research_lab`, `qualification`, `gateway`, and
-`leadpoet_verifier` importable at their repository paths, with their
-dependencies from `requirements.txt`; a `sitecustomize.py` on the import
-path that runs `from lab_arena import shim; shim.install()`; user 65534; no
-network at build or run time beyond the wheel install. Prove a candidate
-image before pinning it by running `tests/lab_arena/test_lab_arena_real_judge.py`
-inside it against the test's fake provider socket: the same 30 matched calls
-and the same redacted breakdowns as on the host.
+Build and publish the judge image from this repository with
+`bash scripts/build_lab_arena_judge_image.sh <registry>/<repository>`. The
+recipe is `lab_arena/judge/Dockerfile`: the `python:3.11-slim` base (override
+with `--build-arg BASE_IMAGE=...@sha256:...` to pin it), the pinned
+dependency set from `requirements.txt`, the packages `lab_arena`,
+`research_lab`, `qualification`, `gateway`, and `leadpoet_verifier` plus the
+five repository packages they import (`leadpoet_canonical`,
+`leadpoet_observability`, `Leadpoet`, `validator_models`, `validator_tee`)
+at their repository paths under `/model`, `/model/scorer_entrypoint.py` as the
+`ENTRYPOINT`, a `sitecustomize.py` that installs the shim into every Python
+process, and user 65534. The script builds `linux/amd64` without provenance
+or SBOM attestations so the pushed reference is a single-platform manifest,
+pushes it, and prints the value for `LAB_ARENA_SCORER_IMAGE`. Runners pull it
+like any miner image. Prove a candidate image before pinning it by running
+`tests/lab_arena/test_lab_arena_real_judge.py` inside it against the test's
+fake provider socket: the same matched calls and the same redacted breakdowns
+as on the host.
 
 ### How the judge reaches the web
 
@@ -240,12 +307,16 @@ every one of those crosses the shim in trusted-scorer mode:
 ## 7. Model release
 
 After each published round with a crowned or defended king, the driver
-commits the king's frozen source to `leadpoet/leadpoet-sales-agent` on
-`main` as the `model/` tree, with the signed manifest at
-`arena/current.json` and one copy per round under `arena/history/`. The
-commit is atomic and fast-forward only; a defended king or a retry makes no
-new commit. The signed receipt is `arena/<round>/public/model_release.json`
-and is shown on `GET /rounds/{id}` as `model_release`.
+commits a pointer to the king's pinned image to
+`leadpoet/leadpoet-sales-agent` on `main` as the `model/` tree
+(`model/IMAGE`, `model/DIGEST`, `model/ENTRYPOINT.json`, `model/README.md`),
+with the signed manifest at `arena/current.json` and one copy per round under
+`arena/history/`. The model itself is the image, which anyone pulls by
+digest. The commit is atomic and fast-forward only; a defended king or a
+retry makes no new commit. The signed receipt is
+`arena/<round>/public/model_release.json` and is shown on `GET /rounds/{id}`
+as `model_release`. The release runs as its own driver step after
+publication, so it never waits for a manual advance of the published round.
 
 Live mode requires `LAB_ARENA_GITHUB_TOKEN` (a fine-grained token with
 contents write on that one repository) and accepts
@@ -263,8 +334,23 @@ commit on the first release.
   ICPs at the 5-minute cap) and each finalist 150 in Stage 2. Size the floor
   so admitted challengers × 100 fits in 80 percent of the 210-minute Stage 1
   window: 257 participants need about 160 slots, or 20 hosts at 8 slots.
-  Stage 1 judge executions equal participants × 20 (5,140 at 257), so raise
-  `LAB_ARENA_SCORING_WORKERS` with the participant count. Scores are written
+  Stage 1 judge executions equal participants × 20 (5,140 at 257). They
+  are validator work now: size the scoring windows from the judge's real
+  duration. A judge run may take up to `SCORING_WALL_CLOCK_SECONDS` (15
+  minutes) against live providers, so a 60-minute Stage 1 scoring window
+  holds at most `slots × 60 / minutes-per-item` items; at 5,140 items and a
+  five-minute average, that needs about 430 slots, or a longer window. A
+  window that closes with items unjudged cancels the round. The Arena's
+  own replays run `LAB_ARENA_SCORING_WORKERS` at a time inside the stage
+  assembly. Measured on the test Mac, one replay subprocess costs about
+  4 s before any judging, because the judge entrypoint imports the
+  evaluator and the qualification scoring package; a 256-challenger round
+  with four workers did not finish its Stage 1 assembly inside two hours.
+  Size the workers as `5,120 × seconds-per-replay / workers` against the
+  time you can spend between the scoring window and Stage 2: with 4 s per
+  replay, 16 workers need about 21 minutes and 32 workers about 11. The
+  assembly blocks the round until it finishes, so on a small host prefer
+  fewer challengers or move the replay after publication. Scores are written
   in batches of 500 and scoring plans live in the object store, so round rows
   stay small at any participant count.
 - Scorer egress enforced with the nftables ruleset from
@@ -273,7 +359,35 @@ commit on the first release.
 - Paid pilot, then the reward release (plan section 19 step 9), which is the
   first change to files outside `lab_arena/`, `scripts/`, and `tests/`.
 
-## 9. Invariants to re-check after any change
+## 9. What a validator may assert
+
+- A failed attempt never stands on one validator's word. Every failure but
+  the miner's own quota exhaustion or key refusal gets one confirmation
+  attempt (`lab_arena_complete_attempt`), claimable by a different validator
+  when the round's allowlist has more than one; a second failure stands. A
+  stage that closes before the confirmation ran keeps the first failure as
+  the miner's zero rather than cancelling.
+- A `judge_key_refused` receipt is accepted only with Arena-recorded
+  evidence: a ledger refusal of a reservation or a settlement whose provider
+  status the broker saw as 401 or 403 (`lab_arena.service.refusal_evidenced`).
+  Nothing the runner writes counts.
+- Accepted scorings are checked by the replay alone (section 6).
+- A model that keeps calling after its quota is refused costs the Arena at
+  most `MAX_REFUSED_FRAMES` round trips per run; the worker then answers
+  its frames locally.
+- Run the service behind a reverse proxy that caps request bodies
+  (`client_max_body_size 1m`; no route takes a large body now that images
+  are named, not uploaded); the application refuses an oversized declared
+  length before reading and rejects an oversized body after, but a proxy
+  stops the bytes earlier.
+- Anyone can rebuild a published round from public material:
+
+```bash
+python3 scripts/lab_arena_verify.py --round arena-2026-09-05 \
+    --api https://arena.example --bucket-url https://bucket.example
+```
+
+## 10. Invariants to re-check after any change
 
 - `python3 -m pytest tests/lab_arena -q`: the boundary tests prove no
   Arena module imports `gateway.tee` or `gateway.db`, no measured package

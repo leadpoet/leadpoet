@@ -44,8 +44,8 @@ class StubService:
     def public_results(self, round_id, submission_id):
         return {"round_id": round_id, "submission_id": submission_id}
 
-    def handle_submission(self, envelope, archive):
-        self.calls["submission"] = (envelope, len(archive))
+    def handle_submission(self, envelope):
+        self.calls["submission"] = envelope
         return {"status": "uploaded", "submission_id": "sub-1"}
 
     def handle_credential(self, envelope, *, register, provider=None):
@@ -118,15 +118,40 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     assert nan.status_code == 400
 
 
-def test_submission_route_needs_envelope_header_and_bounds_the_package(client):
+def test_submission_route_takes_one_signed_json_body_naming_an_image(client):
     http, service = client
-    envelope = {"scope": contracts.SCOPE_SUBMISSION}
-    response = http.post("/arena/v1/submissions", content=b"tarball-bytes", headers={"x-lab-arena-envelope": json.dumps(envelope)})
-    assert response.status_code == 200 and service.calls["submission"] == (envelope, len(b"tarball-bytes"))
+    envelope = {"scope": contracts.SCOPE_SUBMISSION, "body": {"image_reference": "ghcr.io/acme/agent@sha256:" + "a" * 64}}
+    response = http.post("/arena/v1/submissions", content=json.dumps(envelope))
+    assert response.status_code == 200 and service.calls["submission"] == envelope
     assert http.post("/arena/v1/submissions", content=b"x").status_code == 400
-    assert http.post("/arena/v1/submissions", content=b"x", headers={"x-lab-arena-envelope": "{bad"}).status_code == 400
+    assert http.post("/arena/v1/submissions", content=b"{bad").status_code == 400
     assert http.post("/arena/v1/funding/confirm", content=json.dumps({"scope": "gone"})).status_code == 404
     for provider in contracts.MINER_KEY_PROVIDERS:
         assert http.post("/arena/v1/credentials/%s" % provider, content=json.dumps({"scope": contracts.SCOPE_CREDENTIAL})).json() == {"key_hash": "k"}
         assert service.calls["credential_provider"] == provider
     assert http.post("/arena/v1/credentials/exa", content=json.dumps({"scope": contracts.SCOPE_CREDENTIAL})).status_code == 404
+
+
+def test_provider_frames_carry_the_judges_long_prompts(client):
+    """The judge sends page content of tens of thousands of characters in one chat message."""
+
+    http, service = client
+    content = "x" * 32_000
+    frame = {"operation_id": "openrouter.chat", "parameters": {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": content}]}, "timeout_ms": 120000, "action_sequence": 3}
+    ok = http.post("/arena/v1/runs/r1/provider", content=json.dumps(frame), headers={"x-lab-arena-lease": "a" * 64})
+    assert ok.status_code == 200 and service.calls["provider"][2]["parameters"]["messages"][0]["content"] == content
+    from lab_arena import contracts as c
+
+    c.check_strict_document(frame, c.PROVIDER_FRAME_LIMITS)  # the service applies these to the frame
+
+
+
+def test_an_oversized_declared_body_is_refused_before_it_is_read(client):
+    """A content-length above the limit gets 413 without the body being buffered."""
+
+    http, service = client
+    refused = http.post("/arena/v1/runs/claim", content=b"{}", headers={"content-length": str(MAX_JSON_BODY_BYTES + 1)})
+    assert refused.status_code == 413
+    submission = http.post("/arena/v1/submissions", content=b"{}", headers={"content-length": str(MAX_JSON_BODY_BYTES + 1)})
+    assert submission.status_code == 413
+    assert "submission" not in service.calls

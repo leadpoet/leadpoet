@@ -7,6 +7,7 @@ objects that never print them.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import urllib.request
@@ -14,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, model_release, runtime, scoring, signing
+from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, images, model_release, runtime, scoring, signing
 from lab_arena.api import create_app
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
@@ -151,6 +152,45 @@ def _max_challengers_from_environment() -> int:
     return value
 
 
+def _max_image_bytes_from_environment() -> int:
+    """LAB_ARENA_MAX_IMAGE_BYTES: the compressed size ceiling of a submitted image."""
+
+    raw = os.environ.get("LAB_ARENA_MAX_IMAGE_BYTES", "").strip()
+    if not raw:
+        return images.DEFAULT_MAX_IMAGE_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError("LAB_ARENA_MAX_IMAGE_BYTES must be an integer", 500) from None
+    if value < 1:
+        raise ServiceError("LAB_ARENA_MAX_IMAGE_BYTES must be positive", 500)
+    return value
+
+
+def registry_client_from_environment(*, push: bool) -> images.RegistryClient:
+    """The registry client: anonymous pulls everywhere, one credential for the Arena registry.
+
+    The service (``push=True``) needs ``LAB_ARENA_REGISTRY_USERNAME`` and
+    ``LAB_ARENA_REGISTRY_PASSWORD`` for the host of
+    ``LAB_ARENA_REGISTRY_REPOSITORY``; a runner passes the same pair only when
+    the Arena registry is not readable anonymously.
+    """
+
+    repository = os.environ.get("LAB_ARENA_REGISTRY_REPOSITORY", "").strip()
+    username = os.environ.get("LAB_ARENA_REGISTRY_USERNAME", "").strip()
+    password = os.environ.get("LAB_ARENA_REGISTRY_PASSWORD", "")
+    if push and (not repository or not username or not password):
+        raise ServiceError("LAB_ARENA_REGISTRY_REPOSITORY, LAB_ARENA_REGISTRY_USERNAME, and LAB_ARENA_REGISTRY_PASSWORD are required", 500)
+    registry_host = images.parse_repository(repository)[0] if repository else ""
+
+    def credentials_for(host: str):
+        if username and password and registry_host and host == registry_host:
+            return (username, password)
+        return None
+
+    return images.RegistryClient(credentials=credentials_for)
+
+
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -160,6 +200,7 @@ def build_service_from_environment(mode: str):
     objects = S3ObjectStore(_required("LAB_ARENA_BUCKET"), region_name=os.environ.get("AWS_REGION"))
     chain_config = chain_module.ArenaChainConfig(endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT"), netuid=int(os.environ.get("LAB_ARENA_NETUID", "71")), network_name=os.environ.get("LAB_ARENA_NETWORK", "finney"), request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")))
     arena_chain = chain_module.ArenaChain(chain_config, chain_module.connect_substrate(chain_config))
+    atexit.register(arena_chain.close)  # the websocket threads would otherwise hold the process open at exit
     cutover = chain_module.load_arena_cutover()
     chain_reads = ChainReadsAdapter(arena_chain, cutover)
     generation_provider = OpenRouterGenerationProvider(_required("LAB_ARENA_GENERATION_OPENROUTER_API_KEY"))
@@ -167,14 +208,27 @@ def build_service_from_environment(mode: str):
     decryptor = credentials.KmsDecryptor(_required("LAB_ARENA_OPENROUTER_KMS_KEY_ID"), region_name=os.environ.get("AWS_REGION"))
     lock = runtime.load_runtime_lock()
     floor = tuple(item for item in os.environ.get("LAB_ARENA_FLOOR_RUNNER_HOTKEYS", "").split(",") if item.strip())
+    # Image by digest: miners name an image, the Arena mirrors it into its own
+    # repository, and the judge image is resolved once here so every round
+    # pins its single-platform digest and entry command.
+    registry = registry_client_from_environment(push=True)
+    repository = _required("LAB_ARENA_REGISTRY_REPOSITORY")
+    image_rules = images.ImageRules(max_image_bytes=_max_image_bytes_from_environment())
+    try:
+        scorer = images.resolve_image(registry, images.parse_reference(_required("LAB_ARENA_SCORER_IMAGE")), image_rules)
+    except images.ImageError as exc:
+        raise ServiceError("scorer_image_unresolved:%s" % exc.rule_id, 500) from exc
     defaults = RoundDefaults(
         floor_runner_hotkeys=floor,
         openrouter_allowed_models=tuple(item for item in os.environ.get("LAB_ARENA_OPENROUTER_ALLOWED_MODELS", "openai/gpt-4o-mini").split(",") if item.strip()),
-        base_image_digest=os.environ.get("LAB_ARENA_BASE_IMAGE_DIGEST", "sha256:" + "0" * 64),
         repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40),
         max_challengers=_max_challengers_from_environment(),
         daily_cutoff_hour_utc=_daily_cutoff_hour_from_environment(),
-        scorer_image_digest=_required("LAB_ARENA_SCORER_IMAGE_DIGEST"),
+        scorer_image_digest=scorer.image_digest,
+        scorer_image_reference=str(scorer.reference),
+        scorer_entry_command=tuple(scorer.entry_command),
+        image_rules=image_rules,
+        registry_repository=repository,
     )
 
     def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:
@@ -210,7 +264,7 @@ def build_service_from_environment(mode: str):
         model_release_client = model_release.GitHubClient(os.environ.get("LAB_ARENA_MODEL_REPOSITORY", model_release.DEFAULT_REPOSITORY).strip(), github_token)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, signer=signer, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
-        model_release_client=model_release_client, model_release_branch=os.environ.get("LAB_ARENA_MODEL_BRANCH", model_release.DEFAULT_BRANCH).strip() or model_release.DEFAULT_BRANCH,
+        registry=registry, model_release_client=model_release_client, model_release_branch=os.environ.get("LAB_ARENA_MODEL_BRANCH", model_release.DEFAULT_BRANCH).strip() or model_release.DEFAULT_BRANCH,
         generation_provider=generation_provider, price_table_source=lambda models: broker_module.fetch_openrouter_price_table(models),
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, scorer_factory=scorer_factory, defaults=defaults,
         runtime_lock_hash=lock.runtime_lock_hash, scoring_workers=int(os.environ.get("LAB_ARENA_SCORING_WORKERS", "4")),
@@ -240,13 +294,20 @@ def build_runner_from_environment(args):
     sandbox_runtime = runtime.RunscRuntime(config)
     identity = runner_module.RunnerIdentity(hotkey=keypair.ss58_address, sign=lambda message: keypair.sign(message.encode("utf-8")).hex())
     release = runner_module.worker_release_identity(repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40), runtime_lock_hash=lock.runtime_lock_hash)
-    cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.docker_image_exporter)
+    # Images are materialized from the Arena registry by digest with the
+    # hardened extractor; the runner needs no Docker daemon.
+    cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.registry_image_exporter(registry_client_from_environment(push=False)))
     api = runner_module.HttpArenaApiClient(args.api_base_url)
-    # Fail startup unless this runner's identities are exactly what the round pins.
-    runner_module.verify_release_against_round(api.round(args.round_id).get("configuration") or {}, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=lock.runtime_lock_hash)
+    round_id = str(getattr(args, "round_id", "") or "").strip() or None
     runner_config = runner_module.RunnerConfig(
-        round_id=args.round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, worker_release_hash=release["worker_release_hash"],
-        work_dir=Path(args.work_dir) / "runs", max_parallel_runs=runner_module.max_parallel_runs_from_environment(), evaluation_date=args.round_id.replace("arena-", "")[:10],
+        round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, worker_release_hash=release["worker_release_hash"],
+        work_dir=Path(args.work_dir) / "runs", max_parallel_runs=runner_module.max_parallel_runs_from_environment(), runtime_lock_hash=lock.runtime_lock_hash,
     )
+    if round_id is not None:
+        # A pinned round: fail startup unless this runner's identities are exactly what the round pins.
+        configuration = api.round(round_id).get("configuration") or {}
+        runner_module.verify_release_against_round(configuration, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=lock.runtime_lock_hash)
+        runner_config.adopt_round(configuration)
+        runner_config.evaluation_date = round_id.replace("arena-", "")[:10]
     Path(args.work_dir, "runs").mkdir(parents=True, exist_ok=True)
     return runner_module.Runner(runner_config)

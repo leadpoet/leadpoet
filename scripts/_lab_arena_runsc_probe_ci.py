@@ -111,7 +111,8 @@ def make_spec(work: Path, name: str, model_source: str, *, wall_clock: int) -> r
     os.chmod(output_dir, 0o777)
     return runtime.SandboxSpec(
         sandbox_id="lab-arena-probe-%s" % name, rootfs_path=Path("/"), input_dir=input_dir, output_dir=output_dir,
-        socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, entry_file="main.py", evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=wall_clock,
+        # The probe runs on the host root filesystem, so the model's host path is its path inside the sandbox.
+        socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, entry_command=("python3", str(model_dir / "main.py")), evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=wall_clock,
     )
 
 

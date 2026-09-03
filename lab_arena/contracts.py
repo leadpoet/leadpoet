@@ -49,6 +49,10 @@ CALL_QUOTA_SCHEMA_VERSION = "lab_arena.call_quotas.v2"
 # scores one output on one ICP with the Arena judge.
 ASSIGNMENT_KINDS = ("execute", "score")
 ICP_WALL_CLOCK_SECONDS = 300
+# A judge run reads pages and calls several models per company against live
+# providers; it gets its own wall clock, longer than a model's, under the same
+# lease (provider calls refresh the lease) and inside the replay timeout.
+SCORING_WALL_CLOCK_SECONDS = 900
 LEASE_TTL_SECONDS = 420
 
 # Generation requests are fixed (section 8): 20 + 20 + 10 across the ordered
@@ -76,7 +80,7 @@ SCORE_BUNDLE_SCHEMA_VERSION = "leadpoet.lab_arena.score_bundle.v1"
 PUBLICATION_SCHEMA_VERSION = "leadpoet.lab_arena.publication.v1"
 REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
 OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v1"
-SUBMISSION_PACKAGE_SCHEMA_VERSION = "leadpoet.lab_arena.submission_package.v1"
+SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
 PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 PRIVATE_EVENT_SCHEMA_VERSION = "leadpoet.lab_arena.private_event.v1"
 RECIPIENT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_recipient.v1"
@@ -162,7 +166,9 @@ TERMINAL_CAUSES = (
     # The Arena could not reproduce the scoring from its recorded judge responses.
     "replay_rejected",
 )
-# Causes that the miner caused: no second attempt (section 9.1).
+# Causes that the miner caused. A crash, timeout, or invalid output still
+# gets one confirmation attempt (another validator when there is one); a
+# quota exhaustion does not, and a second failure stands as the zero.
 MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
     {"model_timeout", "invalid_output", "budget_exhausted", "model_error", "judge_key_refused"}
 )
@@ -214,6 +220,16 @@ REQUEST_LIMITS = StrictLimits(
     max_object_keys=128,
     max_string_bytes=8_192,
     max_total_bytes=262_144,
+)
+# A provider frame carries one operation's parameters; the operation table
+# allows chat contents of 32,000 characters (the judge sends page content),
+# so the frame's structural limits must not undercut the table's own.
+PROVIDER_FRAME_LIMITS = StrictLimits(
+    max_depth=14,
+    max_list_items=256,
+    max_object_keys=256,
+    max_string_bytes=131_072,
+    max_total_bytes=1_100_000,
 )
 OUTPUT_LIMITS = StrictLimits(
     max_depth=8,
@@ -672,9 +688,12 @@ ROUND_CONFIGURATION_FIELDS = (
             F("runsc_lock_hash", "sha256"),
             F("worker_release_hash", "sha256"),
             F("shim_hash", "sha256"),
-            F("base_image_digest", "str", minimum=1, maximum=200),
-            # The Arena-built judge image every validator runs for scoring assignments.
-            F("scorer_image_digest", "str", minimum=71, maximum=280),
+            # The Arena-built judge image every validator runs for scoring
+            # assignments: its pinned single-platform digest, the reference
+            # runners pull, and the entry command pinned from its config.
+            F("scorer_image_digest", "sha256"),
+            F("scorer_image_reference", "str", minimum=0, maximum=512),
+            F("scorer_entry_command", "list[str]", minimum=1, maximum=64),
         ),
     ),
     F("operation_table_hash", "sha256"),
@@ -685,22 +704,28 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
     F("call_quota_hash", "sha256"),
     F("icp_wall_clock_seconds", "int", minimum=30),
+    F("scoring_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy_hash", "sha256"),
     F("scoring_cap_microusd", "int", minimum=0),
     F("runner_allowlist", "list[hotkey]", minimum=1, maximum=4096),
     F("floor_runner_hotkeys", "list[hotkey]", minimum=1, maximum=64),
     F("banned_hotkeys_snapshot_hash", "sha256"),
     F("signing_public_key_hash", "sha256"),
+    # Image by digest: the public limits every submitted image must meet and
+    # the Arena repository every accepted image is mirrored into.
     F(
-        "artifact_rules",
+        "image_rules",
         "object",
         fields=(
-            F("max_package_bytes", "int", minimum=1),
-            F("max_files", "int", minimum=1),
-            F("max_file_bytes", "int", minimum=1),
-            F("approved_dependency_set_hash", "sha256"),
+            F("schema_version", "str", minimum=1, maximum=64),
+            F("max_image_bytes", "int", minimum=1),
+            F("max_layers", "int", minimum=1),
+            F("max_rootfs_bytes", "int", minimum=1),
+            F("platform", "object", fields=(F("os", "str", minimum=1, maximum=32), F("architecture", "str", minimum=1, maximum=32))),
+            F("layer_media_types", "list[str]", minimum=1, maximum=16),
         ),
     ),
+    F("registry_repository", "str", minimum=0, maximum=512),
     F("publication_terms_hash", "sha256"),
     F("reward_constants", "object", fields=REWARD_CONSTANTS_FIELDS),
     F("all_participants_run_stage_2", "bool"),
@@ -897,8 +922,8 @@ def participant_set_hash(participants: Sequence[Mapping[str, Any]]) -> str:
             {
                 "submission_id": str(item["submission_id"]),
                 "miner_hotkey": require_hotkey(item["miner_hotkey"], "miner_hotkey"),
-                "image_digest": str(item["image_digest"]),
-                "source_tree_hash": require_sha256(item["source_tree_hash"], "source_tree_hash"),
+                "image_digest": require_sha256(item["image_digest"], "image_digest"),
+                "image_reference": str(item.get("image_reference") or ""),
                 "is_king": bool(item.get("is_king", False)),
             }
             for item in participants
@@ -906,6 +931,30 @@ def participant_set_hash(participants: Sequence[Mapping[str, Any]]) -> str:
         key=lambda row: row["submission_id"],
     )
     return document_hash({"schema_version": PARTICIPANT_SET_SCHEMA_VERSION, "participants": rows})
+
+
+# ---------------------------------------------------------------------------
+# Submission body (image by digest)
+# ---------------------------------------------------------------------------
+
+SUBMISSION_CONSENT_FIELDS = (
+    F("public_rerun", "bool"),
+    F("image_publication", "bool"),
+)
+SUBMISSION_BODY_FIELDS = (
+    F("image_reference", "str", minimum=1, maximum=512),
+    F("consent", "object", fields=SUBMISSION_CONSENT_FIELDS),
+)
+
+
+def validate_submission_body(body: Any) -> Dict[str, Any]:
+    """A miner's signed submission body: one image reference and both consents."""
+
+    document = validate_document(body, SUBMISSION_BODY_FIELDS)
+    consent = document["consent"]
+    if consent.get("public_rerun") is not True or consent.get("image_publication") is not True:
+        raise ArenaContractError("public_rerun and image_publication consent must both be true")
+    return document
 
 
 # ---------------------------------------------------------------------------
@@ -946,12 +995,15 @@ def finalize_scorer_policy(document: Mapping[str, Any]) -> Dict[str, Any]:
     return hashed_document(unsigned, "policy_hash")
 
 
+# One work item per accepted assignment: a miner's output on one ICP is judged
+# on that miner's own keys and never shared with another miner, even when the
+# outputs are byte-identical (results are not cached across miners).
 SCORING_WORK_ITEM_FIELDS = (
     F("work_item_id", "sha256"),
     F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
     F("icp_hash", "sha256"),
     F("output_hash", "sha256"),
-    F("submission_ids", "list[str]", minimum=1, maximum=MAX_CHALLENGERS + 1),
+    F("submission_id", "str", minimum=1, maximum=64),
 )
 
 SCORING_PLAN_FIELDS = (
@@ -972,17 +1024,17 @@ SCORING_PLAN_FIELDS = (
 )
 
 
-def work_item_id(icp_hash: str, output_hash: str) -> str:
-    return document_hash({"work_item": "lab_arena.scoring_work_item.v1", "icp_hash": icp_hash, "output_hash": output_hash})
+def work_item_id(icp_hash: str, submission_id: str, output_hash: str) -> str:
+    return document_hash({"work_item": "lab_arena.scoring_work_item.v2", "icp_hash": icp_hash, "submission_id": submission_id, "output_hash": output_hash})
 
 
 def validate_scoring_plan(document: Any) -> Dict[str, Any]:
     plan = validate_document(document, SCORING_PLAN_FIELDS)
     seen: set = set()
     for item in plan["work_items"]:
-        expected = work_item_id(item["icp_hash"], item["output_hash"])
+        expected = work_item_id(item["icp_hash"], item["submission_id"], item["output_hash"])
         if item["work_item_id"] != expected:
-            raise ArenaContractError("work item id does not bind its ICP and output")
+            raise ArenaContractError("work item id does not bind its ICP, submission, and output")
         if item["work_item_id"] in seen:
             raise ArenaContractError("duplicate work item")
         seen.add(item["work_item_id"])

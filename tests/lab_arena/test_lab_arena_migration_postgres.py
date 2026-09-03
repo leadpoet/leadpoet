@@ -102,9 +102,10 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
     for index in range(count):
         miner = hotkey("%s-miner-%d" % (prefix, index))
         submission_id = "%s-sub-%d" % (prefix, index)
-        result = store.register_submission(round_id, submission_id, miner, {"package_hash": sha(submission_id + "pkg"), "consent": {"source_publication": True, "public_rerun": True}})
+        image_digest = "sha256:" + sha(submission_id + "img")[7:]
+        result = store.register_submission(round_id, submission_id, miner, {"submitted_reference": "source.example/%s@%s" % (submission_id, image_digest), "submitted_digest": image_digest, "consent": {"public_rerun": True, "image_publication": True}})
         assert result["status"] == "registered"
-        result = store.update_submission(round_id, submission_id, "uploaded", "accepted", {"source_tree_hash": sha(submission_id + "tree"), "image_digest": "sha256:" + sha(submission_id + "img")[7:]})
+        result = store.update_submission(round_id, submission_id, "uploaded", "accepted", {"image_digest": image_digest, "image_reference": "arena.example/lab-arena/models@" + image_digest, "entry_command": ["python3", "/app/main.py"], "image_environment": {}, "working_dir": "", "image_size_bytes": 4096})
         assert result["status"] == "ok", result
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
         assert result["status"] == "ok"
@@ -440,7 +441,7 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     assert sorted(r["attempt"] for r in attempts) == [1, 2]
 
 
-def test_model_caused_failure_gets_no_second_attempt_and_completion_requires_closed_accounting(store):
+def test_model_caused_failure_gets_one_confirmation_attempt_and_completion_requires_closed_accounting(store):
     round_id = "arena-2026-09-02-mc"
     runners, parts = open_round(store, round_id, participants=1, prefix="mc")
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
@@ -464,11 +465,23 @@ def test_model_caused_failure_gets_no_second_attempt_and_completion_requires_clo
     replay = store.complete_attempt(run_id=run_id, lease_token_hash=lease_hash, receipt=receipt, receipt_hash=sha("receipt"), terminal_cause="model_timeout", output_hash="", output_ref="", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
     assert replay["status"] == "failed" and replay["idempotent"] is True
     assert store.expire_leases(round_id)["expired"] == 0
-    # No second attempt exists for a model-caused failure; the other 19 positions remain claimable.
+    # One confirmation attempt exists for the model-caused failure; with a single validator it
+    # claims that attempt itself, first in ICP order.
+    assert done["confirmation_attempt"] == 2
     attempts = [r for r in store.list_runs(round_id, stage=1) if r["assignment_id"] == response["assignment_id"]]
-    assert [r["attempt"] for r in attempts] == [1]
-    nxt, *_ = claim(store, round_id, runners[0], parallelism=8)
-    assert nxt["status"] == "leased" and nxt["icp_position"] == 1
+    assert [(r["attempt"], r["status"]) for r in attempts] == [(1, "failed"), (2, "pending")]
+    assert attempts[1]["previous_runner_hotkey"] == runners[0]
+    nxt, token2, _, _ = claim(store, round_id, runners[0], parallelism=8)
+    assert nxt["status"] == "leased" and nxt["icp_position"] == 0 and nxt["attempt"] == 2
+    # The second failure stands: no third attempt, and a quota exhaustion never gets a confirmation.
+    second = store.complete_attempt(run_id=nxt["run_id"], lease_token_hash=hash_lease_token(token2), receipt={"receipt_hash": sha("receipt-2")}, receipt_hash=sha("receipt-2"), terminal_cause="model_error", output_hash="", output_ref="", provider_call_root=sha("calls"), private_event_root=sha("events"), cost_root=sha("costs"))
+    assert second["status"] == "failed" and "confirmation_attempt" not in second
+    assert [r["attempt"] for r in store.list_runs(round_id, stage=1) if r["assignment_id"] == response["assignment_id"]] == [1, 2]
+    quota, token3, _, _ = claim(store, round_id, runners[0], parallelism=8)
+    assert quota["icp_position"] == 1
+    exhausted = store.complete_attempt(run_id=quota["run_id"], lease_token_hash=hash_lease_token(token3), receipt={"receipt_hash": sha("receipt-3")}, receipt_hash=sha("receipt-3"), terminal_cause="budget_exhausted", output_hash="", output_ref="", provider_call_root=sha("calls"), private_event_root=sha("events"), cost_root=sha("costs"))
+    assert exhausted["status"] == "failed" and "confirmation_attempt" not in exhausted
+    assert [r["attempt"] for r in store.list_runs(round_id, stage=1) if r["assignment_id"] == quota["assignment_id"]] == [1]
 
 
 def test_close_stage_races_hundred_operations_without_deadlock(connect):
@@ -548,12 +561,19 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
 def test_close_stage_with_only_model_failures_freezes_results(store):
     round_id = "arena-2026-09-02-cf"
     runners, parts = open_round(store, round_id, participants=1, prefix="cf")
-    for position in range(20):
+    # Even positions are accepted; odd positions fail as invalid output, and each such failure
+    # gets one confirmation attempt (claimed next, in ICP order) that fails the same way.
+    seen = []
+    while True:
         response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
-        assert response["icp_position"] == position
+        if response["status"] != "leased":
+            break
+        position = response["icp_position"]
         cause = "accepted" if position % 2 == 0 else "invalid_output"
         result = store.complete_attempt(run_id=response["run_id"], lease_token_hash=hash_lease_token(token), receipt={"receipt_hash": sha("rc%d" % position)}, receipt_hash=sha("rc%d" % position), terminal_cause=cause, output_hash=sha("o%d" % position) if cause == "accepted" else "", output_ref="ref", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
         assert result["status"] == ("accepted" if cause == "accepted" else "failed")
+        seen.append((position, response["attempt"]))
+    assert sorted(seen) == sorted([(p, 1) for p in range(0, 20, 2)] + [(p, a) for p in range(1, 20, 2) for a in (1, 2)])
     closed = store.close_stage(round_id, 1)
     assert closed["status"] == "closed" and closed["incomplete_assignments"] == 0
     assert store.close_stage(round_id, 1)["status"] == "existing"
@@ -561,8 +581,9 @@ def test_close_stage_with_only_model_failures_freezes_results(store):
     # Scores are write-once per attempt.
     runs = store.list_runs(round_id, stage=1)
     scores = [{"run_id": r["run_id"], "per_icp_score": 12.5 if r["status"] == "accepted" else 0.0, "score_ref": "s"} for r in runs]
-    assert store.record_run_scores(round_id, 1, scores)["recorded"] == 20
-    assert store.record_run_scores(round_id, 1, scores)["existing"] == 20
+    assert len(runs) == 30  # twenty first attempts and ten confirmation attempts
+    assert store.record_run_scores(round_id, 1, scores)["recorded"] == 30
+    assert store.record_run_scores(round_id, 1, scores)["existing"] == 30
     with pytest.raises(ArenaStoreError):
         store.record_run_scores(round_id, 1, [dict(scores[0], per_icp_score=1.0)])
 
@@ -871,3 +892,43 @@ def test_service_role_statements_locks_and_idle_transactions_are_bounded(superus
     assert cancelled["status"] == "cancelled", cancelled
     assert seconds < 10.0, "cancel at the challenger cap took %.1fs" % seconds
     assert all(run["status"] == "failed" and run["terminal_cause"] == "stage_closed" for run in store.list_runs(round_id, stage=1))
+
+
+def test_a_confirmation_attempt_goes_to_another_validator_and_an_unreached_one_leaves_the_zero(store):
+    """With two validators the failing one cannot confirm its own verdict; a window that closes first keeps the first failure."""
+
+    round_id = "arena-2026-09-02-cf2"
+    runners, parts = open_round(store, round_id, participants=1, runners=2, prefix="cf2")
+    # Both validators are active: the second one holds position 0 while the first fails position 1.
+    held, held_token, _, _ = claim(store, round_id, runners[1], parallelism=8)
+    assert held["icp_position"] == 0
+    first, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
+    assert first["icp_position"] == 1
+    failed = store.complete_attempt(run_id=first["run_id"], lease_token_hash=hash_lease_token(token), receipt={"receipt_hash": sha("r1")}, receipt_hash=sha("r1"), terminal_cause="model_error", output_hash="", output_ref="", provider_call_root=sha("c"), private_event_root=sha("e"), cost_root=sha("k"))
+    assert failed["confirmation_attempt"] == 2
+    # The failing validator skips the confirmation and takes the next position; the other validator gets it.
+    same, same_token, _, _ = claim(store, round_id, runners[0], parallelism=8)
+    assert same["icp_position"] == 2 and same["attempt"] == 1
+    other, *_ = claim(store, round_id, runners[1], parallelism=8)
+    assert other["icp_position"] == 1 and other["attempt"] == 2
+    # Every other position completes normally, one lease at a time (a runner holds at most eight);
+    # the confirmation attempt stays leased, unreached.
+    def accept(response, token):
+        result = store.complete_attempt(run_id=response["run_id"], lease_token_hash=hash_lease_token(token), receipt={"receipt_hash": sha("ok-" + response["run_id"])}, receipt_hash=sha("ok-" + response["run_id"]), terminal_cause="accepted", output_hash=sha("out-" + response["run_id"]), output_ref="arena/x/outputs/" + response["run_id"], provider_call_root=sha("c"), private_event_root=sha("e"), cost_root=sha("k"))
+        assert result["status"] == "accepted", result
+
+    accept(held, held_token)
+    accept(same, same_token)
+    accepted = 2
+    while True:
+        response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
+        if response["status"] != "leased":
+            break
+        accept(response, token)
+        accepted += 1
+    assert accepted == 19
+    # Closing the stage with the confirmation still open leaves the first failure as the miner's zero.
+    closed = store.close_stage(round_id, 1)
+    assert closed["status"] == "closed" and closed["incomplete_assignments"] == 0, closed
+    runs = [r for r in store.list_runs(round_id, stage=1) if r["assignment_id"] == first["assignment_id"]]
+    assert {(r["attempt"], r["terminal_cause"]) for r in runs} == {(1, "model_error"), (2, "stage_closed")}

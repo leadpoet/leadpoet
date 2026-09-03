@@ -28,14 +28,39 @@ from fractions import Fraction
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
-from research_lab.employee_buckets import (
-    normalize_employee_count_bucket,
-    normalize_observed_employee_count_bucket,
-)
-from research_lab.eval.evaluator import (
-    count_penalizable_false_positives,
-    employee_count_buckets_for_icp,
-)
+
+
+def normalize_employee_count_bucket(*args, **kwargs):
+    from research_lab.employee_buckets import normalize_employee_count_bucket as normalize  # lazy: the research_lab package is heavy
+
+    return normalize(*args, **kwargs)
+
+
+def normalize_observed_employee_count_bucket(*args, **kwargs):
+    from research_lab.employee_buckets import normalize_observed_employee_count_bucket as normalize  # lazy: the research_lab package is heavy
+
+    return normalize(*args, **kwargs)
+
+
+def _evaluator():
+    """The Research Lab evaluator, imported on first use.
+
+    Its import pulls the whole qualification scoring package (seconds per
+    process); a verifier, a replay of a deterministic judge, or the service at
+    startup must not pay for it until a score is actually derived.
+    """
+
+    from research_lab.eval import evaluator
+
+    return evaluator
+
+
+def count_penalizable_false_positives(*args, **kwargs):
+    return _evaluator().count_penalizable_false_positives(*args, **kwargs)
+
+
+def employee_count_buckets_for_icp(*args, **kwargs):
+    return _evaluator().employee_count_buckets_for_icp(*args, **kwargs)
 
 from lab_arena.contracts import (
     ArenaContractError,
@@ -778,11 +803,11 @@ def output_companies(output_document: Any) -> List[Any]:
 
 
 def participant_artifact_hash(participant: Mapping[str, Any]) -> str:
-    """The frozen artifact hash used for salted tie-breaks (``artifact_hash``, else ``source_tree_hash``)."""
+    """The frozen artifact hash used for salted tie-breaks (``artifact_hash``, else the pinned ``image_digest``)."""
 
     value = participant.get("artifact_hash")
     if value is None:
-        value = participant.get("source_tree_hash")
+        value = participant.get("image_digest")
     return require_sha256(value, "artifact_hash")
 
 
@@ -934,10 +959,10 @@ def _verify_authority_documents(
     }
 
 
-def _plan_indexes(plan: Mapping[str, Any]) -> Tuple[Dict[Tuple[str, str], Mapping[str, Any]], Dict[Tuple[str, int], str]]:
-    work_items = {}  # type: Dict[Tuple[str, str], Mapping[str, Any]]
+def _plan_indexes(plan: Mapping[str, Any]) -> Tuple[Dict[Tuple[str, str, str], Mapping[str, Any]], Dict[Tuple[str, int], str]]:
+    work_items = {}  # type: Dict[Tuple[str, str, str], Mapping[str, Any]]
     for item in plan["work_items"]:
-        work_items[(item["icp_hash"], item["output_hash"])] = item
+        work_items[(item["icp_hash"], item["submission_id"], item["output_hash"])] = item
     zero_rows = {}  # type: Dict[Tuple[str, int], str]
     for item in plan["zero_rows"]:
         key = (item["submission_id"], item["icp_position"])
@@ -979,9 +1004,9 @@ def _recompute_stage_rows(
             raise ArenaContractError("%s icp_hash does not match the committed ICP" % path)
         if row["cause"] == ACCEPTED_CAUSE:
             output_hash = row["output_hash"]
-            work_item = work_items.get((icp_hash, output_hash))
-            if work_item is None or submission_id not in work_item["submission_ids"]:
-                raise ArenaContractError("%s has no scoring-plan work item for its ICP and output" % path)
+            work_item = work_items.get((icp_hash, submission_id, output_hash))
+            if work_item is None:
+                raise ArenaContractError("%s has no scoring-plan work item for its ICP, submission, and output" % path)
             if output_hash not in outputs:
                 raise ArenaContractError("%s output %s is not published" % (path, output_hash))
             output_document = outputs[output_hash]
@@ -1008,10 +1033,10 @@ def _recompute_stage_rows(
         else:
             planned_cause = zero_rows.get(key)
             if planned_cause is None:
-                # Not planned as a zero: it must be a work item the bundle declares refused.
-                work_item = work_items.get((icp_hash, row.get("output_hash")))
+                # Not planned as a zero: it must be this submission's own work item, declared refused by the bundle.
+                work_item = work_items.get((icp_hash, submission_id, row.get("output_hash")))
                 declared = {(item["work_item_id"], item["cause"]) for item in score_bundle.get("refused_work_items") or []}
-                if work_item is None or submission_id not in work_item["submission_ids"] or (work_item["work_item_id"], row["cause"]) not in declared:
+                if work_item is None or (work_item["work_item_id"], row["cause"]) not in declared:
                     raise ArenaContractError("%s zero row is not in the scoring plan with cause %s" % (path, row["cause"]))
                 if row["breakdowns"] or row["per_icp_score"] != 0.0 or row["scored_company_indexes"] or row["skipped_company_indexes"]:
                     raise ArenaContractError("%s refused work item row is not a zero row" % path)

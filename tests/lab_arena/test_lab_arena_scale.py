@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("LAB_ARENA_SCALE_TEST") != "1", r
 
 CHALLENGERS = int(os.environ.get("LAB_ARENA_SCALE_CHALLENGERS", str(contracts.MAX_CHALLENGERS)))
 RUNNERS = ["alpha", "beta", "gamma"]
+REPLAY = os.environ.get("LAB_ARENA_SCALE_REPLAY") == "1"  # replay every scoring in the stage assembly, as production does
 
 
 def test_round_at_the_challenger_cap_scores_every_participant_and_publishes(connect, tmp_path):
@@ -35,9 +36,17 @@ def test_round_at_the_challenger_cap_scores_every_participant_and_publishes(conn
         timings[label] = round(time.monotonic() - started, 2)
         return result
 
+    import sys
+
     flavors = ["Scale-%03d" % index for index in range(CHALLENGERS)]
     harness = Harness(connect, tmp_path, challengers=flavors, runners=RUNNERS)
     harness.max_challengers = contracts.MAX_CHALLENGERS
+    if REPLAY:
+        from tests.lab_arena.test_lab_arena_service_round import REPLAY_SCRIPT
+
+        script = tmp_path / "replay_entry.py"
+        script.write_text(REPLAY_SCRIPT)
+        harness.replay_command = [sys.executable, str(script)]
     harness.service = harness.build_service()
     service = harness.service
     harness.chain.epoch = 30500
@@ -74,6 +83,8 @@ def test_round_at_the_challenger_cap_scores_every_participant_and_publishes(conn
     assert len(stage1["submission_scores"]) == CHALLENGERS and len(stage1["rows"]) == 20 * CHALLENGERS
     timing = json.loads(harness.objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode())
     assert timing["judge_executions"] == 20 * CHALLENGERS and timing["work_items"] == 20 * CHALLENGERS
-    report = {"challengers": CHALLENGERS, "finalists": len(finalists), "runs_stage1": 40 * CHALLENGERS, "timings_seconds": timings}
+    if REPLAY:
+        assert timing["replay_mismatches"] == 0 and len(timing["replays"]) == 20 * CHALLENGERS
+    report = {"challengers": CHALLENGERS, "finalists": len(finalists), "runs_stage1": 40 * CHALLENGERS, "replay": REPLAY, "timings_seconds": timings}
     (tmp_path / "scale_report.json").write_text(json.dumps(report, indent=2))
     print("\nSCALE REPORT " + json.dumps(report))

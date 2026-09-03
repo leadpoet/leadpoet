@@ -25,6 +25,7 @@ clock. Nothing here performs network, database, or filesystem access.
 from __future__ import annotations
 
 import json
+import time
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,7 +56,12 @@ from gateway.tasks.icp_generator import (
     international_icp_target,
 )
 from leadpoet_canonical.attested_v2 import canonical_json
-from research_lab.employee_buckets import normalize_employee_count_bucket
+
+
+def normalize_employee_count_bucket(*args, **kwargs):
+    from research_lab.employee_buckets import normalize_employee_count_bucket as normalize  # lazy: the research_lab package is heavy
+
+    return normalize(*args, **kwargs)
 
 from lab_arena import contracts
 from lab_arena.contracts import ArenaContractError
@@ -1313,7 +1319,18 @@ class _GenerationRun:
 
         data = canonical_json(response).encode("utf-8")
         ref = object_ref(self._round_id, kind, len(self._entries))
-        self._store.put(ref, data)
+        # A storage hiccup must not cost a generation attempt and a provider
+        # call: the write is idempotent, so retry it briefly before giving up.
+        for attempt in range(3):
+            try:
+                self._store.put(ref, data)
+                break
+            except ValueError:
+                raise
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
         return ref, contracts.hash_bytes(data), data
 
     # -- flow ---------------------------------------------------------------

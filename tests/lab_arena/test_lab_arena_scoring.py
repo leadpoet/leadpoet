@@ -92,36 +92,37 @@ def test_policy_is_signed_shaped_and_binds_environment_fail_closed():
         scoring.apply_policy_to_environment({k: v for k, v in policy.items() if k != "policy_hash"}, environ={}, cache_dir="/tmp/cache", credentials=credentials)
 
 
-def test_plan_groups_identical_outputs_and_synthesizes_zero_rows():
+def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_rows():
+    """Identical outputs are never shared: each miner's output is judged on its own keys (no result cache)."""
+
     shared = contracts.document_hash(["king-output"])
     outputs = {("king", 0): shared, ("c1", 0): shared}
     causes = {("c2", 1): "model_timeout", ("c3", 2): "preflight_failed"}
     runs = runs_for(["king", "c1", "c2", "c3"], outputs=outputs, causes=causes)
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=scoring.build_scorer_policy()["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
     shared_items = [item for item in plan["work_items"] if item["output_hash"] == shared]
-    assert len(shared_items) == 1 and shared_items[0]["submission_ids"] == ["c1", "king"]
-    # Position 0 holds two items (king+c1 share one output, c2+c3 share the default); positions 1..19 hold one each.
-    assert len(plan["work_items"]) == 21
-    default_items = [item for item in plan["work_items"] if item["icp_position"] == 0 and item["output_hash"] != shared]
-    assert default_items[0]["submission_ids"] == ["c2", "c3"]
-    assert sum(len(item["submission_ids"]) for item in plan["work_items"]) == 80 - 2
+    assert sorted(item["submission_id"] for item in shared_items) == ["c1", "king"] and len({item["work_item_id"] for item in shared_items}) == 2
+    # Every accepted assignment is one item: four submissions over 20 ICPs, minus the two zero rows.
+    assert len(plan["work_items"]) == 80 - 2 and len({(item["submission_id"], item["icp_position"]) for item in plan["work_items"]}) == 78
     assert plan["zero_rows"] == [{"submission_id": "c2", "icp_position": 1, "cause": "model_timeout"}, {"submission_id": "c3", "icp_position": 2, "cause": "preflight_failed"}]
     with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
         scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=scoring.build_scorer_policy()["policy_hash"], runs=runs_for(["c9"], causes={("c9", 3): "lease_expired"}), icp_hashes_by_position=icp_hashes())
 
 
-def test_hundred_concurrent_identical_requests_produce_one_judge_execution_and_identical_breakdowns():
+def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_breakdowns():
+    """No result cache across miners: identical outputs cost one judge execution each and score the same."""
+
     shared = contracts.document_hash(["shared"])
     submissions = ["king"] + ["c%d" % i for i in range(15)]
     outputs = {(submission, position): shared for submission in submissions for position in range(20)}
     runs = runs_for(submissions, outputs=outputs)
     policy = scoring.build_scorer_policy()
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
-    assert len(plan["work_items"]) == 20 and all(len(item["submission_ids"]) == 16 for item in plan["work_items"])
+    assert len(plan["work_items"]) == 320 and len({item["submission_id"] for item in plan["work_items"]}) == 16
     counter = {"executions": 0, "lock": threading.Lock()}
     companies = [company(i) for i in range(5)]
-    results = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter, delay=0.01), workers=8)
-    assert results.judge_executions == 20 and counter["executions"] == 20
+    results = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter, delay=0.001), workers=8)
+    assert results.judge_executions == 320 and counter["executions"] == 320
     bundle = scoring.build_score_bundle(plan=plan, policy=policy, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, breakdowns_by_item=results.breakdowns_by_item)
     assert len(bundle["rows"]) == 320
     per_position = {}
@@ -132,12 +133,12 @@ def test_hundred_concurrent_identical_requests_produce_one_judge_execution_and_i
     assert len(set(bundle["submission_scores"].values())) == 1
     # A restart resumes from durable results without re-executing the judge.
     resumed = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter), workers=4, existing=results.breakdowns_by_item)
-    assert resumed.judge_executions == 0 and counter["executions"] == 20
+    assert resumed.judge_executions == 0 and counter["executions"] == 320
 
 
 def test_judge_infrastructure_failures_retry_then_raise_never_zero():
     counter = {"executions": 0, "lock": threading.Lock()}
-    item = {"work_item_id": contracts.document_hash("w"), "icp_position": 0, "icp_hash": icp_hashes()[0], "output_hash": contracts.document_hash("o"), "submission_ids": ["c1"]}
+    item = {"work_item_id": contracts.document_hash("w"), "icp_position": 0, "icp_hash": icp_hashes()[0], "output_hash": contracts.document_hash("o"), "submission_id": "c1"}
     result = scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=fake_scorer(counter, fail_first=2))
     assert result[0]["final_score"] == 60.0 and counter["executions"] == 3
     with pytest.raises(scoring.ScoringError):

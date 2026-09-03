@@ -16,10 +16,22 @@ from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 
 MAX_JSON_BODY_BYTES = 1_048_576
-MAX_PACKAGE_BODY_BYTES = 64 * 1024 * 1024
+
+
+def _refuse_declared_oversize(request: Request, limit: int) -> None:
+    """Refuse a body whose declared length exceeds the limit before buffering it."""
+
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > limit:
+                raise HTTPException(status_code=413, detail="body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="content-length invalid")
 
 
 async def _read_json(request: Request, *, limit: int = MAX_JSON_BODY_BYTES) -> Any:
+    _refuse_declared_oversize(request, limit)
     raw = await request.body()
     if len(raw) > limit:
         raise HTTPException(status_code=413, detail="body too large")
@@ -89,24 +101,20 @@ def create_app(service: ArenaService, *, recipient_document: Optional[Dict[str, 
     # -- miner --------------------------------------------------------------
 
     @app.post("/arena/v1/submissions")
-    async def submissions(request: Request, x_lab_arena_envelope: Optional[str] = Header(default=None)) -> Any:
-        raw = await request.body()
-        if len(raw) > MAX_PACKAGE_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="package too large")
-        if not x_lab_arena_envelope:
-            raise HTTPException(status_code=400, detail="signed envelope header required")
-        try:
-            envelope = json.loads(x_lab_arena_envelope)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="envelope is not JSON")
-        return service.handle_submission(envelope, raw)
+    async def submissions(request: Request) -> Any:
+        """A signed JSON body naming one image by digest; nothing is uploaded."""
+
+        return service.handle_submission(await _read_json(request))
 
     @app.get("/arena/v1/submissions/{submission_id}")
     async def submission_status(submission_id: str) -> Any:
         row = service.store.get_submission(submission_id)
         if row is None:
             raise HTTPException(status_code=404, detail="unknown submission")
-        return {"submission_id": submission_id, "status": row["status"], "rejection_rule": row.get("rejection_rule"), "image_digest": row.get("image_digest")}
+        return {
+            "submission_id": submission_id, "status": row["status"], "rejection_rule": row.get("rejection_rule"),
+            "image_digest": row.get("image_digest"), "image_reference": row.get("image_reference"), "submitted_reference": row.get("submitted_reference"),
+        }
 
     register_key = credential_register
 

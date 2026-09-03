@@ -1008,3 +1008,25 @@ def test_signature_seam():
         pass  # bittensor 11 locally: the Lab verifier cannot import Keypair and returns False
     else:
         assert production is True
+
+
+def test_close_releases_the_client_once_and_never_raises():
+    """The wiring registers close at exit; a client without close, or one that raises, is fine."""
+
+    class Closable(FakeSubstrate):
+        def __init__(self):
+            super().__init__()
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+            if self.closed > 1:
+                raise RuntimeError("already closed")
+
+    config = ArenaChainConfig(endpoint="wss://chain.example:443", netuid=71, network_name="finney", request_timeout_seconds=5, metagraph_ttl_seconds=5)
+    client = Closable()
+    arena = ArenaChain(config, client, metagraph_source=lambda *args: None)
+    arena.close()
+    arena.close()  # the second close raises inside the client and is swallowed
+    assert client.closed == 2
+    ArenaChain(config, object(), metagraph_source=lambda *args: None).close()  # no close method: nothing to do

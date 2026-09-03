@@ -253,8 +253,9 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
             "runsc_lock_hash": _sha("runsc"),
             "worker_release_hash": _sha("worker"),
             "shim_hash": _sha("shim"),
-            "base_image_digest": "sha256:" + "ab" * 32,
-"scorer_image_digest": "sha256:" + "5" * 64,
+            "scorer_image_digest": "sha256:" + "5" * 64,
+            "scorer_image_reference": "arena.example/lab-arena/judge@sha256:" + "5" * 64,
+            "scorer_entry_command": ["python3", "/model/scorer_entrypoint.py"],
         },
         "operation_table_hash": _sha("operations"),
         "openrouter_price_table_hash": _sha("openrouter-prices"),
@@ -264,18 +265,22 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
         "call_quota_hash": contracts.document_hash(contracts.call_quota_document()),
         "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
         "icp_wall_clock_seconds": 300,
+        "scoring_wall_clock_seconds": 900,
         "scorer_policy_hash": POLICY["policy_hash"],
         "scoring_cap_microusd": 5_000_000,
         "runner_allowlist": runner_hotkeys,
         "floor_runner_hotkeys": runner_hotkeys[:1],
         "banned_hotkeys_snapshot_hash": _sha("banned"),
         "signing_public_key_hash": signing_key_hash,
-        "artifact_rules": {
-            "max_package_bytes": 1_000_000,
-            "max_files": 100,
-            "max_file_bytes": 100_000,
-            "approved_dependency_set_hash": _sha("dependencies"),
+        "image_rules": {
+            "schema_version": "leadpoet.lab_arena.image_rules.v1",
+            "max_image_bytes": 2_147_483_648,
+            "max_layers": 64,
+            "max_rootfs_bytes": 8_589_934_592,
+            "platform": {"os": "linux", "architecture": "amd64"},
+            "layer_media_types": ["application/vnd.oci.image.layer.v1.tar+gzip"],
         },
+        "registry_repository": "arena.example/lab-arena/models",
         "publication_terms_hash": _sha("terms"),
         "reward_constants": {
             "pool_percent": 25,
@@ -327,7 +332,7 @@ def _build_round(
                 "submission_id": "king",
                 "miner_hotkey": _hotkey("king"),
                 "image_digest": "sha256:" + "aa" * 32,
-                "source_tree_hash": _sha("tree-king"),
+                "image_reference": "arena.example/lab-arena/models@sha256:" + "aa" * 32,
                 "is_king": True,
             }
         )
@@ -337,7 +342,7 @@ def _build_round(
                 "submission_id": "sub-%02d" % index,
                 "miner_hotkey": _hotkey("challenger-%d" % index),
                 "image_digest": "sha256:" + ("%02x" % index) * 32,
-                "source_tree_hash": _sha("tree-%d" % index),
+                "image_reference": "arena.example/lab-arena/models@sha256:" + ("%02x" % index) * 32,
                 "is_king": False,
             }
         )
@@ -438,18 +443,14 @@ def _build_round(
         zero_rows = []
         for row in rows:
             if row["cause"] == "accepted":
-                key = (row["icp_hash"], row["output_hash"])
-                item = work.setdefault(
-                    key,
-                    {
-                        "work_item_id": work_item_id(*key),
-                        "icp_position": row["icp_position"],
-                        "icp_hash": key[0],
-                        "output_hash": key[1],
-                        "submission_ids": [],
-                    },
-                )
-                item["submission_ids"].append(row["submission_id"])
+                key = (row["icp_hash"], row["submission_id"], row["output_hash"])
+                work[key] = {
+                    "work_item_id": work_item_id(*key),
+                    "icp_position": row["icp_position"],
+                    "icp_hash": key[0],
+                    "submission_id": key[1],
+                    "output_hash": key[2],
+                }
             else:
                 zero_rows.append({"submission_id": row["submission_id"], "icp_position": row["icp_position"], "cause": row["cause"]})
         plan = finalize_scoring_plan(
@@ -493,7 +494,7 @@ def _build_round(
         [
             {
                 "submission_id": submission_id,
-                "artifact_hash": by_id[submission_id]["source_tree_hash"],
+                "artifact_hash": by_id[submission_id]["image_digest"],
                 "stage1_score": stage1_scores[submission_id],
                 "is_king": by_id[submission_id]["is_king"],
             }
@@ -517,7 +518,7 @@ def _build_round(
         {
             "submission_id": submission_id,
             "hotkey": by_id[submission_id]["miner_hotkey"],
-            "artifact_hash": by_id[submission_id]["source_tree_hash"],
+            "artifact_hash": by_id[submission_id]["image_digest"],
             "final_score": final_scores[submission_id] if validity[submission_id] else None,
             "is_king": by_id[submission_id]["is_king"],
         }

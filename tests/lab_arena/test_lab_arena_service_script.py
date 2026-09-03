@@ -19,14 +19,23 @@ def script():
 
 
 class FakeService:
-    def __init__(self, *, current=None, current_error=None, advance_error=None, ensure=None, ensure_error=None):
+    def __init__(self, *, current=None, current_error=None, advance_error=None, ensure=None, ensure_error=None, release=None, release_error=None):
         self._current = current
         self._current_error = current_error
         self._advance_error = advance_error
         self._ensure = ensure or {"status": "disabled"}
         self._ensure_error = ensure_error
+        self._release = release or {"status": "disabled"}
+        self._release_error = release_error
         self.advanced = []
         self.ensured = 0
+        self.released = 0
+
+    def release_pending(self):
+        self.released += 1
+        if self._release_error is not None:
+            raise self._release_error
+        return self._release
 
     def ensure_daily_round(self):
         self.ensured += 1
@@ -49,6 +58,20 @@ class FakeService:
 def test_a_tick_advances_the_current_round(script):
     service = FakeService(current={"round_id": "arena-2026-09-03"})
     assert script.drive_once(service) == "advanced" and service.advanced == ["arena-2026-09-03"]
+    assert service.released == 1  # the published round's release is checked on every tick
+
+
+def test_a_tick_releases_the_published_king_model_after_the_round_stops_being_current(script):
+    """The published round is not current, so its release is a tick step of its own."""
+
+    idle = FakeService(current=None, release={"status": "ok", "round_id": "arena-2026-09-02"})
+    assert script.drive_once(idle) == "idle; released arena-2026-09-02" and idle.released == 1
+    already = FakeService(current={"round_id": "arena-2026-09-03"}, release={"status": "released", "round_id": "arena-2026-09-02"})
+    assert script.drive_once(already) == "advanced"
+    failing = FakeService(current={"round_id": "arena-2026-09-03"}, release_error=RuntimeError("github token in message"))
+    outcome = script.drive_once(failing)
+    assert outcome == "advanced; failed release_pending: RuntimeError" and failing.advanced == ["arena-2026-09-03"]
+    assert "token" not in outcome
 
 
 def test_a_tick_without_a_round_is_idle_unless_it_creates_the_next_daily_round(script):

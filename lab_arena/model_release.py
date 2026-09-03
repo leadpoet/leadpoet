@@ -1,10 +1,11 @@
 """Commit the daily king's model to the public sales-agent repository.
 
-After a round publishes with a crowned or defended king, the king's frozen
-source archive, which already passed the secret scan at acceptance and again
-at publication, is committed to ``leadpoet/leadpoet-sales-agent`` as that
+After a round publishes with a crowned or defended king, a pointer to the
+king's pinned container image (its digest-pinned Arena reference and entry
+command) is committed to ``leadpoet/leadpoet-sales-agent`` as that
 repository's ``model/`` tree, together with a signed release manifest that
-binds the round, the signed publication, and the artifact hashes.
+binds the round, the signed publication, and the image digest. The model
+itself is the image, which anyone can pull by digest.
 
 Properties:
 
@@ -13,7 +14,7 @@ Properties:
   the new model disappear; every other path in the repository is preserved
   through the previous commit's tree.
 - Idempotent: when ``arena/current.json`` at the branch head already names
-  this ``source_tree_hash`` nothing is written, so a defended king costs no
+  this ``image_digest`` nothing is written, so a defended king costs no
   commit and a retry after a crash never duplicates one.
 - Bounded optimistic concurrency: the ref update is a compare-and-swap against
   the head that was read; a concurrent push is retried a bounded number of
@@ -64,12 +65,21 @@ _PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,120}(/[A-Za-z0-9_][A-Za-z0
 README_TEXT = """# Leadpoet sales agent
 
 This repository holds the model that currently leads the Leadpoet Lab Arena.
-The `model/` tree is the exact frozen source of the reigning king's package
-and is replaced whenever a new king is crowned. `arena/current.json` is the
-signed release manifest that binds the model to the round that produced it,
-and `arena/history/` keeps one manifest per released round.
+The `model/` tree points at the reigning king's container image: `model/IMAGE`
+names the exact digest-pinned reference anyone can pull, and
+`model/ENTRYPOINT.json` is the entry command pinned from the image config. It
+is replaced whenever a new king is crowned. `arena/current.json` is the signed
+release manifest that binds the image to the round that produced it, and
+`arena/history/` keeps one manifest per released round.
 
 Releases are written by the Arena service only; edit nothing here by hand.
+"""
+
+POINTER_README = """# Lab Arena king model
+
+`IMAGE` names the reigning king's container image, pinned by digest.
+`ENTRYPOINT.json` is the command the Arena runs inside it. Pull the image by
+its digest to rerun the model exactly as the Arena did.
 """
 
 
@@ -89,12 +99,11 @@ MODEL_RELEASE_FIELDS = (
     F("king_hotkey", "str", minimum=40, maximum=64),
     F("king_outcome", "str", choices=("crowned", "defended")),
     F("submission_id", "str", minimum=6, maximum=64),
-    F("package_hash", "sha256"),
-    F("source_tree_hash", "sha256"),
-    F("image_digest", "str", minimum=71, maximum=280),
-    F("entry_point", "str", minimum=1, maximum=200),
-    F("dependency_lock", "list[str]", minimum=0, maximum=200),
-    F("base_image_digest", "str", minimum=71, maximum=280),
+    # The winning model is an image: its digest-pinned Arena reference and the
+    # entry command pinned from its config at admission.
+    F("image_reference", "str", minimum=1, maximum=512),
+    F("image_digest", "sha256"),
+    F("entry_command", "list[str]", minimum=1, maximum=64),
     F("file_count", "int", minimum=1, maximum=MAX_FILES),
     F("configuration_hash", "sha256"),
     F("result_bundle_hash", "sha256"),
@@ -113,12 +122,9 @@ def release_manifest(
     king_hotkey: str,
     king_outcome: str,
     submission_id: str,
-    package_hash: str,
-    source_tree_hash: str,
+    image_reference: str,
     image_digest: str,
-    entry_point: str,
-    dependency_lock: Sequence[str],
-    base_image_digest: str,
+    entry_command: Sequence[str],
     file_count: int,
     configuration_hash: str,
     result_bundle_hash: str,
@@ -137,12 +143,9 @@ def release_manifest(
         "king_hotkey": king_hotkey,
         "king_outcome": king_outcome,
         "submission_id": submission_id,
-        "package_hash": package_hash,
-        "source_tree_hash": source_tree_hash,
+        "image_reference": image_reference,
         "image_digest": image_digest,
-        "entry_point": entry_point,
-        "dependency_lock": list(dependency_lock),
-        "base_image_digest": base_image_digest,
+        "entry_command": [str(item) for item in entry_command],
         "file_count": int(file_count),
         "configuration_hash": configuration_hash,
         "result_bundle_hash": result_bundle_hash,
@@ -155,6 +158,19 @@ def release_manifest(
     if not _REPOSITORY_RE.match(repository) or not _BRANCH_RE.match(branch):
         raise ArenaContractError("model release repository or branch is invalid")
     return hashed_document(document, "release_hash")
+
+
+def pointer_files(*, image_reference: str, image_digest: str, entry_command: Sequence[str]) -> Dict[str, bytes]:
+    """The ``model/`` tree for an image king: a pointer to the pinned image, never source."""
+
+    if not image_reference or not image_digest or not entry_command:
+        raise ModelReleaseError("image pointer is incomplete")
+    return {
+        "IMAGE": (str(image_reference) + "\n").encode("utf-8"),
+        "DIGEST": (str(image_digest) + "\n").encode("utf-8"),
+        "ENTRYPOINT.json": (contracts.canonical_json([str(item) for item in entry_command]) + "\n").encode("utf-8"),
+        "README.md": POINTER_README.encode("utf-8"),
+    }
 
 
 def validate_model_files(files: Mapping[str, bytes]) -> Dict[str, bytes]:
@@ -373,11 +389,11 @@ def release_king_model(
     model_tree: Optional[str] = None
     for attempt in range(MAX_REF_RETRIES):
         existing = current_manifest(client, branch, head)
-        if existing is not None and existing.get("source_tree_hash") == manifest["source_tree_hash"] and existing.get("release_hash") == manifest["release_hash"]:
+        if existing is not None and existing.get("image_digest") == manifest["image_digest"] and existing.get("release_hash") == manifest["release_hash"]:
             emit("repository already holds this model")
             return ReleaseReceipt(False, head, None, None, branch, client.repository, str(manifest["release_hash"]))
-        if existing is not None and existing.get("source_tree_hash") == manifest["source_tree_hash"]:
-            # Same model, different round (a defended king): the tree is unchanged and no commit is made.
+        if existing is not None and existing.get("image_digest") == manifest["image_digest"]:
+            # Same image, different round (a defended king): the tree is unchanged and no commit is made.
             emit("repository already holds this model from an earlier round")
             return ReleaseReceipt(False, head, None, None, branch, client.repository, str(manifest["release_hash"]))
         if model_tree is None:
@@ -389,7 +405,7 @@ def release_king_model(
             {"path": "%s/%s.json" % (HISTORY_PREFIX, manifest["round_id"]), "mode": BLOB_MODE, "type": "blob", "sha": blob(manifest_bytes)},
         ]
         root_tree = client.create_tree(root_entries, base_tree=client.commit_tree(head))
-        message = "Lab Arena %s: %s king %s (%s)" % (manifest["round_id"], manifest["king_outcome"], manifest["king_hotkey"], manifest["source_tree_hash"][:19])
+        message = "Lab Arena %s: %s king %s (%s)" % (manifest["round_id"], manifest["king_outcome"], manifest["king_hotkey"], manifest["image_digest"][:19])
         commit = client.create_commit(message, root_tree, [head])
         try:
             client.update_ref(branch, commit)

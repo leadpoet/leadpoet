@@ -23,10 +23,15 @@ from bittensor_wallet import Keypair
 from lab_arena import broker as br, contracts, runner as rn, runtime, scoring, service as svc, shim, signing, verify
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
+SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
+SCORER_ENTRY_COMMAND = ("python3", "/model/scorer_entrypoint.py")
+ARENA_REPOSITORY = "arena.example/lab-arena/models"  # every accepted image is mirrored here
 from lab_arena.store import ArenaStore, PsycopgTransport
 from lab_arena.credentials import RuntimeKeyHandle
+from lab_arena.images import RegistryClient
 from tests.lab_arena.lab_arena_benchmark_tape import TapeProvider, load_tape
 from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
+from tests.lab_arena.test_lab_arena_images import FakeRegistry, layer_tar, simple_image
 from tests.lab_arena.test_lab_arena_model_release import REPO as MODEL_REPO, TOKEN as MODEL_TOKEN, FakeGitHub
 from lab_arena import model_release as mr
 import httpx
@@ -156,7 +161,7 @@ class ModelSandbox:
     def run_icp(self, spec: runtime.SandboxSpec, **_):
         with self.lock:
             self.runs += 1
-        digest = "sha256:" + spec.rootfs_path.name.split("sha256-")[1]
+        digest = "sha256:" + spec.rootfs_path.parent.name.split("sha256-")[1]  # the cache keys images by digest
         input_document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
         icp = input_document["icp"]
         import os
@@ -178,7 +183,7 @@ class ModelSandbox:
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
         if scoring_run:
             # A scoring assignment: the validator's judge sandbox (the pinned scorer image, trusted mode).
-            assert digest == SCORER_IMAGE_DIGEST and spec.extra_environment.get(shim.TRUSTED_SCORER_ENV) == "1" and spec.entry_file == rn.SCORER_ENTRY_FILE
+            assert digest == SCORER_IMAGE_DIGEST and spec.extra_environment.get(shim.TRUSTED_SCORER_ENV) == "1" and spec.entry_command == SCORER_ENTRY_COMMAND
             breakdowns = deterministic_scorer(input_document["companies"], icp, False)
             if self.inflate_scores:
                 breakdowns = [dict(row, final_score=99.0) for row in breakdowns]
@@ -225,18 +230,14 @@ class InProcessApi:
         return self._guard(lambda: self.service.handle_complete(envelope))
 
 
-def package_bytes(flavor: str) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        def add(name: str, data: bytes) -> None:
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            info.mode = 0o644
-            archive.addfile(info, io.BytesIO(data))
+def flavor_image(flavor: str) -> Dict[str, Any]:
+    """A miner's image: one layer whose content is the flavor, so every flavor has its own digest."""
 
-        add("manifest.json", json.dumps({"schema_version": contracts.SUBMISSION_PACKAGE_SCHEMA_VERSION, "entry_point": "model/main.py", "dependency_lock": ["requests==2.32.5"], "consent": {"source_publication": True, "public_rerun": True}}).encode())
-        add("model/main.py", ("print('%s')\n" % flavor).encode())
-    return buffer.getvalue()
+    return simple_image(layers=[layer_tar([("app", "dir"), ("app/main.py", "file", ("print('%s')\n" % flavor).encode())])], entrypoint=["python3", "/app/main.py"], cmd=None, env=["APP_FLAVOR=" + flavor], workdir="/app")
+
+
+def submission_body(reference: str) -> Dict[str, Any]:
+    return {"image_reference": reference, "consent": {"public_rerun": True, "image_publication": True}}
 
 
 @pytest.fixture(scope="module")
@@ -282,9 +283,11 @@ class Harness:
         self.max_challengers = contracts.MAX_CHALLENGERS
         self.replay_command = None  # a replay entry command switches replay verification on
         self.daily_cutoff_hour_utc = None  # set to enable automatic daily round creation
+        self.banned: List[str] = []  # the live ban list the service reads
         self.refused_hotkeys: set = set()  # miners whose provider key the provider now rejects
         self.api_factory = None  # runners talk to the service in-process unless a test supplies an API client
         self.github = FakeGitHub()
+        self.registry = FakeRegistry()  # miners' source registry and the Arena repository, in memory
         self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
         self.service = self.build_service()
 
@@ -303,11 +306,15 @@ class Harness:
 
         config = svc.ServiceConfig(
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
-            generation_provider=TapeProvider(load_tape("clean_run.json")), price_table_source=lambda models: price_table(models), banned_hotkeys_source=lambda: [],
+            generation_provider=TapeProvider(load_tape("clean_run.json")), price_table_source=lambda models: price_table(models), banned_hotkeys_source=lambda: list(harness.banned),
             broker_factory=broker_factory, scorer_factory=lambda policy: deterministic_scorer,
-            defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc, scorer_image_digest=SCORER_IMAGE_DIGEST),
+            defaults=svc.RoundDefaults(
+                floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
+                scorer_image_digest=SCORER_IMAGE_DIGEST, scorer_image_reference=SCORER_IMAGE_REFERENCE, scorer_entry_command=SCORER_ENTRY_COMMAND, registry_repository=ARENA_REPOSITORY,
+            ),
             clock=self.clock, scoring_workers=4, replay_verification=self.replay_command is not None, replay_entry_command=self.replay_command, replay_work_dir=str(self.tmp),
             model_release_client=mr.GitHubClient(MODEL_REPO, MODEL_TOKEN, http_client=httpx.Client(transport=httpx.MockTransport(self.github.handler))),
+            registry=RegistryClient(http=httpx.Client(transport=httpx.MockTransport(self.registry.handler))),
         )
         return svc.ArenaService(config)
 
@@ -322,25 +329,35 @@ class Harness:
                       "observed_at": "2026-09-01T12:00:00Z", "probe": {}}
             store.upsert_account_credential(hotkey, provider, "ciphertext-%s-%s" % (hotkey[:8], provider), key_hash, record)
 
+    def publish_image(self, flavor: str) -> str:
+        """Push a miner's image to its own registry; returns the digest-pinned reference the miner submits."""
+
+        image = flavor_image(flavor)
+        self.flavors[image["digest"]] = flavor
+        return self.registry.put_image("source.example", "miners/" + flavor.lower(), image)
+
     def submit(self, flavor: str, round_id: str, *, preflight: str = "ok", providers=contracts.MINER_KEY_PROVIDERS) -> str:
+        """Submit an image the way a miner does, then admit it the way the driver does."""
+
         miner = keypair("svc-miner-" + flavor)
-        archive = package_bytes(flavor)
-        envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body={"package_hash": contracts.hash_bytes(archive), "consent": {"source_publication": True, "public_rerun": True}}, timestamp=int(self.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
-        result = self.service.handle_submission(envelope, archive)
+        reference = self.publish_image(flavor)
+        envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body=submission_body(reference), timestamp=int(self.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+        result = self.service.handle_submission(envelope)
         assert result["status"] == "uploaded", result
-        digest = "sha256:" + hashlib.sha256(("image-" + flavor).encode()).hexdigest()
-        self.flavors[digest] = flavor
-        accepted = self.service.accept_built_submission(round_id, result["submission_id"], image_digest=digest, source_tree_hash=result["source_tree_hash"], scan_result={"mode": "raise", "findings": 0}, screening_result={"accepted": True})
-        assert accepted["status"] == "ok", accepted
+        admitted = self.service.admit_uploaded_submissions(round_id)
+        assert admitted["status"] == "ok" and admitted["rejected"] == 0, admitted
+        row = self.service.store.get_submission(result["submission_id"])
+        assert row["status"] == "accepted" and row["image_reference"].startswith(ARENA_REPOSITORY + "@") and row["entry_command"] == ["python3", "/app/main.py"], row
         self.fund_and_register(miner.ss58_address, preflight=preflight, providers=providers)
         return result["submission_id"]
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
         kp = keypair("svc-runner-" + ["alpha", "beta", "gamma"][index])
-        cache = rn.ImageCache(self.tmp / ("images-%d" % index), lambda digest, target: (target / "rootfs").mkdir())
+        cache = rn.ImageCache(self.tmp / ("images-%d" % index), lambda reference, digest, target: (target / "rootfs").mkdir())
         config = rn.RunnerConfig(
             round_id=self.round_id, identity=rn.RunnerIdentity(hotkey=kp.ss58_address, sign=lambda m, kp=kp: kp.sign(m.encode()).hex()), api=self.api_factory() if self.api_factory else InProcessApi(self.service), sandbox_runtime=self.sandbox,
             image_cache=cache, worker_release_hash=self.service.worker_release_hash, work_dir=self.tmp / ("work-%d" % index), max_parallel_runs=parallel, evaluation_date="2026-09-02", clock=self.clock,
+            completion_retry_seconds=(0.0, 0.0),  # retries without waiting in tests
         )
         (self.tmp / ("work-%d" % index)).mkdir(exist_ok=True)
         return rn.Runner(config)
@@ -431,14 +448,14 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     harness.run_stage_with_runners(2)
     assert service.advance_round(round_id)["status"] == "ok" and harness.status() == "stage2_closed"
     harness.advance_until("scored")
-    # A sanitizer failure keeps the round unpublished (section 17) instead of publishing.
-    original_scan = svc.build.scan_source_archive_raise
-    svc.build.scan_source_archive_raise = lambda files: (_ for _ in ()).throw(svc.build.SecretMaterialFound("secret.value", "model/main.py"))
+    # A publication check failure keeps the round unpublished (section 17) instead of publishing.
+    original_check = svc.contracts.check_strict_document
+    svc.contracts.check_strict_document = lambda document, limits=None: (_ for _ in ()).throw(contracts.ArenaContractError("publication bundle exceeds its limits"))
     try:
-        with pytest.raises(svc.ServiceError, match="publication_sanitizer_failed"):
+        with pytest.raises(contracts.ArenaContractError, match="exceeds its limits"):
             service.advance_round(round_id)
     finally:
-        svc.build.scan_source_archive_raise = original_scan
+        svc.contracts.check_strict_document = original_check
     assert harness.status() == "scored"
     published = service.advance_round(round_id)
     assert published["status"] == "ok" and published["king_outcome"] == "crowned" and harness.status() == "published"
@@ -452,8 +469,10 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     king_id = row["publication_doc"]["king_decision"]["king_submission_id"]
     king_flavor = [flavor for flavor, sid in submissions.items() if sid == king_id][0]
     repo_files = harness.github.files_at(receipt["commit_sha"])
-    expected = svc.build.inspect_package(package_bytes(king_flavor)).files
+    king_row = service.store.get_submission(king_id)
+    expected = mr.pointer_files(image_reference=king_row["image_reference"], image_digest=king_row["image_digest"], entry_command=king_row["entry_command"])
     assert {k[len("model/"):]: v for k, v in repo_files.items() if k.startswith("model/")} == expected
+    assert harness.flavors[king_row["image_digest"]] == king_flavor and king_row["image_reference"] == ARENA_REPOSITORY + "@" + king_row["image_digest"]
     manifest = json.loads(repo_files["arena/current.json"])
     assert manifest == receipt["manifest"] and manifest["round_id"] == round_id and manifest["king_hotkey"] == published["king_hotkey"] and manifest["publication_hash"] == row["publication_doc"]["publication_hash"]
     signing.verify_document_signature(manifest, hash_field="release_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
@@ -544,6 +563,13 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     else:
         assert row2["king_start_epoch"] == 24821  # a new king restarts the schedule
     assert service.public_reward_basis(24821)["round_id"] == round2 and service.public_reward_basis(24815)["round_id"] == round_id
+    # The results route serves the defending king's own runs under the id the decision names.
+    decision2 = service.store.get_round(round2)["publication_doc"]["king_decision"]
+    assert decision2["outcome"] == "defended" and decision2["winner_submission_id"] is None  # no challenger won: the king stays
+    king_results = service.public_results(round2, decision2["king_submission_id"])
+    assert len(king_results["receipts"]) == 50 and len(king_results["outputs"]) == 50, decision2
+    with pytest.raises(svc.ServiceError):
+        service.public_results(round2, "")  # an empty id is refused, never "every submission"
     assert harness.service.store._transport.deadlock_retries == 0 or True
 
 
@@ -987,6 +1013,9 @@ def test_one_validator_scores_its_own_executions_and_unreproducible_scorings_are
     harness.advance_until("stage1_scored", runners=1)
     timing = json.loads(harness.objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode())
     assert timing["judge_executions"] == 20 * participants and timing["replay_mismatches"] == 0 and all(entry["outcome"] == "match" for entry in timing["replays"])
+    # Every accepted execution row carries the per-ICP score the bundle gave it (the results route reads it).
+    scored_runs = [run for run in service.store.list_runs(round_id, stage=1, kind="execute") if run["status"] == "accepted"]
+    assert scored_runs and all(run["per_icp_score"] is not None for run in scored_runs), [run["per_icp_score"] for run in scored_runs[:3]]
     harness.clock.advance_to(harness.schedule()["stage_2_start"])
     assert service.advance_round(round_id)["status"] == "ok" and harness.status() == "stage2"
     harness.run_stage_with_runners(1)
@@ -1126,13 +1155,14 @@ def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator
     _run_stage_one_to_scoring(harness, participants, runners=2)
 
     class DyingApi(InProcessApi):
-        """The validator process dies after judging: three completions never reach the Arena."""
+        """The validator process dies after judging: three scoring completions never reach the Arena, however often retried."""
 
-        deaths = 3
+        dead_runs: set = set()
 
         def complete(self, envelope):
-            if envelope["body"]["receipt"]["kind"] == "score" and DyingApi.deaths > 0:
-                DyingApi.deaths -= 1
+            receipt = envelope["body"]["receipt"]
+            if receipt["kind"] == "score" and (receipt["run_id"] in DyingApi.dead_runs or len(DyingApi.dead_runs) < 3):
+                DyingApi.dead_runs.add(receipt["run_id"])
                 raise RuntimeError("validator died before completing")
             return super().complete(envelope)
 
@@ -1191,21 +1221,21 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     configuration = service.create_round(datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc))
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
-    # One challenger arrives the way a miner does: the signed envelope in a header, the package as the body.
+    # One challenger arrives the way a miner does: one signed JSON body naming the image by digest.
     miner = keypair("svc-miner-Http-A")
-    archive = package_bytes("Http-A")
-    envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body={"package_hash": contracts.hash_bytes(archive), "consent": {"source_publication": True, "public_rerun": True}}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
-    uploaded = original_post("http://localhost/arena/v1/submissions", content=archive, headers={"content-type": "application/gzip", "x-lab-arena-envelope": json.dumps(envelope)})
+    reference = harness.publish_image("Http-A")
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body=submission_body(reference), timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    uploaded = original_post("http://localhost/arena/v1/submissions", content=json.dumps(envelope), headers={"content-type": "application/json"})
     assert uploaded.status_code == 200 and uploaded.json()["status"] == "uploaded", uploaded.text
     submission_id = uploaded.json()["submission_id"]
     status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
-    assert status.status_code == 200 and status.json()["status"] == "uploaded"
-    digest = "sha256:" + hashlib.sha256(b"image-Http-A").hexdigest()
-    harness.flavors[digest] = "Http-A"
-    accepted = service.accept_built_submission(round_id, submission_id, image_digest=digest, source_tree_hash=uploaded.json()["source_tree_hash"], scan_result={"mode": "raise", "findings": 0}, screening_result={"accepted": True})
-    assert accepted["status"] == "ok", accepted
+    assert status.status_code == 200 and status.json()["status"] == "uploaded" and status.json()["submitted_reference"] == reference
+    # The driver's tick resolves and mirrors the image into the Arena repository.
+    assert service.advance_round(round_id)["status"] == "waiting"
     harness.fund_and_register(miner.ss58_address)
-    assert original_get("http://localhost/arena/v1/submissions/%s" % submission_id).json()["image_digest"] == digest
+    digest = reference.rsplit("@", 1)[1]
+    admitted = original_get("http://localhost/arena/v1/submissions/%s" % submission_id).json()
+    assert admitted["status"] == "accepted" and admitted["image_digest"] == digest and admitted["image_reference"] == ARENA_REPOSITORY + "@" + digest
     harness.submit("Http-B", round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert service.advance_round(round_id)["status"] == "ok"
@@ -1225,6 +1255,41 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert not InProcessApi.errors
     public = client.get("/arena/v1/rounds/%s" % round_id)
     assert public.status_code == 200 and public.json()["status"] == "published"
+    # The public surface a dashboard or verifier reads after publication.
+    row = service.store.get_round(round_id)
+    decision = row["publication_doc"]["king_decision"]
+    winner = decision["winner_submission_id"] or decision["king_submission_id"]  # a defended king names no winner
+    results = original_get("http://localhost/arena/v1/rounds/%s/results/%s" % (round_id, winner))
+    assert results.status_code == 200 and len(results.json()["receipts"]) == 50 and len(results.json()["outputs"]) == 50
+    benchmark = original_get("http://localhost/arena/v1/rounds/%s/benchmark" % round_id)
+    assert benchmark.status_code == 200 and len(benchmark.json()["icps"]) == 50
+    basis = original_get("http://localhost/arena/v1/reward-basis", params={"epoch": int(row["effective_reward_epoch"])})
+    assert basis.status_code == 200 and basis.json()["round_id"] == round_id
+    prior = original_get("http://localhost/arena/v1/reward-basis", params={"epoch": int(row["effective_reward_epoch"]) - 1})
+    assert prior.status_code == 404 or prior.json()["round_id"] != round_id  # the epoch before belongs to an earlier round, or to none
+    current = original_get("http://localhost/arena/v1/current")
+    assert current.status_code == 200 and current.json()["king"]["hotkey"] == row["king_hotkey"]
+    signing_key = original_get("http://localhost/arena/v1/signing-key")
+    assert signing_key.status_code == 200 and signing_key.json()["public_key_hash"] == harness.signer.public_key_hash
+    # A third party rebuilds the round from the API and the bucket's public prefix alone.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("lab_arena_verify", Path(__file__).resolve().parents[2] / "scripts" / "lab_arena_verify.py")
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    def api_get(path):
+        response = original_get("http://localhost" + path)
+        assert response.status_code == 200, (path, response.status_code)
+        return response.json()
+
+    def public_object_get(ref):
+        assert ref.startswith("arena/%s/public/" % round_id), ref  # only the public prefix is reachable
+        return harness.objects.get(ref)
+
+    report = verifier.verify_published_round(round_id, api_get=api_get, object_get=public_object_get)
+    published_outputs = json.loads(harness.objects.get(row["publication_doc"]["result_bundle_ref"]).decode())["outputs"]
+    assert report["ok"] and report["outputs_checked"] == len({entry["output_hash"] for entry in published_outputs}), report
 
 
 def test_daily_rounds_are_created_only_when_no_round_is_open_and_skip_dates_that_exist(connect, tmp_path):
@@ -1257,3 +1322,110 @@ def test_daily_rounds_are_created_only_when_no_round_is_open_and_skip_dates_that
     service.cancel("arena-2026-12-03", reason)
     harness.clock.advance_to("2026-12-01T12:00:00Z")
     assert service.ensure_daily_round()["round_id"] == "arena-2026-12-04"
+
+
+class FlakyObjectStore:
+    """Every distinct object write fails the first time; reads pass through."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._failed_once = set()
+        self.failures = 0
+
+    def put(self, key, data):
+        if key not in self._failed_once:
+            self._failed_once.add(key)
+            self.failures += 1
+            raise OSError("object store unavailable")
+        return self._inner.put(key, data)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_every_advance_survives_an_object_store_failure_and_retries_cleanly(connect, tmp_path):
+    """A failed object write during any step leaves the round retryable, and the retry completes it."""
+
+    harness = Harness(connect, tmp_path, challengers=["Flaky-A"], runners=["alpha"])
+    flaky = FlakyObjectStore(harness.objects)
+    harness.objects = flaky
+    harness.service = harness.build_service()
+    service = harness.service
+    harness.chain.epoch = 30600
+    # Creation writes the round's objects before its row: each failed write leaves no round, and the
+    # retry that finally writes them all creates it.
+    configuration = None
+    for attempt in range(20):
+        try:
+            configuration = service.create_round(datetime(2026, 10, 15, 0, 0, tzinfo=timezone.utc))
+            break
+        except OSError:
+            assert service.store.get_round("arena-2026-10-15") is None, "a round row exists before its objects"
+    assert configuration is not None and attempt >= 1, attempt
+    harness.round_id = configuration["round_id"]
+    round_id = harness.round_id
+    assert harness.objects.get("arena/%s/price_table.json" % round_id)
+    # A submission touches no object: it registers the image reference, and the
+    # same signed request a second time finds its registration.
+    miner = keypair("svc-miner-Flaky-A")
+    reference = harness.publish_image("Flaky-A")
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body=submission_body(reference), timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    result = service.handle_submission(envelope)
+    assert result["status"] == "uploaded", result
+    assert service.handle_submission(envelope)["submission_id"] == result["submission_id"]
+    assert service.admit_uploaded_submissions(round_id)["accepted"] == 1
+    harness.fund_and_register(miner.ss58_address)
+
+    def advance() -> Dict[str, Any]:
+        """One driver tick with retries: a failed object write is the next tick's retry of the same step."""
+
+        for _ in range(400):  # a step writes as many objects as it has documents; each fails once
+            try:
+                return service.advance_round(round_id)
+            except OSError:
+                continue
+        raise AssertionError("advance kept failing at %s" % harness.status())
+
+    def drive_to(target: str) -> None:
+        for _ in range(120):
+            status = harness.status()
+            if status == target:
+                return
+            if status in ("stage1", "stage2", "stage1_scoring", "stage2_scoring"):
+                harness.run_stage_with_runners(1)
+            result = advance()
+            assert result.get("status") not in ("cancelled", "terminal"), (status, result)
+        raise AssertionError("round did not reach %s (at %s)" % (target, harness.status()))
+
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    drive_to("committed")  # participants frozen, benchmark generated and committed
+    for participant in service.store.get_round(round_id)["participants"]:
+        harness.flavors.setdefault(participant["image_digest"], "King")
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    drive_to("stage1_scored")
+    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+    drive_to("published")
+    assert flaky.failures >= 8, flaky.failures  # package, benchmark, plans, scores, timing, publication: each failed once
+    row = service.store.get_round(round_id)
+    assert row["status"] == "published" and row["king_outcome"] in ("crowned", "defended")
+    # Every object the publication references exists and hashes as recorded.
+    bundle = json.loads(harness.objects.get(row["publication_doc"]["result_bundle_ref"]).decode())
+    assert bundle["round_configuration"]["round_id"] == round_id
+    for entry in bundle["outputs"]:
+        assert contracts.document_hash(json.loads(harness.objects.get(entry["output_ref"]).decode())) == entry["output_hash"]
+    assert_canary_absent(harness, connect)
+
+
+
+def test_a_banned_miner_cannot_register_a_key_even_before_a_round_exists(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    service = harness.service
+    reason = sorted(svc.CANCEL_REASONS.values())[0]
+    while service.current_round() is not None:
+        service.cancel(service.current_round()["round_id"], reason)
+    miner = keypair("svc-miner-Banned")
+    harness.banned.append(miner.ss58_address)
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id=None, hotkey=miner.ss58_address, body={"envelope": {"provider": "openrouter"}}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    with pytest.raises(svc.ServiceError) as refused:
+        service.handle_credential(envelope, register=lambda key_envelope: {"provider": "openrouter", "key_hash": "sha256:" + "a" * 64}, provider="openrouter")
+    assert refused.value.code == "hotkey_banned"

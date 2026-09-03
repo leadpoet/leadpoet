@@ -27,7 +27,9 @@ Arena never touches enclave, validator, or weight code paths.
   every round configuration and is what the standalone verifier trusts.
 - Credential key: one KMS RSA key for decrypting miner OpenRouter runtime
   keys, id in `LAB_ARENA_OPENROUTER_KMS_KEY_ID`. Its public key is served at
-  `GET /arena/v1/recipient`.
+  `GET /arena/v1/recipient`. Miners encrypt one key per provider
+  (Scrapingdog, Deepline, OpenRouter) to it; the Arena holds no provider
+  key of its own for miner runs and there is no TAO deposit.
 - Object store: one bucket in `LAB_ARENA_BUCKET`. The `arena/<round>/public/`
   prefix is the only public prefix; packages, price tables, timing, and
   score bundles stay private.
@@ -37,9 +39,8 @@ Arena never touches enclave, validator, or weight code paths.
 Required: `LAB_ARENA_SUPABASE_URL`, `LAB_ARENA_SUPABASE_ANON_KEY`,
 `LAB_ARENA_SERVICE_JWT`, `LAB_ARENA_SIGNING_KEY_ID`, `LAB_ARENA_BUCKET`,
 `LAB_ARENA_CHAIN_ENDPOINT`, `LAB_ARENA_GENERATION_OPENROUTER_API_KEY`,
-`LAB_ARENA_EXA_API_KEY`, `LAB_ARENA_SCRAPINGDOG_API_KEY`,
-`LAB_ARENA_OPENROUTER_KMS_KEY_ID`, `LAB_ARENA_SCORING_CACHE_DIR`,
-`LAB_ARENA_TAO_RECIPIENT_WALLET`, and one scorer credential per name:
+`LAB_ARENA_OPENROUTER_KMS_KEY_ID`, `LAB_ARENA_SCORING_CACHE_DIR`, and one
+scorer credential per name:
 `LAB_ARENA_SCORING_OPENROUTER_API_KEY`, `LAB_ARENA_SCORING_QUALIFICATION_OPENROUTER_API_KEY`, `LAB_ARENA_SCORING_SCRAPINGDOG_API_KEY`, `LAB_ARENA_SCORING_EXA_API_KEY`.
 
 Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
@@ -77,7 +78,31 @@ no database credential, and no signing key.
 
 Start: `python3 scripts/run_lab_arena_runner.py --round-id <round>`.
 
-## 5. Daily round
+## 5. Miner keys and call quotas
+
+Miners bring their own provider keys and there is no TAO deposit. Each miner
+registers one encrypted key per provider through
+`POST /arena/v1/credentials/{provider}` for `scrapingdog`, `deepline`, and
+`openrouter`; the miner CLI encrypts each key from
+`LAB_ARENA_<PROVIDER>_RUNTIME_KEY`. The service decrypts once in memory,
+runs a read-only probe (OpenRouter key info, the Scrapingdog account
+endpoint, one Deepline tool schema), and stores only the ciphertext envelope
+and a non-secret record. A miner is eligible only when all three keys have
+passed; a miner with a failed or missing key stays in the round with zero
+records, like a king that fails preflight.
+
+Advise miners to register keys with spend limits where the provider offers
+them. The Arena host would expose stored keys in a breach, and limited keys
+bound that damage.
+
+Fairness is a fixed call quota per provider per ICP attempt, pinned on every
+round configuration: scrapingdog 30, deepline 30, openrouter 60. The stage quota is
+the per-ICP quota times the stage's ICP count times the attempt limit.
+Deepline calls are limited to the tools exa_answer, exa_company_search, exa_contents, exa_people_search, exa_search, free_simple_company_search;
+their payloads are Deepline's own schemas and pass through unchanged apart
+from size bounds and a credential-name scan.
+
+## 6. Daily round
 
 1. The driver creates and advances rounds by wall clock; the admin CLI is
    for supervised steps only:
@@ -103,7 +128,7 @@ Standalone verification of any published round uses
 `lab_arena.verify.rebuild_round(public_bundle, signing_key_document)` with
 only the public bundle and the round's signing key document.
 
-## 6. Model release
+## 7. Model release
 
 After each published round with a crowned or defended king, the driver
 commits the king's frozen source to `leadpoet/leadpoet-sales-agent` on
@@ -119,7 +144,7 @@ contents write on that one repository) and accepts
 mode never releases. An empty repository is bootstrapped with one README
 commit on the first release.
 
-## 7. Go-live gates
+## 8. Go-live gates
 
 - Seven consecutive shadow rounds published with the throughput gate
   (`ArenaService.shadow_report`) satisfied, including at least one round at
@@ -139,13 +164,13 @@ commit on the first release.
 - Paid pilot, then the reward release (plan section 19 step 9), which is the
   first change to files outside `lab_arena/`, `scripts/`, and `tests/`.
 
-## 8. Invariants to re-check after any change
+## 9. Invariants to re-check after any change
 
 - `python3 -m pytest tests/lab_arena -q`: the boundary tests prove no
   Arena module imports `gateway.tee` or `gateway.db`, no measured package
   imports `lab_arena`, and the enclave allowlists exclude it.
-- Operation table hash `sha256:e466eafdc20d20b33feba8dd99544759e2dd66b1a4bcf05da35e61d1d7187abb` and price list
-  hash `sha256:6784881f2a79a0d758c773cc47a0630d495dba0c972e32a949e793f33bba41e9` are pinned on every round
+- Operation table hash `sha256:65c501101fa66687b1128d4699c2850e67b62be81ee325fdf10a945c07232857` and call quota
+  hash `sha256:e89b37df6fc1199d9f97ad2c44e858aad2b0ee12a6a4ab1416939108a94e1c45` are pinned on every round
   configuration; changing either changes the round identity.
 - No secret value may appear in any table, object, event, log, or public
   bundle; the round tests inject canary provider keys and assert absence.

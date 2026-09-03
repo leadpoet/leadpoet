@@ -10,12 +10,12 @@ in this table; no request field can alter host, path, method, headers, or
 credentials, and the tests prove it field by field.
 
 Cost rules: TAO-funded operations (Exa, ScrapingDog) carry a fixed published
-price from ``PROVIDER_PRICE_LIST`` and every price-determining parameter is
+billed to the miner's own provider key, bounded by the per-provider call quotas, and every price-determining parameter is
 pinned in ``fixed_params``, so the reserved estimate is the settled price.
 ``openrouter.chat`` is priced by the broker from the round's pinned price
 table; this module only caps the model-controllable output tokens.
 
-``OPERATION_TABLE_HASH`` and ``PROVIDER_PRICE_LIST_HASH`` are bound into the
+``OPERATION_TABLE_HASH`` and ``CALL_QUOTA_HASH`` are bound into the
 signed round configuration (``operation_table_hash`` and
 ``provider_price_list_hash``).
 
@@ -42,8 +42,8 @@ from lab_arena import contracts
 OPERATION_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.operation_table.v1"
 PRICE_LIST_SCHEMA_VERSION = "leadpoet.lab_arena.provider_price_list.v1"
 
-PROVIDERS = ("exa", "scrapingdog", "openrouter")
-FUNDING_SOURCES = ("tao", "openrouter")
+PROVIDERS = contracts.MINER_KEY_PROVIDERS  # every provider is reached with the miner's own key
+FUNDING_SOURCES = ("miner_key",)
 METHODS = ("GET", "POST")
 PARAMETER_LOCATIONS = ("body", "query")
 RESPONSE_SANITIZERS = ("json", "text")
@@ -256,8 +256,10 @@ class FieldSpec:
             raise ValueError("unknown field format")
         if self.kind == "list[str]" and self.item is None:
             raise ValueError("list[str] needs an item spec")
-        if self.kind in ("list[object]", "object") and self.fields is None:
-            raise ValueError("object fields need a schema")
+        if self.kind == "list[object]" and self.fields is None:
+            raise ValueError("list[object] members need a schema")
+        # An ``object`` without ``fields`` is an opaque provider-owned document
+        # bounded by the structural limits and the forbidden-name scan only.
         if self.fields is not None:
             object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
 
@@ -289,10 +291,22 @@ class Operation:
     response_sanitizer: str
     funding_source: str
     credential: CredentialPlacement
+    # Request fields substituted into the path (one ``{name}`` placeholder
+    # each); they must be closed-choice strings so the path stays enumerable.
+    path_fields: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS or self.method not in METHODS:
             raise ValueError("operation provider or method is invalid")
+        for name in self.path_fields:
+            spec = self.request_fields.get(name)
+            if spec is None or spec.kind != "str" or not spec.choices or not spec.required:
+                raise ValueError("path fields must be required closed-choice strings")
+            if self.path.count("{%s}" % name) != 1:
+                raise ValueError("path must carry each path field exactly once")
+        residual = re.sub(r"\{[a-z_]+\}", "", self.path)
+        if "{" in residual or "}" in residual:
+            raise ValueError("path placeholders must all be declared path fields")
         if self.parameter_location not in PARAMETER_LOCATIONS:
             raise ValueError("operation parameter location is invalid")
         if self.method == "GET" and self.parameter_location != "query":
@@ -337,6 +351,13 @@ def _normalize_name(name: str) -> str:
     return str(name).lower().replace("-", "_")
 
 
+# Names refused at any depth inside an opaque provider payload. Top-level
+# request fields use the wider FORBIDDEN_FIELD_NAMES because they could steer
+# the request; inside a tool payload the target is fixed by the table, so only
+# credential-shaped names are refused (a tool may legitimately take ``urls``).
+PAYLOAD_FORBIDDEN_FIELD_NAMES = frozenset({_normalize_name(name) for name in CREDENTIAL_HEADERS} | {"api_key", "apikey", "token", "access_token", "secret", "password", "bearer"})
+
+
 def _is_dns_hostname(host: str) -> bool:
     """A public DNS name: lowercase labels, no IP literal, alphabetic TLD."""
 
@@ -354,91 +375,29 @@ def _is_dns_hostname(host: str) -> bool:
 # Price list (section 7.5: TAO-funded settlement equals the published price)
 # ---------------------------------------------------------------------------
 
-PROVIDER_PRICE_LIST: Mapping[str, int] = MappingProxyType(
-    {
-        "exa.search": 5_000,
-        # 1,000 microUSD per result times the fixed maximum of five URLs.
-        "exa.contents": 5_000,
-        "scrapingdog.scrape": 2_000,
-        "scrapingdog.google": 5_000,
-    }
-)
-
-
-def _fixed_cost(operation_id: str) -> Mapping[str, Any]:
-    return {"kind": "fixed_microusd", "microusd": int(PROVIDER_PRICE_LIST[operation_id])}
+# Every operation is billed to the miner's own provider account; the Arena
+# enforces fairness with the per-provider call quotas pinned in
+# ``contracts.CALL_QUOTAS_PER_ICP`` and hashed into the round configuration.
+MINER_BILLED_COST_RULE: Mapping[str, Any] = MappingProxyType({"kind": "miner_billed"})
 
 
 # ---------------------------------------------------------------------------
 # V1 operations
 # ---------------------------------------------------------------------------
 
-_EXA_CATEGORIES = (
-    "company",
-    "research paper",
-    "news",
-    "pdf",
-    "github",
-    "tweet",
-    "personal site",
-    "linkedin profile",
-    "financial report",
-)
 _DOMAIN_ITEM = FieldSpec("str", min_length=1, max_length=253, format="domain")
 _HTTPS_URL_ITEM = FieldSpec("str", min_length=8, max_length=2000, format="https_url")
 _GOOGLE_COUNTRIES = ("us", "gb", "ca", "au", "de", "fr", "nl", "ie", "in", "sg")
 
-_EXA_CREDENTIAL = CredentialPlacement("header", "x-api-key")
 _SCRAPINGDOG_CREDENTIAL = CredentialPlacement("query", "api_key")
 _OPENROUTER_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Bearer")
+_DEEPLINE_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Bearer")
+# Deepline tools miners may execute (https://deepline.com/docs/providers/exa):
+# the Exa-backed search, contents, answer, people, and company tools plus the
+# public company search. Deepline owns each tool's payload schema.
+DEEPLINE_TOOLS = ("exa_answer", "exa_company_search", "exa_contents", "exa_people_search", "exa_search", "free_simple_company_search")
 
 _OPERATION_LIST = (
-    Operation(
-        operation_id="exa.search",
-        provider="exa",
-        method="POST",
-        host="api.exa.ai",
-        path="/search",
-        parameter_location="body",
-        request_fields={
-            "query": FieldSpec("str", required=True, min_length=1, max_length=1000),
-            "type": FieldSpec("str", choices=("auto", "neural", "keyword")),
-            "category": FieldSpec("str", choices=_EXA_CATEGORIES),
-            "includeDomains": FieldSpec("list[str]", max_length=20, item=_DOMAIN_ITEM),
-            "excludeDomains": FieldSpec("list[str]", max_length=20, item=_DOMAIN_ITEM),
-            "startPublishedDate": FieldSpec("str", format="iso_date", min_length=10, max_length=10),
-            "endPublishedDate": FieldSpec("str", format="iso_date", min_length=10, max_length=10),
-        },
-        fixed_params={"numResults": 10, "contents": {"text": {"maxCharacters": 2000}}},
-        defaults={},
-        timeout_seconds=30,
-        max_request_bytes=16_384,
-        max_response_bytes=1_048_576,
-        cost_rule=_fixed_cost("exa.search"),
-        response_sanitizer="json",
-        funding_source="tao",
-        credential=_EXA_CREDENTIAL,
-    ),
-    Operation(
-        operation_id="exa.contents",
-        provider="exa",
-        method="POST",
-        host="api.exa.ai",
-        path="/contents",
-        parameter_location="body",
-        request_fields={
-            "urls": FieldSpec("list[str]", required=True, min_length=1, max_length=5, item=_HTTPS_URL_ITEM),
-        },
-        fixed_params={"text": {"maxCharacters": 4000}},
-        defaults={},
-        timeout_seconds=45,
-        max_request_bytes=16_384,
-        max_response_bytes=1_048_576,
-        cost_rule=_fixed_cost("exa.contents"),
-        response_sanitizer="json",
-        funding_source="tao",
-        credential=_EXA_CREDENTIAL,
-    ),
     Operation(
         operation_id="scrapingdog.scrape",
         provider="scrapingdog",
@@ -455,9 +414,9 @@ _OPERATION_LIST = (
         timeout_seconds=60,
         max_request_bytes=4_096,
         max_response_bytes=2_097_152,
-        cost_rule=_fixed_cost("scrapingdog.scrape"),
+        cost_rule=MINER_BILLED_COST_RULE,
         response_sanitizer="text",
-        funding_source="tao",
+        funding_source="miner_key",
         credential=_SCRAPINGDOG_CREDENTIAL,
     ),
     Operation(
@@ -476,10 +435,34 @@ _OPERATION_LIST = (
         timeout_seconds=45,
         max_request_bytes=4_096,
         max_response_bytes=1_048_576,
-        cost_rule=_fixed_cost("scrapingdog.google"),
+        cost_rule=MINER_BILLED_COST_RULE,
         response_sanitizer="json",
-        funding_source="tao",
+        funding_source="miner_key",
         credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="deepline.execute",
+        provider="deepline",
+        method="POST",
+        host="code.deepline.com",
+        path="/api/v2/integrations/{tool}/execute",
+        parameter_location="body",
+        request_fields={
+            "tool": FieldSpec("str", required=True, choices=DEEPLINE_TOOLS),
+            # Opaque tool payload: Deepline owns each tool's schema, the
+            # structural limits bound it, credential-shaped names are refused.
+            "payload": FieldSpec("object", required=True),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=60,
+        max_request_bytes=65_536,
+        max_response_bytes=1_048_576,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="json",
+        funding_source="miner_key",
+        credential=_DEEPLINE_CREDENTIAL,
+        path_fields=("tool",),
     ),
     Operation(
         operation_id="openrouter.chat",
@@ -516,7 +499,7 @@ _OPERATION_LIST = (
         max_response_bytes=1_048_576,
         cost_rule={"kind": "openrouter_price_table", "max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
         response_sanitizer="json",
-        funding_source="openrouter",
+        funding_source="miner_key",
         credential=_OPENROUTER_CREDENTIAL,
     ),
 )
@@ -527,12 +510,10 @@ OPERATIONS: Mapping[str, Operation] = MappingProxyType(
 if len(OPERATIONS) != len(_OPERATION_LIST):
     raise RuntimeError("operation ids must be unique")
 for _operation in _OPERATION_LIST:
-    if _operation.funding_source == "tao" and _operation.operation_id not in PROVIDER_PRICE_LIST:
-        raise RuntimeError("TAO-funded operation without a published price")
-    if _operation.cost_rule["kind"] == "fixed_microusd" and _operation.cost_rule["microusd"] != PROVIDER_PRICE_LIST[_operation.operation_id]:
-        raise RuntimeError("operation price differs from the price list")
-    if _operation.cost_rule["kind"] not in ("fixed_microusd", "openrouter_price_table"):
+    if _operation.cost_rule["kind"] not in ("miner_billed", "openrouter_price_table"):
         raise RuntimeError("operation cost rule is invalid")
+    if _operation.provider == "openrouter" and _operation.cost_rule["kind"] != "openrouter_price_table":
+        raise RuntimeError("OpenRouter operations must bound cost with the price table")
     if _operation.max_request_bytes > OPERATION_LIMITS.max_total_bytes:
         raise RuntimeError("operation request cap exceeds the structural ceiling")
 del _operation
@@ -587,6 +568,7 @@ def operation_document(operation: Operation) -> Dict[str, Any]:
         "cost_rule": _deep_copy_json(operation.cost_rule),
         "response_sanitizer": operation.response_sanitizer,
         "funding_source": operation.funding_source,
+        "path_fields": list(operation.path_fields),
         "credential": {
             "location": operation.credential.location,
             "name": operation.credential.name,
@@ -610,34 +592,14 @@ def operation_table_document() -> Dict[str, Any]:
         "allowed_request_headers": sorted(ALLOWED_REQUEST_HEADERS),
         "credential_headers": sorted(CREDENTIAL_HEADERS),
         "forbidden_field_names": sorted(FORBIDDEN_FIELD_NAMES),
+        "payload_forbidden_field_names": sorted(PAYLOAD_FORBIDDEN_FIELD_NAMES),
         "credential_statuses": sorted(CREDENTIAL_STATUSES),
         "operations": [operation_document(OPERATIONS[key]) for key in sorted(OPERATIONS)],
     }
 
 
-def price_list_document() -> Dict[str, Any]:
-    return {
-        "schema_version": PRICE_LIST_SCHEMA_VERSION,
-        "unit": "microusd",
-        "prices": {key: int(PROVIDER_PRICE_LIST[key]) for key in sorted(PROVIDER_PRICE_LIST)},
-    }
-
-
 OPERATION_TABLE_HASH = contracts.document_hash(operation_table_document())
-PROVIDER_PRICE_LIST_HASH = contracts.document_hash(price_list_document())
-
-
-def fixed_cost_microusd(operation_id: str) -> Optional[int]:
-    """The fixed maximum cost of a TAO-funded operation; ``None`` for OpenRouter.
-
-    The value never depends on parameters: every price-determining parameter is
-    pinned in ``fixed_params``.
-    """
-
-    rule = _operation(operation_id).cost_rule
-    if rule["kind"] == "fixed_microusd":
-        return int(rule["microusd"])
-    return None
+CALL_QUOTA_HASH = contracts.document_hash(contracts.call_quota_document())
 
 
 # ---------------------------------------------------------------------------
@@ -741,9 +703,43 @@ def _validate_field(spec: FieldSpec, value: Any, path: str) -> Any:
         assert spec.fields is not None
         return [_validate_object(spec.fields, item, "%s[%d]" % (path, index)) for index, item in enumerate(value)]
     if kind == "object":
-        assert spec.fields is not None
+        if spec.fields is None:
+            return _validate_opaque_object(value, path)
         return _validate_object(spec.fields, value, path)
     raise OperationRequestError("invalid_field", path)
+
+
+def _validate_opaque_object(value: Any, path: str) -> Dict[str, Any]:
+    """A provider-owned document: bounded, JSON-plain, and free of credential-shaped names at any depth."""
+
+    if not isinstance(value, Mapping):
+        raise OperationRequestError("invalid_field", path)
+    try:
+        contracts.check_strict_document(value, _STRUCTURE_LIMITS)
+    except contracts.ArenaContractError:
+        raise OperationRequestError("invalid_field", path) from None
+
+    def walk(node: Any, node_path: str) -> Any:
+        if isinstance(node, Mapping):
+            out: Dict[str, Any] = {}
+            for name, item in node.items():
+                if not isinstance(name, str):
+                    raise OperationRequestError("invalid_field", node_path)
+                if _normalize_name(name) in PAYLOAD_FORBIDDEN_FIELD_NAMES:
+                    raise OperationRequestError("forbidden_field", node_path)
+                out[name] = walk(item, "%s.%s" % (node_path, name))
+            return out
+        if isinstance(node, (list, tuple)):
+            return [walk(item, "%s[%d]" % (node_path, index)) for index, item in enumerate(node)]
+        if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
+            return node
+        if isinstance(node, float):
+            if not math.isfinite(node):
+                raise OperationRequestError("invalid_field", node_path)
+            return node
+        raise OperationRequestError("invalid_field", node_path)
+
+    return walk(value, path)
 
 
 def _validate_object(
@@ -847,7 +843,7 @@ def _coerce_query_value(spec: FieldSpec, raw: str, path: str) -> Any:
     return raw
 
 
-def _match_operation(method: str, url: str) -> Operation:
+def _match_operation(method: str, url: str) -> Tuple[Operation, Dict[str, str]]:
     if not isinstance(method, str) or not isinstance(url, str):
         raise OperationRequestError("no_matching_operation")
     method = method.upper()
@@ -866,9 +862,31 @@ def _match_operation(method: str, url: str) -> Operation:
     if not host or not _is_dns_hostname(host):
         raise OperationRequestError("no_matching_operation")
     for operation in _OPERATION_LIST:
-        if operation.method == method and operation.host == host and operation.path == parts.path:
-            return operation
+        if operation.method != method or operation.host != host:
+            continue
+        if not operation.path_fields:
+            if operation.path == parts.path:
+                return operation, {}
+            continue
+        matched = _path_pattern(operation).fullmatch(parts.path)
+        if matched is not None:
+            return operation, dict(matched.groupdict())
     raise OperationRequestError("no_matching_operation")
+
+
+def _path_pattern(operation: Operation) -> "re.Pattern[str]":
+    pattern = re.escape(operation.path)
+    for name in operation.path_fields:
+        pattern = pattern.replace(re.escape("{%s}" % name), "(?P<%s>[A-Za-z0-9_]{1,80})" % name)
+    return re.compile("^" + pattern + "$")
+
+
+def _render_path(operation: Operation, normalized: Mapping[str, Any]) -> str:
+    path = operation.path
+    for name in operation.path_fields:
+        value = normalized[name]  # validated against the closed choices
+        path = path.replace("{%s}" % name, str(value))
+    return path
 
 
 def match_request(
@@ -886,7 +904,7 @@ def match_request(
     never forwarded.
     """
 
-    operation = _match_operation(method, url)
+    operation, path_parameters = _match_operation(method, url)
     check_request_headers(headers or {})
     parts = urlsplit(url)
     raw = b"" if body is None else bytes(body)
@@ -901,6 +919,10 @@ def match_request(
             raise OperationRequestError("invalid_body") from exc
         if not isinstance(parameters, dict):
             raise OperationRequestError("invalid_body")
+        for name, value in path_parameters.items():
+            if name in parameters:
+                raise OperationRequestError("invalid_body")
+            parameters[name] = value
     else:
         if raw:
             raise OperationRequestError("invalid_body")
@@ -947,8 +969,8 @@ def outbound_target(operation_id: str, parameters: Any) -> OutboundTarget:
     """The constant target of an operation; parameters are validated only."""
 
     operation = _operation(operation_id)
-    validate_operation_request(operation_id, parameters)
-    return OutboundTarget(operation.method, "https", operation.host, 443, operation.path)
+    normalized = validate_operation_request(operation_id, parameters)
+    return OutboundTarget(operation.method, "https", operation.host, 443, _render_path(operation, normalized))
 
 
 def _query_value(value: Any) -> str:
@@ -969,10 +991,11 @@ def build_outbound_request(operation_id: str, parameters: Any) -> OutboundReques
 
     operation = _operation(operation_id)
     normalized = validate_operation_request(operation_id, parameters)
-    target = OutboundTarget(operation.method, "https", operation.host, 443, operation.path)
-    base_url = "https://%s%s" % (operation.host, operation.path)
+    path = _render_path(operation, normalized)
+    target = OutboundTarget(operation.method, "https", operation.host, 443, path)
+    base_url = "https://%s%s" % (operation.host, path)
     if operation.parameter_location == "body":
-        document = dict(normalized)
+        document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential)
@@ -1033,7 +1056,9 @@ def sanitize_response(
     if not isinstance(body, (bytes, bytearray, memoryview)):
         raise OperationResponseError("invalid_response")
     raw = bytes(body)
-    generic = status in CREDENTIAL_STATUSES or (status == 402 and operation.funding_source == "tao")
+    # Credential statuses stay generic so a model never learns key state from a
+    # provider; 402 passes through because every key is the miner's own.
+    generic = status in CREDENTIAL_STATUSES
     if generic:
         return (
             GENERIC_UNAVAILABLE_STATUS,
@@ -1072,6 +1097,9 @@ __all__ = [
     "OPERATIONS",
     "OPERATION_LIMITS",
     "OPERATION_TABLE_HASH",
+    "CALL_QUOTA_HASH",
+    "DEEPLINE_TOOLS",
+    "PAYLOAD_FORBIDDEN_FIELD_NAMES",
     "OPERATION_TABLE_SCHEMA_VERSION",
     "Operation",
     "OperationError",
@@ -1080,12 +1108,9 @@ __all__ = [
     "OutboundRequest",
     "OutboundTarget",
     "PRICE_LIST_SCHEMA_VERSION",
-    "PROVIDER_PRICE_LIST",
-    "PROVIDER_PRICE_LIST_HASH",
     "build_outbound_request",
     "check_request_headers",
     "field_spec_document",
-    "fixed_cost_microusd",
     "match_request",
     "operation_document",
     "operation_table_document",

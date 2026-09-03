@@ -96,8 +96,8 @@ PIPE_CHUNK_BYTES = 65536
 PROCESS_ENV: Mapping[str, str] = MappingProxyType({"PATH": "/usr/local/bin:/usr/bin:/bin"})
 PROVIDER_BASE_URLS: Mapping[str, str] = MappingProxyType(
     {
-        "EXA_BASE_URL": "https://api.exa.ai",
         "SCRAPINGDOG_BASE_URL": "https://api.scrapingdog.com",
+        "DEEPLINE_BASE_URL": "https://code.deepline.com",
         "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
     }
 )

@@ -76,28 +76,6 @@ def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):
     assert wiring.banned_hotkeys_from_environment() == []
 
 
-def test_funding_confirmer_maps_rejections_and_outages_without_leaking():
-    from datetime import datetime, timezone
-
-    from lab_arena import chain as chain_module, funding, wiring
-
-    class FailingClient:
-        def __getattr__(self, name):
-            def call(*args, **kwargs):
-                raise RuntimeError("endpoint down")
-
-            return call
-
-    chain_config = chain_module.ArenaChainConfig(endpoint="wss://entrypoint.invalid:443", netuid=71, network_name="finney", request_timeout_seconds=10)
-    chain = chain_module.ArenaChain(chain_config, FailingClient(), metagraph_source=lambda *args: None)
-    config = funding.FundingConfig(recipient_wallet="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", network_name="finney")
-    confirm = wiring.funding_confirmer(chain=chain, config=config, store=None, price_source=None, clock=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc))
-    with pytest.raises(ServiceError, match="funding_unavailable"):
-        confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "0x" + "a" * 64, "extrinsic_index": 1})
-    malformed = confirm("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", {"block_hash": "not-a-hash", "extrinsic_index": 1})
-    assert malformed["credited"] is False and malformed.get("rejected") is True
-
-
 def test_credential_registrar_rejects_bad_envelopes_and_records_good_ones():
     import json
 

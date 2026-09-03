@@ -94,7 +94,7 @@ def lease(run_id="r1", position=0):
     return {
         "status": "leased", "run_id": run_id, "assignment_id": "%s:s1:1:%d" % (ROUND, position), "submission_id": "s1", "miner_hotkey": MINER,
         "image_digest": IMAGE, "stage": 1, "icp_position": position, "icp_hash": contracts.document_hash({"icp": position}), "attempt": 1,
-        "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00", "per_icp_cap_microusd": 100000,
+        "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "event_cursor": 0, "event_head_hash": "", "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
     }
 
@@ -114,7 +114,7 @@ class BridgingRuntime:
         os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
         try:
             for _ in range(self.calls):
-                status, headers, body = shim.dispatch("exa.search", {"query": "fintech"}, 5000)
+                status, headers, body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": "fintech"}}, 5000)
                 assert status == 200 and json.loads(body)["results"]
         finally:
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
@@ -206,13 +206,13 @@ def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_pat
     state = rn.RunState(lease=lease(), lease_token="tok", event_cursor=0, event_head_hash="")
     api.cursor["r1"] = {"event_cursor": 0, "event_head_hash": ""}
     server = rn.WorkerSocketServer(tmp_path / "worker.sock", api, state, rn.EventWriter(api, state, lambda: datetime(2026, 9, 2, tzinfo=timezone.utc)))
-    good = shim.build_operation_frame("exa.search", {"query": "x"}, 1000)
+    good = shim.build_operation_frame("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 1000)
     response = json.loads(server.handle_frame(good))
     assert response["status"] == 200 and state.action_sequence == 1 and state.event_cursor == 1
     for hostile in (
-        json.dumps({"schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION, "operation_id": "exa.search", "parameters": {"query": "x"}, "timeout_ms": 1000, "lease_token": "steal"}),
+        json.dumps({"schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION, "operation_id": "deepline.execute", "parameters": {"tool": "exa_search", "payload": {"query": "x"}}, "timeout_ms": 1000, "lease_token": "steal"}),
         json.dumps({"schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION, "operation_id": "deepline.play", "parameters": {}, "timeout_ms": 1000}),
-        json.dumps({"schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION, "operation_id": "exa.search", "parameters": {"query": "x", "headers": {"x-api-key": "k"}}, "timeout_ms": 1000}),
+        json.dumps({"schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION, "operation_id": "deepline.execute", "parameters": {"tool": "exa_search", "payload": {"query": "x"}, "headers": {"x-api-key": "k"}}, "timeout_ms": 1000}),
         b"not json",
     ):
         error = json.loads(server.handle_frame(hostile.encode() if isinstance(hostile, str) else hostile))

@@ -25,7 +25,7 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
     connect = lambda: psycopg2.connect(**dsn)
     setup = ArenaStore(PsycopgTransport(connect, pool_size=4))
     round_id = "arena-2026-09-02-st"
-    runners, parts = open_round(setup, round_id, participants=4, runners=3, prefix="st", per_icp_cap=5_000_000, ceiling_1=200_000_000)
+    runners, parts = open_round(setup, round_id, participants=4, runners=3, prefix="st")
     stores = [ArenaStore(PsycopgTransport(connect, pool_size=4)) for _ in range(3)]
     errors = []
     lock = threading.Lock()
@@ -43,12 +43,12 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
             try:
                 cursor, head = int(response["event_cursor"]), str(response["event_head_hash"])
                 for sequence in range(3):
-                    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=sequence, operation_id="exa.search", request_hash=sha("%s-%d" % (run_id, sequence)))
-                    reserved = store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=5000, call_doc={})
+                    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=sequence, operation_id="deepline.execute", request_hash=sha("%s-%d" % (run_id, sequence)))
+                    reserved = store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
                     assert reserved["status"] == "reserved", reserved
                     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity)["status"] == "dispatched"
                     event = make_event(response, cursor, head, event_type="provider_call")
-                    settled = store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, actual_microusd=5000, terminal_response={"status": 200}, event=event)
+                    settled = store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, actual_microusd=0, terminal_response={"status": 200}, event=event)
                     assert settled["status"] == "settled", settled
                     cursor, head = int(settled["event_cursor"]), str(settled["event_head_hash"])
                     appended = store.append_events(run_id=run_id, lease_token_hash=lease_hash, events=[make_event(response, cursor, head, event_type="stdout")])
@@ -80,7 +80,7 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
     assert len(heads) == 240 and set(heads.values()) == {"settlement"}
     for part in parts:
         account = setup.get_account(part["miner_hotkey"])
-        assert account["balance_microusd"] == 5_000_000 - 60 * 5000
+        assert account["preflight_status"] == "ok" and set(account["credentials"]) == set(contracts.MINER_KEY_PROVIDERS)
     print("deadlock retries:", retries, details[:1])
     for store in stores + [setup]:
         store.close()

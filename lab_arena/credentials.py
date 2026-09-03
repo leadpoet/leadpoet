@@ -32,12 +32,14 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol
 from urllib import request as urlrequest
+from urllib.parse import quote as urlquote
 from urllib.error import HTTPError, URLError
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from lab_arena.contracts import (
+    MINER_KEY_PROVIDERS,
     ArenaContractError,
     F,
     RECIPIENT_DOCUMENT_SCHEMA_VERSION,
@@ -55,6 +57,14 @@ from lab_arena.contracts import (
 # ---------------------------------------------------------------------------
 
 OPENROUTER_KEY_RE = re.compile(r"^sk-or-v1-[A-Za-z0-9_-]{24,}$")
+# Scrapingdog and Deepline keys have no published shape beyond "an API key";
+# the bounds below only refuse whitespace, control characters, and absurd lengths.
+SCRAPINGDOG_KEY_RE = re.compile(r"^[A-Za-z0-9]{16,128}$")
+DEEPLINE_KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]{16,256}$")
+PROVIDER_KEY_PATTERNS = {"openrouter": OPENROUTER_KEY_RE, "scrapingdog": SCRAPINGDOG_KEY_RE, "deepline": DEEPLINE_KEY_RE}
+SCRAPINGDOG_ACCOUNT_URL = "https://api.scrapingdog.com/account"
+# Read-only, authenticated, and free: the tool's schema, not an execution.
+DEEPLINE_PROBE_URL = "https://code.deepline.com/api/v2/integrations/exa_search/get"
 OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_KEY_INFO_URL = f"{OPENROUTER_API_BASE_URL}/key"
 _OPENROUTER_KEY_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -66,8 +76,11 @@ STRICT_OPENROUTER_PROVIDER_POLICY: Dict[str, Any] = {
 }
 
 
-class OpenRouterKeyError(ArenaContractError):
-    """Raised when OpenRouter key validation, decryption, or preflight fails."""
+class ProviderKeyError(ArenaContractError):
+    """Raised when a provider key's validation, decryption, or preflight fails."""
+
+
+OpenRouterKeyError = ProviderKeyError  # historical name
 
 
 def strict_openrouter_provider_policy() -> Dict[str, Any]:
@@ -76,13 +89,82 @@ def strict_openrouter_provider_policy() -> Dict[str, Any]:
     return dict(STRICT_OPENROUTER_PROVIDER_POLICY)
 
 
+def validate_provider_key_format(provider: str, raw_key: str) -> str:
+    """Per-provider shape check; returns the normalized key or raises."""
+
+    if provider not in PROVIDER_KEY_PATTERNS:
+        raise ProviderKeyError("unknown provider")
+    if provider == "openrouter":
+        return validate_openrouter_key_format(raw_key)
+    value = (raw_key or "").strip() if isinstance(raw_key, str) else ""
+    if not PROVIDER_KEY_PATTERNS[provider].match(value):
+        raise ProviderKeyError("%s key does not look like a valid API key" % provider)
+    return value
+
+
+def _fetch_json_object(request: "urlrequest.Request", provider: str, *, timeout_seconds: int, urlopen: Callable[..., Any]) -> Dict[str, Any]:
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            raise ProviderKeyError("%s key preflight failed: key is invalid or unauthorized" % provider) from exc
+        raise ProviderKeyError("%s key preflight failed: HTTP %d" % (provider, exc.code)) from exc
+    except URLError as exc:
+        raise ProviderKeyError("%s key preflight failed: %s" % (provider, exc.reason)) from exc
+    except OSError as exc:
+        raise ProviderKeyError("%s key preflight failed: transport error" % provider) from exc
+    try:
+        decoded = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ProviderKeyError("%s key preflight returned invalid JSON" % provider) from exc
+    if not isinstance(decoded, Mapping):
+        raise ProviderKeyError("%s key preflight returned no key metadata" % provider)
+    return dict(decoded)
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def preflight_provider_key(
+    provider: str,
+    raw_key: str,
+    *,
+    timeout_seconds: int = 12,
+    urlopen: Callable[..., Any] = urlrequest.urlopen,
+) -> Dict[str, Any]:
+    """Authenticated, read-only probe of a provider key; returns non-secret metadata only.
+
+    OpenRouter reports limits and usage. Scrapingdog's account endpoint
+    reports request counts. Deepline has no usage endpoint, so the probe
+    reads one tool schema with the key, which costs nothing and proves the
+    key is accepted by the workspace.
+    """
+
+    if provider == "openrouter":
+        return preflight_openrouter_key(raw_key, timeout_seconds=timeout_seconds, urlopen=urlopen)
+    key = validate_provider_key_format(provider, raw_key)
+    if provider == "scrapingdog":
+        request = urlrequest.Request(SCRAPINGDOG_ACCOUNT_URL + "?api_key=" + urlquote(key, safe=""), headers={"Accept": "application/json"}, method="GET")
+        decoded = _fetch_json_object(request, provider, timeout_seconds=timeout_seconds, urlopen=urlopen)
+        return {"request_limit": _optional_int(decoded.get("requestLimit")), "request_used": _optional_int(decoded.get("requestUsed"))}
+    if provider == "deepline":
+        request = urlrequest.Request(DEEPLINE_PROBE_URL, headers={"Authorization": "Bearer " + key, "Accept": "application/json"}, method="GET")
+        decoded = _fetch_json_object(request, provider, timeout_seconds=timeout_seconds, urlopen=urlopen)
+        return {"tool": "exa_search", "has_input_schema": isinstance(decoded.get("inputSchema"), Mapping)}
+    raise ProviderKeyError("unknown provider")
+
+
 def validate_openrouter_key_format(raw_key: str) -> str:
     value = (raw_key or "").strip()
     prefix = "sk-or-v1-"
     if value[: len(prefix)].lower() == prefix and value[: len(prefix)] != prefix:
         value = prefix + value[len(prefix) :]
     if not OPENROUTER_KEY_RE.match(value):
-        raise OpenRouterKeyError("OpenRouter key must start with sk-or-v1- and look like a valid API key")
+        raise ProviderKeyError("OpenRouter key must start with sk-or-v1- and look like a valid API key")
     return value
 
 
@@ -114,30 +196,30 @@ def preflight_openrouter_key(
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         if exc.code in (401, 403):
-            raise OpenRouterKeyError("OpenRouter key preflight failed: key is invalid or unauthorized") from exc
-        raise OpenRouterKeyError(f"OpenRouter key preflight failed: HTTP {exc.code}") from exc
+            raise ProviderKeyError("OpenRouter key preflight failed: key is invalid or unauthorized") from exc
+        raise ProviderKeyError(f"OpenRouter key preflight failed: HTTP {exc.code}") from exc
     except URLError as exc:
-        raise OpenRouterKeyError(f"OpenRouter key preflight failed: {exc.reason}") from exc
+        raise ProviderKeyError(f"OpenRouter key preflight failed: {exc.reason}") from exc
     except OSError as exc:
         # Read timeouts surface as TimeoutError rather than URLError; the
         # message deliberately carries no transport detail.
-        raise OpenRouterKeyError("OpenRouter key preflight failed: transport error") from exc
+        raise ProviderKeyError("OpenRouter key preflight failed: transport error") from exc
 
     try:
         decoded = json.loads(body)
     except json.JSONDecodeError as exc:
-        raise OpenRouterKeyError("OpenRouter key preflight returned invalid JSON") from exc
+        raise ProviderKeyError("OpenRouter key preflight returned invalid JSON") from exc
     data = decoded.get("data") if isinstance(decoded, Mapping) else None
     if not isinstance(data, Mapping):
-        raise OpenRouterKeyError("OpenRouter key preflight returned no key metadata")
+        raise ProviderKeyError("OpenRouter key preflight returned no key metadata")
     if data.get("disabled") is True:
-        raise OpenRouterKeyError("OpenRouter key is disabled")
+        raise ProviderKeyError("OpenRouter key is disabled")
     observed_key_hash = str(data.get("hash") or "").strip()
     if expected_key_hash is not None:
         if not _OPENROUTER_KEY_HASH_RE.fullmatch(expected_key_hash):
-            raise OpenRouterKeyError("expected OpenRouter runtime key hash is invalid")
+            raise ProviderKeyError("expected OpenRouter runtime key hash is invalid")
         if observed_key_hash and observed_key_hash != expected_key_hash:
-            raise OpenRouterKeyError("OpenRouter key preflight differs from the expected runtime key")
+            raise ProviderKeyError("OpenRouter key preflight differs from the expected runtime key")
         key_hash = expected_key_hash
     else:
         key_hash = observed_key_hash or _local_key_hash(key)
@@ -172,7 +254,7 @@ RECIPIENT_ALGORITHM = "RSAES_OAEP_SHA_256"
 RECIPIENT_KEY_SPEC = "RSA_4096"
 RECIPIENT_KEY_SPEC_BY_BITS = {2048: "RSA_2048", 3072: "RSA_3072", 4096: "RSA_4096"}
 RECIPIENT_MODULUS_BYTES = frozenset(bits // 8 for bits in RECIPIENT_KEY_SPEC_BY_BITS)
-ENVELOPE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_envelope.v1"
+ENVELOPE_SCHEMA_VERSION = "leadpoet.lab_arena.provider_key_envelope.v1"
 
 RECIPIENT_DOCUMENT_FIELDS = (
     F("schema_version", "str", choices=(RECIPIENT_DOCUMENT_SCHEMA_VERSION,)),
@@ -185,6 +267,7 @@ RECIPIENT_DOCUMENT_FIELDS = (
 ENVELOPE_FIELDS = (
     F("schema_version", "str", choices=(ENVELOPE_SCHEMA_VERSION,)),
     F("algorithm", "str", choices=(RECIPIENT_ALGORITHM,)),
+    F("provider", "str", choices=MINER_KEY_PROVIDERS),
     F("recipient_key_hash", "sha256"),
     F("key_hash", "str", minimum=64, maximum=64),
     F("ciphertext_b64", "str", minimum=4, maximum=1024),
@@ -259,24 +342,26 @@ def validate_recipient_document(document: Any) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def encrypt_runtime_key(recipient: Mapping[str, Any], raw_key: str) -> Dict[str, Any]:
-    """Encrypt a runtime key to the Arena recipient; returns the envelope.
+def encrypt_runtime_key(recipient: Mapping[str, Any], raw_key: str, *, provider: str = "openrouter") -> Dict[str, Any]:
+    """Encrypt a provider runtime key to the Arena recipient; returns the envelope.
 
-    The envelope carries only the ciphertext, the recipient key hash, and the
-    local sha256 commitment of the key. It is what the miner submits.
+    The envelope carries the provider name, the ciphertext, the recipient key
+    hash, and the local sha256 commitment of the key. It is what the miner
+    submits, once per provider.
     """
 
     der = validate_recipient_document(recipient)
-    key = validate_openrouter_key_format(raw_key)
+    key = validate_provider_key_format(provider, raw_key)
     public_key = _load_rsa_public_key(der)
     modulus_bytes = public_key.key_size // 8
     plaintext = key.encode("utf-8")
     if len(plaintext) > modulus_bytes - 2 * hashes.SHA256.digest_size - 2:
-        raise OpenRouterKeyError("OpenRouter key is too long for the recipient key")
+        raise ProviderKeyError("runtime key is too long for the recipient key")
     ciphertext = public_key.encrypt(plaintext, _OAEP_PADDING)
     return {
         "schema_version": ENVELOPE_SCHEMA_VERSION,
         "algorithm": RECIPIENT_ALGORITHM,
+        "provider": provider,
         "recipient_key_hash": recipient_key_hash(der),
         "key_hash": _local_key_hash(key),
         "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
@@ -376,15 +461,15 @@ class KmsDecryptor:
         self.key_id = str(key_id)
         described = self._client.get_public_key(KeyId=self.key_id)
         if described.get("KeyUsage") != "ENCRYPT_DECRYPT":
-            raise OpenRouterKeyError("Arena recipient key must be an ENCRYPT_DECRYPT key")
+            raise ProviderKeyError("Arena recipient key must be an ENCRYPT_DECRYPT key")
         if described.get("KeySpec") != RECIPIENT_KEY_SPEC:
-            raise OpenRouterKeyError("Arena recipient key must be %s" % RECIPIENT_KEY_SPEC)
+            raise ProviderKeyError("Arena recipient key must be %s" % RECIPIENT_KEY_SPEC)
         if RECIPIENT_ALGORITHM not in tuple(described.get("EncryptionAlgorithms") or ()):
-            raise OpenRouterKeyError("Arena recipient key does not support %s" % RECIPIENT_ALGORITHM)
+            raise ProviderKeyError("Arena recipient key does not support %s" % RECIPIENT_ALGORITHM)
         der = bytes(described["PublicKey"])
         key = _load_rsa_public_key(der)
         if RECIPIENT_KEY_SPEC_BY_BITS[key.key_size] != RECIPIENT_KEY_SPEC:
-            raise OpenRouterKeyError("Arena recipient public key size does not match its key spec")
+            raise ProviderKeyError("Arena recipient public key size does not match its key spec")
         self.public_key_der = der
         self.modulus_bytes = key.key_size // 8
         self.recipient_key_hash = recipient_key_hash(der)
@@ -411,11 +496,12 @@ class RuntimeKeyHandle:
     drops the closure at the end of a run.
     """
 
-    __slots__ = ("_reveal", "key_hash")
+    __slots__ = ("_reveal", "key_hash", "provider")
 
-    def __init__(self, raw_key: str) -> None:
-        validated = validate_openrouter_key_format(raw_key)
+    def __init__(self, raw_key: str, provider: str = "openrouter") -> None:
+        validated = validate_provider_key_format(provider, raw_key)
         self.key_hash = _local_key_hash(validated)
+        self.provider = provider
 
         def reveal() -> str:
             return validated
@@ -425,9 +511,14 @@ class RuntimeKeyHandle:
     def bearer_header(self) -> Dict[str, str]:
         return {"Authorization": "Bearer " + self._reveal()}
 
+    def secret(self) -> str:
+        """The raw key for the broker's outbound request only; never store or log it."""
+
+        return self._reveal()
+
     def revoke(self) -> None:
         def revoked() -> str:
-            raise OpenRouterKeyError("runtime key handle has been revoked")
+            raise ProviderKeyError("runtime key handle has been revoked")
 
         self._reveal = revoked
 
@@ -467,14 +558,14 @@ def decrypt_runtime_key(
     except ArenaContractError:
         raise
     except Exception as exc:  # noqa: BLE001 - every decrypt failure is closed
-        raise OpenRouterKeyError("envelope decryption failed: %s" % type(exc).__name__) from None
+        raise ProviderKeyError("envelope decryption failed: %s" % type(exc).__name__) from None
     try:
         raw_key = bytes(plaintext).decode("utf-8")
     except UnicodeDecodeError:
-        raise OpenRouterKeyError("decrypted runtime key is not UTF-8 text") from None
-    handle = RuntimeKeyHandle(raw_key)
+        raise ProviderKeyError("decrypted runtime key is not UTF-8 text") from None
+    handle = RuntimeKeyHandle(raw_key, validated["provider"])
     if handle.key_hash != validated["key_hash"]:
-        raise OpenRouterKeyError("envelope key_hash does not match the decrypted key")
+        raise ProviderKeyError("envelope key_hash does not match the decrypted key")
     return handle
 
 
@@ -484,11 +575,13 @@ def decrypt_runtime_key(
 
 PREFLIGHT_RECORD_FIELDS = (
     "key_hash",
+    "provider",
     "limit_microusd",
     "limit_remaining_microusd",
     "usage_microusd",
     "observed_at",
     "preflight_status",
+    "probe",
 )
 _MICROUSD = Decimal(1_000_000)
 
@@ -504,13 +597,13 @@ def usd_to_microusd(value: Any, field_name: str) -> Optional[int]:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
-        raise OpenRouterKeyError("OpenRouter key preflight returned a non-numeric %s" % field_name)
+        raise ProviderKeyError("OpenRouter key preflight returned a non-numeric %s" % field_name)
     try:
         amount = Decimal(str(value).strip())
     except (InvalidOperation, ValueError):
-        raise OpenRouterKeyError("OpenRouter key preflight returned a non-numeric %s" % field_name) from None
+        raise ProviderKeyError("OpenRouter key preflight returned a non-numeric %s" % field_name) from None
     if not amount.is_finite():
-        raise OpenRouterKeyError("OpenRouter key preflight returned a non-finite %s" % field_name)
+        raise ProviderKeyError("OpenRouter key preflight returned a non-finite %s" % field_name)
     return int((amount * _MICROUSD).to_integral_value(rounding=ROUND_FLOOR))
 
 
@@ -535,6 +628,20 @@ def preflight_record(
     ``None`` is an unlimited key and yields ``None`` for the remaining limit.
     """
 
+    if handle.provider != "openrouter":
+        probe = preflight_provider_key(handle.provider, handle._reveal(), timeout_seconds=timeout_seconds, urlopen=urlopen)
+        record = {
+            "key_hash": handle.key_hash,
+            "provider": handle.provider,
+            "limit_microusd": None,
+            "limit_remaining_microusd": None,
+            "usage_microusd": None,
+            "observed_at": _utc_now_iso(now),
+            "preflight_status": "ok",
+            "probe": probe,
+        }
+        check_strict_document(record, REQUEST_LIMITS)
+        return record
     metadata = preflight_openrouter_key(
         handle._reveal(),
         timeout_seconds=timeout_seconds,
@@ -546,25 +653,27 @@ def preflight_record(
     else:
         remaining = metadata.get("limit_remaining")
         if remaining is None:
-            raise OpenRouterKeyError("OpenRouter key preflight returned a limit without a remaining balance")
+            raise ProviderKeyError("OpenRouter key preflight returned a limit without a remaining balance")
         limit_remaining_microusd = usd_to_microusd(remaining, "limit_remaining")
     usage = metadata.get("usage")
     if usage is None:
-        raise OpenRouterKeyError("OpenRouter key preflight returned no usage")
+        raise ProviderKeyError("OpenRouter key preflight returned no usage")
     usage_microusd = usd_to_microusd(usage, "usage")
     record = {
         "key_hash": handle.key_hash,
+        "provider": "openrouter",
         "limit_microusd": limit_microusd,
         "limit_remaining_microusd": limit_remaining_microusd,
         "usage_microusd": usage_microusd,
         "observed_at": _utc_now_iso(now),
         "preflight_status": "ok",
+        "probe": {"is_free_tier": metadata.get("is_free_tier")},
     }
     check_strict_document(record, REQUEST_LIMITS)
     return record
 
 
-def register_openrouter_key(
+def register_provider_key(
     envelope: Mapping[str, Any],
     *,
     decryptor: Decryptor,
@@ -588,6 +697,9 @@ def register_openrouter_key(
         handle.revoke()
 
 
+register_openrouter_key = register_provider_key  # historical name
+
+
 __all__ = [
     "Decryptor",
     "ENVELOPE_FIELDS",
@@ -596,7 +708,7 @@ __all__ = [
     "LocalRsaDecryptor",
     "OPENROUTER_KEY_INFO_URL",
     "OPENROUTER_KEY_RE",
-    "OpenRouterKeyError",
+    "ProviderKeyError",
     "PREFLIGHT_RECORD_FIELDS",
     "RECIPIENT_ALGORITHM",
     "RECIPIENT_DOCUMENT_FIELDS",
@@ -610,6 +722,11 @@ __all__ = [
     "recipient_document",
     "recipient_key_hash",
     "register_openrouter_key",
+    "register_provider_key",
+    "preflight_provider_key",
+    "validate_provider_key_format",
+    "ProviderKeyError",
+    "PROVIDER_KEY_PATTERNS",
     "strict_openrouter_provider_policy",
     "usd_to_microusd",
     "validate_envelope_shape",

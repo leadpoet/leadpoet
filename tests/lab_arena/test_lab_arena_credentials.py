@@ -291,8 +291,8 @@ def test_recipient_document_rejects_non_rsa_keys() -> None:
 
 def test_envelope_roundtrip(recipient: Dict[str, Any], decryptor: creds.LocalRsaDecryptor) -> None:
     envelope = creds.encrypt_runtime_key(recipient, CANARY_KEY)
-    assert set(envelope) == {"schema_version", "algorithm", "recipient_key_hash", "key_hash", "ciphertext_b64"}
-    assert envelope["schema_version"] == "leadpoet.lab_arena.openrouter_envelope.v1"
+    assert set(envelope) == {"schema_version", "algorithm", "provider", "recipient_key_hash", "key_hash", "ciphertext_b64"}
+    assert envelope["schema_version"] == "leadpoet.lab_arena.provider_key_envelope.v1" and envelope["provider"] == "openrouter"
     assert envelope["algorithm"] == "RSAES_OAEP_SHA_256"
     assert envelope["recipient_key_hash"] == recipient["public_key_hash"] == decryptor.recipient_key_hash
     assert envelope["key_hash"] == creds._local_key_hash(CANARY_KEY)
@@ -380,6 +380,7 @@ def test_decrypted_plaintext_must_be_a_valid_key(recipient: Dict[str, Any], rsa_
     envelope = {
         "schema_version": creds.ENVELOPE_SCHEMA_VERSION,
         "algorithm": creds.RECIPIENT_ALGORITHM,
+        "provider": "openrouter",
         "recipient_key_hash": recipient["public_key_hash"],
         "key_hash": "0" * 64,
         "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
@@ -433,11 +434,13 @@ def test_register_returns_non_secret_record(recipient: Dict[str, Any], decryptor
     assert tuple(record) == creds.PREFLIGHT_RECORD_FIELDS
     assert record == {
         "key_hash": creds._local_key_hash(CANARY_KEY),
+        "provider": "openrouter",
         "limit_microusd": 10_000_000,
         "limit_remaining_microusd": 9_750_000,
         "usage_microusd": 250_000,
         "observed_at": "2026-09-02T12:30:45Z",
         "preflight_status": "ok",
+        "probe": {"is_free_tier": False},
     }
     assert fake.calls[0][1] == 5
     assert fake.calls[0][0].get_header("Authorization") == "Bearer " + CANARY_KEY
@@ -651,3 +654,55 @@ def test_canary_key_never_leaks(recipient: Dict[str, Any], decryptor: creds.Loca
     assert leaks == []
     # The only sanctioned exit is the bearer header for the broker's outbound request.
     assert handle.bearer_header() == {"Authorization": "Bearer " + CANARY_KEY}
+
+
+# ---------------------------------------------------------------------------
+# Every provider: Scrapingdog and Deepline keys share the envelope and probe path
+# ---------------------------------------------------------------------------
+
+SCRAPINGDOG_CANARY = "sdcanary" + "k" * 24
+DEEPLINE_CANARY = "dl_canary_" + "m" * 30
+
+
+@pytest.mark.parametrize(
+    "provider, raw_key, body, expected_probe",
+    [
+        ("scrapingdog", SCRAPINGDOG_CANARY, b'{"requestLimit": 1000, "requestUsed": 12, "pack": "lite"}', {"request_limit": 1000, "request_used": 12}),
+        ("deepline", DEEPLINE_CANARY, b'{"id": "exa_search", "inputSchema": {"type": "object"}, "pricing": {"credits": 0.07}}', {"tool": "exa_search", "has_input_schema": True}),
+    ],
+)
+def test_other_providers_register_through_the_same_envelope_and_a_read_only_probe(recipient, decryptor, provider, raw_key, body, expected_probe) -> None:
+    fake = FakeUrlopen(body=body)
+    envelope = creds.encrypt_runtime_key(recipient, raw_key, provider=provider)
+    assert envelope["provider"] == provider and envelope["key_hash"] == creds._local_key_hash(raw_key)
+    record = creds.register_provider_key(envelope, decryptor=decryptor, urlopen=fake, expected_recipient_key_hash=recipient["public_key_hash"])
+    assert record["provider"] == provider and record["preflight_status"] == "ok" and record["probe"] == expected_probe
+    assert record["limit_microusd"] is None and record["key_hash"] == envelope["key_hash"]
+    assert set(record) == set(creds.PREFLIGHT_RECORD_FIELDS)
+    request = fake.calls[0][0]
+    if provider == "scrapingdog":
+        assert request.full_url.startswith(creds.SCRAPINGDOG_ACCOUNT_URL + "?api_key=") and raw_key in request.full_url
+        assert request.get_header("Authorization") is None
+    else:
+        assert request.full_url == creds.DEEPLINE_PROBE_URL and request.get_header("Authorization") == "Bearer " + raw_key
+    assert request.get_method() == "GET"
+    assert raw_key not in repr(record)
+
+
+def test_other_provider_probe_failures_and_bad_keys_fail_closed(recipient, decryptor) -> None:
+    for provider, raw_key in (("scrapingdog", SCRAPINGDOG_CANARY), ("deepline", DEEPLINE_CANARY)):
+        envelope = creds.encrypt_runtime_key(recipient, raw_key, provider=provider)
+        error = HTTPError("https://x", 401, "no", {}, None)
+        with pytest.raises(creds.ProviderKeyError, match="invalid or unauthorized"):
+            creds.register_provider_key(envelope, decryptor=decryptor, urlopen=FakeUrlopen(error=error), expected_recipient_key_hash=recipient["public_key_hash"])
+        with pytest.raises(creds.ProviderKeyError, match="no key metadata"):
+            creds.register_provider_key(envelope, decryptor=decryptor, urlopen=FakeUrlopen(body=b"[]"), expected_recipient_key_hash=recipient["public_key_hash"])
+    for provider, bad in (("scrapingdog", "short"), ("scrapingdog", "has space in it and more"), ("deepline", "x" * 5), ("nope", DEEPLINE_CANARY)):
+        with pytest.raises(creds.ProviderKeyError):
+            creds.validate_provider_key_format(provider, bad)
+    # A Deepline envelope cannot be passed off as an OpenRouter key: the provider is bound in the envelope.
+    envelope = creds.encrypt_runtime_key(recipient, DEEPLINE_CANARY, provider="deepline")
+    handle = creds.decrypt_runtime_key(envelope, decryptor)
+    assert handle.provider == "deepline" and handle.secret() == DEEPLINE_CANARY
+    with pytest.raises(creds.ArenaContractError):
+        creds.validate_envelope_shape({**envelope, "provider": "exa"}, recipient["public_key_hash"])

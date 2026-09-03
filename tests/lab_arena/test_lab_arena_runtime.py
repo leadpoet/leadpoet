@@ -269,7 +269,7 @@ def test_oci_spec_invariants(tmp_path):
     assert env["PYTHONHASHSEED"] == "12345" and env["LAB_ARENA_RANDOM_SEED"] == "12345"
     assert env["LAB_ARENA_EVALUATION_DATE"] == "2026-09-02"
     assert env["LAB_ARENA_WORKER_SOCKET"] == "/run/lab_arena/worker.sock"
-    assert env["EXA_BASE_URL"] == "https://api.exa.ai"
+    assert env["DEEPLINE_BASE_URL"] == "https://code.deepline.com" and "EXA_BASE_URL" not in env
     assert env["SCRAPINGDOG_BASE_URL"] == "https://api.scrapingdog.com"
     assert env["OPENROUTER_BASE_URL"] == "https://openrouter.ai/api/v1"
     assert env["LAB_ARENA_INPUT_PATH"] == "/input/icp.json" and env["LAB_ARENA_OUTPUT_PATH"] == "/output/companies.json"

@@ -22,6 +22,7 @@ from bittensor_wallet import Keypair
 
 from lab_arena import broker as br, contracts, runner as rn, runtime, service as svc, shim, signing, verify
 from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.credentials import RuntimeKeyHandle
 from tests.lab_arena.lab_arena_benchmark_tape import TapeProvider, load_tape
 from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_model_release import REPO as MODEL_REPO, TOKEN as MODEL_TOKEN, FakeGitHub
@@ -29,8 +30,11 @@ from lab_arena import model_release as mr
 import httpx
 
 KEYS: Dict[str, Keypair] = {}
-CANARY_EXA_KEY = "exa-canary-" + "x" * 30
-CANARY_DOG_KEY = "dog-canary-" + "y" * 30
+# Miners' own provider keys, injected by the fake broker: none may ever reach a row, object, event, or bundle.
+CANARY_DEEPLINE_KEY = "dl_canary_" + "x" * 30
+CANARY_DOG_KEY = "dogcanary" + "y" * 30
+CANARY_OPENROUTER_KEY = "sk-or-v1-" + "o" * 40
+CANARY_KEYS = {"deepline": CANARY_DEEPLINE_KEY, "scrapingdog": CANARY_DOG_KEY, "openrouter": CANARY_OPENROUTER_KEY}
 
 
 def assert_canary_absent(harness, connect) -> None:
@@ -39,14 +43,15 @@ def assert_canary_absent(harness, connect) -> None:
     for path in harness.objects_root.rglob("*"):
         if path.is_file():
             data = path.read_bytes()
-            assert CANARY_EXA_KEY.encode() not in data and CANARY_DOG_KEY.encode() not in data, path
+            assert all(canary.encode() not in data for canary in CANARY_KEYS.values()), path
     connection = connect()
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
             for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_events", "lab_arena_accounts", "lab_arena_ledger"):
-                cursor.execute("SELECT count(*) FROM public.%s WHERE row_to_json(%s)::text LIKE %%s OR row_to_json(%s)::text LIKE %%s" % (table, table, table), ("%" + CANARY_EXA_KEY + "%", "%" + CANARY_DOG_KEY + "%"))
-                assert cursor.fetchone()[0] == 0, table
+                for canary in CANARY_KEYS.values():
+                    cursor.execute("SELECT count(*) FROM public.%s WHERE row_to_json(%s)::text LIKE %%s" % (table, table), ("%" + canary + "%",))
+                    assert cursor.fetchone()[0] == 0, (table, canary)
     finally:
         connection.close()
 
@@ -130,7 +135,7 @@ def deterministic_scorer(companies, icp, is_reference_model):
 
 
 class ModelSandbox:
-    """A fake model: reads the ICP, calls Exa through the shim bridge, writes companies."""
+    """A fake model: reads the ICP, calls Deepline's Exa search through the shim bridge, writes companies."""
 
     def __init__(self, *, flavor_by_digest: Dict[str, str], broken_digests: set):
         self.flavor_by_digest = flavor_by_digest
@@ -147,7 +152,7 @@ class ModelSandbox:
 
         os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
         try:
-            status, _headers, body = shim.dispatch("exa.search", {"query": icp["prompt"][:200]}, 5000)
+            status, _headers, body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": icp["prompt"][:200]}}, 5000)
             assert status == 200
         finally:
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
@@ -262,7 +267,7 @@ class Harness:
         harness = self
 
         def broker_factory(service, round_row):
-            return br.Broker(store=store, credentials=br.ArenaProviderCredentials(CANARY_EXA_KEY, CANARY_DOG_KEY), openrouter_key_for=lambda hotkey: None, price_table=price_table(), allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=FakeProviderTransport(), clock=harness.clock)
+            return br.Broker(store=store, key_for=lambda hotkey, provider: RuntimeKeyHandle(CANARY_KEYS[provider], provider), price_table=price_table(), allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=FakeProviderTransport(), clock=harness.clock)
 
         config = svc.ServiceConfig(
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
@@ -274,12 +279,18 @@ class Harness:
         )
         return svc.ArenaService(config)
 
-    def fund_and_register(self, hotkey: str, *, balance=5_000_000, preflight="ok"):
-        store = self.service.store
-        store.credit_deposit(miner_hotkey=hotkey, payment_reference="finney:0x" + hashlib.sha256(hotkey.encode()).hexdigest() + ":1", amount_microusd=balance, deposit_doc={"test": True})
-        store.upsert_account_credential(hotkey, "ciphertext-" + hotkey[:8], hashlib.sha256(hotkey.encode()).hexdigest(), {"preflight_status": preflight, "key_hash": hashlib.sha256(hotkey.encode()).hexdigest(), "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
+    def fund_and_register(self, hotkey: str, *, preflight="ok", providers=contracts.MINER_KEY_PROVIDERS):
+        """Register the miner's own key for each provider; the account is eligible only with all three."""
 
-    def submit(self, flavor: str, round_id: str, *, balance: int = 5_000_000, preflight: str = "ok") -> str:
+        store = self.service.store
+        for provider in providers:
+            key_hash = hashlib.sha256((hotkey + provider).encode()).hexdigest()
+            record = {"preflight_status": preflight, "key_hash": key_hash, "provider": provider, "limit_microusd": 20_000_000 if provider == "openrouter" else None,
+                      "limit_remaining_microusd": 10_000_000 if provider == "openrouter" else None, "usage_microusd": 0 if provider == "openrouter" else None,
+                      "observed_at": "2026-09-01T12:00:00Z", "probe": {}}
+            store.upsert_account_credential(hotkey, provider, "ciphertext-%s-%s" % (hotkey[:8], provider), key_hash, record)
+
+    def submit(self, flavor: str, round_id: str, *, preflight: str = "ok", providers=contracts.MINER_KEY_PROVIDERS) -> str:
         miner = keypair("svc-miner-" + flavor)
         archive = package_bytes(flavor)
         envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body={"package_hash": contracts.hash_bytes(archive), "consent": {"source_publication": True, "public_rerun": True}}, timestamp=int(self.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
@@ -289,7 +300,7 @@ class Harness:
         self.flavors[digest] = flavor
         accepted = self.service.accept_built_submission(round_id, result["submission_id"], image_digest=digest, source_tree_hash=result["source_tree_hash"], scan_result={"mode": "raise", "findings": 0}, screening_result={"accepted": True})
         assert accepted["status"] == "ok", accepted
-        self.fund_and_register(miner.ss58_address, balance=balance, preflight=preflight)
+        self.fund_and_register(miner.ss58_address, preflight=preflight, providers=providers)
         return result["submission_id"]
 
     def runner(self, index: int, parallel: int = 4) -> rn.Runner:
@@ -408,7 +419,8 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     assert final["submission_scores"][winner] == max(final["submission_scores"].values())
     assert {entry["runner_hotkey"] for entry in bundle["runner_fractions"]} <= set(harness.runner_keys)
     assert abs(sum(entry["executed_fraction"] for entry in bundle["runner_fractions"]) - 1.0) < 1e-6
-    assert all(cost["providers"] == ["exa"] and cost["total_microusd"] == 50 * 5000 for cost in bundle["cost_totals"].values())
+    # Every call went to the miner's own Deepline key: no Arena cost, one counted call per ICP.
+    assert all(cost["providers"] == ["deepline"] and cost["total_microusd"] == 0 and cost["calls"] == {"deepline": 50} for cost in bundle["cost_totals"].values())
     # Public reads and the reward-basis lookup.
     assert service.public_reward_basis(24801)["reward_basis_hash"] == row["reward_basis_hash"]
     assert service.public_reward_basis(24800) is None
@@ -760,28 +772,34 @@ def test_credential_registration_stores_the_envelope_the_broker_decrypts_and_fun
     current = service.current_round()
     request_round = current["round_id"] if current else "arena-0000-00-00"
     request = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id=request_round, hotkey=miner.ss58_address, body={"envelope": envelope}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
-    result = service.handle_credential(request, register=register)
-    assert result["status"] == "ok" and result["preflight_status"] == "ok" and result["observed_limit_remaining_microusd"] == 20_500_000
+    result = service.handle_credential(request, register=register, provider="openrouter")
+    # One key alone leaves the account ineligible; the OpenRouter limit is still observed.
+    assert result["status"] == "ok" and result["preflight_status"] == "failed" and result["observed_limit_remaining_microusd"] == 20_500_000
+    assert result["credentials"]["openrouter"]["has_key"] is True and "ciphertext" not in result["credentials"]["openrouter"]
     account = service.store.get_account(miner.ss58_address)
-    stored = json.loads(account["openrouter_ciphertext"])
-    assert raw_key not in account["openrouter_ciphertext"]
-    # The broker identity decrypts the stored envelope per run (wiring.openrouter_key_for path).
+    stored = json.loads(account["credentials"]["openrouter"]["ciphertext"])
+    assert raw_key not in json.dumps(account)
+    # The broker identity decrypts the stored envelope per call (wiring.key_for path).
     handle = creds.decrypt_runtime_key(stored, decryptor, expected_recipient_key_hash=recipient["public_key_hash"])
-    assert handle.bearer_header()["Authorization"] == "Bearer " + raw_key
-    # Funding confirmation is signed, scoped, and credited through the store exactly once.
-    confirmations = []
-
-    def confirm(hotkey, body):
-        confirmations.append((hotkey, body["block_hash"]))
-        return service.store.credit_deposit(miner_hotkey=hotkey, payment_reference="finney:0x" + hashlib.sha256(body["block_hash"].encode()).hexdigest() + ":1", amount_microusd=1_500_000, deposit_doc={"block_hash": body["block_hash"]})
-
-    funding = contracts.build_signed_request(scope=contracts.SCOPE_FUNDING, round_id=request_round, hotkey=miner.ss58_address, body={"block_hash": "0x" + "ab" * 32, "extrinsic_index": 2}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
-    first = service.handle_funding(funding, confirm=confirm)
-    second = service.handle_funding(funding, confirm=confirm)
-    assert first["credited"] is True and second["credited"] is False and second["idempotent"] is True
-    assert service.store.get_account(miner.ss58_address)["balance_microusd"] == 1_500_000
-    with pytest.raises(svc.ServiceError, match="signature_invalid"):
-        service.handle_funding(dict(funding, body={"block_hash": "0x" + "cd" * 32, "extrinsic_index": 2}), confirm=confirm)
+    assert handle.bearer_header()["Authorization"] == "Bearer " + raw_key and handle.provider == "openrouter"
+    # The path provider must match the envelope's provider.
+    with pytest.raises(svc.ServiceError, match="provider_invalid"):
+        service.handle_credential(request, register=register, provider="deepline")
+    # The other two providers complete the set through the same route; the probe is read-only.
+    other_keys = {"deepline": "dl_" + "k" * 40, "scrapingdog": "dogkey" + "s" * 30}
+    for provider, key in other_keys.items():
+        other_envelope = creds.encrypt_runtime_key(recipient, key, provider=provider)
+        other_request = contracts.build_signed_request(scope=contracts.SCOPE_CREDENTIAL, round_id=request_round, hotkey=miner.ss58_address, body={"envelope": other_envelope}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+        result = service.handle_credential(other_request, register=register, provider=provider)
+        assert result["credentials"][provider]["preflight_status"] == "ok"
+    assert result["preflight_status"] == "ok" and set(result["credentials"]) == set(contracts.MINER_KEY_PROVIDERS)
+    account = service.store.get_account(miner.ss58_address)
+    for provider, key in other_keys.items():
+        assert key not in json.dumps(account)
+        assert creds.decrypt_runtime_key(json.loads(account["credentials"][provider]["ciphertext"]), decryptor).secret() == key
+    # A failed re-preflight of one provider makes the whole account ineligible again.
+    service.store.record_preflight(miner.ss58_address, "scrapingdog", {"preflight_status": "failed", "key_hash": account["credentials"]["scrapingdog"]["key_hash"], "provider": "scrapingdog"})
+    assert service.store.get_account(miner.ss58_address)["preflight_status"] == "failed"
 
 
 def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_reward(connect, tmp_path):
@@ -792,7 +810,7 @@ def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_r
     if latest is None or latest.get("king_outcome") not in ("crowned", "defended"):
         pytest.skip("this database has no published king yet")
     king_hotkey = latest["king_hotkey"]
-    service.store.record_preflight(king_hotkey, {"preflight_status": "failed", "key_hash": service.store.get_account(king_hotkey)["openrouter_key_hash"], "limit_microusd": 0, "limit_remaining_microusd": 0, "usage_microusd": 0})
+    service.store.record_preflight(king_hotkey, "openrouter", {"preflight_status": "failed", "provider": "openrouter", "key_hash": service.store.get_account(king_hotkey)["credentials"]["openrouter"]["key_hash"], "limit_microusd": 0, "limit_remaining_microusd": 0, "usage_microusd": 0})
     configuration = service.create_round(datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc))
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
@@ -822,7 +840,7 @@ def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_r
     assert final["submission_scores"][king["submission_id"]] == 0.0
     assert all(r["cause"] == "preflight_failed" for r in final["rows"] if r["submission_id"] == king["submission_id"])
     # Restore the old king's preflight so later tests are unaffected.
-    service.store.record_preflight(king_hotkey, {"preflight_status": "ok", "key_hash": service.store.get_account(king_hotkey)["openrouter_key_hash"], "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
+    service.store.record_preflight(king_hotkey, "openrouter", {"preflight_status": "ok", "provider": "openrouter", "key_hash": service.store.get_account(king_hotkey)["credentials"]["openrouter"]["key_hash"], "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
 
 
 def test_freeze_checks_eligibility_before_the_cap_and_records_every_exclusion(connect, tmp_path):
@@ -835,7 +853,7 @@ def test_freeze_checks_eligibility_before_the_cap_and_records_every_exclusion(co
     assert configuration["max_challengers"] == 2
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
-    unfunded = harness.submit("Zulu-1", round_id, balance=contracts.MIN_FUNDED_BALANCE_MICROUSD - 1)
+    missing_key = harness.submit("Zulu-1", round_id, providers=("openrouter", "scrapingdog"))  # no Deepline key
     unpreflighted = harness.submit("Zulu-2", round_id, preflight="failed")
     entered_a = harness.submit("Zulu-3", round_id)
     entered_b = harness.submit("Zulu-4", round_id)
@@ -846,7 +864,7 @@ def test_freeze_checks_eligibility_before_the_cap_and_records_every_exclusion(co
     participants = service.store.get_round(round_id)["participants"]
     assert {p["submission_id"] for p in participants if not p["is_king"]} == {entered_a, entered_b}
     by_id = {row["submission_id"]: row for row in service.store.list_submissions(round_id)}
-    assert (by_id[unfunded]["status"], by_id[unfunded]["rejection_rule"]) == ("rejected", "funding.insufficient")
+    assert (by_id[missing_key]["status"], by_id[missing_key]["rejection_rule"]) == ("rejected", "credential.preflight_not_ok")
     assert (by_id[unpreflighted]["status"], by_id[unpreflighted]["rejection_rule"]) == ("rejected", "credential.preflight_not_ok")
     assert (by_id[overflow]["status"], by_id[overflow]["rejection_rule"]) == ("rejected", "capacity.round_full")
     assert by_id[entered_a]["status"] == by_id[entered_b]["status"] == "frozen"

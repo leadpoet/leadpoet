@@ -48,10 +48,8 @@ class StubService:
         self.calls["submission"] = (envelope, len(archive))
         return {"status": "uploaded", "submission_id": "sub-1"}
 
-    def handle_funding(self, envelope, *, confirm):
-        return confirm("hotkey", envelope)
-
-    def handle_credential(self, envelope, *, register):
+    def handle_credential(self, envelope, *, register, provider=None):
+        self.calls["credential_provider"] = provider
         return register(envelope)
 
     def handle_claim(self, envelope):
@@ -75,7 +73,7 @@ class StubService:
 @pytest.fixture()
 def client():
     service = StubService()
-    app = create_app(service, recipient_document={"schema_version": contracts.RECIPIENT_DOCUMENT_SCHEMA_VERSION, "public_key_hash": contracts.document_hash("r")}, funding_confirm=lambda hotkey, body: {"credited": True}, credential_register=lambda envelope: {"key_hash": "k"})
+    app = create_app(service, recipient_document={"schema_version": contracts.RECIPIENT_DOCUMENT_SCHEMA_VERSION, "public_key_hash": contracts.document_hash("r")}, credential_register=lambda envelope: {"key_hash": "k"})
     return TestClient(app), service
 
 
@@ -100,7 +98,7 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     http, service = client
     claim = http.post("/arena/v1/runs/claim", content=json.dumps({"scope": contracts.SCOPE_CLAIM}))
     assert claim.status_code == 200 and service.calls["claim"] == {"scope": contracts.SCOPE_CLAIM}
-    frame = {"operation_id": "exa.search", "parameters": {"query": "x"}, "timeout_ms": 1000, "action_sequence": 0}
+    frame = {"operation_id": "deepline.execute", "parameters": {"tool": "exa_search", "payload": {"query": "x"}}, "timeout_ms": 1000, "action_sequence": 0}
     no_lease = http.post("/arena/v1/runs/r1/provider", content=json.dumps(frame))
     assert no_lease.status_code == 401
     bad_lease = http.post("/arena/v1/runs/r1/provider", content=json.dumps(frame), headers={"x-lab-arena-lease": "short"})
@@ -127,5 +125,8 @@ def test_submission_route_needs_envelope_header_and_bounds_the_package(client):
     assert response.status_code == 200 and service.calls["submission"] == (envelope, len(b"tarball-bytes"))
     assert http.post("/arena/v1/submissions", content=b"x").status_code == 400
     assert http.post("/arena/v1/submissions", content=b"x", headers={"x-lab-arena-envelope": "{bad"}).status_code == 400
-    assert http.post("/arena/v1/funding/confirm", content=json.dumps({"scope": contracts.SCOPE_FUNDING})).json() == {"credited": True}
-    assert http.post("/arena/v1/credentials/openrouter", content=json.dumps({"scope": contracts.SCOPE_CREDENTIAL})).json() == {"key_hash": "k"}
+    assert http.post("/arena/v1/funding/confirm", content=json.dumps({"scope": "gone"})).status_code == 404
+    for provider in contracts.MINER_KEY_PROVIDERS:
+        assert http.post("/arena/v1/credentials/%s" % provider, content=json.dumps({"scope": contracts.SCOPE_CREDENTIAL})).json() == {"key_hash": "k"}
+        assert service.calls["credential_provider"] == provider
+    assert http.post("/arena/v1/credentials/exa", content=json.dumps({"scope": contracts.SCOPE_CREDENTIAL})).status_code == 404

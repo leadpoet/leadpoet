@@ -150,18 +150,18 @@ def assert_frame_is_minimal(frame: dict, raw: bytes, operation_id: str) -> None:
 
 def test_urllib_post_sends_one_minimal_frame(worker):
     request = urllib.request.Request(
-        "https://api.exa.ai/search",
-        data=json.dumps({"query": "fintech"}).encode("utf-8"),
+        "https://code.deepline.com/api/v2/integrations/exa_search/execute",
+        data=json.dumps({"payload": {"query": "fintech"}}).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": "model/1.0"},
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         assert response.status == 200
-        assert json.loads(response.read()) == {"ok": True, "operation_id": "exa.search"}
+        assert json.loads(response.read()) == {"ok": True, "operation_id": "deepline.execute"}
         assert response.headers["content-type"] == "application/json"
         assert response.headers.get("x-should-not-leak") is None
     assert len(worker.frames) == 1
-    assert_frame_is_minimal(worker.frames[0], worker.raw_frames[0], "exa.search")
-    assert worker.frames[0]["parameters"] == {"query": "fintech"}
+    assert_frame_is_minimal(worker.frames[0], worker.raw_frames[0], "deepline.execute")
+    assert worker.frames[0]["parameters"] == {"tool": "exa_search", "payload": {"query": "fintech"}}
     assert worker.frames[0]["timeout_ms"] == 5000
 
 
@@ -175,14 +175,15 @@ def test_urllib_error_status_raises_http_error(worker):
 
 
 def test_requests_post_and_get(worker):
-    response = requests.post("https://api.exa.ai/contents", json={"urls": ["https://example.com/"]}, timeout=3)
+    response = requests.post("https://code.deepline.com/api/v2/integrations/exa_contents/execute", json={"payload": {"urls": ["https://example.com/"], "text": True}}, timeout=3)
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "operation_id": "exa.contents"}
+    assert response.json() == {"ok": True, "operation_id": "deepline.execute"}
     assert "x-should-not-leak" not in response.headers
     response = requests.get("https://api.scrapingdog.com/scrape", params={"url": "https://example.com/jobs?page=2", "dynamic": "true"}, timeout=(2, 4))
     assert response.ok
     assert len(worker.frames) == 2
-    assert_frame_is_minimal(worker.frames[0], worker.raw_frames[0], "exa.contents")
+    assert_frame_is_minimal(worker.frames[0], worker.raw_frames[0], "deepline.execute")
+    assert worker.frames[0]["parameters"] == {"tool": "exa_contents", "payload": {"urls": ["https://example.com/"], "text": True}}
     assert_frame_is_minimal(worker.frames[1], worker.raw_frames[1], "scrapingdog.scrape")
     assert worker.frames[1]["parameters"] == {"url": "https://example.com/jobs?page=2", "dynamic": True}
     assert worker.frames[1]["timeout_ms"] == 4000
@@ -219,7 +220,7 @@ def test_aiohttp_get_and_post(worker):
                 assert response.ok
                 assert (await response.json())["operation_id"] == "scrapingdog.scrape"
                 assert "x-should-not-leak" not in response.headers
-            async with session.post("https://api.exa.ai/search", json={"query": "x", "includeDomains": ["Example.com"]}) as response:
+            async with session.post("https://code.deepline.com/api/v2/integrations/exa_search/execute", json={"payload": {"query": "x", "includeDomains": ["Example.com"]}}) as response:
                 assert (await response.text()).startswith("{")
                 response.raise_for_status()
 
@@ -227,8 +228,9 @@ def test_aiohttp_get_and_post(worker):
     assert len(worker.frames) == 2
     assert_frame_is_minimal(worker.frames[0], worker.raw_frames[0], "scrapingdog.scrape")
     assert worker.frames[0]["timeout_ms"] == 9000
-    assert_frame_is_minimal(worker.frames[1], worker.raw_frames[1], "exa.search")
-    assert worker.frames[1]["parameters"] == {"query": "x", "includeDomains": ["example.com"]}
+    assert_frame_is_minimal(worker.frames[1], worker.raw_frames[1], "deepline.execute")
+    # Tool payloads are opaque: passed through byte-for-byte, never normalized.
+    assert worker.frames[1]["parameters"] == {"tool": "exa_search", "payload": {"query": "x", "includeDomains": ["Example.com"]}}
 
 
 def test_aiohttp_error_status_raise_for_status(worker):
@@ -255,9 +257,10 @@ def test_aiohttp_error_status_raise_for_status(worker):
         "https://example.com/",
         "http://127.0.0.1:8080/",
         "http://localhost/",
-        "https://api.exa.ai/search/extra",
-        "https://api.exa.ai:8443/search",
-        "https://user@api.exa.ai/search",
+        "https://code.deepline.com/api/v2/integrations/exa_search/execute/extra",
+        "https://code.deepline.com:8443/api/v2/integrations/exa_search/execute",
+        "https://user@code.deepline.com/api/v2/integrations/exa_search/execute",
+        "https://code.deepline.com/api/v2/integrations/execute",
         "https://openrouter.ai/api/v1/models",
     ],
 )
@@ -281,25 +284,25 @@ def test_unknown_targets_fail_inside_every_client_without_a_frame(worker, url):
 
 def test_credential_headers_and_unknown_fields_never_reach_the_worker(worker):
     with pytest.raises(requests.exceptions.ConnectionError) as excinfo:
-        requests.post("https://api.exa.ai/search", json={"query": "x"}, headers={"Authorization": "Bearer sk-live-secret"})
+        requests.post("https://code.deepline.com/api/v2/integrations/exa_search/execute", json={"payload": {"query": "x"}}, headers={"Authorization": "Bearer sk-live-secret"})
     assert "forbidden_header" in str(excinfo.value)
     assert "sk-live-secret" not in str(excinfo.value)
     with pytest.raises(httpx.ConnectError) as httpx_error:
-        httpx.post("https://api.exa.ai/search", json={"query": "x", "numResults": 100})
+        httpx.post("https://code.deepline.com/api/v2/integrations/exa_search/execute", json={"payload": {"query": "x"}, "numResults": 100})
     assert "unknown_field" in str(httpx_error.value)
     with pytest.raises(urllib.error.URLError):
-        urllib.request.urlopen(urllib.request.Request("https://api.exa.ai/search", data=b"not json", method="POST"))
+        urllib.request.urlopen(urllib.request.Request("https://code.deepline.com/api/v2/integrations/exa_search/execute", data=b"not json", method="POST"))
     assert worker.frames == []
 
 
 def test_worker_error_frame_surfaces_as_generic_client_error(worker):
     worker.reply = lambda frame: shim.encode_worker_error("budget_exhausted")
     with pytest.raises(requests.exceptions.ConnectionError) as excinfo:
-        requests.post("https://api.exa.ai/search", json={"query": "x"})
+        requests.post("https://code.deepline.com/api/v2/integrations/exa_search/execute", json={"payload": {"query": "x"}})
     assert str(excinfo.value) == "lab arena: budget_exhausted"
     worker.reply = lambda frame: shim.encode_worker_error("bad code with details sk-live")
     with pytest.raises(requests.exceptions.ConnectionError) as excinfo:
-        requests.post("https://api.exa.ai/search", json={"query": "x"})
+        requests.post("https://code.deepline.com/api/v2/integrations/exa_search/execute", json={"payload": {"query": "x"}})
     assert str(excinfo.value) == "lab arena: invalid_response"
 
 
@@ -341,8 +344,8 @@ def test_malformed_worker_responses_are_rejected(worker):
 def _frame(**overrides):
     frame = {
         "schema_version": shim.OPERATION_FRAME_SCHEMA_VERSION,
-        "operation_id": "exa.search",
-        "parameters": {"query": "x"},
+        "operation_id": "deepline.execute",
+        "parameters": {"tool": "exa_search", "payload": {"query": "x"}},
         "timeout_ms": 1000,
     }
     frame.update(overrides)
@@ -350,9 +353,9 @@ def _frame(**overrides):
 
 
 def test_validate_operation_frame_accepts_the_canonical_frame():
-    assert shim.validate_operation_frame(_frame()) == ("exa.search", {"query": "x"}, 1000)
-    encoded = shim.build_operation_frame("exa.search", {"query": "x"}, 999_999)
-    assert shim.decode_operation_frame(encoded)[2] == operations.OPERATIONS["exa.search"].timeout_seconds * 1000
+    assert shim.validate_operation_frame(_frame()) == ("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 1000)
+    encoded = shim.build_operation_frame("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 999_999)
+    assert shim.decode_operation_frame(encoded)[2] == operations.OPERATIONS["deepline.execute"].timeout_seconds * 1000
 
 
 @pytest.mark.parametrize(
@@ -362,13 +365,13 @@ def test_validate_operation_frame_accepts_the_canonical_frame():
         {**_frame(), "lease_token": "abc"},
         {**_frame(), "miner": "5F3sa2TJAWMqDhXG6jhV4N8ko9SKwHbcjkMLsg1JZbAf"},
         {**_frame(), "headers": {"Authorization": "x"}},
-        {**_frame(), "url": "https://api.exa.ai/search"},
+        {**_frame(), "url": "https://code.deepline.com/api/v2/integrations/exa_search/execute"},
         {k: v for k, v in _frame().items() if k != "timeout_ms"},
         _frame(schema_version="leadpoet.lab_arena.operation_frame.v0"),
         _frame(timeout_ms=0),
         _frame(timeout_ms=True),
         _frame(timeout_ms="1000"),
-        _frame(timeout_ms=operations.OPERATIONS["exa.search"].timeout_seconds * 1000 + 1),
+        _frame(timeout_ms=operations.OPERATIONS["deepline.execute"].timeout_seconds * 1000 + 1),
         "not a mapping",
         [],
     ],
@@ -384,10 +387,13 @@ def test_validate_operation_frame_rejects_unknown_operation_and_bad_parameters()
         shim.validate_operation_frame(_frame(operation_id="deepline.play"))
     assert excinfo.value.code == "no_matching_operation"
     with pytest.raises(operations.OperationRequestError) as request_error:
-        shim.validate_operation_frame(_frame(parameters={"query": "x", "url": "https://evil.example/"}))
+        shim.validate_operation_frame(_frame(parameters={"tool": "exa_search", "payload": {"query": "x"}, "url": "https://evil.example/"}))
     assert request_error.value.code == "forbidden_field"
     with pytest.raises(operations.OperationRequestError):
-        shim.validate_operation_frame(_frame(parameters={"query": "x", "numResults": 100}))
+        shim.validate_operation_frame(_frame(parameters={"tool": "exa_search", "payload": {"query": "x"}, "numResults": 100}))
+    with pytest.raises(operations.OperationRequestError) as nested:
+        shim.validate_operation_frame(_frame(parameters={"tool": "exa_search", "payload": {"query": "x", "headers": {"x-api-key": "k"}}}))
+    assert nested.value.code == "forbidden_field"
     with pytest.raises(shim.OperationFrameError) as too_large:
         shim.decode_operation_frame(b"{" + b" " * shim.MAX_FRAME_BYTES + b"}")
     assert too_large.value.code == "frame_too_large"

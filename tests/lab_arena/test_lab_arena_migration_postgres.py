@@ -72,14 +72,28 @@ def superuser(connect):
     connection.close()
 
 
-def round_config(round_id: str, runners: List[str], *, stage_1_ceiling=1_000_000, stage_2_ceiling=1_500_000) -> Dict[str, Any]:
+def round_config(round_id: str, runners: List[str], *, quotas=None, stage_1_icps=20, stage_2_icps=30, max_attempts=2) -> Dict[str, Any]:
+    """The configuration fields the SQL reads: runner allowlist and the call-quota inputs."""
+
     body = {
         "round_id": round_id,
         "runner_allowlist": runners,
-        "stage_1_ceiling_microusd": stage_1_ceiling,
-        "stage_2_ceiling_microusd": stage_2_ceiling,
+        "call_quotas": dict(quotas or contracts.CALL_QUOTAS_PER_ICP),
+        "stage_1_icp_count": stage_1_icps,
+        "stage_2_icp_count": stage_2_icps,
+        "max_attempts_per_assignment": max_attempts,
     }
     return contracts.hashed_document(body, "configuration_hash")
+
+
+def register_keys(store: ArenaStore, miner: str, label: str, *, preflight: str = "ok", providers=contracts.MINER_KEY_PROVIDERS) -> None:
+    """Miners bring one key per provider; the account aggregate is ok only when every provider passed."""
+
+    for provider in providers:
+        key_hash = sha("key" + label + provider)[7:]
+        record = {"preflight_status": preflight, "key_hash": key_hash, "provider": provider, "limit_microusd": 20_000_000 if provider == "openrouter" else None,
+                  "limit_remaining_microusd": 10_000_000 if provider == "openrouter" else None, "usage_microusd": 0 if provider == "openrouter" else None, "observed_at": "2026-09-02T00:00:00Z", "probe": {}}
+        store.upsert_account_credential(miner, provider, "ciphertext-%s-%s" % (label, provider), key_hash, record)
 
 
 def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix: str, king_index=None) -> List[Dict[str, Any]]:
@@ -93,8 +107,7 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
         assert result["status"] == "ok", result
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
         assert result["status"] == "ok"
-        store.credit_deposit(miner_hotkey=miner, payment_reference="test:0x" + sha(submission_id + "dep")[7:] + ":1", amount_microusd=5_000_000, deposit_doc={"test": True})
-        store.upsert_account_credential(miner, "ciphertext-" + submission_id, sha("key" + submission_id)[7:], {"preflight_status": "ok", "key_hash": sha("key" + submission_id)[7:], "limit_microusd": 20_000_000, "limit_remaining_microusd": 10_000_000, "usage_microusd": 0})
+        register_keys(store, miner, submission_id)
         participants.append({"submission_id": submission_id, "miner_hotkey": miner, "preflight_failed": False})
     return participants
 
@@ -116,14 +129,14 @@ def stage_positions(stage: int):
     return list(range(0, 20)) if stage == 1 else list(range(20, 50))
 
 
-def open_round(store: ArenaStore, round_id: str, *, participants=3, runners=1, prefix: str, per_icp_cap=50_000, ceiling_1=1_000_000, ceiling_2=1_500_000, king_index=None):
+def open_round(store: ArenaStore, round_id: str, *, participants=3, runners=1, prefix: str, quotas=None, stage_1_icps=20, max_attempts=2, king_index=None):
     runner_keys = [hotkey("%s-runner-%d" % (prefix, i)) for i in range(runners)]
-    config = round_config(round_id, runner_keys, stage_1_ceiling=ceiling_1, stage_2_ceiling=ceiling_2)
+    config = round_config(round_id, runner_keys, quotas=quotas, stage_1_icps=stage_1_icps, max_attempts=max_attempts)
     assert store.create_round(round_id, config)["status"] == "created"
     parts = frozen_participants(store, round_id, participants, prefix=prefix, king_index=king_index)
     commit_round(store, round_id, parts)
     positions = stage_positions(1)
-    result = store.open_stage(round_id, 1, parts, positions, [sha("%s-icp-%d" % (round_id, p)) for p in positions], per_icp_cap)
+    result = store.open_stage(round_id, 1, parts, positions, [sha("%s-icp-%d" % (round_id, p)) for p in positions])
     assert result["status"] == "ok", result
     return runner_keys, parts
 
@@ -220,8 +233,8 @@ def test_append_only_tables_and_write_once_rounds_resist_owner_level_mutation(st
     response, token, _, _ = claim(store, round_id, runners[0])
     run_id = response["run_id"]
     lease_hash = hash_lease_token(token)
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="exa.search", request_hash=sha("q"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=5000, call_doc={"q": 1})["status"] == "reserved"
+    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q"))
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={"q": 1})["status"] == "reserved"
     event = make_event(response, 0, "")
     assert store.append_events(run_id=run_id, lease_token_hash=lease_hash, events=[event])["status"] == "appended"
     with superuser.cursor() as cursor:
@@ -376,15 +389,17 @@ def test_claim_replay_reuse_ceiling_and_self_exclusion(store, connect):
 
 def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once(store, superuser):
     round_id = "arena-2026-09-02-lx"
-    runners, parts = open_round(store, round_id, participants=1, prefix="lx", per_icp_cap=2_000_000)
+    # Two Deepline calls per ICP attempt and a single attempt in the stage quota: the retry after
+    # expiry inherits the lost attempt's uncertain call and is refused by the stage quota once
+    # the per-ICP quota still has room.
+    runners, parts = open_round(store, round_id, participants=1, prefix="lx", quotas={"deepline": 2, "scrapingdog": 30, "openrouter": 60}, stage_1_icps=1, max_attempts=1)
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="exa.search", request_hash=sha("q1"))
-    dispatched_identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=1, operation_id="exa.search", request_hash=sha("q2"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=5000, call_doc={})["status"] == "reserved"
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=7000, call_doc={})["status"] == "reserved"
+    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q1"))
+    dispatched_identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("q2"))
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity)["status"] == "dispatched"
-    balance_before = store.get_account(parts[0]["miner_hotkey"])["balance_microusd"]
     # Wrong token is stale everywhere.
     wrong = hash_lease_token("other")
     assert store.mark_dispatched(run_id=run_id, lease_token_hash=wrong, call_identity=identity)["status"] == "stale"
@@ -393,12 +408,10 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     expire_now(superuser, run_id)
     assert store.expire_leases(round_id) == {"status": "ok", "expired": 1, "retried": 1}
     assert store.expire_leases(round_id) == {"status": "ok", "expired": 0, "retried": 0}
-    account = store.get_account(parts[0]["miner_hotkey"])
-    assert account["balance_microusd"] == balance_before + 5000  # undispatched returned once; dispatched stays charged
     heads = {row["call_identity"]: row["entry_kind"] for row in store.list_ledger(run_id=run_id)}
     assert heads[identity] == "recovery" and heads[dispatched_identity] == "uncertain"
-    for call in (store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=sha("x"), operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=1, call_doc={}),
-                 store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, actual_microusd=7000, terminal_response={}, event=None),
+    for call in (store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=sha("x"), operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={}),
+                 store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, actual_microusd=0, terminal_response={}, event=None),
                  store.append_events(run_id=run_id, lease_token_hash=lease_hash, events=[make_event(response, 0, "")]),
                  store.complete_attempt(run_id=run_id, lease_token_hash=lease_hash, receipt={"receipt_hash": sha("r")}, receipt_hash=sha("r"), terminal_cause="accepted", output_hash=sha("o"), output_ref="ref", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))):
         assert call["status"] == "stale"
@@ -406,14 +419,18 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     assert old["status"] == "failed" and old["terminal_cause"] == "lease_expired"
     second, token2, _, _ = claim(store, round_id, runners[0], parallelism=8)
     assert second["assignment_id"] == response["assignment_id"] and second["attempt"] == 2
-    assert second["per_icp_cap_microusd"] == 2_000_000 and second["lease_generation"] == 2
-    # Stage ceiling still counts the lost attempt's dispatched spend (7000 stays charged).
+    assert "per_icp_cap_microusd" not in second and second["lease_generation"] == 2
+    # The stage quota still counts the lost attempt's uncertain call (the recovered one does not).
     lease2 = hash_lease_token(token2)
-    heavy = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=0, operation_id="exa.search", request_hash=sha("heavy"))
-    refused = store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=1_000_000 - 7000 + 1, call_doc={})
-    assert refused["status"] == "refused" and refused["reason"] == "stage_ceiling"
-    # The refusal is recorded and replayed.
-    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=1, call_doc={})["status"] == "refused"
+    heavy = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("heavy"))
+    first_ok = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("first-ok"))
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=first_ok, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    refused = store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
+    assert refused["status"] == "refused" and refused["reason"] == "stage_quota"
+    # Another provider's quota is independent, and the refusal is recorded and replayed.
+    other = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=2, operation_id="scrapingdog.google", request_hash=sha("other"))
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "refused"
     # No third attempt after the second expires.
     expire_now(superuser, second["run_id"])
     assert store.expire_leases(round_id) == {"status": "ok", "expired": 1, "retried": 0}
@@ -428,7 +445,7 @@ def test_model_caused_failure_gets_no_second_attempt_and_completion_requires_clo
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
     identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="openrouter.chat", request_hash=sha("q"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="openrouter", amount_microusd=9000, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=9000, call_doc={})["status"] == "reserved"
     receipt = {"receipt_hash": sha("receipt")}
     blocked = store.complete_attempt(run_id=run_id, lease_token_hash=lease_hash, receipt=receipt, receipt_hash=sha("receipt"), terminal_cause="model_timeout", output_hash="", output_ref="", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
     assert blocked == {"status": "accounting_open", "open_calls": 1}
@@ -456,7 +473,7 @@ def test_model_caused_failure_gets_no_second_attempt_and_completion_requires_clo
 def test_close_stage_races_hundred_operations_without_deadlock(connect):
     round_id = "arena-2026-09-02-cs"
     setup = ArenaStore(PsycopgTransport(connect))
-    runners, parts = open_round(setup, round_id, participants=5, runners=1, prefix="cs", per_icp_cap=500_000)
+    runners, parts = open_round(setup, round_id, participants=5, runners=1, prefix="cs")
     leases = []
     for _ in range(100):
         response, token, _, _ = claim(setup, round_id, runners[0], parallelism=100, ceiling=100)
@@ -464,10 +481,10 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
         leases.append((response, hash_lease_token(token)))
     # Prepare one reserved and one dispatched call on every lease before the race.
     for index, (response, lease_hash) in enumerate(leases):
-        reserved = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="exa.search", request_hash=sha("r%d" % index))
-        dispatched = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="exa.search", request_hash=sha("d%d" % index))
-        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=reserved, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=100, call_doc={})["status"] == "reserved"
-        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=100, call_doc={})["status"] == "reserved"
+        reserved = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
+        dispatched = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
+        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=reserved, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
         assert setup.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched)["status"] == "dispatched"
     workers = [ArenaStore(PsycopgTransport(connect)) for _ in range(2)]
     closer = ArenaStore(PsycopgTransport(connect))
@@ -480,12 +497,12 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
         worker = workers[index % 2]
         kind = index % 6
         start.wait(timeout=30)
-        identity_r = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="exa.search", request_hash=sha("r%d" % index))
-        identity_d = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="exa.search", request_hash=sha("d%d" % index))
+        identity_r = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
+        identity_d = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
         if kind == 0:
             result = claim(worker, round_id, runners[0], parallelism=100, ceiling=100)[0]
         elif kind == 1:
-            result = worker.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=sha("new%d" % index), operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=100, call_doc={})
+            result = worker.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=sha("new%d" % index), operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
         elif kind == 2:
             result = worker.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity_r)
         elif kind == 3:
@@ -557,12 +574,12 @@ def test_preflight_failed_king_records_and_stage_two_positions(store):
     parts[1]["preflight_failed"] = True
     commit_round(store, round_id, parts)
     positions = stage_positions(1)
-    assert store.open_stage(round_id, 1, parts, positions, [sha("i%d" % p) for p in positions], 1000)["status"] == "ok"
+    assert store.open_stage(round_id, 1, parts, positions, [sha("i%d" % p) for p in positions])["status"] == "ok"
     king_runs = store.list_runs(round_id, stage=1, submission_id=parts[1]["submission_id"])
     assert len(king_runs) == 20 and all(r["attempt"] == 0 and r["terminal_cause"] == "preflight_failed" and r["status"] == "failed" for r in king_runs)
     assert claim(store, round_id, runner_keys[0], parallelism=8)[0]["miner_hotkey"] == parts[0]["miner_hotkey"]
     # Stage 2 requires stage1_scored and positions 20..49.
-    assert store.open_stage(round_id, 2, parts, stage_positions(2), [sha("i%d" % p) for p in stage_positions(2)], 1000)["status"] == "stale"
+    assert store.open_stage(round_id, 2, parts, stage_positions(2), [sha("i%d" % p) for p in stage_positions(2)])["status"] == "stale"
     assert store.cancel_round(round_id, "test")["status"] == "cancelled"
     assert store.cancel_round(round_id, "test")["status"] == "existing"
     assert claim(store, round_id, runner_keys[0], parallelism=8)[0]["status"] == "stage_closed"
@@ -573,12 +590,11 @@ def test_preflight_failed_king_records_and_stage_two_positions(store):
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_reservations_never_overspend_balance_or_caps(connect):
+def test_concurrent_reservations_never_exceed_the_call_quota(connect):
     round_id = "arena-2026-09-02-ov"
     setup = ArenaStore(PsycopgTransport(connect))
-    runners, parts = open_round(setup, round_id, participants=1, prefix="ov", per_icp_cap=5_000_000, ceiling_1=50_000_000)
+    runners, parts = open_round(setup, round_id, participants=1, prefix="ov", quotas={"deepline": 12, "scrapingdog": 30, "openrouter": 60})
     miner = parts[0]["miner_hotkey"]
-    balance = setup.get_account(miner)["balance_microusd"]  # 5_000_000
     response, token, _, _ = claim(setup, round_id, runners[0], parallelism=8)
     lease_hash = hash_lease_token(token)
     instances = [ArenaStore(PsycopgTransport(connect)), ArenaStore(PsycopgTransport(connect))]
@@ -586,31 +602,26 @@ def test_concurrent_reservations_never_overspend_balance_or_caps(connect):
     lock = threading.Lock()
 
     def reserve(index: int):
-        identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="exa.search", request_hash=sha("c%d" % index))
-        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=400_000, call_doc={})
+        identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="deepline.execute", request_hash=sha("c%d" % index))
+        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
         with lock:
-            results.append(result["status"])
+            results.append((result["status"], result.get("reason")))
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(reserve, range(50)))
-    assert results.count("reserved") == 12  # 12 * 400k = 4.8M <= 5M balance; the 13th would overspend
-    assert results.count("refused") == 38
+    statuses = [status for status, _ in results]
+    assert statuses.count("reserved") == 12  # the per-ICP Deepline quota, under sixteen concurrent workers
+    assert statuses.count("refused") == 38 and {reason for status, reason in results if status == "refused"} == {"per_icp_quota"}
+    # Quotas are per provider: Scrapingdog calls on the same attempt are untouched by the Deepline quota.
+    other = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=99, operation_id="scrapingdog.google", request_hash=sha("g"))
+    assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    # A miner missing one provider key is refused for every provider, even the ones it holds.
     account = setup.get_account(miner)
-    assert account["balance_microusd"] == balance - 12 * 400_000 and account["balance_microusd"] >= 0
-    # Per-ICP cap on the attempt: a fresh assignment with a 1000 cap refuses the second call.
-    other, token2, _, _ = claim(setup, round_id, runners[0], parallelism=8)
-    lease2 = hash_lease_token(token2)
-    ids = [contracts.provider_call_identity(assignment_id=other["assignment_id"], icp_position=other["icp_position"], action_sequence=i, operation_id="exa.search", request_hash=sha("k%d" % i)) for i in range(2)]
-    with setup._transport._connection().cursor() if False else _noop():
-        pass
-    superuser = connect()
-    superuser.autocommit = True
-    with superuser.cursor() as cursor:
-        cursor.execute("UPDATE public.lab_arena_runs SET per_icp_cap_microusd = 1000 WHERE run_id = %s", (other["run_id"],))
-    superuser.close()
-    assert setup.reserve_call(run_id=other["run_id"], lease_token_hash=lease2, call_identity=ids[0], operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=800, call_doc={})["status"] == "reserved"
-    refused = setup.reserve_call(run_id=other["run_id"], lease_token_hash=lease2, call_identity=ids[1], operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=300, call_doc={})
-    assert refused["status"] == "refused" and refused["reason"] == "per_icp_cap"
+    assert account["preflight_status"] == "ok" and "balance_microusd" not in account
+    setup.record_preflight(miner, "deepline", {"preflight_status": "failed", "provider": "deepline", "key_hash": account["credentials"]["deepline"]["key_hash"]})
+    blocked = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=100, operation_id="scrapingdog.google", request_hash=sha("blocked"))
+    refused = setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=blocked, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})
+    assert refused["status"] == "refused" and refused["reason"] == "key_preflight"
     for instance in instances + [setup]:
         instance.close()
 
@@ -626,7 +637,7 @@ class _noop:
 def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     round_id = "arena-2026-09-02-or"
     setup = ArenaStore(PsycopgTransport(connect))
-    runners, parts = open_round(setup, round_id, participants=1, prefix="or", per_icp_cap=50_000_000, ceiling_1=90_000_000)
+    runners, parts = open_round(setup, round_id, participants=1, prefix="or")
     miner = parts[0]["miner_hotkey"]
     response, token, _, _ = claim(setup, round_id, runners[0], parallelism=8)
     lease_hash = hash_lease_token(token)
@@ -637,7 +648,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
 
     def reserve(index: int):
         identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="openrouter.chat", request_hash=sha("o%d" % index))
-        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="openrouter", amount_microusd=1_000_000, call_doc={})
+        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1_000_000, call_doc={})
         with lock:
             results.append((index, result["status"]))
 
@@ -661,7 +672,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
         list(pool.map(dispatch, range(4)))
     assert dispatch_results.count(False) == 1 and dispatch_results.count(True) == 3
     assert len([row for row in setup.list_ledger(call_identity=identity) if row["entry_kind"] == "dispatch"]) == 1
-    # Settlement cannot exceed the reservation; TAO must settle at the estimate.
+    # Settlement cannot exceed the reservation.
     with pytest.raises(ArenaStoreError):
         setup.settle_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, actual_microusd=1_000_001, terminal_response={}, event=None)
     settled = setup.settle_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, actual_microusd=250_000, terminal_response={"usage": {"total_tokens": 10}}, event=None)
@@ -681,37 +692,10 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     rid = next(index for index, status in results if status == "reserved" and index not in (reserved_index, uncertain_index))
     r_identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=rid, operation_id="openrouter.chat", request_hash=sha("o%d" % rid))
     assert setup.settle_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=r_identity, actual_microusd=1, terminal_response={}, event=None)["status"] == "reserved"
-    refreshed = setup.record_preflight(miner, {"preflight_status": "ok", "key_hash": sha("key" + parts[0]["submission_id"])[7:], "limit_microusd": 20_000_000, "limit_remaining_microusd": 12_000_000, "usage_microusd": 8_000_000})
+    refreshed = setup.record_preflight(miner, "openrouter", {"preflight_status": "ok", "provider": "openrouter", "key_hash": sha("key" + parts[0]["submission_id"] + "openrouter")[7:], "limit_microusd": 20_000_000, "limit_remaining_microusd": 12_000_000, "usage_microusd": 8_000_000})
     assert refreshed["settled_since_preflight_microusd"] == 0 and refreshed["observed_limit_remaining_microusd"] == 12_000_000
     with pytest.raises(ArenaStoreError):
-        setup.record_preflight(miner, {"preflight_status": "ok", "key_hash": "0" * 64})
-    for instance in instances + [setup]:
-        instance.close()
-
-
-def test_deposit_credits_exactly_once_under_concurrency(connect):
-    setup = ArenaStore(PsycopgTransport(connect))
-    miner = hotkey("dep-miner")
-    reference = "finney:0x" + sha("deposit")[7:] + ":3"
-    instances = [ArenaStore(PsycopgTransport(connect)) for _ in range(3)]
-    results = []
-    lock = threading.Lock()
-
-    def credit(index: int):
-        result = instances[index % 3].credit_deposit(miner_hotkey=miner, payment_reference=reference, amount_microusd=2_500_000, deposit_doc={"i": index})
-        with lock:
-            results.append(result["credited"])
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(credit, range(24)))
-    assert results.count(True) == 1 and results.count(False) == 23
-    assert setup.get_account(miner)["balance_microusd"] == 2_500_000
-    other = setup.credit_deposit(miner_hotkey=hotkey("dep-other"), payment_reference=reference, amount_microusd=1, deposit_doc={})
-    assert other == {"credited": False, "idempotent": False, "reason": "payment_reference_used", "balance_microusd": 0}
-    with pytest.raises(ArenaStoreError):
-        setup.credit_deposit(miner_hotkey=miner, payment_reference="finney:0xZZ:1", amount_microusd=1, deposit_doc={})
-    with pytest.raises(ArenaStoreError):
-        setup.credit_deposit(miner_hotkey=miner, payment_reference=reference, amount_microusd=0, deposit_doc={})
+        setup.record_preflight(miner, "openrouter", {"preflight_status": "ok", "provider": "openrouter", "key_hash": "0" * 64})
     for instance in instances + [setup]:
         instance.close()
 

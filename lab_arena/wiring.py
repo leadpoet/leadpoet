@@ -14,8 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, funding, model_release, runtime, scoring, signing
+from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, model_release, runtime, scoring, signing
 from lab_arena.api import create_app
+from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
 from lab_arena.store import ArenaStore, PostgrestTransport
 
@@ -94,45 +95,15 @@ class ChainReadsAdapter:
         return [hotkey for hotkey, permit in zip(snapshot.hotkeys, snapshot.validator_permit) if permit]
 
 
-def funding_confirmer(*, chain, config: funding.FundingConfig, store, price_source, clock=None):
-    """The ``POST /funding/confirm`` handler: verify one finalized transfer, credit once.
-
-    Returns structured, secret-free results; verification failures name the
-    published rule and create no credit.
-    """
-
-    def confirm(miner_hotkey: str, body: Mapping[str, Any]) -> Dict[str, Any]:
-        moment = (clock or (lambda: datetime.now(timezone.utc)))()
-        try:
-            receipt = funding.confirm_funding(
-                chain=chain, config=config, store=store, miner_hotkey=miner_hotkey,
-                block_hash=body.get("block_hash"), extrinsic_index=body.get("extrinsic_index"), now=moment, price_source=price_source,
-            )
-        except funding.DepositRejected as exc:
-            return {"credited": False, "idempotent": False, "rejected": True, "rule": exc.rule_id}
-        except funding.MalformedReference as exc:
-            return {"credited": False, "idempotent": False, "rejected": True, "rule": "reference_malformed"}
-        except (funding.PriceUnavailable, funding.FundingStoreError, chain_module.ArenaChainError) as exc:
-            raise ServiceError("funding_unavailable:%s" % type(exc).__name__, 503) from exc
-        except funding.FundingError as exc:
-            raise ServiceError("funding_rejected:%s" % type(exc).__name__, 400) from exc
-        return {
-            "credited": bool(receipt.credited), "idempotent": bool(receipt.idempotent), "balance_microusd": int(receipt.balance_microusd),
-            "payment_reference": receipt.deposit_doc.get("payment_reference"), "amount_microusd": receipt.deposit_doc.get("amount_microusd"),
-        }
-
-    return confirm
-
-
 def credential_registrar(*, decryptor, urlopen=urllib.request.urlopen, clock=None):
-    """The ``POST /credentials/openrouter`` handler: decrypt once in the broker identity, preflight, record."""
+    """The ``POST /credentials/{provider}`` handler: decrypt once in the broker identity, probe the provider, record."""
 
     def register(envelope: Mapping[str, Any]) -> Dict[str, Any]:
         try:
-            return credentials.register_openrouter_key(envelope, decryptor=decryptor, urlopen=urlopen, expected_recipient_key_hash=decryptor.recipient_key_hash, now=clock)
-        except credentials.OpenRouterKeyError as exc:
+            return credentials.register_provider_key(envelope, decryptor=decryptor, urlopen=urlopen, expected_recipient_key_hash=decryptor.recipient_key_hash, now=clock)
+        except credentials.ProviderKeyError as exc:
             raise ServiceError("credential_rejected:%s" % str(exc)[:80], 400) from exc
-        except contracts.ArenaContractError as exc:
+        except ArenaContractError as exc:
             raise ServiceError("envelope_invalid:%s" % str(exc)[:80], 400) from exc
 
     return register
@@ -177,7 +148,7 @@ def build_service_from_environment(mode: str):
     cutover = chain_module.load_arena_cutover()
     chain_reads = ChainReadsAdapter(arena_chain, cutover)
     generation_provider = OpenRouterGenerationProvider(_required("LAB_ARENA_GENERATION_OPENROUTER_API_KEY"))
-    provider_credentials = broker_module.ArenaProviderCredentials(exa_api_key=_required("LAB_ARENA_EXA_API_KEY"), scrapingdog_api_key=_required("LAB_ARENA_SCRAPINGDOG_API_KEY"))
+    # Miners bring every provider key; the Arena holds no Exa, Scrapingdog, or Deepline credential of its own.
     decryptor = credentials.KmsDecryptor(_required("LAB_ARENA_OPENROUTER_KMS_KEY_ID"), region_name=os.environ.get("AWS_REGION"))
     lock = runtime.load_runtime_lock()
     floor = tuple(item for item in os.environ.get("LAB_ARENA_FLOOR_RUNNER_HOTKEYS", "").split(",") if item.strip())
@@ -189,16 +160,22 @@ def build_service_from_environment(mode: str):
         max_challengers=_max_challengers_from_environment(),
     )
 
-    def openrouter_key_for(miner_hotkey: str) -> credentials.RuntimeKeyHandle:
+    def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:
+        """Decrypt the miner's stored envelope for one provider, per call, in memory only."""
+
         account = store.get_account(miner_hotkey)
-        if account is None or not account.get("openrouter_ciphertext"):
+        entry = (account or {}).get("credentials", {}).get(provider) if account else None
+        if not isinstance(entry, Mapping) or not entry.get("ciphertext"):
             raise broker_module.BrokerError("broker_unavailable")
-        envelope = json.loads(account["openrouter_ciphertext"])
-        return credentials.decrypt_runtime_key(envelope, decryptor)
+        envelope = json.loads(entry["ciphertext"])
+        handle = credentials.decrypt_runtime_key(envelope, decryptor)
+        if handle.provider != provider:
+            raise broker_module.BrokerError("broker_unavailable")
+        return handle
 
     def broker_factory(service: ArenaService, round_row: Mapping[str, Any]) -> broker_module.Broker:
         table = json.loads(objects.get("arena/%s/price_table.json" % round_row["round_id"]).decode("utf-8"))
-        return broker_module.Broker(store=store, credentials=provider_credentials, openrouter_key_for=openrouter_key_for, price_table=table, allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=broker_module.HttpxProviderTransport())
+        return broker_module.Broker(store=store, key_for=key_for, price_table=table, allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=broker_module.HttpxProviderTransport())
 
     def scorer_factory(policy: Mapping[str, Any]) -> scoring.Scorer:
         scoring.apply_policy_to_environment(policy, environ=os.environ, cache_dir=_required("LAB_ARENA_SCORING_CACHE_DIR"), credentials={name: _required("LAB_ARENA_SCORING_" + name) for name in scoring.CREDENTIAL_ENV_NAMES})
@@ -222,11 +199,9 @@ def build_service_from_environment(mode: str):
     )
     service = ArenaService(config)
     recipient = credentials.recipient_document(decryptor.public_key_der)
-    funding_config = funding.FundingConfig(recipient_wallet=_required("LAB_ARENA_TAO_RECIPIENT_WALLET"), network_name=config.network_name)
     app = create_app(
         service,
         recipient_document=recipient,
-        funding_confirm=funding_confirmer(chain=arena_chain, config=funding_config, store=store, price_source=funding.coingecko_price_source()),
         credential_register=credential_registrar(decryptor=decryptor),
     )
     return service, app

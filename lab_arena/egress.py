@@ -131,7 +131,7 @@ def container_credential_split() -> Dict[str, Dict[str, Any]]:
 
     return {
         "service": {"holds": ["LAB_ARENA_SERVICE_JWT", "LAB_ARENA_SIGNING_KEY_ID"], "network": "https egress to Supabase, KMS, S3, chain endpoint"},
-        "broker": {"holds": ["LAB_ARENA_OPENROUTER_KMS_KEY_ID", "LAB_ARENA_EXA_API_KEY", "LAB_ARENA_SCRAPINGDOG_API_KEY"], "network": "https egress to providers, KMS", "only_decrypt_identity": True},
+        "broker": {"holds": ["LAB_ARENA_OPENROUTER_KMS_KEY_ID"], "network": "https egress to providers, KMS", "only_decrypt_identity": True},
         "scorer": {"holds": ["LAB_ARENA_SCORING_OPENROUTER_API_KEY", "LAB_ARENA_SCORING_SCRAPINGDOG_API_KEY", "LAB_ARENA_SCORING_EXA_API_KEY"], "network": "public port 443 only (scorer_nftables_ruleset)"},
         "builder": {"holds": [], "network": "none"},
     }

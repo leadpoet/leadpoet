@@ -151,8 +151,6 @@ class ChainReads(Protocol):
 
 @dataclass
 class RoundDefaults:
-    stage_1_ceiling_microusd: int = 2_000_000
-    stage_2_ceiling_microusd: int = 3_000_000
     scoring_cap_microusd: int = 50_000_000
     openrouter_allowed_models: Tuple[str, ...] = ("openai/gpt-4o-mini",)
     floor_runner_hotkeys: Tuple[str, ...] = ()
@@ -378,13 +376,11 @@ class ArenaService:
                 "base_image_digest": defaults.base_image_digest,
             },
             "operation_table_hash": operations.OPERATION_TABLE_HASH,
-            "provider_price_list_hash": operations.PROVIDER_PRICE_LIST_HASH,
             "openrouter_price_table_hash": price_table["price_table_hash"],
             "openrouter_allowed_models": list(defaults.openrouter_allowed_models),
-            "stage_1_ceiling_microusd": defaults.stage_1_ceiling_microusd,
-            "stage_2_ceiling_microusd": defaults.stage_2_ceiling_microusd,
-            "per_icp_cap_stage_1_microusd": defaults.stage_1_ceiling_microusd // contracts.STAGE_1_ICP_COUNT,
-            "per_icp_cap_stage_2_microusd": defaults.stage_2_ceiling_microusd // contracts.STAGE_2_ICP_COUNT,
+            "miner_key_providers": list(contracts.MINER_KEY_PROVIDERS),
+            "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
+            "call_quota_hash": operations.CALL_QUOTA_HASH,
             "icp_wall_clock_seconds": contracts.ICP_WALL_CLOCK_SECONDS,
             "scorer_policy_hash": self._scorer_policy["policy_hash"],
             "scoring_cap_microusd": defaults.scoring_cap_microusd,
@@ -517,17 +513,14 @@ class ArenaService:
             return {"status": "duplicate_artifact", "submission_status": "rejected", "rejection_rule": "package.duplicate_artifact"}
         return result
 
-    def handle_funding(self, envelope: Any, *, confirm: Callable[[str, Mapping[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
-        round_row = self.current_round()
-        validated = self.validate_request(envelope, scope=contracts.SCOPE_FUNDING, round_id=round_row["round_id"] if round_row else None)
-        return confirm(validated["hotkey"], validated["body"])
+    def handle_credential(self, envelope: Any, *, register: Callable[[Mapping[str, Any]], Dict[str, Any]], provider: Optional[str] = None) -> Dict[str, Any]:
+        """Register or replace one of a miner's encrypted provider keys (section 7.3).
 
-    def handle_credential(self, envelope: Any, *, register: Callable[[Mapping[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
-        """Register or replace a miner's encrypted OpenRouter runtime key (section 7.3).
-
-        ``register`` decrypts once inside the broker identity and returns the
-        non-secret preflight record; the account stores the whole ciphertext
-        envelope (never the plaintext) so the broker can decrypt it per run.
+        Miners bring their own Scrapingdog, Deepline, and OpenRouter keys.
+        ``register`` decrypts once inside the broker identity, runs the
+        provider's read-only preflight, and returns the non-secret record; the
+        account stores the whole ciphertext envelope (never the plaintext) so
+        the broker can decrypt it per call.
         """
 
         round_row = self.current_round()
@@ -535,9 +528,14 @@ class ArenaService:
         key_envelope = validated["body"].get("envelope")
         if not isinstance(key_envelope, Mapping):
             raise ServiceError("envelope_missing", 400)
+        envelope_provider = key_envelope.get("provider")
+        if envelope_provider not in contracts.MINER_KEY_PROVIDERS or (provider is not None and provider != envelope_provider):
+            raise ServiceError("provider_invalid", 400)
         record = register(key_envelope)
+        if record.get("provider") != envelope_provider:
+            raise ServiceError("provider_invalid", 400)
         stored = contracts.canonical_json(dict(key_envelope))
-        return self._store.upsert_account_credential(validated["hotkey"], stored, str(record["key_hash"]), record)
+        return self._store.upsert_account_credential(validated["hotkey"], envelope_provider, stored, str(record["key_hash"]), record)
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 
@@ -547,16 +545,13 @@ class ArenaService:
         accepted = [row for row in self._store.list_submissions(round_id, status="accepted") if not row.get("is_king")]
         king = self._entering_king(round_id)
         cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
-        # Eligibility is checked before the cap so an unfunded or unpreflighted
-        # miner never consumes an admission slot; freeze order (acceptance
-        # order) decides who enters when the cap binds, and every exclusion
-        # is recorded under a published rule.
+        # Eligibility is checked before the cap so a miner without every
+        # provider key preflighted never consumes an admission slot; freeze
+        # order (acceptance order) decides who enters when the cap binds, and
+        # every exclusion is recorded under a published rule.
         frozen_count = 0
         for row in accepted:
             account = self._store.get_account(row["miner_hotkey"]) or {}
-            if int(account.get("balance_microusd") or 0) < contracts.MIN_FUNDED_BALANCE_MICROUSD:
-                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "funding.insufficient"})
-                continue
             if account.get("preflight_status") != "ok":
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "credential.preflight_not_ok"})
                 continue
@@ -593,7 +588,7 @@ class ArenaService:
             self._store.update_submission(round_id, submission_id, "uploaded", "accepted", {"image_digest": king_submission["image_digest"], "source_tree_hash": king_submission["source_tree_hash"], "is_king": True})
             self._store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": True})
         account = self._store.get_account(king_hotkey) or {}
-        preflight_failed = int(account.get("balance_microusd") or 0) < contracts.MIN_FUNDED_BALANCE_MICROUSD or account.get("preflight_status") != "ok"
+        preflight_failed = account.get("preflight_status") != "ok"
         return {"submission_id": submission_id, "miner_hotkey": king_hotkey, "image_digest": king_submission["image_digest"], "source_tree_hash": king_submission["source_tree_hash"], "is_king": True, "preflight_failed": bool(preflight_failed)}
 
     def commit_benchmark(self, round_id: str) -> Dict[str, Any]:
@@ -661,9 +656,8 @@ class ArenaService:
             participants = [p for p in participants if p["submission_id"] in finalists or p.get("is_king")]
         _icps, hashes = self.benchmark_icps(round_id)
         positions = list(range(0, contracts.STAGE_1_ICP_COUNT)) if stage == 1 else list(range(contracts.STAGE_1_ICP_COUNT, contracts.BENCHMARK_ICP_COUNT))
-        cap = int(configuration["per_icp_cap_stage_%d_microusd" % stage])
         rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "preflight_failed": bool(p.get("preflight_failed"))} for p in participants]
-        return self._store.open_stage(round_id, stage, rows, positions, [hashes[p] for p in positions], cap)
+        return self._store.open_stage(round_id, stage, rows, positions, [hashes[p] for p in positions])
 
     def stage_is_complete(self, round_id: str, stage: int) -> bool:
         runs = self._store.list_runs(round_id, stage=stage)
@@ -916,11 +910,17 @@ class ArenaService:
             if entry.get("round_id") != round_id or not entry.get("call_identity"):
                 continue
             heads[entry["call_identity"]] = entry
+        calls: Dict[str, Dict[str, int]] = {}
         for entry in heads.values():
             if entry["entry_kind"] in ("settlement", "uncertain"):
                 bucket = totals.setdefault(entry["submission_id"], {})
                 bucket[entry["provider"]] = bucket.get(entry["provider"], 0) + int(entry["amount_microusd"])
-        return {submission: {"providers": sorted(costs), "total_microusd": sum(costs.values())} for submission, costs in sorted(totals.items())}
+                count = calls.setdefault(entry["submission_id"], {})
+                count[entry["provider"]] = count.get(entry["provider"], 0) + 1
+        # Every provider is billed to the miner's own key: the cost is the
+        # provider-reported amount where one exists (OpenRouter) and the call
+        # counts are what the quotas bound.
+        return {submission: {"providers": sorted(costs), "total_microusd": sum(costs.values()), "calls": dict(sorted(calls.get(submission, {}).items()))} for submission, costs in sorted(totals.items())}
 
     # -- runner handlers (section 14.3) ----------------------------------------
 

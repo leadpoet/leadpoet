@@ -170,7 +170,7 @@ def test_service_jwt_reaches_whoami_and_functions_through_postgrest(stack):
     identity = store.require_service_role()
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
     assert identity["rolsuper"] is False and identity["rolbypassrls"] is False and identity["session_user"] == "authenticator"
-    config = contracts.hashed_document({"round_id": "arena-2026-09-02", "runner_allowlist": [], "stage_1_ceiling_microusd": 1, "stage_2_ceiling_microusd": 1}, "configuration_hash")
+    config = contracts.hashed_document({"round_id": "arena-2026-09-02", "runner_allowlist": [], "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP)}, "configuration_hash")
     assert store.create_round("arena-2026-09-02", config)["status"] == "created"
     assert store.get_round("arena-2026-09-02")["status"] == "open"
     assert store.list_rounds()[0]["round_id"] == "arena-2026-09-02"

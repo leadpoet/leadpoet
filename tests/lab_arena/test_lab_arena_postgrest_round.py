@@ -128,7 +128,7 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert bundle["king_decision"]["outcome"] == "crowned" and bundle["king_decision"]["king_hotkey"] == row["king_hotkey"]
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
     reached = set(harness.calls)
-    assert {"lab_arena_create_round", "lab_arena_transition_round", "lab_arena_append_journal_entry", "lab_arena_register_submission", "lab_arena_update_submission", "lab_arena_upsert_account_credential", "lab_arena_credit_deposit", "lab_arena_open_stage", "lab_arena_claim_assignment", "lab_arena_reserve_call", "lab_arena_mark_dispatched", "lab_arena_settle_call", "lab_arena_append_events", "lab_arena_complete_attempt", "lab_arena_close_stage", "lab_arena_record_run_scores", "lab_arena_whoami"} <= reached, sorted(reached)
+    assert {"lab_arena_create_round", "lab_arena_transition_round", "lab_arena_append_journal_entry", "lab_arena_register_submission", "lab_arena_update_submission", "lab_arena_upsert_account_credential", "lab_arena_open_stage", "lab_arena_claim_assignment", "lab_arena_reserve_call", "lab_arena_mark_dispatched", "lab_arena_settle_call", "lab_arena_append_events", "lab_arena_complete_attempt", "lab_arena_close_stage", "lab_arena_record_run_scores", "lab_arena_whoami"} <= reached, sorted(reached)
     # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}

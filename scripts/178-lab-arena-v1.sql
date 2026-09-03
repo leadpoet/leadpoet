@@ -208,7 +208,6 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   attempt SMALLINT NOT NULL CHECK (attempt BETWEEN 0 AND 2),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'leased', 'submitted', 'accepted', 'failed')),
-  per_icp_cap_microusd BIGINT NOT NULL CHECK (per_icp_cap_microusd >= 0),
   runner_hotkey TEXT,
   lease_token_hash TEXT,
   lease_generation BIGINT NOT NULL DEFAULT 0,
@@ -274,9 +273,9 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_events (
 
 CREATE TABLE IF NOT EXISTS public.lab_arena_accounts (
   miner_hotkey TEXT PRIMARY KEY CHECK (miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
-  balance_microusd BIGINT NOT NULL DEFAULT 0 CHECK (balance_microusd >= 0),
-  openrouter_ciphertext TEXT,
-  openrouter_key_hash TEXT,
+  -- One entry per provider: {"ciphertext", "key_hash", "preflight_status", "preflight", "observed_at"}.
+  -- The miner's own keys pay for every provider call; there is no Arena balance.
+  credentials JSONB NOT NULL DEFAULT '{}'::JSONB CHECK (pg_catalog.jsonb_typeof(credentials) = 'object'),
   preflight_status TEXT NOT NULL DEFAULT 'none'
     CHECK (preflight_status IN ('none', 'ok', 'failed')),
   observed_limit_microusd BIGINT,
@@ -294,7 +293,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_accounts (
 CREATE TABLE IF NOT EXISTS public.lab_arena_ledger (
   entry_id BIGSERIAL PRIMARY KEY,
   entry_kind TEXT NOT NULL CHECK (entry_kind IN (
-    'deposit', 'reservation', 'dispatch', 'settlement', 'uncertain', 'recovery', 'refusal')),
+    'reservation', 'dispatch', 'settlement', 'uncertain', 'recovery', 'refusal')),
   miner_hotkey TEXT NOT NULL,
   round_id TEXT,
   submission_id TEXT,
@@ -303,16 +302,13 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_ledger (
   call_identity TEXT CHECK (call_identity IS NULL OR call_identity ~ '^sha256:[0-9a-f]{64}$'),
   provider TEXT,
   operation_id TEXT,
-  funding_source TEXT CHECK (funding_source IS NULL OR funding_source IN ('tao', 'openrouter')),
+  funding_source TEXT CHECK (funding_source IS NULL OR funding_source = 'miner_key'),
   amount_microusd BIGINT NOT NULL CHECK (amount_microusd >= 0),
-  payment_reference TEXT,
   entry_doc JSONB NOT NULL DEFAULT '{}'::JSONB,
   terminal_response JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_ledger_payment_reference_uq
-  ON public.lab_arena_ledger (payment_reference) WHERE entry_kind = 'deposit';
 CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_ledger_reservation_uq
   ON public.lab_arena_ledger (call_identity) WHERE entry_kind = 'reservation';
 CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_ledger_dispatch_uq
@@ -543,43 +539,64 @@ ALTER FUNCTION public.lab_arena__ledger_head(TEXT) OWNER TO lab_arena_owner;
 -- Money a run has consumed: the head entry of every call identity, counting
 -- live reservations, dispatched calls, settlements, and uncertain marks.
 -- Recovered and refused calls consume nothing.
-CREATE OR REPLACE FUNCTION public.lab_arena__run_consumed(p_run_id TEXT)
+-- Calls of one provider consumed by one attempt: every call identity whose
+-- newest ledger entry is a reservation, dispatch, settlement, or uncertain
+-- outcome counts once against the per-ICP quota; recovered and refused calls
+-- do not.
+CREATE OR REPLACE FUNCTION public.lab_arena__run_consumed(p_run_id TEXT, p_provider TEXT)
 RETURNS BIGINT
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $lab_arena__run_consumed$
-  SELECT COALESCE(SUM(head.amount_microusd), 0)::BIGINT
+  SELECT COUNT(*)::BIGINT
   FROM (
-    SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind, ledger.amount_microusd
+    SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind
     FROM public.lab_arena_ledger AS ledger
-    WHERE ledger.run_id = p_run_id AND ledger.call_identity IS NOT NULL
+    WHERE ledger.run_id = p_run_id AND ledger.provider = p_provider AND ledger.call_identity IS NOT NULL
     ORDER BY ledger.call_identity, ledger.entry_id DESC
   ) AS head
   WHERE head.entry_kind IN ('reservation', 'dispatch', 'settlement', 'uncertain');
 $lab_arena__run_consumed$;
-ALTER FUNCTION public.lab_arena__run_consumed(TEXT) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena__run_consumed(TEXT, TEXT) OWNER TO lab_arena_owner;
 
-CREATE OR REPLACE FUNCTION public.lab_arena__submission_stage_consumed(p_submission_id TEXT, p_stage SMALLINT)
+CREATE OR REPLACE FUNCTION public.lab_arena__submission_stage_consumed(p_submission_id TEXT, p_stage SMALLINT, p_provider TEXT)
 RETURNS BIGINT
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $lab_arena__submission_stage_consumed$
-  SELECT COALESCE(SUM(head.amount_microusd), 0)::BIGINT
+  SELECT COUNT(*)::BIGINT
   FROM (
-    SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind, ledger.amount_microusd
+    SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind
     FROM public.lab_arena_ledger AS ledger
     WHERE ledger.submission_id = p_submission_id
       AND ledger.stage = p_stage
+      AND ledger.provider = p_provider
       AND ledger.call_identity IS NOT NULL
     ORDER BY ledger.call_identity, ledger.entry_id DESC
   ) AS head
   WHERE head.entry_kind IN ('reservation', 'dispatch', 'settlement', 'uncertain');
 $lab_arena__submission_stage_consumed$;
-ALTER FUNCTION public.lab_arena__submission_stage_consumed(TEXT, SMALLINT) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT) OWNER TO lab_arena_owner;
+
+-- Aggregate key state: 'ok' only when every required provider has a key
+-- whose newest preflight passed; 'none' before any key; otherwise 'failed'.
+CREATE OR REPLACE FUNCTION public.lab_arena__aggregate_preflight(p_credentials JSONB)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $lab_arena__aggregate_preflight$
+  SELECT CASE
+    WHEN p_credentials IS NULL OR p_credentials = '{}'::JSONB THEN 'none'
+    WHEN (SELECT bool_and(COALESCE(p_credentials -> provider ->> 'preflight_status', '') = 'ok')
+          FROM unnest(ARRAY['scrapingdog', 'deepline', 'openrouter']) AS provider) THEN 'ok'
+    ELSE 'failed' END;
+$lab_arena__aggregate_preflight$;
+ALTER FUNCTION public.lab_arena__aggregate_preflight(JSONB) OWNER TO lab_arena_owner;
 
 -- Terminal funding effects. TAO credit was deducted at reservation; a
 -- recovery returns it and a settlement/uncertain keeps it. OpenRouter
@@ -604,15 +621,12 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'lab_arena_account_missing' USING ERRCODE = '23503';
   END IF;
-  IF p_reservation.funding_source = 'tao' THEN
-    IF p_terminal_kind = 'recovery' THEN
-      UPDATE public.lab_arena_accounts
-      SET balance_microusd = balance_microusd + p_reservation.amount_microusd
-      WHERE miner_hotkey = p_reservation.miner_hotkey;
-    END IF;
-    RETURN;
+  IF p_reservation.funding_source IS DISTINCT FROM 'miner_key' THEN
+    RAISE EXCEPTION 'lab_arena_funding_source_invalid' USING ERRCODE = '22023';
   END IF;
-  IF p_reservation.funding_source = 'openrouter' THEN
+  -- Only OpenRouter reports a key limit; its outstanding reservation and
+  -- settled totals track the remaining capacity observed at preflight.
+  IF p_reservation.provider = 'openrouter' THEN
     UPDATE public.lab_arena_accounts
     SET outstanding_openrouter_reservation_microusd =
           GREATEST(0, outstanding_openrouter_reservation_microusd - p_reservation.amount_microusd),
@@ -622,9 +636,7 @@ BEGIN
           ELSE COALESCE(p_actual_microusd, p_reservation.amount_microusd)
         END
     WHERE miner_hotkey = p_reservation.miner_hotkey;
-    RETURN;
   END IF;
-  RAISE EXCEPTION 'lab_arena_funding_source_invalid' USING ERRCODE = '22023';
 END;
 $lab_arena__apply_terminal_funding$;
 ALTER FUNCTION public.lab_arena__apply_terminal_funding(public.lab_arena_ledger, TEXT, BIGINT) OWNER TO lab_arena_owner;
@@ -1142,9 +1154,10 @@ SET search_path = pg_catalog, public
 AS $lab_arena__account_view$
   SELECT pg_catalog.jsonb_build_object(
     'miner_hotkey', p_account.miner_hotkey,
-    'balance_microusd', p_account.balance_microusd,
-    'openrouter_key_hash', p_account.openrouter_key_hash,
-    'has_openrouter_key', p_account.openrouter_ciphertext IS NOT NULL,
+    'credentials', (
+      SELECT COALESCE(pg_catalog.jsonb_object_agg(entry.key, (entry.value - 'ciphertext') || pg_catalog.jsonb_build_object('has_key', entry.value ? 'ciphertext')), '{}'::JSONB)
+      FROM pg_catalog.jsonb_each(p_account.credentials) AS entry
+    ),
     'preflight_status', p_account.preflight_status,
     'observed_limit_microusd', p_account.observed_limit_microusd,
     'observed_limit_remaining_microusd', p_account.observed_limit_remaining_microusd,
@@ -1158,6 +1171,7 @@ ALTER FUNCTION public.lab_arena__account_view(public.lab_arena_accounts) OWNER T
 
 CREATE OR REPLACE FUNCTION public.lab_arena_upsert_account_credential(
   p_miner_hotkey TEXT,
+  p_provider TEXT,
   p_ciphertext TEXT,
   p_key_hash TEXT,
   p_preflight JSONB
@@ -1170,34 +1184,44 @@ SET search_path = pg_catalog, public
 AS $lab_arena_upsert_account_credential$
 DECLARE
   v_account public.lab_arena_accounts;
+  v_entry JSONB;
 BEGIN
   IF COALESCE(p_miner_hotkey, '') !~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'
+     OR p_provider NOT IN ('scrapingdog', 'deepline', 'openrouter')
      OR COALESCE(p_ciphertext, '') = '' OR pg_catalog.octet_length(p_ciphertext) > 8192
      OR COALESCE(p_key_hash, '') !~ '^[0-9a-f]{64}$'
      OR pg_catalog.jsonb_typeof(p_preflight) IS DISTINCT FROM 'object'
+     OR pg_catalog.octet_length(p_preflight::TEXT) > 8192
      OR (p_preflight ->> 'preflight_status') NOT IN ('ok', 'failed') THEN
     RAISE EXCEPTION 'lab_arena_credential_input_invalid' USING ERRCODE = '22023';
   END IF;
   INSERT INTO public.lab_arena_accounts (miner_hotkey) VALUES (p_miner_hotkey) ON CONFLICT DO NOTHING;
   SELECT * INTO v_account FROM public.lab_arena_accounts WHERE miner_hotkey = p_miner_hotkey FOR UPDATE;
+  v_entry := pg_catalog.jsonb_build_object(
+    'ciphertext', p_ciphertext,
+    'key_hash', p_key_hash,
+    'preflight_status', p_preflight ->> 'preflight_status',
+    'preflight', p_preflight - 'key_hash',
+    'observed_at', pg_catalog.clock_timestamp()
+  );
   UPDATE public.lab_arena_accounts
-  SET openrouter_ciphertext = p_ciphertext,
-      openrouter_key_hash = p_key_hash,
-      preflight_status = p_preflight ->> 'preflight_status',
-      observed_limit_microusd = (p_preflight ->> 'limit_microusd')::BIGINT,
-      observed_limit_remaining_microusd = (p_preflight ->> 'limit_remaining_microusd')::BIGINT,
-      observed_usage_microusd = (p_preflight ->> 'usage_microusd')::BIGINT,
-      observed_at = pg_catalog.clock_timestamp(),
-      settled_since_preflight_microusd = 0
+  SET credentials = credentials || pg_catalog.jsonb_build_object(p_provider, v_entry),
+      preflight_status = public.lab_arena__aggregate_preflight(credentials || pg_catalog.jsonb_build_object(p_provider, v_entry)),
+      observed_limit_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'limit_microusd')::BIGINT ELSE observed_limit_microusd END,
+      observed_limit_remaining_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'limit_remaining_microusd')::BIGINT ELSE observed_limit_remaining_microusd END,
+      observed_usage_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'usage_microusd')::BIGINT ELSE observed_usage_microusd END,
+      observed_at = CASE WHEN p_provider = 'openrouter' THEN pg_catalog.clock_timestamp() ELSE observed_at END,
+      settled_since_preflight_microusd = CASE WHEN p_provider = 'openrouter' THEN 0 ELSE settled_since_preflight_microusd END
   WHERE miner_hotkey = p_miner_hotkey
   RETURNING * INTO v_account;
   RETURN pg_catalog.jsonb_build_object('status', 'ok') || public.lab_arena__account_view(v_account);
 END;
 $lab_arena_upsert_account_credential$;
-ALTER FUNCTION public.lab_arena_upsert_account_credential(TEXT, TEXT, TEXT, JSONB) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena_upsert_account_credential(TEXT, TEXT, TEXT, TEXT, JSONB) OWNER TO lab_arena_owner;
 
 CREATE OR REPLACE FUNCTION public.lab_arena_record_preflight(
   p_miner_hotkey TEXT,
+  p_provider TEXT,
   p_preflight JSONB
 )
 RETURNS JSONB
@@ -1208,8 +1232,11 @@ SET search_path = pg_catalog, public
 AS $lab_arena_record_preflight$
 DECLARE
   v_account public.lab_arena_accounts;
+  v_entry JSONB;
 BEGIN
-  IF pg_catalog.jsonb_typeof(p_preflight) IS DISTINCT FROM 'object'
+  IF p_provider NOT IN ('scrapingdog', 'deepline', 'openrouter')
+     OR pg_catalog.jsonb_typeof(p_preflight) IS DISTINCT FROM 'object'
+     OR pg_catalog.octet_length(p_preflight::TEXT) > 8192
      OR (p_preflight ->> 'preflight_status') NOT IN ('ok', 'failed') THEN
     RAISE EXCEPTION 'lab_arena_preflight_input_invalid' USING ERRCODE = '22023';
   END IF;
@@ -1217,74 +1244,30 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'lab_arena_account_missing' USING ERRCODE = 'P0002';
   END IF;
-  IF v_account.openrouter_key_hash IS DISTINCT FROM (p_preflight ->> 'key_hash') THEN
+  v_entry := v_account.credentials -> p_provider;
+  IF v_entry IS NULL OR (v_entry ->> 'key_hash') IS DISTINCT FROM (p_preflight ->> 'key_hash') THEN
     RAISE EXCEPTION 'lab_arena_preflight_key_mismatch' USING ERRCODE = '22023';
   END IF;
+  v_entry := v_entry || pg_catalog.jsonb_build_object(
+    'preflight_status', p_preflight ->> 'preflight_status',
+    'preflight', p_preflight - 'key_hash',
+    'observed_at', pg_catalog.clock_timestamp()
+  );
   UPDATE public.lab_arena_accounts
-  SET preflight_status = p_preflight ->> 'preflight_status',
-      observed_limit_microusd = (p_preflight ->> 'limit_microusd')::BIGINT,
-      observed_limit_remaining_microusd = (p_preflight ->> 'limit_remaining_microusd')::BIGINT,
-      observed_usage_microusd = (p_preflight ->> 'usage_microusd')::BIGINT,
-      observed_at = pg_catalog.clock_timestamp(),
-      settled_since_preflight_microusd = 0
+  SET credentials = credentials || pg_catalog.jsonb_build_object(p_provider, v_entry),
+      preflight_status = public.lab_arena__aggregate_preflight(credentials || pg_catalog.jsonb_build_object(p_provider, v_entry)),
+      observed_limit_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'limit_microusd')::BIGINT ELSE observed_limit_microusd END,
+      observed_limit_remaining_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'limit_remaining_microusd')::BIGINT ELSE observed_limit_remaining_microusd END,
+      observed_usage_microusd = CASE WHEN p_provider = 'openrouter' THEN (p_preflight ->> 'usage_microusd')::BIGINT ELSE observed_usage_microusd END,
+      observed_at = CASE WHEN p_provider = 'openrouter' THEN pg_catalog.clock_timestamp() ELSE observed_at END,
+      settled_since_preflight_microusd = CASE WHEN p_provider = 'openrouter' THEN 0 ELSE settled_since_preflight_microusd END
   WHERE miner_hotkey = p_miner_hotkey
   RETURNING * INTO v_account;
   RETURN pg_catalog.jsonb_build_object('status', 'ok') || public.lab_arena__account_view(v_account);
 END;
 $lab_arena_record_preflight$;
-ALTER FUNCTION public.lab_arena_record_preflight(TEXT, JSONB) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena_record_preflight(TEXT, TEXT, JSONB) OWNER TO lab_arena_owner;
 
--- Credit one finalized deposit exactly once under its normalized reference.
-CREATE OR REPLACE FUNCTION public.lab_arena_credit_deposit(
-  p_miner_hotkey TEXT,
-  p_payment_reference TEXT,
-  p_amount_microusd BIGINT,
-  p_deposit_doc JSONB
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-VOLATILE
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-AS $lab_arena_credit_deposit$
-DECLARE
-  v_account public.lab_arena_accounts;
-  v_existing public.lab_arena_ledger;
-BEGIN
-  IF COALESCE(p_miner_hotkey, '') !~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'
-     OR COALESCE(p_payment_reference, '') !~ '^[a-z]+:0x[0-9a-f]{64}:[0-9]{1,6}$'
-     OR COALESCE(p_amount_microusd, 0) <= 0
-     OR pg_catalog.jsonb_typeof(p_deposit_doc) IS DISTINCT FROM 'object' THEN
-    RAISE EXCEPTION 'lab_arena_deposit_input_invalid' USING ERRCODE = '22023';
-  END IF;
-  INSERT INTO public.lab_arena_accounts (miner_hotkey) VALUES (p_miner_hotkey) ON CONFLICT DO NOTHING;
-  SELECT * INTO v_account FROM public.lab_arena_accounts WHERE miner_hotkey = p_miner_hotkey FOR UPDATE;
-  SELECT * INTO v_existing FROM public.lab_arena_ledger
-  WHERE entry_kind = 'deposit' AND payment_reference = p_payment_reference;
-  IF FOUND THEN
-    IF v_existing.miner_hotkey = p_miner_hotkey THEN
-      RETURN pg_catalog.jsonb_build_object('credited', FALSE, 'idempotent', TRUE,
-        'balance_microusd', v_account.balance_microusd, 'payment_reference', p_payment_reference);
-    END IF;
-    RETURN pg_catalog.jsonb_build_object('credited', FALSE, 'idempotent', FALSE,
-      'reason', 'payment_reference_used', 'balance_microusd', v_account.balance_microusd);
-  END IF;
-  BEGIN
-    INSERT INTO public.lab_arena_ledger (entry_kind, miner_hotkey, amount_microusd, payment_reference, entry_doc)
-    VALUES ('deposit', p_miner_hotkey, p_amount_microusd, p_payment_reference, p_deposit_doc);
-  EXCEPTION WHEN unique_violation THEN
-    RETURN pg_catalog.jsonb_build_object('credited', FALSE, 'idempotent', FALSE,
-      'reason', 'payment_reference_used', 'balance_microusd', v_account.balance_microusd);
-  END;
-  UPDATE public.lab_arena_accounts
-  SET balance_microusd = balance_microusd + p_amount_microusd
-  WHERE miner_hotkey = p_miner_hotkey
-  RETURNING * INTO v_account;
-  RETURN pg_catalog.jsonb_build_object('credited', TRUE, 'idempotent', FALSE,
-    'balance_microusd', v_account.balance_microusd, 'payment_reference', p_payment_reference);
-END;
-$lab_arena_credit_deposit$;
-ALTER FUNCTION public.lab_arena_credit_deposit(TEXT, TEXT, BIGINT, JSONB) OWNER TO lab_arena_owner;
 
 -- ---------------------------------------------------------------------------
 -- Stages, claims, provider calls, events, completion, expiry, close, cancel
@@ -1299,8 +1282,7 @@ CREATE OR REPLACE FUNCTION public.lab_arena_open_stage(
   p_stage SMALLINT,
   p_participants JSONB,
   p_icp_positions INTEGER[],
-  p_icp_hashes TEXT[],
-  p_per_icp_cap_microusd BIGINT
+  p_icp_hashes TEXT[]
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -1325,8 +1307,7 @@ BEGIN
      OR pg_catalog.jsonb_typeof(p_participants) IS DISTINCT FROM 'array'
      OR pg_catalog.jsonb_array_length(p_participants) < 1
      OR p_icp_positions IS NULL OR p_icp_hashes IS NULL
-     OR pg_catalog.array_length(p_icp_positions, 1) IS DISTINCT FROM pg_catalog.array_length(p_icp_hashes, 1)
-     OR COALESCE(p_per_icp_cap_microusd, -1) < 0 THEN
+     OR pg_catalog.array_length(p_icp_positions, 1) IS DISTINCT FROM pg_catalog.array_length(p_icp_hashes, 1) THEN
     RAISE EXCEPTION 'lab_arena_stage_input_invalid' USING ERRCODE = '22023';
   END IF;
   v_expected := CASE p_stage WHEN 1 THEN 'committed' ELSE 'stage1_scored' END;
@@ -1358,19 +1339,19 @@ BEGIN
       IF v_preflight_failed THEN
         INSERT INTO public.lab_arena_runs (
           run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-          attempt, status, per_icp_cap_microusd, stage_generation, terminal_cause, terminal_doc
+          attempt, status, stage_generation, terminal_cause, terminal_doc
         ) VALUES (
           v_assignment || ':0', v_assignment, p_round_id, v_submission.submission_id, v_submission.miner_hotkey,
-          p_stage, v_position, p_icp_hashes[v_index], 0, 'failed', 0, v_generation, 'preflight_failed',
+          p_stage, v_position, p_icp_hashes[v_index], 0, 'failed', v_generation, 'preflight_failed',
           pg_catalog.jsonb_build_object('service_created', TRUE)
         );
       ELSE
         INSERT INTO public.lab_arena_runs (
           run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-          attempt, status, per_icp_cap_microusd, stage_generation
+          attempt, status, stage_generation
         ) VALUES (
           v_assignment || ':1', v_assignment, p_round_id, v_submission.submission_id, v_submission.miner_hotkey,
-          p_stage, v_position, p_icp_hashes[v_index], 1, 'pending', p_per_icp_cap_microusd, v_generation
+          p_stage, v_position, p_icp_hashes[v_index], 1, 'pending', v_generation
         );
       END IF;
       v_created := v_created + 1;
@@ -1383,7 +1364,7 @@ BEGIN
     'stage_generation', v_generation, 'assignments', v_created);
 END;
 $lab_arena_open_stage$;
-ALTER FUNCTION public.lab_arena_open_stage(TEXT, SMALLINT, JSONB, INTEGER[], TEXT[], BIGINT) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena_open_stage(TEXT, SMALLINT, JSONB, INTEGER[], TEXT[]) OWNER TO lab_arena_owner;
 
 -- Claim the next pending ICP assignment (section 9.1). Replaying the same
 -- request id returns the stored response; a reused id with different bytes
@@ -1480,7 +1461,6 @@ BEGIN
     'lease_generation', v_run.lease_generation + 1,
     'stage_generation', v_round.stage_generation,
     'lease_expires_at', v_expires,
-    'per_icp_cap_microusd', v_run.per_icp_cap_microusd,
     'event_cursor', v_run.event_cursor,
     'event_head_hash', v_run.event_head_hash
   );
@@ -1546,7 +1526,8 @@ DECLARE
   v_head public.lab_arena_ledger;
   v_submission public.lab_arena_submissions;
   v_account public.lab_arena_accounts;
-  v_ceiling BIGINT;
+  v_quota INTEGER;
+  v_stage_quota BIGINT;
   v_consumed BIGINT;
   v_capacity BIGINT;
   v_reason TEXT := NULL;
@@ -1554,8 +1535,8 @@ DECLARE
 BEGIN
   IF COALESCE(p_call_identity, '') !~ '^sha256:[0-9a-f]{64}$'
      OR COALESCE(p_operation_id, '') !~ '^[a-z0-9_.]{1,64}$'
-     OR p_provider NOT IN ('exa', 'scrapingdog', 'openrouter')
-     OR p_funding_source NOT IN ('tao', 'openrouter')
+     OR p_provider NOT IN ('scrapingdog', 'deepline', 'openrouter')
+     OR p_funding_source IS DISTINCT FROM 'miner_key'
      OR COALESCE(p_amount_microusd, -1) < 0
      OR pg_catalog.jsonb_typeof(p_call_doc) IS DISTINCT FROM 'object'
      OR pg_catalog.octet_length(p_call_doc::TEXT) > 65536
@@ -1575,55 +1556,54 @@ BEGIN
     RETURN public.lab_arena__call_state_view(v_head, v_run);
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = v_run.round_id;
-  v_ceiling := CASE v_run.stage
-    WHEN 1 THEN (v_round.configuration_doc ->> 'stage_1_ceiling_microusd')::BIGINT
-    ELSE (v_round.configuration_doc ->> 'stage_2_ceiling_microusd')::BIGINT END;
-
-  -- Per-ICP cap on this attempt.
-  v_consumed := public.lab_arena__run_consumed(p_run_id);
-  IF v_consumed + p_amount_microusd > v_run.per_icp_cap_microusd THEN
-    v_reason := 'per_icp_cap';
+  -- Fairness is a fixed call quota per provider (section 7 as revised): the
+  -- per-ICP quota bounds this attempt, the stage quota (per-ICP quota times
+  -- the stage's ICP count times the attempt limit) bounds the participant.
+  v_quota := ((v_round.configuration_doc -> 'call_quotas') ->> p_provider)::INTEGER;
+  IF v_quota IS NULL OR v_quota < 1 THEN
+    RAISE EXCEPTION 'lab_arena_quota_missing' USING ERRCODE = '22023';
   END IF;
-  -- Stage ceiling on the participant (lock order: participant budget after
+  v_stage_quota := v_quota::BIGINT
+    * (CASE v_run.stage WHEN 1 THEN (v_round.configuration_doc ->> 'stage_1_icp_count')::BIGINT ELSE (v_round.configuration_doc ->> 'stage_2_icp_count')::BIGINT END)
+    * (v_round.configuration_doc ->> 'max_attempts_per_assignment')::BIGINT;
+
+  -- Per-ICP quota on this attempt.
+  v_consumed := public.lab_arena__run_consumed(p_run_id, p_provider);
+  IF v_consumed >= v_quota THEN
+    v_reason := 'per_icp_quota';
+  END IF;
+  -- Stage quota on the participant (lock order: participant budget after
   -- assignment). FOR NO KEY UPDATE serializes reservations of one
   -- participant against each other while staying compatible with the
   -- FOR KEY SHARE locks that run-row updates take on the submission through
   -- the foreign key; a FOR UPDATE lock here deadlocks against settlement.
   IF v_reason IS NULL THEN
     SELECT * INTO v_submission FROM public.lab_arena_submissions WHERE submission_id = v_run.submission_id FOR NO KEY UPDATE;
-    v_consumed := public.lab_arena__submission_stage_consumed(v_run.submission_id, v_run.stage);
-    IF v_consumed + p_amount_microusd > v_ceiling THEN
-      v_reason := 'stage_ceiling';
+    v_consumed := public.lab_arena__submission_stage_consumed(v_run.submission_id, v_run.stage, p_provider);
+    IF v_consumed >= v_stage_quota THEN
+      v_reason := 'stage_quota';
     END IF;
   END IF;
-  -- Funding (lock order: account after participant budget).
+  -- The miner's key for this provider (lock order: account after participant budget).
   IF v_reason IS NULL THEN
     SELECT * INTO v_account FROM public.lab_arena_accounts WHERE miner_hotkey = v_run.miner_hotkey FOR UPDATE;
     IF NOT FOUND THEN
       v_reason := 'no_account';
-    ELSIF p_funding_source = 'tao' THEN
-      IF v_account.balance_microusd < p_amount_microusd THEN
-        v_reason := 'balance';
+    ELSIF v_account.preflight_status <> 'ok' OR NOT (v_account.credentials ? p_provider)
+          OR (v_account.credentials -> p_provider ->> 'ciphertext') IS NULL THEN
+      v_reason := 'key_preflight';
+    ELSIF p_provider = 'openrouter' THEN
+      v_capacity := CASE
+        WHEN v_account.observed_limit_remaining_microusd IS NULL THEN NULL
+        ELSE v_account.observed_limit_remaining_microusd
+             - v_account.outstanding_openrouter_reservation_microusd
+             - v_account.settled_since_preflight_microusd END;
+      IF v_capacity IS NOT NULL AND v_capacity < p_amount_microusd THEN
+        v_reason := 'key_capacity';
       ELSE
-        UPDATE public.lab_arena_accounts SET balance_microusd = balance_microusd - p_amount_microusd
+        UPDATE public.lab_arena_accounts
+        SET outstanding_openrouter_reservation_microusd = outstanding_openrouter_reservation_microusd + p_amount_microusd
         WHERE miner_hotkey = v_run.miner_hotkey;
-      END IF;
-    ELSE
-      IF v_account.preflight_status <> 'ok' OR v_account.openrouter_ciphertext IS NULL THEN
-        v_reason := 'key_preflight';
-      ELSE
-        v_capacity := CASE
-          WHEN v_account.observed_limit_remaining_microusd IS NULL THEN NULL
-          ELSE v_account.observed_limit_remaining_microusd
-               - v_account.outstanding_openrouter_reservation_microusd
-               - v_account.settled_since_preflight_microusd END;
-        IF v_capacity IS NOT NULL AND v_capacity < p_amount_microusd THEN
-          v_reason := 'key_capacity';
-        ELSE
-          UPDATE public.lab_arena_accounts
-          SET outstanding_openrouter_reservation_microusd = outstanding_openrouter_reservation_microusd + p_amount_microusd
-          WHERE miner_hotkey = v_run.miner_hotkey;
-        END IF;
       END IF;
     END IF;
   END IF;
@@ -1749,9 +1729,6 @@ BEGIN
   WHERE call_identity = p_call_identity AND entry_kind = 'reservation';
   IF p_actual_microusd > v_reservation.amount_microusd THEN
     RAISE EXCEPTION 'lab_arena_settlement_exceeds_reservation' USING ERRCODE = '23514';
-  END IF;
-  IF v_reservation.funding_source = 'tao' AND p_actual_microusd <> v_reservation.amount_microusd THEN
-    RAISE EXCEPTION 'lab_arena_tao_settles_at_estimate' USING ERRCODE = '23514';
   END IF;
   INSERT INTO public.lab_arena_ledger (
     entry_kind, miner_hotkey, round_id, submission_id, run_id, stage, call_identity,
@@ -2012,11 +1989,11 @@ BEGIN
     IF v_run.attempt < 2 AND v_run.stage_generation = v_round.stage_generation THEN
       INSERT INTO public.lab_arena_runs (
         run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-        attempt, status, per_icp_cap_microusd, lease_generation, stage_generation
+        attempt, status, lease_generation, stage_generation
       ) VALUES (
         v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
         v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
-        v_run.attempt + 1, 'pending', v_run.per_icp_cap_microusd, v_run.lease_generation, v_round.stage_generation
+        v_run.attempt + 1, 'pending', v_run.lease_generation, v_round.stage_generation
       );
       v_retried := v_retried + 1;
     END IF;
@@ -2265,10 +2242,9 @@ BEGIN
     'public.lab_arena_append_journal_entry(TEXT, JSONB)',
     'public.lab_arena_register_submission(TEXT, TEXT, TEXT, JSONB)',
     'public.lab_arena_update_submission(TEXT, TEXT, TEXT, TEXT, JSONB)',
-    'public.lab_arena_upsert_account_credential(TEXT, TEXT, TEXT, JSONB)',
-    'public.lab_arena_record_preflight(TEXT, JSONB)',
-    'public.lab_arena_credit_deposit(TEXT, TEXT, BIGINT, JSONB)',
-    'public.lab_arena_open_stage(TEXT, SMALLINT, JSONB, INTEGER[], TEXT[], BIGINT)',
+    'public.lab_arena_upsert_account_credential(TEXT, TEXT, TEXT, TEXT, JSONB)',
+    'public.lab_arena_record_preflight(TEXT, TEXT, JSONB)',
+    'public.lab_arena_open_stage(TEXT, SMALLINT, JSONB, INTEGER[], TEXT[])',
     'public.lab_arena_claim_assignment(TEXT, TEXT, INTEGER, INTEGER, TEXT[], TEXT, TEXT, TEXT, INTEGER)',
     'public.lab_arena_reserve_call(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT, JSONB, INTEGER)',
     'public.lab_arena_mark_dispatched(TEXT, TEXT, TEXT)',
@@ -2292,8 +2268,9 @@ BEGIN
   -- Internal helpers and trigger functions: owner only.
   FOREACH signature IN ARRAY ARRAY[
     'public.lab_arena__ledger_head(TEXT)',
-    'public.lab_arena__run_consumed(TEXT)',
-    'public.lab_arena__submission_stage_consumed(TEXT, SMALLINT)',
+    'public.lab_arena__run_consumed(TEXT, TEXT)',
+    'public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT)',
+    'public.lab_arena__aggregate_preflight(JSONB)',
     'public.lab_arena__apply_terminal_funding(public.lab_arena_ledger, TEXT, BIGINT)',
     'public.lab_arena__terminate_open_calls(TEXT, TEXT)',
     'public.lab_arena__lock_current_lease(TEXT, TEXT)',

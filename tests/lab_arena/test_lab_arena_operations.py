@@ -15,18 +15,13 @@ from lab_arena import contracts
 from lab_arena import operations as ops
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+D_EXECUTE = "https://code.deepline.com/api/v2/integrations/exa_search/execute"
 
 VALID = {
-    "exa.search": {
-        "query": "fintech startups in berlin",
-        "type": "auto",
-        "category": "company",
-        "includeDomains": ["Example.com"],
-        "excludeDomains": ["bad.example"],
-        "startPublishedDate": "2024-01-01",
-        "endPublishedDate": "2025-01-01",
+    "deepline.execute": {
+        "tool": "exa_search",
+        "payload": {"query": "fintech startups in berlin", "type": "fast", "numResults": 5, "includeDomains": ["Example.com"]},
     },
-    "exa.contents": {"urls": ["https://example.com/a", "https://example.org/b?x=1"]},
     "scrapingdog.scrape": {"url": "https://example.com/jobs?page=2", "dynamic": True},
     "scrapingdog.google": {"query": "acme corp", "country": "gb"},
     "openrouter.chat": {
@@ -43,8 +38,8 @@ VALID = {
 
 HOSTILE_VALUES = (
     "https://evil.example/x",
-    "http://api.exa.ai/search",
-    "https://api.exa.ai@evil.example/",
+    "http://code.deepline.com/api/v2/integrations/exa_search/execute",
+    "https://code.deepline.com@evil.example/",
     "https://user:pw@example.com/",
     "https://127.0.0.1/",
     "https://[::1]/",
@@ -85,9 +80,13 @@ CREDENTIAL_FIELD_NAMES = (
 def request_for(operation_id: str, parameters=None):
     operation = ops.OPERATIONS[operation_id]
     parameters = VALID[operation_id] if parameters is None else parameters
-    url = "https://%s%s" % (operation.host, operation.path)
+    path = operation.path
+    for name in operation.path_fields:
+        path = path.replace("{%s}" % name, str(parameters[name]))
+    url = "https://%s%s" % (operation.host, path)
     if operation.method == "POST":
-        return operation.method, url, json.dumps(parameters).encode("utf-8"), {"Content-Type": "application/json"}
+        body = {name: value for name, value in parameters.items() if name not in operation.path_fields}
+        return operation.method, url, json.dumps(body).encode("utf-8"), {"Content-Type": "application/json"}
     query = urlencode({name: ("true" if value is True else "false" if value is False else value) for name, value in parameters.items()})
     return operation.method, url + "?" + query, b"", {}
 
@@ -106,54 +105,69 @@ def reject(operation_id: str, parameters, code=None):
 # ---------------------------------------------------------------------------
 
 
-def test_table_is_closed_and_every_cost_is_fixed_by_parameters():
-    assert set(ops.OPERATIONS) == {"exa.search", "exa.contents", "scrapingdog.scrape", "scrapingdog.google", "openrouter.chat"}
+def test_table_is_closed_and_every_operation_is_miner_billed():
+    assert set(ops.OPERATIONS) == {"deepline.execute", "scrapingdog.scrape", "scrapingdog.google", "openrouter.chat"}
+    assert ops.PROVIDERS == contracts.MINER_KEY_PROVIDERS == ("scrapingdog", "deepline", "openrouter")
+    assert ops.FUNDING_SOURCES == ("miner_key",)
     for operation_id, operation in ops.OPERATIONS.items():
         assert operation.operation_id == operation_id
         assert operation.provider in ops.PROVIDERS
-        assert operation.host in ("api.exa.ai", "api.scrapingdog.com", "openrouter.ai")
+        assert operation.host in ("code.deepline.com", "api.scrapingdog.com", "openrouter.ai")
         assert operation.method in ops.METHODS
-        assert operation.funding_source == ("openrouter" if operation.provider == "openrouter" else "tao")
+        assert operation.funding_source == "miner_key"
         # A price-determining parameter is never model-controllable.
         assert not set(operation.fixed_params) & set(operation.request_fields)
-        if operation.funding_source == "tao":
-            assert operation.cost_rule["kind"] == "fixed_microusd"
-            assert operation.cost_rule["microusd"] == ops.PROVIDER_PRICE_LIST[operation_id]
-            assert ops.fixed_cost_microusd(operation_id) == ops.PROVIDER_PRICE_LIST[operation_id]
-        else:
+        if operation.provider == "openrouter":
             assert operation.cost_rule["kind"] == "openrouter_price_table"
             assert operation.cost_rule["max_output_tokens"] == ops.OPENROUTER_MAX_OUTPUT_TOKENS
-            assert ops.fixed_cost_microusd(operation_id) is None
-    assert ops.OPERATIONS["exa.search"].fixed_params["numResults"] == 10
-    assert ops.OPERATIONS["exa.search"].fixed_params["contents"] == {"text": {"maxCharacters": 2000}}
-    assert ops.OPERATIONS["exa.contents"].fixed_params == {"text": {"maxCharacters": 4000}}
+        else:
+            assert operation.cost_rule == {"kind": "miner_billed"}
+    deepline = ops.OPERATIONS["deepline.execute"]
+    assert deepline.path == "/api/v2/integrations/{tool}/execute" and deepline.path_fields == ("tool",)
+    assert deepline.request_fields["tool"].choices == ops.DEEPLINE_TOOLS and deepline.request_fields["payload"].fields is None
+    assert deepline.credential.location == "header" and deepline.credential.scheme == "Bearer"
     assert ops.OPERATIONS["scrapingdog.scrape"].fixed_params == {"premium": False}
     assert ops.OPERATIONS["scrapingdog.google"].fixed_params == {"results": 10}
     chat = ops.OPERATIONS["openrouter.chat"].fixed_params
     assert chat["stream"] is False
     assert chat["provider"] == {"data_collection": "deny", "allow_fallbacks": False}
-    assert set(ops.PROVIDER_PRICE_LIST) == {k for k, v in ops.OPERATIONS.items() if v.funding_source == "tao"}
-    assert ops.PROVIDER_PRICE_LIST["exa.search"] == 5_000
-    assert ops.PROVIDER_PRICE_LIST["exa.contents"] == 5_000
-    assert ops.PROVIDER_PRICE_LIST["scrapingdog.scrape"] == 2_000
-    assert ops.PROVIDER_PRICE_LIST["scrapingdog.google"] == 5_000
+    assert not hasattr(ops, "PROVIDER_PRICE_LIST") and not hasattr(ops, "fixed_cost_microusd")
+
+
+def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
+    for tool in ops.DEEPLINE_TOOLS:
+        outbound = ops.build_outbound_request("deepline.execute", {"tool": tool, "payload": {"query": "x"}})
+        assert outbound.url == "https://code.deepline.com/api/v2/integrations/%s/execute" % tool
+        assert json.loads(outbound.body) == {"payload": {"query": "x"}}  # the path field never enters the body
+    reject("deepline.execute", {"tool": "exa_search/../admin", "payload": {}}, "invalid_field")
+    reject("deepline.execute", {"tool": "unknown_tool", "payload": {}}, "invalid_field")
+    reject("deepline.execute", {"payload": {"query": "x"}}, "missing_field")
+    reject("deepline.execute", {"tool": "exa_search"}, "missing_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": []}, "invalid_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"query": "x", "api_key": "k"}}, "forbidden_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"contents": {"x-api-key": "k"}}}, "forbidden_field")
+    assert ops.validate_operation_request("deepline.execute", {"tool": "exa_contents", "payload": {"urls": ["https://example.com/"], "text": True}})["payload"]["urls"] == ["https://example.com/"]
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"n": float("inf")}}, "invalid_request")  # structural check first
+    with pytest.raises(ops.OperationRequestError) as excinfo:
+        ops.match_request("POST", D_EXECUTE, b'{"tool": "exa_contents", "payload": {}}', {})
+    assert excinfo.value.code == "invalid_body"  # the body may not restate the path field
 
 
 def test_operations_are_immutable():
-    operation = ops.OPERATIONS["exa.search"]
+    operation = ops.OPERATIONS["scrapingdog.google"]
     with pytest.raises(TypeError):
-        operation.fixed_params["numResults"] = 100  # type: ignore[index]
+        operation.fixed_params["results"] = 100  # type: ignore[index]
     with pytest.raises(TypeError):
         ops.OPERATIONS["evil"] = operation  # type: ignore[index]
     with pytest.raises(Exception):
         operation.host = "evil.example"  # type: ignore[misc]
 
 
-def test_table_and_price_hashes_are_deterministic_and_stable_across_interpreters():
+def test_table_and_quota_hashes_are_deterministic_and_stable_across_interpreters():
     assert ops.OPERATION_TABLE_HASH == contracts.document_hash(ops.operation_table_document())
-    assert ops.PROVIDER_PRICE_LIST_HASH == contracts.document_hash(ops.price_list_document())
+    assert ops.CALL_QUOTA_HASH == contracts.document_hash(contracts.call_quota_document())
     assert contracts.SHA256_RE.match(ops.OPERATION_TABLE_HASH)
-    script = "from lab_arena import operations as o; print(o.OPERATION_TABLE_HASH, o.PROVIDER_PRICE_LIST_HASH)"
+    script = "from lab_arena import operations as o; print(o.OPERATION_TABLE_HASH, o.CALL_QUOTA_HASH)"
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=str(REPO_ROOT),
@@ -162,28 +176,29 @@ def test_table_and_price_hashes_are_deterministic_and_stable_across_interpreters
         timeout=60,
         check=True,
     )
-    assert completed.stdout.split() == [ops.OPERATION_TABLE_HASH, ops.PROVIDER_PRICE_LIST_HASH]
+    assert completed.stdout.split() == [ops.OPERATION_TABLE_HASH, ops.CALL_QUOTA_HASH]
 
 
-def test_table_hash_changes_when_a_fixed_param_or_price_changes():
+def test_table_hash_changes_when_a_fixed_param_tool_list_or_quota_changes():
     document = ops.operation_table_document()
     assert contracts.document_hash(copy.deepcopy(document)) == ops.OPERATION_TABLE_HASH
     changed = copy.deepcopy(document)
-    search = next(item for item in changed["operations"] if item["operation_id"] == "exa.search")
-    search["fixed_params"]["numResults"] = 11
+    google = next(item for item in changed["operations"] if item["operation_id"] == "scrapingdog.google")
+    google["fixed_params"]["results"] = 11
     assert contracts.document_hash(changed) != ops.OPERATION_TABLE_HASH
     changed = copy.deepcopy(document)
     chat = next(item for item in changed["operations"] if item["operation_id"] == "openrouter.chat")
     chat["fixed_params"]["provider"]["allow_fallbacks"] = True
     assert contracts.document_hash(changed) != ops.OPERATION_TABLE_HASH
-    prices = ops.price_list_document()
-    prices["prices"]["exa.search"] += 1
-    assert contracts.document_hash(prices) != ops.PROVIDER_PRICE_LIST_HASH
-    # The table document carries every constraint, so a schema change is visible.
+    # The Deepline tool allowlist and path template are part of the table identity.
     changed = copy.deepcopy(document)
-    search = next(item for item in changed["operations"] if item["operation_id"] == "exa.search")
-    search["request_fields"]["query"]["max_length"] = 5000
+    deepline = next(item for item in changed["operations"] if item["operation_id"] == "deepline.execute")
+    assert deepline["path_fields"] == ["tool"] and deepline["request_fields"]["tool"]["choices"] == list(ops.DEEPLINE_TOOLS)
+    deepline["request_fields"]["tool"]["choices"].append("instantly_list_api_keys")
     assert contracts.document_hash(changed) != ops.OPERATION_TABLE_HASH
+    quotas = contracts.call_quota_document()
+    quotas["per_icp_attempt"]["deepline"] += 1
+    assert contracts.document_hash(quotas) != ops.CALL_QUOTA_HASH
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +215,9 @@ def test_valid_request_matches_exactly_one_operation(operation_id):
         assert name in parameters
 
 
-def test_normalization_lowercases_domains_and_fills_defaults():
-    parameters = ops.validate_operation_request("exa.search", {"query": "x", "includeDomains": ["Example.COM"]})
-    assert parameters == {"query": "x", "includeDomains": ["example.com"]}
+def test_normalization_fills_defaults_and_passes_tool_payloads_through():
+    parameters = ops.validate_operation_request("deepline.execute", {"tool": "exa_search", "payload": {"query": "x", "includeDomains": ["Example.COM"]}})
+    assert parameters == {"tool": "exa_search", "payload": {"query": "x", "includeDomains": ["Example.COM"]}}
     chat = ops.validate_operation_request("openrouter.chat", {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]})
     assert chat["max_tokens"] == ops.OPENROUTER_MAX_OUTPUT_TOKENS
     assert ops.validate_operation_request("scrapingdog.google", {"query": "acme"})["country"] == "us"
@@ -210,8 +225,8 @@ def test_normalization_lowercases_domains_and_fills_defaults():
 
 
 def test_null_optional_fields_are_dropped_and_null_required_fields_are_missing():
-    assert ops.validate_operation_request("exa.search", {"query": "x", "category": None}) == {"query": "x"}
-    reject("exa.search", {"query": None}, "missing_field")
+    assert ops.validate_operation_request("scrapingdog.google", {"query": "x", "country": None}) == {"query": "x", "country": "us"}
+    reject("scrapingdog.google", {"query": None}, "missing_field")
 
 
 # ---------------------------------------------------------------------------
@@ -222,26 +237,30 @@ def test_null_optional_fields_are_dropped_and_null_required_fields_are_missing()
 @pytest.mark.parametrize(
     "method,url",
     [
-        ("POST", "https://api.exa.ai/search/"),
-        ("POST", "https://api.exa.ai/search/extra"),
-        ("POST", "https://api.exa.ai/Search"),
-        ("POST", "https://api.exa.ai/v1/search"),
-        ("GET", "https://api.exa.ai/search"),
-        ("PUT", "https://api.exa.ai/search"),
-        ("POST", "http://api.exa.ai/search"),
-        ("POST", "https://api.exa.ai:8443/search"),
-        ("POST", "https://api.exa.ai:80/search"),
-        ("POST", "https://user@api.exa.ai/search"),
-        ("POST", "https://api.exa.ai@evil.example/search"),
-        ("POST", "https://api.exa.ai/search#fragment"),
-        ("POST", "https://evil.example/search"),
-        ("POST", "https://api.exa.ai.evil.example/search"),
-        ("POST", "https://sub.api.exa.ai/search"),
-        ("POST", "https://api.exa.ai./search"),
-        ("POST", "https://127.0.0.1/search"),
-        ("POST", "https://[::1]/search"),
-        ("POST", "https://2130706433/search"),
-        ("POST", "https://api.exa.ai/search\n"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa_search/execute/"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa_search/execute/extra"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa_search/Execute"),
+        ("POST", "https://code.deepline.com/api/v1/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/execute"),
+        ("POST", "https://code.deepline.com/api/v2/integrations//execute"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa%20search/execute"),
+        ("GET", "https://code.deepline.com/api/v2/integrations/exa_search/execute"),
+        ("GET", "https://code.deepline.com/api/v2/integrations/exa_search/get"),
+        ("PUT", "https://code.deepline.com/api/v2/integrations/exa_search/execute"),
+        ("POST", "http://code.deepline.com/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com:8443/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com:80/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://user@code.deepline.com/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com@evil.example/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa_search/execute#fragment"),
+        ("POST", "https://evil.example/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com.evil.example/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://sub.code.deepline.com/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com./api/v2/integrations/exa_search/execute"),
+        ("POST", "https://127.0.0.1/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://[::1]/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://2130706433/api/v2/integrations/exa_search/execute"),
+        ("POST", "https://code.deepline.com/api/v2/integrations/exa_search/execute\n"),
         ("GET", "https://api.scrapingdog.com/scrape/"),
         ("POST", "https://api.scrapingdog.com/scrape"),
         ("POST", "https://openrouter.ai/api/v1/completions"),
@@ -251,17 +270,17 @@ def test_null_optional_fields_are_dropped_and_null_required_fields_are_missing()
 )
 def test_unknown_path_method_host_port_userinfo_and_fragment_match_nothing(method, url):
     with pytest.raises(ops.OperationRequestError) as excinfo:
-        ops.match_request(method, url, b'{"query": "x"}', {})
+        ops.match_request(method, url, b'{"payload": {"query": "x"}}', {})
     assert excinfo.value.code == "no_matching_operation"
 
 
 def test_explicit_port_443_is_the_same_operation():
-    assert ops.match_request("POST", "https://api.exa.ai:443/search", b'{"query": "x"}', {})[0] == "exa.search"
+    assert ops.match_request("POST", "https://code.deepline.com:443/api/v2/integrations/exa_search/execute", b'{"payload": {"query": "x"}}', {})[0] == "deepline.execute"
 
 
 def test_query_string_on_post_operation_is_rejected():
     with pytest.raises(ops.OperationRequestError) as excinfo:
-        ops.match_request("POST", "https://api.exa.ai/search?numResults=100", b'{"query": "x"}', {})
+        ops.match_request("POST", D_EXECUTE + "?numResults=100", b'{"payload": {"query": "x"}}', {})
     assert excinfo.value.code == "invalid_query"
 
 
@@ -309,7 +328,7 @@ def test_get_operation_rejects_a_body_and_coerces_booleans():
 )
 def test_caller_credentials_and_unknown_headers_are_refused(header, code):
     with pytest.raises(ops.OperationRequestError) as excinfo:
-        ops.match_request("POST", "https://api.exa.ai/search", b'{"query": "x"}', {header: "value"})
+        ops.match_request("POST", D_EXECUTE, b'{"payload": {"query": "x"}}', {header: "value"})
     assert excinfo.value.code == code
     with pytest.raises(ops.OperationRequestError):
         ops.match_request("GET", "https://api.scrapingdog.com/google?query=x", b"", {header: "value"})
@@ -317,7 +336,7 @@ def test_caller_credentials_and_unknown_headers_are_refused(header, code):
 
 def test_benign_client_headers_are_accepted_and_never_forwarded():
     headers = {
-        "Host": "api.exa.ai",
+        "Host": "code.deepline.com",
         "User-Agent": "python-requests/2.32",
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate",
@@ -325,8 +344,8 @@ def test_benign_client_headers_are_accepted_and_never_forwarded():
         "Content-Length": "14",
         "Content-Type": "application/json; charset=utf-8",
     }
-    operation_id, parameters = ops.match_request("POST", "https://api.exa.ai/search", b'{"query": "x"}', headers)
-    assert operation_id == "exa.search"
+    operation_id, parameters = ops.match_request("POST", D_EXECUTE, b'{"payload": {"query": "x"}}', headers)
+    assert operation_id == "deepline.execute"
     outbound = ops.build_outbound_request(operation_id, parameters)
     assert "User-Agent" not in json.dumps(outbound.body.decode("utf-8"))
     assert outbound.content_type == "application/json"
@@ -335,23 +354,23 @@ def test_benign_client_headers_are_accepted_and_never_forwarded():
 @pytest.mark.parametrize("body", [b"", b"[]", b'"x"', b"not json", b"\xff\xfe", b"{\"query\": \"x\"} trailing"])
 def test_post_body_must_be_a_json_object(body):
     with pytest.raises(ops.OperationRequestError) as excinfo:
-        ops.match_request("POST", "https://api.exa.ai/search", body, {})
+        ops.match_request("POST", D_EXECUTE, body, {})
     assert excinfo.value.code in ("invalid_body", "missing_field")
 
 
 def test_oversized_raw_body_and_nesting_bombs_are_rejected_before_validation():
-    padded = json.dumps({"query": "x", "pad": "y" * 20_000}).encode("utf-8")
+    padded = json.dumps({"payload": {"query": "x", "pad": "y" * 70_000}}).encode("utf-8")
     with pytest.raises(ops.OperationRequestError) as excinfo:
-        ops.match_request("POST", "https://api.exa.ai/search", padded, {})
+        ops.match_request("POST", D_EXECUTE, padded, {})
     assert excinfo.value.code == "request_too_large"
     bomb: dict = {"query": "x"}
     cursor = bomb
     for _ in range(20):
         cursor["n"] = {}
         cursor = cursor["n"]
-    reject("exa.search", bomb, "invalid_request")
-    reject("exa.search", {"query": "x\x00y"}, "invalid_request")
-    reject("exa.search", "not a mapping", "invalid_request")
+    reject("deepline.execute", {"tool": "exa_search", "payload": bomb}, "invalid_request")
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"query": "x\x00y"}}, "invalid_request")
+    reject("deepline.execute", "not a mapping", "invalid_request")
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +430,7 @@ def test_https_only_url_rules(url):
     # code is still generic and the request is still refused.
     expected = ("invalid_url", "invalid_field") if len(url) < 8 else ("invalid_url",)
     assert reject("scrapingdog.scrape", {"url": url}).code in expected
-    assert reject("exa.contents", {"urls": [url]}).code in expected
+    assert reject("scrapingdog.scrape", {"url": url}).code in expected
 
 
 @pytest.mark.parametrize(
@@ -422,24 +441,23 @@ def test_accepted_target_urls_are_returned_unchanged(url):
     assert ops.validate_operation_request("scrapingdog.scrape", {"url": url})["url"] == url
 
 
-def test_exa_contents_bounds_urls():
-    reject("exa.contents", {"urls": []}, "invalid_field")
-    reject("exa.contents", {"urls": ["https://example.com/"] * 6}, "invalid_field")
-    reject("exa.contents", {"urls": "https://example.com/"}, "invalid_field")
-    reject("exa.contents", {}, "missing_field")
+def test_scrapingdog_scrape_bounds_url():
+    reject("scrapingdog.scrape", {"url": ""}, "invalid_field")
+    reject("scrapingdog.scrape", {"url": ["https://example.com/"]}, "invalid_field")
+    reject("scrapingdog.scrape", {"url": 5}, "invalid_field")
+    reject("scrapingdog.scrape", {}, "missing_field")
 
 
-def test_exa_search_field_rules():
-    reject("exa.search", {"query": ""}, "invalid_field")
-    reject("exa.search", {"query": "x" * 1001}, "invalid_field")
-    reject("exa.search", {"query": "x", "type": "magic"}, "invalid_field")
-    reject("exa.search", {"query": "x", "category": "everything"}, "invalid_field")
-    reject("exa.search", {"query": "x", "includeDomains": ["example.com"] * 21}, "invalid_field")
-    reject("exa.search", {"query": "x", "includeDomains": ["https://example.com"]}, "invalid_field")
-    reject("exa.search", {"query": "x", "includeDomains": ["10.0.0.1"]}, "invalid_field")
-    reject("exa.search", {"query": "x", "startPublishedDate": "2024-13-01"}, "invalid_field")
-    reject("exa.search", {"query": "x", "startPublishedDate": "2024-01-01T00:00:00Z"}, "invalid_field")
-    reject("exa.search", {"query": 5}, "invalid_field")
+def test_deepline_execute_field_rules():
+    reject("deepline.execute", {"tool": "", "payload": {}}, "invalid_field")
+    reject("deepline.execute", {"tool": "exa_search" * 20, "payload": {}}, "invalid_field")
+    reject("deepline.execute", {"tool": 5, "payload": {}}, "invalid_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": "text"}, "invalid_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"query": "x", "extra": {"nested": {"api_key": "k"}}}}, "forbidden_field")
+    reject("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}, "url": "https://evil.example/"}, "forbidden_field")
+    # Deepline owns tool schemas: payload fields pass through untouched, including ones the old Exa table capped.
+    passed = ops.validate_operation_request("deepline.execute", {"tool": "exa_people_search", "payload": {"query": "x", "numResults": 100, "includeDomains": ["Example.com"] * 21}})
+    assert passed["payload"]["numResults"] == 100 and len(passed["payload"]["includeDomains"]) == 21
 
 
 def test_scrapingdog_google_field_rules():
@@ -516,7 +534,10 @@ def _mutations(operation: ops.Operation):
 def test_outbound_target_is_constant_under_every_field_mutation(operation_id):
     operation = ops.OPERATIONS[operation_id]
     baseline = ops.outbound_target(operation_id, VALID[operation_id])
-    assert baseline == ops.OutboundTarget(operation.method, "https", operation.host, 443, operation.path)
+    rendered_path = operation.path
+    for field_name in operation.path_fields:
+        rendered_path = rendered_path.replace("{%s}" % field_name, VALID[operation_id][field_name])
+    assert baseline == ops.OutboundTarget(operation.method, "https", operation.host, 443, rendered_path)
     exercised = 0
     for name, value in _mutations(operation):
         parameters = dict(VALID[operation_id])
@@ -529,11 +550,11 @@ def test_outbound_target_is_constant_under_every_field_mutation(operation_id):
         exercised += 1
         assert target == baseline
         outbound = ops.build_outbound_request(operation_id, parameters)
-        assert outbound.url.startswith("https://%s%s" % (operation.host, operation.path))
+        assert outbound.url.startswith("https://%s%s" % (operation.host, rendered_path))
         assert outbound.target == baseline
         if operation.method == "POST":
             document = json.loads(outbound.body.decode("utf-8"))
-            assert set(document) <= set(operation.request_fields) | set(operation.fixed_params)
+            assert set(document) <= (set(operation.request_fields) - set(operation.path_fields)) | set(operation.fixed_params)
             for fixed_name, fixed_value in operation.fixed_params.items():
                 assert document[fixed_name] == fixed_value
         else:
@@ -568,7 +589,7 @@ def test_scrapingdog_scrape_query_is_url_encoded_and_credential_free():
 
 def test_sanitizer_strips_every_provider_header_and_recomputes_length():
     status, headers, body = ops.sanitize_response(
-        "exa.search",
+        "deepline.execute",
         200,
         {"Set-Cookie": "session=abc", "X-RateLimit-Remaining": "1", "Server": "nginx", "Content-Type": "application/json; charset=utf-8", "Content-Length": "999", "Via": "proxy"},
         b'{"results": []}',
@@ -586,10 +607,10 @@ def test_credential_statuses_become_one_generic_response(operation_id, status):
     assert b"sk-live" not in result[2]
 
 
-def test_payment_required_is_generic_for_arena_credentials_but_visible_for_miner_keys():
-    assert ops.sanitize_response("exa.search", 402, {}, b'{"error": "account out of credit"}')[0] == 502
-    status, _, body = ops.sanitize_response("openrouter.chat", 402, {}, b'{"error": {"code": 402}}')
-    assert status == 402 and body == b'{"error": {"code": 402}}'
+def test_payment_required_is_visible_for_every_miner_key():
+    for operation_id in ("deepline.execute", "scrapingdog.google", "openrouter.chat"):
+        status, _, body = ops.sanitize_response(operation_id, 402, {}, b'{"error": {"code": 402}}')
+        assert status == 402 and body == b'{"error": {"code": 402}}'
 
 
 def test_openrouter_body_passes_through_unchanged_when_valid_json():
@@ -601,20 +622,20 @@ def test_openrouter_body_passes_through_unchanged_when_valid_json():
 
 def test_json_sanitizer_fails_closed_on_invalid_or_oversized_bodies():
     with pytest.raises(ops.OperationResponseError) as excinfo:
-        ops.sanitize_response("exa.search", 200, {}, b"<html>oops</html>")
+        ops.sanitize_response("deepline.execute", 200, {}, b"<html>oops</html>")
     assert excinfo.value.code == "invalid_response"
     with pytest.raises(ops.OperationResponseError) as excinfo:
-        ops.sanitize_response("exa.search", 200, {}, b'"just a string"')
+        ops.sanitize_response("deepline.execute", 200, {}, b'"just a string"')
     assert excinfo.value.code == "invalid_response"
-    too_big = b'{"pad": "' + b"x" * ops.OPERATIONS["exa.search"].max_response_bytes + b'"}'
+    too_big = b'{"pad": "' + b"x" * ops.OPERATIONS["deepline.execute"].max_response_bytes + b'"}'
     with pytest.raises(ops.OperationResponseError) as excinfo:
-        ops.sanitize_response("exa.search", 200, {}, too_big)
+        ops.sanitize_response("deepline.execute", 200, {}, too_big)
     assert excinfo.value.code == "response_too_large"
     for bad_status in (99, 600, "200", True, None):
         with pytest.raises(ops.OperationResponseError):
-            ops.sanitize_response("exa.search", bad_status, {}, b"{}")
+            ops.sanitize_response("deepline.execute", bad_status, {}, b"{}")
     with pytest.raises(ops.OperationResponseError):
-        ops.sanitize_response("exa.search", 200, {}, "not bytes")
+        ops.sanitize_response("deepline.execute", 200, {}, "not bytes")
 
 
 def test_text_sanitizer_truncates_on_a_utf8_boundary_and_bounds_content_type():
@@ -630,7 +651,7 @@ def test_text_sanitizer_truncates_on_a_utf8_boundary_and_bounds_content_type():
 
 
 def test_error_codes_are_closed_and_messages_carry_no_values():
-    exc = reject("exa.search", {"query": "x", "url": "https://secret-host.example/token=abc"}, "forbidden_field")
+    exc = reject("deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}, "url": "https://secret-host.example/token=abc"}, "forbidden_field")
     assert "secret-host" not in str(exc)
     assert str(exc).startswith("forbidden_field")
     with pytest.raises(ValueError):

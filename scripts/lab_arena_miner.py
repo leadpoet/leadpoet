@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Lab Arena miner helper (labarena.md sections 6.2, 7.2, 7.3, 14.2).
 
-    python3 scripts/lab_arena_miner.py encrypt-key --recipient recipient.json --out envelope.json
+    python3 scripts/lab_arena_miner.py encrypt-key --provider deepline --recipient recipient.json --out envelope.json
     python3 scripts/lab_arena_miner.py package --source-dir ./model --entry-point model/main.py \\
         --lock requirements.lock --out package.tar.gz
     python3 scripts/lab_arena_miner.py sign --scope submission --round-id arena-2026-09-02 \\
         --body body.json --out envelope.json [--wallet-name W --hotkey-name H | --hotkey-uri //Alice]
 
-The runtime key is read from ``LAB_ARENA_OPENROUTER_RUNTIME_KEY`` and never
+Each provider key is read from ``LAB_ARENA_<PROVIDER>_RUNTIME_KEY`` and never
 written anywhere but the encrypted envelope. Hotkey signing uses the local
 Bittensor wallet; ``--hotkey-uri`` exists for development only.
 """
@@ -29,10 +29,9 @@ if str(ROOT) not in sys.path:
 
 from lab_arena import build, contracts, credentials  # noqa: E402
 
-KEY_ENV = "LAB_ARENA_OPENROUTER_RUNTIME_KEY"
+KEY_ENV_TEMPLATE = "LAB_ARENA_%s_RUNTIME_KEY"  # one variable per provider, e.g. LAB_ARENA_DEEPLINE_RUNTIME_KEY
 SCOPES = {
     "submission": contracts.SCOPE_SUBMISSION,
-    "funding": contracts.SCOPE_FUNDING,
     "credential": contracts.SCOPE_CREDENTIAL,
     "submission-status": contracts.SCOPE_SUBMISSION_STATUS,
 }
@@ -41,7 +40,8 @@ SCOPES = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Leadpoet Lab Arena miner helper")
     commands = parser.add_subparsers(dest="command", required=True)
-    encrypt = commands.add_parser("encrypt-key", help="encrypt the OpenRouter runtime key to the Arena recipient key")
+    encrypt = commands.add_parser("encrypt-key", help="encrypt one provider runtime key to the Arena recipient key")
+    encrypt.add_argument("--provider", required=True, choices=list(contracts.MINER_KEY_PROVIDERS))
     encrypt.add_argument("--recipient", required=True, help="path to the GET /recipient document")
     encrypt.add_argument("--out", required=True)
     package = commands.add_parser("package", help="build a deterministic signed-package tarball")
@@ -61,15 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def encrypt_key(args) -> int:
-    raw_key = os.environ.get(KEY_ENV, "")
+    key_env = KEY_ENV_TEMPLATE % args.provider.upper()
+    raw_key = os.environ.get(key_env, "")
     if not raw_key:
-        print("%s is not set" % KEY_ENV, file=sys.stderr)
+        print("%s is not set" % key_env, file=sys.stderr)
         return 2
     recipient = json.loads(Path(args.recipient).read_text(encoding="utf-8"))
     credentials.validate_recipient_document(recipient)
-    envelope = credentials.encrypt_runtime_key(recipient, credentials.validate_openrouter_key_format(raw_key))
+    envelope = credentials.encrypt_runtime_key(recipient, credentials.validate_provider_key_format(args.provider, raw_key), provider=args.provider)
     Path(args.out).write_text(json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"key_hash": envelope["key_hash"], "recipient_key_hash": envelope["recipient_key_hash"], "out": args.out}))
+    print(json.dumps({"provider": args.provider, "key_hash": envelope["key_hash"], "recipient_key_hash": envelope["recipient_key_hash"], "out": args.out}))
     return 0
 
 

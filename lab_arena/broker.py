@@ -247,29 +247,6 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ArenaProviderCredentials:
-    """Arena-owned keys for TAO-funded providers. Never logged or serialized."""
-
-    exa_api_key: str
-    scrapingdog_api_key: str
-
-    def __repr__(self) -> str:
-        return "ArenaProviderCredentials(<redacted>)"
-
-    __str__ = __repr__
-
-    def for_provider(self, provider: str) -> str:
-        if provider == "exa":
-            secret = self.exa_api_key
-        elif provider == "scrapingdog":
-            secret = self.scrapingdog_api_key
-        else:
-            raise BrokerError("broker_unavailable")
-        if not secret:
-            raise BrokerError("broker_unavailable")
-        return secret
-
 
 def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tuple[str, Dict[str, str]]:
     """Place the credential exactly where the operation table says."""
@@ -396,8 +373,7 @@ class Broker:
         self,
         *,
         store: CallStore,
-        credentials: ArenaProviderCredentials,
-        openrouter_key_for: Callable[[str], RuntimeKeyHandle],
+        key_for: Callable[[str, str], RuntimeKeyHandle],
         price_table: Mapping[str, Any],
         allowed_models: Sequence[str],
         transport: ProviderTransport,
@@ -405,8 +381,9 @@ class Broker:
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
     ) -> None:
         self._store = store
-        self._credentials = credentials
-        self._openrouter_key_for = openrouter_key_for
+        # (miner_hotkey, provider) -> the miner's own decrypted key handle; the
+        # broker holds no Arena provider credential of its own.
+        self._key_for = key_for
         self._price_table = validate_price_table(price_table)
         self._allowed_models = tuple(str(model) for model in allowed_models)
         for model in self._allowed_models:
@@ -486,13 +463,14 @@ class Broker:
         max_output_tokens = 0
         try:
             if operation.provider == "openrouter":
+                # OpenRouter reports a key limit: the price-table bound reserves
+                # against the remaining capacity observed at preflight.
                 normalized, max_output_tokens = self._openrouter_parameters(normalized)
                 amount = max_openrouter_cost_microusd(self._price_table, normalized["model"], normalized, max_output_tokens=max_output_tokens)
             else:
-                fixed = operations.fixed_cost_microusd(operation_id)
-                if fixed is None:
-                    raise BrokerError("broker_unavailable")
-                amount = int(fixed)
+                # Other providers bill the miner's own account; the Arena bounds
+                # them by call quota, so the reservation carries no amount.
+                amount = 0
         except BrokerError as exc:
             return _error_result(exc.code, {"operation_id": operation_id})
         request_hash = contracts.document_hash(normalized)
@@ -559,13 +537,10 @@ class Broker:
         outbound = operations.build_outbound_request(operation_id, normalized)
         key_handle: Optional[RuntimeKeyHandle] = None
         try:
-            if operation.provider == "openrouter":
-                key_handle = self._openrouter_key_for(context.miner_hotkey)
-                header = key_handle.bearer_header()
-                value = next(iter(header.values())) if isinstance(header, Mapping) else str(header)
-                secret = value.split(" ", 1)[1] if value.lower().startswith("bearer ") else value
-            else:
-                secret = self._credentials.for_provider(operation.provider)
+            key_handle = self._key_for(context.miner_hotkey, operation.provider)
+            if getattr(key_handle, "provider", operation.provider) != operation.provider:
+                raise BrokerError("broker_unavailable")
+            secret = key_handle.secret()
             url, headers = inject_credential(outbound, secret)
             timeout_seconds = min(max(1, int(timeout_ms)) / 1000.0, float(operation.timeout_seconds))
             try:
@@ -595,7 +570,7 @@ class Broker:
             # Missing, malformed, stale, or excessive usage retains the full reservation.
             actual = amount if actual is None or actual > amount else actual
         else:
-            actual = amount  # TAO-funded providers settle at the published estimate
+            actual = 0  # miner-billed providers: the Arena records the call, not a price
         terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
         payload = dict(summary, outcome="settled", status=sanitized_status, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
         settled = self._terminal_with_event(

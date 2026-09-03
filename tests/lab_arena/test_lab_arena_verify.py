@@ -11,6 +11,7 @@ import pytest
 from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
 from research_lab.eval import evaluator
 
+from lab_arena import contracts
 from lab_arena import rewards, verify
 from lab_arena.contracts import (
     ArenaContractError,
@@ -255,13 +256,11 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
             "base_image_digest": "sha256:" + "ab" * 32,
         },
         "operation_table_hash": _sha("operations"),
-        "provider_price_list_hash": _sha("prices"),
         "openrouter_price_table_hash": _sha("openrouter-prices"),
         "openrouter_allowed_models": ["openai/gpt-4o-mini"],
-        "stage_1_ceiling_microusd": 2_000_000,
-        "stage_2_ceiling_microusd": 3_000_000,
-        "per_icp_cap_stage_1_microusd": 100_000,
-        "per_icp_cap_stage_2_microusd": 100_000,
+        "miner_key_providers": list(contracts.MINER_KEY_PROVIDERS),
+        "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
+        "call_quota_hash": contracts.document_hash(contracts.call_quota_document()),
         "icp_wall_clock_seconds": 300,
         "scorer_policy_hash": POLICY["policy_hash"],
         "scoring_cap_microusd": 5_000_000,

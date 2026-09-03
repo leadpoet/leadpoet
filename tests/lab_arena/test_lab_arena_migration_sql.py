@@ -19,7 +19,6 @@ SERVICE_FUNCTIONS = (
     "lab_arena_update_submission",
     "lab_arena_upsert_account_credential",
     "lab_arena_record_preflight",
-    "lab_arena_credit_deposit",
     "lab_arena_open_stage",
     "lab_arena_claim_assignment",
     "lab_arena_reserve_call",
@@ -128,9 +127,9 @@ def test_unique_indexes_enforce_plan_invariants():
     assert "WHERE status IN ('pending', 'leased', 'submitted')" in SQL
     assert "lab_arena_runs_one_accepted_uq" in SQL
     assert "lab_arena_runs_claim_request_uq" in SQL
-    assert "lab_arena_ledger_payment_reference_uq" in SQL
     assert "lab_arena_ledger_reservation_uq" in SQL
     assert "lab_arena_ledger_terminal_uq" in SQL
     assert "lab_arena_rounds_effective_reward_epoch_uq" in SQL
-    assert "CHECK (balance_microusd >= 0)" in SQL
+    assert "funding_source = 'miner_key'" in SQL and "balance_microusd" not in SQL and "credit_deposit" not in SQL
+    assert "lab_arena__aggregate_preflight" in SQL and "lab_arena__run_consumed(p_run_id TEXT, p_provider TEXT)" in SQL
     assert "FOR UPDATE SKIP LOCKED" in SQL

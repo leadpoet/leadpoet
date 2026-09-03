@@ -46,10 +46,9 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_append_journal_entry": (("p_round_id", "text"), ("p_entry", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
-    "lab_arena_upsert_account_credential": (("p_miner_hotkey", "text"), ("p_ciphertext", "text"), ("p_key_hash", "text"), ("p_preflight", "jsonb")),
-    "lab_arena_record_preflight": (("p_miner_hotkey", "text"), ("p_preflight", "jsonb")),
-    "lab_arena_credit_deposit": (("p_miner_hotkey", "text"), ("p_payment_reference", "text"), ("p_amount_microusd", "bigint"), ("p_deposit_doc", "jsonb")),
-    "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]"), ("p_icp_hashes", "text[]"), ("p_per_icp_cap_microusd", "bigint")),
+    "lab_arena_upsert_account_credential": (("p_miner_hotkey", "text"), ("p_provider", "text"), ("p_ciphertext", "text"), ("p_key_hash", "text"), ("p_preflight", "jsonb")),
+    "lab_arena_record_preflight": (("p_miner_hotkey", "text"), ("p_provider", "text"), ("p_preflight", "jsonb")),
+    "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]"), ("p_icp_hashes", "text[]")),
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_dispatched": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text")),
@@ -500,28 +499,21 @@ class ArenaStore:
 
     # -- accounts and deposits --------------------------------------------
 
-    def upsert_account_credential(self, miner_hotkey: str, ciphertext: str, key_hash: str, preflight: Mapping[str, Any]) -> Dict[str, Any]:
+    def upsert_account_credential(self, miner_hotkey: str, provider: str, ciphertext: str, key_hash: str, preflight: Mapping[str, Any]) -> Dict[str, Any]:
+        """Store one provider's encrypted key envelope and its preflight; the account aggregate follows."""
+
         return _require_mapping(
             self._transport.rpc(
                 "lab_arena_upsert_account_credential",
-                {"p_miner_hotkey": miner_hotkey, "p_ciphertext": ciphertext, "p_key_hash": key_hash, "p_preflight": dict(preflight)},
+                {"p_miner_hotkey": miner_hotkey, "p_provider": provider, "p_ciphertext": ciphertext, "p_key_hash": key_hash, "p_preflight": dict(preflight)},
             ),
             "upsert_account_credential",
         )
 
-    def record_preflight(self, miner_hotkey: str, preflight: Mapping[str, Any]) -> Dict[str, Any]:
+    def record_preflight(self, miner_hotkey: str, provider: str, preflight: Mapping[str, Any]) -> Dict[str, Any]:
         return _require_mapping(
-            self._transport.rpc("lab_arena_record_preflight", {"p_miner_hotkey": miner_hotkey, "p_preflight": dict(preflight)}),
+            self._transport.rpc("lab_arena_record_preflight", {"p_miner_hotkey": miner_hotkey, "p_provider": provider, "p_preflight": dict(preflight)}),
             "record_preflight",
-        )
-
-    def credit_deposit(self, *, miner_hotkey: str, payment_reference: str, amount_microusd: int, deposit_doc: Mapping[str, Any]) -> Dict[str, Any]:
-        return _require_mapping(
-            self._transport.rpc(
-                "lab_arena_credit_deposit",
-                {"p_miner_hotkey": miner_hotkey, "p_payment_reference": payment_reference, "p_amount_microusd": int(amount_microusd), "p_deposit_doc": dict(deposit_doc)},
-            ),
-            "credit_deposit",
         )
 
     def get_account(self, miner_hotkey: str) -> Optional[Dict[str, Any]]:
@@ -530,7 +522,7 @@ class ArenaStore:
 
     # -- stages and assignments -------------------------------------------
 
-    def open_stage(self, round_id: str, stage: int, participants: Sequence[Mapping[str, Any]], icp_positions: Sequence[int], icp_hashes: Sequence[str], per_icp_cap_microusd: int) -> Dict[str, Any]:
+    def open_stage(self, round_id: str, stage: int, participants: Sequence[Mapping[str, Any]], icp_positions: Sequence[int], icp_hashes: Sequence[str]) -> Dict[str, Any]:
         return _require_mapping(
             self._transport.rpc(
                 "lab_arena_open_stage",
@@ -540,7 +532,6 @@ class ArenaStore:
                     "p_participants": [dict(item) for item in participants],
                     "p_icp_positions": [int(item) for item in icp_positions],
                     "p_icp_hashes": [str(item) for item in icp_hashes],
-                    "p_per_icp_cap_microusd": int(per_icp_cap_microusd),
                 },
             ),
             "open_stage",

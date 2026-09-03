@@ -15,8 +15,9 @@ from lab_arena import contracts, operations
 from lab_arena.credentials import RuntimeKeyHandle
 
 KEY = "sk-or-v1-" + "k" * 40
-EXA_KEY = "exa-secret-" + "e" * 30
-DOG_KEY = "dog-secret-" + "d" * 30
+DL_KEY = "dl_secret_" + "e" * 30
+DOG_KEY = "dogsecret" + "d" * 30
+MINER_KEYS = {"openrouter": KEY, "deepline": DL_KEY, "scrapingdog": DOG_KEY}
 
 
 def price_table():
@@ -34,9 +35,8 @@ def price_table():
 class FakeLedgerStore:
     """In-memory model of the section 7.5 ledger functions and their statuses."""
 
-    def __init__(self, *, per_icp_cap=1_000_000, balance=10_000_000, openrouter_capacity=10_000_000):
-        self.per_icp_cap = per_icp_cap
-        self.balance = balance
+    def __init__(self, *, per_icp_quota=30, openrouter_capacity=10_000_000):
+        self.per_icp_quota = per_icp_quota
         self.openrouter_capacity = openrouter_capacity
         self.calls: Dict[str, Dict[str, Any]] = {}
         self.run = {"event_cursor": 0, "event_head_hash": ""}
@@ -48,8 +48,8 @@ class FakeLedgerStore:
     def _view(self, call):
         return {"status": {"reservation": "reserved", "dispatch": "dispatched", "settlement": "settled", "uncertain": "uncertain", "recovery": "recovered", "refusal": "refused"}[call["kind"]], "idempotent": True, "call_identity": call["identity"], "amount_microusd": call["amount"], "terminal_response": call.get("terminal"), "reason": call.get("reason"), "event_cursor": self.run["event_cursor"], "event_head_hash": self.run["event_head_hash"]}
 
-    def _consumed(self):
-        return sum(c["amount"] for c in self.calls.values() if c["kind"] in ("reservation", "dispatch", "settlement", "uncertain"))
+    def _consumed(self, provider):
+        return sum(1 for c in self.calls.values() if c.get("provider") == provider and c["kind"] in ("reservation", "dispatch", "settlement", "uncertain"))
 
     def reserve_call(self, *, run_id, lease_token_hash, call_identity, operation_id, provider, funding_source, amount_microusd, call_doc, lease_ttl_seconds):
         with self.lock:
@@ -59,21 +59,18 @@ class FakeLedgerStore:
             existing = self.calls.get(call_identity)
             if existing:
                 return self._view(existing)
+            assert funding_source == "miner_key"
             reason = None
-            if self._consumed() + amount_microusd > self.per_icp_cap:
-                reason = "per_icp_cap"
-            elif funding_source == "tao" and self.balance < amount_microusd:
-                reason = "balance"
-            elif funding_source == "openrouter" and self.openrouter_capacity < amount_microusd:
+            if self._consumed(provider) >= self.per_icp_quota:
+                reason = "per_icp_quota"
+            elif provider == "openrouter" and self.openrouter_capacity < amount_microusd:
                 reason = "key_capacity"
             if reason:
                 self.calls[call_identity] = {"kind": "refusal", "identity": call_identity, "amount": 0, "reason": reason}
                 return {"status": "refused", "idempotent": False, "reason": reason, "call_identity": call_identity, "event_cursor": self.run["event_cursor"], "event_head_hash": self.run["event_head_hash"]}
-            if funding_source == "tao":
-                self.balance -= amount_microusd
-            else:
+            if provider == "openrouter":
                 self.openrouter_capacity -= amount_microusd
-            self.calls[call_identity] = {"kind": "reservation", "identity": call_identity, "amount": amount_microusd, "funding": funding_source}
+            self.calls[call_identity] = {"kind": "reservation", "identity": call_identity, "amount": amount_microusd, "provider": provider}
             return {"status": "reserved", "idempotent": False, "call_identity": call_identity, "amount_microusd": amount_microusd, "event_cursor": self.run["event_cursor"], "event_head_hash": self.run["event_head_hash"]}
 
     def mark_dispatched(self, *, run_id, lease_token_hash, call_identity):
@@ -106,12 +103,10 @@ class FakeLedgerStore:
             if call["kind"] != "dispatch":
                 return self._view(call)
             assert actual_microusd <= call["amount"]
-            if call["funding"] == "tao":
-                assert actual_microusd == call["amount"]
             # One transaction: the event check happens before any state changes.
             if event is not None:
                 self._append(event)
-            if call["funding"] != "tao":
+            if call.get("provider") == "openrouter":
                 self.openrouter_capacity += call["amount"]  # outstanding released
                 self.openrouter_capacity -= actual_microusd
             call.update({"kind": "settlement", "terminal": terminal_response, "actual": actual_microusd})
@@ -154,8 +149,7 @@ def make_broker(store=None, transport=None, **kwargs):
     transport = transport or FakeTransport()
     broker = br.Broker(
         store=store,
-        credentials=br.ArenaProviderCredentials(exa_api_key=EXA_KEY, scrapingdog_api_key=DOG_KEY),
-        openrouter_key_for=lambda hotkey: RuntimeKeyHandle(KEY),
+        key_for=lambda hotkey, provider: RuntimeKeyHandle(MINER_KEYS[provider], provider),
         price_table=price_table(),
         allowed_models=["openai/gpt-4o-mini", "anthropic/claude-3.5-haiku"],
         transport=transport,
@@ -169,21 +163,20 @@ CONTEXT = br.RunContext(run_id="r1", assignment_id="arena-2026-09-02:s1:1:0", ic
 CHAT = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "find fintech companies"}], "max_tokens": 200}
 
 
-def test_exa_call_reserves_dispatches_sends_and_settles_at_estimate():
+def test_deepline_call_reserves_dispatches_sends_with_the_miners_key_and_settles():
     broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": [{"url": "https://a.example"}]})]))
-    result = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "fintech"}, action_sequence=0, timeout_ms=5000)
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "fintech"}}, action_sequence=0, timeout_ms=5000)
     assert result.status == 200 and json.loads(result.body)["results"][0]["url"] == "https://a.example"
     assert set(result.headers) == {"content-type", "content-length"}
     assert store.log == ["reserve", "dispatch", "settle"]
     call = result.call
-    assert call["outcome"] == "settled" and call["reserved_microusd"] == call["actual_microusd"] == 5000
+    assert call["outcome"] == "settled" and call["reserved_microusd"] == call["actual_microusd"] == 0 and call["funding_source"] == "miner_key"
     sent = transport.sent[0]
-    assert sent["url"] == "https://api.exa.ai/search" and sent["method"] == "POST"
-    assert sent["headers"]["x-api-key"] == EXA_KEY and "authorization" not in sent["headers"]
-    body = json.loads(sent["body"])
-    assert body["numResults"] == 10 and body["contents"] == {"text": {"maxCharacters": 2000}} and body["query"] == "fintech"
-    assert store.balance == 10_000_000 - 5000
-    assert store.events[0]["event_type"] == "provider_call" and store.events[0]["payload"]["actual_microusd"] == 5000
+    assert sent["url"] == "https://code.deepline.com/api/v2/integrations/exa_search/execute" and sent["method"] == "POST"
+    assert sent["headers"]["authorization"] == "Bearer " + DL_KEY and "x-api-key" not in sent["headers"]
+    assert json.loads(sent["body"]) == {"payload": {"query": "fintech"}}
+    assert store.calls[call["call_identity"]]["provider"] == "deepline"
+    assert store.events[0]["event_type"] == "provider_call" and store.events[0]["payload"]["actual_microusd"] == 0
     assert contracts.verify_event_chain(store.events) == store.run["event_head_hash"]
 
 
@@ -195,7 +188,7 @@ def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_respons
     assert "api_key=" + DOG_KEY in sent["url"] and sent["url"].startswith("https://api.scrapingdog.com/scrape?")
     assert "premium=false" in sent["url"]
     assert DOG_KEY not in result.body.decode() and DOG_KEY not in json.dumps(result.call)
-    assert result.call["reserved_microusd"] == 2000
+    assert result.call["reserved_microusd"] == 0 and store.calls[result.call["call_identity"]]["provider"] == "scrapingdog"
 
 
 def test_openrouter_reserves_maximum_cost_and_settles_actual_from_pinned_table():
@@ -242,41 +235,40 @@ def test_max_tokens_is_capped_and_disallowed_models_are_refused_before_reservati
 
 
 def test_budget_refusal_is_generic_and_recorded_under_the_identity():
-    broker, store, transport = make_broker(store=FakeLedgerStore(per_icp_cap=4000))
-    refused = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    broker, store, transport = make_broker(store=FakeLedgerStore(per_icp_quota=0))
+    refused = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert refused.status == 402 and json.loads(refused.body) == {"error": {"code": "budget_refused"}}
-    assert refused.call["outcome"] == "refused" and refused.call["reason"] == "per_icp_cap"
+    assert refused.call["outcome"] == "refused" and refused.call["reason"] == "per_icp_quota"
     assert transport.sent == []
-    again = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    again = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert again.status == 402 and store.log == ["reserve", "reserve"]
 
 
 def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation():
     broker, store, transport = make_broker(transport=FakeTransport(fail=True))
-    result = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
-    assert store.balance == 10_000_000 - 5000
-    assert result.call["outcome"] == "uncertain" and result.call["actual_microusd"] == 5000
+    assert result.call["outcome"] == "uncertain" and result.call["actual_microusd"] == 0
     # A later identical request neither re-sends nor releases the reservation.
-    late = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    late = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert late.status == 409 and json.loads(late.body) == {"error": {"code": "call_uncertain"}} and len(transport.sent) == 1
 
 
 def test_fault_injection_points_produce_single_accounting_results():
     # After reservation (crash before dispatch): resuming the identity dispatches exactly once.
     broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": []})]))
-    identity_args = dict(operation_id="exa.search", parameters={"query": "crash"}, action_sequence=5, timeout_ms=1000)
-    request_hash = contracts.document_hash(operations.validate_operation_request("exa.search", {"query": "crash"}))
-    identity = contracts.provider_call_identity(assignment_id=CONTEXT.assignment_id, icp_position=0, action_sequence=5, operation_id="exa.search", request_hash=request_hash)
-    store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=5000, call_doc={}, lease_ttl_seconds=420)
+    identity_args = dict(operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "crash"}}, action_sequence=5, timeout_ms=1000)
+    request_hash = contracts.document_hash(operations.validate_operation_request("deepline.execute", {"tool": "exa_search", "payload": {"query": "crash"}}))
+    identity = contracts.provider_call_identity(assignment_id=CONTEXT.assignment_id, icp_position=0, action_sequence=5, operation_id="deepline.execute", request_hash=request_hash)
+    store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={}, lease_ttl_seconds=420)
     result = broker.execute(CONTEXT, **identity_args)
     assert result.status == 200 and len(transport.sent) == 1
-    assert [c for c in store.calls.values() if c["kind"] == "settlement"] and store.balance == 10_000_000 - 5000
+    assert [c for c in store.calls.values() if c["kind"] == "settlement"]
     # After the dispatch marker (crash before send): the repeat never sends and reports uncertain.
     broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": []})]))
-    store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="exa.search", provider="exa", funding_source="tao", amount_microusd=5000, call_doc={}, lease_ttl_seconds=420)
+    store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={}, lease_ttl_seconds=420)
     store.mark_dispatched(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity)
     result = broker.execute(CONTEXT, **identity_args)
     assert result.status == 409 and transport.sent == []
@@ -309,7 +301,7 @@ def test_two_broker_instances_cause_at_most_one_dispatch_per_identity():
 
     def worker(index):
         barrier.wait(timeout=10)
-        results.append(brokers[index].execute(CONTEXT, operation_id="exa.search", parameters={"query": "race"}, action_sequence=9, timeout_ms=1000))
+        results.append(brokers[index].execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "race"}}, action_sequence=9, timeout_ms=1000))
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
     for thread in threads:
@@ -335,20 +327,20 @@ def test_event_cursor_race_is_retried_with_a_fresh_cursor():
         return response
 
     store.mark_dispatched = dispatch_then_append
-    result = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert result.status == 200 and [e["event_type"] for e in store.events] == ["stdout", "provider_call"]
     assert contracts.verify_event_chain(store.events)
 
 
 def test_errors_and_responses_carry_no_provider_account_or_credential_detail():
-    broker, store, transport = make_broker(transport=FakeTransport([(401, {"error": {"message": "invalid api key " + EXA_KEY}})]))
-    result = broker.execute(CONTEXT, operation_id="exa.search", parameters={"query": "x"}, action_sequence=0, timeout_ms=1000)
+    broker, store, transport = make_broker(transport=FakeTransport([(401, {"error": {"message": "invalid api key " + DL_KEY}})]))
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert EXA_KEY not in result.body.decode() and "x-ratelimit-remaining" not in result.headers and "set-cookie" not in result.headers
+    assert DL_KEY not in result.body.decode() and "x-ratelimit-remaining" not in result.headers and "set-cookie" not in result.headers
     document = result.to_document()
     assert set(document) == {"status", "headers", "body_b64", "call"}
-    for value in (json.dumps(document), repr(broker._credentials)):
-        assert EXA_KEY not in value and DOG_KEY not in value and KEY not in value
+    for value in (json.dumps(document), repr(broker)):
+        assert DL_KEY not in value and DOG_KEY not in value and KEY not in value
 
 
 def test_price_table_parsing_and_validation():
@@ -366,7 +358,7 @@ def test_price_table_parsing_and_validation():
     with pytest.raises(contracts.ArenaContractError):
         br.validate_price_table(dict(table, price_table_hash=contracts.document_hash("x")))
     with pytest.raises(contracts.ArenaContractError):
-        br.Broker(store=FakeLedgerStore(), credentials=br.ArenaProviderCredentials("a", "b"), openrouter_key_for=lambda h: None, price_table=table, allowed_models=["anthropic/claude-3.5-haiku"], transport=FakeTransport())
+        br.Broker(store=FakeLedgerStore(), key_for=lambda h, p: None, price_table=table, allowed_models=["anthropic/claude-3.5-haiku"], transport=FakeTransport())
     cost = br.max_openrouter_cost_microusd(price_table(), "anthropic/claude-3.5-haiku", {"messages": [{"role": "user", "content": "hi"}]}, max_output_tokens=100)
     # 26 bounded input tokens * 0.8e-6 + 100 * (4e-6 + 4e-6 reasoning) + 1e-5 request = 0.0008308 USD -> 831 micro-USD (ceiling)
     assert cost == 831

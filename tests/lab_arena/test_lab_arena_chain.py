@@ -417,7 +417,7 @@ def test_connect_substrate_uses_only_the_configured_endpoint(monkeypatch):
 def test_import_closure_is_lazy_and_boundary_clean():
     code = (
         "import json, sys\n"
-        "import lab_arena.chain, lab_arena.funding\n"
+        "import lab_arena.chain\n"
         "loaded = sorted(m for m in sys.modules if m.startswith(('gateway.tee', 'gateway.db', "
         "'async_substrate_interface', 'bittensor', 'scalecodec')))\n"
         "print(json.dumps(loaded))\n"

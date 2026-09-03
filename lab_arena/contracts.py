@@ -31,7 +31,12 @@ LAB_ARENA_POOL_PERCENT = 25
 KING_POOL_SHARE_PERCENT_BY_WEEK = (100, 80, 60, 40, 20)
 EPOCHS_PER_REWARD_WEEK = 140
 ELIGIBILITY_MAX_EPOCHS = 45
-MIN_FUNDED_BALANCE_MICROUSD = 1_000_000
+# Miners bring their own provider keys (section 7 as revised on 2026-09-02):
+# every participant registers one key per provider below, and fairness is a
+# fixed call quota per provider, per ICP attempt, instead of a money ceiling.
+MINER_KEY_PROVIDERS = ("scrapingdog", "deepline", "openrouter")
+CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
+CALL_QUOTA_SCHEMA_VERSION = "lab_arena.call_quotas.v1"
 ICP_WALL_CLOCK_SECONDS = 300
 LEASE_TTL_SECONDS = 420
 
@@ -71,7 +76,6 @@ RUNNER_ALLOWLIST_SCHEMA_VERSION = "leadpoet.lab_arena.runner_allowlist.v1"
 SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
 SCOPE_SUBMISSION = "lab_arena.submission.v1"
-SCOPE_FUNDING = "lab_arena.funding.v1"
 SCOPE_CREDENTIAL = "lab_arena.credential.v1"
 SCOPE_SUBMISSION_STATUS = "lab_arena.submission_status.v1"
 REQUEST_SCOPES = frozenset(
@@ -79,7 +83,6 @@ REQUEST_SCOPES = frozenset(
         SCOPE_CLAIM,
         SCOPE_COMPLETE,
         SCOPE_SUBMISSION,
-        SCOPE_FUNDING,
         SCOPE_CREDENTIAL,
         SCOPE_SUBMISSION_STATUS,
     }
@@ -137,7 +140,6 @@ INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "rec
 
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
-    "deposit",
     "reservation",
     "dispatch",
     "settlement",
@@ -642,13 +644,11 @@ ROUND_CONFIGURATION_FIELDS = (
         ),
     ),
     F("operation_table_hash", "sha256"),
-    F("provider_price_list_hash", "sha256"),
     F("openrouter_price_table_hash", "sha256"),
     F("openrouter_allowed_models", "list[str]", minimum=1, maximum=64),
-    F("stage_1_ceiling_microusd", "int", minimum=0),
-    F("stage_2_ceiling_microusd", "int", minimum=0),
-    F("per_icp_cap_stage_1_microusd", "int", minimum=0),
-    F("per_icp_cap_stage_2_microusd", "int", minimum=0),
+    F("miner_key_providers", "list[str]", minimum=1, maximum=8),
+    F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
+    F("call_quota_hash", "sha256"),
     F("icp_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy_hash", "sha256"),
     F("scoring_cap_microusd", "int", minimum=0),
@@ -674,6 +674,22 @@ ROUND_CONFIGURATION_FIELDS = (
 )
 
 
+def call_quota_document() -> Dict[str, Any]:
+    """The public quota policy hashed into every round configuration.
+
+    A quota is per provider and per ICP attempt; the stage quota is the
+    per-ICP quota times the stage's ICP count times the attempt limit, so a
+    retry after an infrastructure failure is never starved.
+    """
+
+    return {
+        "schema_version": CALL_QUOTA_SCHEMA_VERSION,
+        "providers": list(MINER_KEY_PROVIDERS),
+        "per_icp_attempt": {provider: int(CALL_QUOTAS_PER_ICP[provider]) for provider in MINER_KEY_PROVIDERS},
+        "stage_multiplier": MAX_ATTEMPTS_PER_ASSIGNMENT,
+    }
+
+
 def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
     if not ROUND_ID_RE.match(config["round_id"]):
@@ -688,10 +704,10 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("runner slot ceiling exceeds the public constant")
     if config["max_challengers"] > MAX_CHALLENGERS:
         raise ArenaContractError("max challengers exceeds the public constant")
-    if config["per_icp_cap_stage_1_microusd"] != config["stage_1_ceiling_microusd"] // STAGE_1_ICP_COUNT:
-        raise ArenaContractError("stage 1 per-ICP cap must be the ceiling divided by the ICP count")
-    if config["per_icp_cap_stage_2_microusd"] != config["stage_2_ceiling_microusd"] // STAGE_2_ICP_COUNT:
-        raise ArenaContractError("stage 2 per-ICP cap must be the ceiling divided by the ICP count")
+    if tuple(config["miner_key_providers"]) != MINER_KEY_PROVIDERS or dict(config["call_quotas"]) != dict(CALL_QUOTAS_PER_ICP):
+        raise ArenaContractError("miner key providers and call quotas are fixed public constants")
+    if config["call_quota_hash"] != document_hash(call_quota_document()):
+        raise ArenaContractError("call quota hash does not match the public quota document")
     if tuple(config["generator"]["batch_sizes"]) != GENERATION_BATCH_SIZES:
         raise ArenaContractError("generation batch sizes are fixed public constants")
     rewards = config["reward_constants"]

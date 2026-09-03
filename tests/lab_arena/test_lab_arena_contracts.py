@@ -38,7 +38,7 @@ def test_public_constants_are_the_plan_values():
     assert c.LAB_ARENA_POOL_PERCENT == 25
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
-    assert c.MIN_FUNDED_BALANCE_MICROUSD == 1_000_000
+    assert c.MINER_KEY_PROVIDERS == ("scrapingdog", "deepline", "openrouter") and c.CALL_QUOTAS_PER_ICP == {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
     assert (c.ICP_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 420)
     assert c.GENERATION_BATCH_SIZES == (20, 20, 10)
     from leadpoet_canonical.constants import EPOCH_LENGTH
@@ -156,13 +156,11 @@ def base_round_configuration():
             "base_image_digest": "sha256:" + "b" * 64,
         },
         "operation_table_hash": c.document_hash("ops"),
-        "provider_price_list_hash": c.document_hash("prices"),
         "openrouter_price_table_hash": c.document_hash("ortable"),
         "openrouter_allowed_models": ["openai/gpt-4o-mini"],
-        "stage_1_ceiling_microusd": 2_000_000,
-        "stage_2_ceiling_microusd": 3_000_000,
-        "per_icp_cap_stage_1_microusd": 100_000,
-        "per_icp_cap_stage_2_microusd": 100_000,
+        "miner_key_providers": list(c.MINER_KEY_PROVIDERS),
+        "call_quotas": dict(c.CALL_QUOTAS_PER_ICP),
+        "call_quota_hash": c.document_hash(c.call_quota_document()),
         "icp_wall_clock_seconds": 300,
         "scorer_policy_hash": c.document_hash("policy"),
         "scoring_cap_microusd": 50_000_000,
@@ -185,7 +183,9 @@ def test_round_configuration_pins_public_constants_and_hashes():
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
         lambda d: d.update(runner_slot_ceiling=9),
-        lambda d: d.update(per_icp_cap_stage_1_microusd=1),
+        lambda d: d["call_quotas"].update(scrapingdog=1),
+        lambda d: d.update(call_quota_hash=c.document_hash("other")),
+        lambda d: d.update(miner_key_providers=["scrapingdog"]),
         lambda d: d["reward_constants"].update(pool_percent=30),
         lambda d: d["generator"].update(batch_sizes=[25, 25]),
         lambda d: d.update(floor_runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address]),
@@ -279,5 +279,5 @@ def test_journal_chain_and_receipt_and_reward_basis_contracts():
     bad = dict(plan, work_items=[dict(plan["work_items"][0], work_item_id=c.document_hash("wrong"))])
     with pytest.raises(c.ArenaContractError):
         c.validate_scoring_plan(bad)
-    identity = c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=0, operation_id="exa.search", request_hash=c.document_hash("q"))
-    assert identity != c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=1, operation_id="exa.search", request_hash=c.document_hash("q"))
+    identity = c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=c.document_hash("q"))
+    assert identity != c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=c.document_hash("q"))

@@ -99,14 +99,23 @@ REQUEST_SCOPES = frozenset(
 # Closed state vocabularies (section 11)
 # ---------------------------------------------------------------------------
 
+# Validators execute every stage and then score it: ``stageN_closed`` commits
+# the scoring plan, ``stageN_scoring`` is the window in which validators claim
+# scoring assignments, ``stageN_judged`` is that window closed with every
+# assignment terminal, and the scored state is reached once the Arena has
+# verified the breakdowns and built the bundle.
 ROUND_STATUSES = (
     "open",
     "committed",
     "stage1",
     "stage1_closed",
+    "stage1_scoring",
+    "stage1_judged",
     "stage1_scored",
     "stage2",
     "stage2_closed",
+    "stage2_scoring",
+    "stage2_judged",
     "scored",
     "published",
     "cancelled",
@@ -115,10 +124,14 @@ ROUND_TRANSITIONS = {
     "open": ("committed", "cancelled"),
     "committed": ("stage1", "cancelled"),
     "stage1": ("stage1_closed", "cancelled"),
-    "stage1_closed": ("stage1_scored", "cancelled"),
+    "stage1_closed": ("stage1_scoring", "cancelled"),
+    "stage1_scoring": ("stage1_judged", "cancelled"),
+    "stage1_judged": ("stage1_scored", "cancelled"),
     "stage1_scored": ("stage2", "cancelled"),
     "stage2": ("stage2_closed", "cancelled"),
-    "stage2_closed": ("scored", "cancelled"),
+    "stage2_closed": ("stage2_scoring", "cancelled"),
+    "stage2_scoring": ("stage2_judged", "cancelled"),
+    "stage2_judged": ("scored", "cancelled"),
     "scored": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
@@ -137,13 +150,19 @@ TERMINAL_CAUSES = (
     "receipt_rejected",
     "preflight_failed",
     "stage_closed",
+    # Scoring assignments: the judge failed or timed out (infrastructure), or
+    # the scored miner's own key refused the judge's calls (miner-caused).
+    "judge_error",
+    "judge_timeout",
+    "judge_key_refused",
 )
 # Causes that the miner caused: no second attempt (section 9.1).
 MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
-    {"model_timeout", "invalid_output", "budget_exhausted", "model_error"}
+    {"model_timeout", "invalid_output", "budget_exhausted", "model_error", "judge_key_refused"}
 )
+SCORE_TERMINAL_CAUSES = ("accepted", "judge_error", "judge_timeout", "judge_key_refused")
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
-INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected"})
+INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected", "judge_error", "judge_timeout"})
 
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
@@ -648,6 +667,8 @@ ROUND_CONFIGURATION_FIELDS = (
             F("worker_release_hash", "sha256"),
             F("shim_hash", "sha256"),
             F("base_image_digest", "str", minimum=1, maximum=200),
+            # The Arena-built judge image every validator runs for scoring assignments.
+            F("scorer_image_digest", "str", minimum=71, maximum=280),
         ),
     ),
     F("operation_table_hash", "sha256"),
@@ -655,7 +676,10 @@ ROUND_CONFIGURATION_FIELDS = (
     F("openrouter_allowed_models", "list[str]", minimum=1, maximum=64),
     F("miner_key_providers", "list[str]", minimum=1, maximum=8),
     F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
+    F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
     F("call_quota_hash", "sha256"),
+    # Share of scoring work items that a second validator scores again (audit).
+    F("audit_percent", "int", minimum=0, maximum=100),
     F("icp_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy_hash", "sha256"),
     F("scoring_cap_microusd", "int", minimum=0),
@@ -714,6 +738,8 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("max challengers exceeds the public constant")
     if tuple(config["miner_key_providers"]) != MINER_KEY_PROVIDERS or dict(config["call_quotas"]) != dict(CALL_QUOTAS_PER_ICP):
         raise ArenaContractError("miner key providers and call quotas are fixed public constants")
+    if dict(config["scoring_call_quotas"]) != dict(SCORING_CALL_QUOTAS_PER_WORK_ITEM):
+        raise ArenaContractError("scoring call quotas are fixed public constants")
     if config["call_quota_hash"] != document_hash(call_quota_document()):
         raise ArenaContractError("call quota hash does not match the public quota document")
     if tuple(config["generator"]["batch_sizes"]) != GENERATION_BATCH_SIZES:
@@ -1003,7 +1029,8 @@ ICP_RECEIPT_FIELDS = (
     ),
     F("started_at", "iso8601"),
     F("finished_at", "iso8601"),
-    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "model_error")),
+    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "model_error", "judge_error", "judge_timeout", "judge_key_refused")),
+    F("kind", "str", choices=ASSIGNMENT_KINDS, required=False),
     F("receipt_hash", "sha256", required=False),
     F("runner_signature", "str", required=False, minimum=128, maximum=130),
 )

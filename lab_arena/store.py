@@ -58,6 +58,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_receipt", "jsonb"), ("p_receipt_hash", "text"), ("p_terminal_cause", "text"), ("p_output_hash", "text"), ("p_output_ref", "text"), ("p_provider_call_root", "text"), ("p_private_event_root", "text"), ("p_cost_root", "text")),
     "lab_arena_expire_leases": (("p_round_id", "text"),),
     "lab_arena_close_stage": (("p_round_id", "text"), ("p_stage", "smallint")),
+    "lab_arena_open_scoring": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
+    "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
 }
@@ -669,6 +671,17 @@ class ArenaStore:
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_stage", {"p_round_id": round_id, "p_stage": int(stage)}), "close_stage")
 
+    def open_scoring(self, round_id: str, stage: int, work_items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Turn the committed scoring plan into claimable scoring assignments (one per work item)."""
+
+        return _require_mapping(
+            self._transport.rpc("lab_arena_open_scoring", {"p_round_id": round_id, "p_stage": int(stage), "p_work_items": [dict(item) for item in work_items]}),
+            "open_scoring",
+        )
+
+    def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc("lab_arena_close_scoring", {"p_round_id": round_id, "p_stage": int(stage)}), "close_scoring")
+
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")
 
@@ -706,7 +719,7 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_runs", filters={"run_id": run_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if stage is not None:
             filters["stage"] = int(stage)
@@ -714,6 +727,8 @@ class ArenaStore:
             filters["status"] = status
         if submission_id:
             filters["submission_id"] = submission_id
+        if kind:
+            filters["kind"] = kind
         return self._transport.select("lab_arena_runs", filters=filters, order="run_id")
 
     def list_events(self, run_id: str) -> List[Dict[str, Any]]:

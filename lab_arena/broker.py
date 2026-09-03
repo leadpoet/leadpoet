@@ -248,6 +248,32 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 
 
 
+def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """The OpenRouter body the broker hashes and sends: the output cap is always explicit."""
+
+    requested = parameters.get("max_tokens")
+    cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
+    max_tokens = cap if requested is None else min(int(requested), cap)
+    if max_tokens < 1:
+        raise BrokerError("invalid_request")
+    normalized = dict(parameters)
+    normalized["max_tokens"] = max_tokens
+    return normalized
+
+
+def normalized_request(operation_id: str, parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize a request exactly as ``Broker.execute`` does before hashing it.
+
+    Replay recomputation keys recorded responses by this hash, so it must be
+    the same function the broker used when the call was made.
+    """
+
+    normalized = operations.validate_operation_request(operation_id, parameters)
+    if operations.OPERATIONS[operation_id].provider == "openrouter":
+        normalized = openrouter_normalized(normalized)
+    return normalized
+
+
 def deepline_cost_microusd(body: bytes) -> int:
     """``billing.cost_usd`` from a Deepline execute envelope as micro-USD, else 0."""
 
@@ -428,14 +454,8 @@ class Broker:
         allowed = self._judge_models if kind == "score" else self._allowed_models
         if model not in allowed:
             raise BrokerError("model_not_allowed")
-        requested = parameters.get("max_tokens")
-        cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
-        max_tokens = cap if requested is None else min(int(requested), cap)
-        if max_tokens < 1:
-            raise BrokerError("invalid_request")
-        normalized = dict(parameters)
-        normalized["max_tokens"] = max_tokens
-        return normalized, max_tokens
+        normalized = openrouter_normalized(parameters)
+        return normalized, int(normalized["max_tokens"])
 
     def _event(self, run_state: Mapping[str, Any], payload: Mapping[str, Any]) -> Dict[str, Any]:
         return contracts.build_private_event(

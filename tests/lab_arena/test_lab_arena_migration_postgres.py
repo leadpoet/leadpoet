@@ -79,6 +79,7 @@ def round_config(round_id: str, runners: List[str], *, quotas=None, stage_1_icps
         "round_id": round_id,
         "runner_allowlist": runners,
         "call_quotas": dict(quotas or contracts.CALL_QUOTAS_PER_ICP),
+        "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
         "stage_1_icp_count": stage_1_icps,
         "stage_2_icp_count": stage_2_icps,
         "max_attempts_per_assignment": max_attempts,
@@ -722,3 +723,120 @@ def test_events_are_ordered_hash_chained_and_replay_safe(store):
     stored = store.list_events(run_id)
     assert [row["sequence"] for row in stored] == [0, 1, 2]
     assert [row["event_hash"] for row in stored] == [first["event_hash"], second["event_hash"], third["event_hash"]]
+
+
+# ---------------------------------------------------------------------------
+# Validator scoring: scoring assignments, the executor-is-not-scorer rule,
+# judge causes, and the scoring window's close and cancel behavior.
+# ---------------------------------------------------------------------------
+
+
+def _complete_accepted(store, run_id, lease_hash, label):
+    return store.complete_attempt(
+        run_id=run_id, lease_token_hash=lease_hash, receipt={"receipt_hash": sha(label)}, receipt_hash=sha(label), terminal_cause="accepted",
+        output_hash=sha(label + "-output"), output_ref="arena/x/outputs/%s.json" % run_id, provider_call_root=sha(label + "-calls"), private_event_root=sha(label + "-events"), cost_root=sha(label + "-cost"),
+    )
+
+
+def _execute_everything(store, round_id, runner, *, parallelism=100):
+    """One runner executes every pending assignment of the current stage; returns run ids by (submission, icp)."""
+
+    executed = {}
+    while True:
+        response, token, _, _ = claim(store, round_id, runner, parallelism=parallelism, ceiling=parallelism)
+        if response["status"] != "leased":
+            break
+        assert response["kind"] == "execute"
+        assert _complete_accepted(store, response["run_id"], hash_lease_token(token), response["run_id"])["status"] == "accepted"
+        executed[(response["submission_id"], response["icp_position"])] = response["run_id"]
+    return executed
+
+
+def _commit_plan(store, round_id, stage):
+    plan = contracts.hashed_document({"round_id": round_id, "stage": stage, "work_items": []}, "plan_hash")
+    result = store.transition_round(round_id, "stage%d_closed" % stage, "stage%d_closed" % stage, {"stage%d_scoring_plan_hash" % stage: plan["plan_hash"], "stage%d_scoring_plan_doc" % stage: {"plan_hash": plan["plan_hash"], "work_items_ref": "arena/%s/scoring/stage%d_plan.json" % (round_id, stage)}})
+    assert result["status"] == "ok", result
+
+
+def _scoring_items(executed):
+    items = []
+    for (submission_id, position), run_id in sorted(executed.items()):
+        item = {"work_item_id": sha("item-%s-%d" % (submission_id, position)), "output_hash": sha(run_id + "-output"), "scored_run_id": run_id, "audit": False}
+        items.append(item)
+        if position == 0:  # the ICP-0 items are also audited by a second validator
+            items.append(dict(item, audit=True))
+    return items
+
+
+def test_scoring_assignments_are_claimed_by_other_validators_and_close_to_judged(store):
+    round_id = "arena-2026-09-02-sc"
+    runners, parts = open_round(store, round_id, participants=2, runners=2, prefix="sc")
+    executor, scorer = runners
+    executed = _execute_everything(store, round_id, executor)
+    assert len(executed) == 40 and store.close_stage(round_id, 1)["status"] == "closed"
+    _commit_plan(store, round_id, 1)
+    items = _scoring_items(executed)
+    opened = store.open_scoring(round_id, 1, items)
+    assert opened["status"] == "ok" and opened["round_status"] == "stage1_scoring" and opened["assignments"] == 40 + 2  # two audits (ICP 0 of each miner)
+    assert store.open_scoring(round_id, 1, items)["status"] == "existing"
+    # The executor never scores its own executions: it sees nothing pending; the other validator does.
+    assert claim(store, round_id, executor, parallelism=100, ceiling=100)[0]["status"] == "no_pending"
+    response, token, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
+    assert response["status"] == "leased" and response["kind"] == "score" and response["scored_run_id"] in executed.values() and response["work_item_id"]
+    lease_hash = hash_lease_token(token)
+    # An execute-only cause on a score run is refused; a judge cause is accepted.
+    with pytest.raises(ArenaStoreError, match="lab_arena_complete_cause_kind_mismatch"):
+        store.complete_attempt(run_id=response["run_id"], lease_token_hash=lease_hash, receipt={"receipt_hash": sha("bad")}, receipt_hash=sha("bad"), terminal_cause="model_error", output_hash="", output_ref="", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
+    refused = store.complete_attempt(run_id=response["run_id"], lease_token_hash=lease_hash, receipt={"receipt_hash": sha("refused")}, receipt_hash=sha("refused"), terminal_cause="judge_key_refused", output_hash="", output_ref="", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
+    assert refused["status"] == "failed"
+    # Score-run provider calls draw on the scoring quota of the scored miner's keys.
+    response2, token2, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
+    lease2 = hash_lease_token(token2)
+    identity = contracts.provider_call_identity(assignment_id=response2["assignment_id"], icp_position=response2["icp_position"], action_sequence=0, operation_id="openrouter.chat", request_hash=sha("judge"))
+    reserved = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1000, call_doc={})
+    assert reserved["status"] == "reserved"
+    assert store.mark_dispatched(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity)["status"] == "dispatched"
+    assert store.settle_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, actual_microusd=400, terminal_response={"status": 200}, event=None)["status"] == "settled"
+    assert _complete_accepted(store, response2["run_id"], lease2, response2["run_id"])["status"] == "accepted"
+    # Everything else is scored; the window closes to judged, not cancelled.
+    while True:
+        r, t, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
+        if r["status"] != "leased":
+            break
+        assert _complete_accepted(store, r["run_id"], hash_lease_token(t), r["run_id"])["status"] == "accepted"
+    # With one independent validator the two audits stay unclaimed: the scorer of a primary never audits it.
+    pending_audits = [run for run in store.list_runs(round_id, stage=1, kind="score") if run["assignment_id"].endswith(":audit")]
+    assert len(pending_audits) == 2 and all(run["status"] == "pending" for run in pending_audits)
+    closed = store.close_scoring(round_id, 1)
+    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged" and closed["incomplete_assignments"] == 0  # audits are best effort
+    assert store.close_scoring(round_id, 1)["status"] == "existing"
+    score_runs = store.list_runs(round_id, stage=1, kind="score")
+    primaries = [run for run in score_runs if not run["assignment_id"].endswith(":audit")]
+    assert len(score_runs) == 42 and len(primaries) == 40 and all(run["runner_hotkey"] == scorer and run["scored_runner_hotkey"] == executor for run in primaries)
+    assert all(run["status"] == "failed" and run["terminal_cause"] == "stage_closed" for run in score_runs if run["assignment_id"].endswith(":audit"))
+    # The judged round takes the scored transition, not the closed one.
+    stale = store.transition_round(round_id, "stage1_closed", "stage1_scored", {"finalists": [], "stage1_score_bundle_hash": sha("b"), "stage1_scores_ref": "arena/x"})
+    assert stale["status"] == "stale" and stale["round_status"] == "stage1_judged"
+    assert store.transition_round(round_id, "stage1_judged", "stage1_scored", {"finalists": [], "stage1_score_bundle_hash": sha("b"), "stage1_scores_ref": "arena/x"})["status"] == "ok"
+
+
+def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_runs(store, superuser):
+    round_id = "arena-2026-09-02-sx"
+    runners, parts = open_round(store, round_id, participants=1, runners=2, prefix="sx")
+    executor, scorer = runners
+    executed = _execute_everything(store, round_id, executor)
+    assert store.close_stage(round_id, 1)["status"] == "closed"
+    _commit_plan(store, round_id, 1)
+    items = [item for item in _scoring_items(executed) if not item["audit"]]
+    assert store.open_scoring(round_id, 1, items)["assignments"] == 20
+    response, token, _, _ = claim(store, round_id, scorer, parallelism=1, ceiling=1)
+    assert response["kind"] == "score"
+    # An expired scoring lease retries once and keeps its scoring identity.
+    expire_now(superuser, response["run_id"])
+    assert store.expire_leases(round_id) == {"status": "ok", "expired": 1, "retried": 1}
+    retry = [run for run in store.list_runs(round_id, stage=1, kind="score") if run["assignment_id"] == response["assignment_id"] and run["attempt"] == 2][0]
+    assert retry["status"] == "pending" and retry["scored_run_id"] == response["scored_run_id"] and retry["work_item_id"] == response["work_item_id"]
+    # Closing with pending scoring work is an infrastructure gap: the round cancels, no miner gets a zero.
+    closed = store.close_scoring(round_id, 1)
+    assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 20
+    assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:20"

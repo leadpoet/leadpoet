@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Seque
 
 import httpx
 
-from lab_arena import contracts, operations, runtime, shim
+from lab_arena import contracts, operations, runtime, scoring, shim
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes, output_document_hash
 
@@ -34,6 +34,7 @@ DEFAULT_MAX_PARALLEL_RUNS = 1
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 LOG_EVENT_CHUNK_BYTES = 8192
 DEFAULT_SOCKET_ROOT = "/tmp"
+SCORER_ENTRY_FILE = "scorer_entrypoint.py"  # the judge image's entry file, mounted like a model's
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
 MAX_SOCKET_PATH_BYTES = 100
 EVENT_APPEND_RETRIES = 3
@@ -491,20 +492,32 @@ class AssignmentExecutor:
             raise RunnerError("worker socket path exceeds %d bytes; set a shorter socket_root" % MAX_SOCKET_PATH_BYTES)
         server = WorkerSocketServer(socket_path, config.api, state, events)
         started_at = _timestamp(config.clock)
-        terminal = "model_error"
+        kind = str(lease.get("kind") or "execute")
+        scoring_run = kind == "score"
+        terminal = "judge_error" if scoring_run else "model_error"
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
         try:
-            (input_dir / runtime.INPUT_FILE_NAME).write_text(
-                json.dumps({
+            if scoring_run:
+                # A scoring assignment runs the Arena judge image on one accepted
+                # output; the judge's provider calls cross the same socket.
+                input_document = scoring.build_scoring_input(
+                    work_item_id=str(lease["work_item_id"]), icp=icp, companies=list((lease.get("scored_output") or {}).get("companies") or []),
+                    policy=lease["scorer_policy"], evaluation_date=config.evaluation_date,
+                )
+                extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}
+                entry_file = SCORER_ENTRY_FILE
+            else:
+                input_document = {
                     "schema_version": "leadpoet.lab_arena.icp_input.v1",
                     "icp": dict(icp),
                     "evaluation_date": config.evaluation_date,
                     "company_limit": int(icp.get("max_companies") or 5),
                     "provider_operations": sorted(operations.OPERATIONS),
-                }, sort_keys=True),
-                encoding="utf-8",
-            )
+                }
+                extra_environment = {}
+                entry_file = config.entry_file
+            (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             rootfs = config.image_cache.rootfs_for(str(lease["image_digest"]))
             spec = runtime.SandboxSpec(
                 sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
@@ -512,10 +525,11 @@ class AssignmentExecutor:
                 input_dir=input_dir,
                 output_dir=output_dir,
                 socket_path=socket_path,
-                entry_file=config.entry_file,
+                entry_file=entry_file,
                 evaluation_date=config.evaluation_date,
                 random_seed=int(contracts.document_hash(lease["assignment_id"])[7:15], 16) % (2 ** 32),
                 wall_clock_seconds=config.wall_clock_seconds,
+                extra_environment=extra_environment,
             )
             server.start()
             events.append("process_started", {"run_id": lease["run_id"], "assignment_id": lease["assignment_id"], "icp_position": lease["icp_position"], "image_digest": lease["image_digest"], "attempt": lease["attempt"]})
@@ -524,13 +538,27 @@ class AssignmentExecutor:
                 for index, chunk in enumerate(_chunk_log(data)):
                     events.append(stream_name, {"chunk": index, "text": chunk, "truncated": bool(truncated)})
             if result.timed_out:
-                terminal = "model_timeout"
+                terminal = "judge_timeout" if scoring_run else "model_timeout"
                 events.append("process_finished", {"exit_code": result.exit_code, "timed_out": True, "wall_seconds": result.wall_seconds})
             else:
                 events.append("process_finished", {"exit_code": result.exit_code, "timed_out": False, "wall_seconds": result.wall_seconds})
                 if result.output_error or result.output_bytes is None:
-                    terminal = "invalid_output" if result.output_error else "model_error"
+                    terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
                     events.append("output_rejected", {"reason": result.output_error or "no_output"})
+                elif scoring_run:
+                    try:
+                        output_document = scoring.scoring_output_from_bytes(result.output_bytes)
+                    except scoring.ScoringError as exc:
+                        terminal = "judge_error"
+                        events.append("output_rejected", {"reason": str(exc)[:200]})
+                    else:
+                        if "failure" in output_document:
+                            terminal = str(output_document["failure"])
+                            events.append("output_rejected", {"reason": terminal})
+                            output_document = None
+                        else:
+                            terminal = "accepted"
+                            events.append("output_validated", {"breakdown_count": len(output_document["breakdowns"]), "output_hash": contracts.document_hash(output_document)})
                 else:
                     try:
                         output_document = output_document_from_bytes(result.output_bytes)
@@ -559,9 +587,10 @@ class AssignmentExecutor:
             "worker_release_hash": config.worker_release_hash,
             "image_digest": lease["image_digest"],
             "icp_hash": lease["icp_hash"],
+            "kind": kind,
             "provider_call_root": provider_call_root(state.calls),
             "private_event_root": contracts.ordered_root(state.event_hashes),
-            "output_hash": output_document_hash(output_document) if output_document is not None else contracts.document_hash(None),
+            "output_hash": (contracts.document_hash(output_document) if scoring_run else output_document_hash(output_document)) if output_document is not None else contracts.document_hash(None),
             "cost_root": cost_root(state.calls),
             "resource_summary": {
                 "wall_seconds": float(result.wall_seconds) if result else 0.0,

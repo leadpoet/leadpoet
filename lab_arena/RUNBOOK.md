@@ -49,7 +49,9 @@ Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
 `LAB_ARENA_BASE_IMAGE_DIGEST`, `LAB_ARENA_REPOSITORY_COMMIT`,
 `LAB_ARENA_SCORING_WORKERS` (4), `LAB_ARENA_BANNED_HOTKEYS_PATH` (JSON list),
 `LAB_ARENA_MAX_CHALLENGERS` (256, the admitted challengers per round; lower
-it only while capacity is being commissioned), `AWS_REGION`.
+it only while capacity is being commissioned), `LAB_ARENA_AUDIT_PERCENT` (10),
+`AWS_REGION`. Required for validator scoring: `LAB_ARENA_SCORER_IMAGE_DIGEST`,
+the pinned judge image.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
 `shadow` (full rounds, publication marked shadow, no reward basis is
@@ -114,6 +116,39 @@ employers and education) to search and contents results; the broker drops
 person entities before a model or the ledger sees them, except for
 `exa_people_search`, whose purpose is people. Fixtures from the live calls
 live in `tests/lab_arena/fixtures/deepline/`.
+
+## 6. Validator scoring
+
+Validators run the judge as well as the models. After a stage closes and the
+scoring plan is committed, the round enters `stageN_scoring`: one scoring
+assignment per work item (plus `LAB_ARENA_AUDIT_PERCENT` of them a second
+time as audits) is claimable like an ICP run, never by the validator that
+executed that output. The validator runs the Arena-built judge image, whose
+digest is pinned in the round configuration from `LAB_ARENA_SCORER_IMAGE_DIGEST`,
+in the sandbox with the trusted-scorer shim mode; the judge's Exa,
+Scrapingdog, and OpenRouter calls cross the same broker on the scored
+miner's keys under the per-work-item scoring quotas, and the judge models
+come from the signed scorer policy. Completion carries the breakdown
+document under a signed receipt. When every assignment is terminal the
+window closes to `stageN_judged`; an assignment left unjudged for any reason
+other than the scored miner's own key cancels the round, exactly like an
+execution gap. The Arena then verifies each breakdown against the plan and
+the scored output and replays it: the same judge entrypoint runs again in a
+subprocess on the Arena host against the responses the broker recorded for
+that scoring run (no provider is called), and the replayed breakdowns are the
+ones scored; a validator whose report differs is listed as a mismatch in the
+stage timing report. Audits are independent by construction, a validator
+never holds two scorings of one work item, and best effort, an audit nobody
+independent could claim fails at close without cancelling the round; a mean
+difference above 10 points between the two scorings is flagged. The score
+bundle and per-ICP scores are then built and recorded as before.
+`LAB_ARENA_REPLAY_VERIFICATION=0` disables the replay only for local
+rehearsal; production keeps it on.
+
+Build the judge image from this repository with the scorer entrypoint
+(`lab_arena/scorer_entrypoint.py`) and the evaluator's dependencies, pin its
+digest, and give every validator the same image through the registry the
+runner already pulls miner images from.
 
 ## 6. Daily round
 

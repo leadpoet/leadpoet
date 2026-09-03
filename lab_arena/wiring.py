@@ -136,6 +136,21 @@ def _max_challengers_from_environment() -> int:
     return value
 
 
+def _audit_percent_from_environment() -> int:
+    """LAB_ARENA_AUDIT_PERCENT: share of scoring work items a second validator scores again (default 10)."""
+
+    raw = os.environ.get("LAB_ARENA_AUDIT_PERCENT", "").strip()
+    if not raw:
+        return 10
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError("LAB_ARENA_AUDIT_PERCENT must be an integer", 500) from None
+    if value < 0 or value > 100:
+        raise ServiceError("LAB_ARENA_AUDIT_PERCENT must be between 0 and 100", 500)
+    return value
+
+
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -158,6 +173,8 @@ def build_service_from_environment(mode: str):
         base_image_digest=os.environ.get("LAB_ARENA_BASE_IMAGE_DIGEST", "sha256:" + "0" * 64),
         repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40),
         max_challengers=_max_challengers_from_environment(),
+        scorer_image_digest=_required("LAB_ARENA_SCORER_IMAGE_DIGEST"),
+        audit_percent=_audit_percent_from_environment(),
     )
 
     def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:
@@ -175,7 +192,8 @@ def build_service_from_environment(mode: str):
 
     def broker_factory(service: ArenaService, round_row: Mapping[str, Any]) -> broker_module.Broker:
         table = json.loads(objects.get("arena/%s/price_table.json" % round_row["round_id"]).decode("utf-8"))
-        return broker_module.Broker(store=store, key_for=key_for, price_table=table, allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=broker_module.HttpxProviderTransport())
+        judge_models = sorted({str(model) for model in (service.scorer_policy.get("judge_models") or {}).values() if model})
+        return broker_module.Broker(store=store, key_for=key_for, judge_models=judge_models, price_table=table, allowed_models=round_row["configuration_doc"]["openrouter_allowed_models"], transport=broker_module.HttpxProviderTransport())
 
     def scorer_factory(policy: Mapping[str, Any]) -> scoring.Scorer:
         scoring.apply_policy_to_environment(policy, environ=os.environ, cache_dir=_required("LAB_ARENA_SCORING_CACHE_DIR"), credentials={name: _required("LAB_ARENA_SCORING_" + name) for name in scoring.CREDENTIAL_ENV_NAMES})
@@ -196,6 +214,9 @@ def build_service_from_environment(mode: str):
         generation_provider=generation_provider, price_table_source=lambda models: broker_module.fetch_openrouter_price_table(models),
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, scorer_factory=scorer_factory, defaults=defaults,
         runtime_lock_hash=lock.runtime_lock_hash, scoring_workers=int(os.environ.get("LAB_ARENA_SCORING_WORKERS", "4")),
+        # Replay recomputation of every accepted scoring assignment stays on in production.
+        replay_verification=os.environ.get("LAB_ARENA_REPLAY_VERIFICATION", "1").strip() != "0",
+        replay_work_dir=os.environ.get("LAB_ARENA_REPLAY_WORK_DIR") or None,
     )
     service = ArenaService(config)
     recipient = credentials.recipient_document(decryptor.public_key_der)

@@ -39,7 +39,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -106,6 +106,7 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 _SANDBOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 ProcessRunner = Callable[..., Any]
 
@@ -279,10 +280,18 @@ class SandboxSpec:
     gid: int = SANDBOX_GID
     output_tmpfs_bytes: int = OUTPUT_TMPFS_BYTES
     tmp_tmpfs_bytes: int = TMP_TMPFS_BYTES
+    # Additional fixed environment (the scorer image's trusted mode and the
+    # signed scorer policy bindings); never overrides the model environment.
+    extra_environment: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not _SANDBOX_ID_RE.match(str(self.sandbox_id)):
             raise SandboxSpecError("sandbox id is invalid")
+        extra = dict(self.extra_environment or {})
+        for name, value in extra.items():
+            if not _ENV_NAME_RE.match(str(name)) or not isinstance(value, str) or len(value) > 4096 or any(ord(ch) < 32 for ch in value):
+                raise SandboxSpecError("extra environment entry is invalid")
+        object.__setattr__(self, "extra_environment", MappingProxyType(extra))
         for name in ("rootfs_path", "input_dir", "output_dir", "socket_path"):
             value = Path(getattr(self, name))
             if not value.is_absolute():
@@ -344,6 +353,8 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
     }
     environment.update(PROVIDER_BASE_URLS)
+    for name, value in spec.extra_environment.items():
+        environment.setdefault(name, value)  # the fixed model environment always wins
     return environment
 
 

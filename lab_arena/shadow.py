@@ -100,7 +100,13 @@ def shadow_report(*, round_row: Mapping[str, Any], public_bundle: Mapping[str, A
         scoring["stage_%d" % int(entry["stage"])] = {
             "seconds": (_parse(entry["finished_at"]) - _parse(entry["started_at"])).total_seconds(),
             "judge_executions": int(entry.get("judge_executions") or 0),
-            "workers": int(entry.get("workers") or 1),
+            # Validator scoring: every work item is judged by a validator on the
+            # scored miner's keys; the Arena replays and audits a sample.
+            "work_items": int(entry.get("work_items") or 0),
+            "key_refused_items": len(entry.get("key_refused_items") or []),
+            "audits": len(entry.get("audits") or []),
+            "flagged_audits": sum(1 for audit in (entry.get("audits") or []) if isinstance(audit, dict) and audit.get("flagged")),
+            "replay_mismatches": sum(1 for item in (entry.get("replays") or []) if isinstance(item, dict) and item.get("outcome") not in (None, "match")),
         }
     report = {
         "schema_version": SHADOW_REPORT_SCHEMA_VERSION,

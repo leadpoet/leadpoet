@@ -10,6 +10,7 @@ because it reads credentials and behavior knobs at import time.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -51,6 +52,14 @@ class ScoringError(RuntimeError):
 
 class ScorerPolicyConflict(ScoringError):
     """The process environment conflicts with the signed scorer policy."""
+
+
+class JudgeKeyRefused(ScoringError):
+    """The scored miner's own key or quota refused the judge's provider calls: the miner's outcome, never retried."""
+
+
+# Shim error codes that mean the broker refused the call on the miner's key or quota.
+KEY_REFUSAL_CODES = frozenset({"budget_refused", "budget_exhausted", "call_refused"})
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +278,8 @@ def score_work_item(
         try:
             breakdowns = _run_scorer(scorer, sliced, icp)
         except Exception as exc:  # judge/provider failure: retry the work item
+            if getattr(exc, "code", None) in KEY_REFUSAL_CODES:
+                raise JudgeKeyRefused("the scored miner's key refused the judge: %s" % exc.code) from exc
             last_error = exc
             continue
         if any(scorer_breakdown_has_retryable_infrastructure_failure(item_row) for item_row in breakdowns):
@@ -413,3 +424,87 @@ def run_scores_for_store(bundle: Mapping[str, Any], runs: Sequence[Mapping[str, 
             continue
         records.append({"run_id": run["run_id"], "per_icp_score": float(row["per_icp_score"]), "score_ref": score_ref})
     return records
+
+
+# ---------------------------------------------------------------------------
+# Scoring assignments: what a validator's judge sandbox reads and writes
+# ---------------------------------------------------------------------------
+
+SCORING_INPUT_SCHEMA_VERSION = "leadpoet.lab_arena.scoring_input.v1"
+SCORING_OUTPUT_SCHEMA_VERSION = "leadpoet.lab_arena.scoring_output.v1"
+SCORING_FAILURES = ("judge_error", "judge_timeout", "judge_key_refused")
+MAX_SCORING_OUTPUT_BYTES = 2 * 1024 * 1024
+BREAKDOWN_SCORE_FIELD = "final_score"
+
+
+def build_scoring_input(*, work_item_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str) -> Dict[str, Any]:
+    """The judge sandbox's input: one ICP, one output, the signed scorer policy."""
+
+    return {
+        "schema_version": SCORING_INPUT_SCHEMA_VERSION,
+        "work_item_id": contracts.require_sha256(work_item_id, "work_item_id"),
+        "icp": dict(icp),
+        "companies": [dict(company) for company in companies],
+        "scorer_policy": contracts.validate_scorer_policy(policy),
+        "evaluation_date": str(evaluation_date),
+    }
+
+
+def build_scoring_output(work_item_id: str, breakdowns: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "breakdowns": [dict(item) for item in breakdowns]}
+
+
+def build_scoring_failure(work_item_id: str, failure: str) -> Dict[str, Any]:
+    if failure not in SCORING_FAILURES:
+        raise ScoringError("unknown scoring failure")
+    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": failure}
+
+
+def scoring_output_from_bytes(raw: bytes) -> Dict[str, Any]:
+    """Parse a judge sandbox output: bounded, plain JSON, the declared shape only."""
+
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_SCORING_OUTPUT_BYTES:
+        raise ScoringError("scoring output is missing or too large")
+    try:
+        document = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ScoringError("scoring output is not JSON") from None
+    return validate_scoring_output_document(document)
+
+
+def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
+    if not isinstance(document, Mapping) or document.get("schema_version") != SCORING_OUTPUT_SCHEMA_VERSION:
+        raise ScoringError("scoring output schema is invalid")
+    try:
+        contracts.check_strict_document(document, contracts.PUBLICATION_LIMITS)
+    except contracts.ArenaContractError:
+        raise ScoringError("scoring output exceeds structural limits") from None
+    work_item_id = document.get("work_item_id")
+    contracts.require_sha256(work_item_id, "work_item_id")
+    keys = set(document)
+    if "failure" in document:
+        if keys != {"schema_version", "work_item_id", "failure"} or document["failure"] not in SCORING_FAILURES:
+            raise ScoringError("scoring failure document is invalid")
+        return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": document["failure"]}
+    if keys != {"schema_version", "work_item_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
+        raise ScoringError("scoring output document is invalid")
+    breakdowns = []
+    for item in document["breakdowns"]:
+        if not isinstance(item, Mapping):
+            raise ScoringError("scoring breakdown is not an object")
+        score = item.get(BREAKDOWN_SCORE_FIELD)
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0.0 <= float(score) <= 100.0:
+            raise ScoringError("scoring breakdown carries no valid final score")
+        breakdowns.append(dict(item))
+    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "breakdowns": breakdowns}
+
+
+def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0) -> List[Dict[str, Any]]:
+    """A breakdown list is acceptable for a work item only when it covers exactly the scored companies."""
+
+    scored, _skipped = verify.bucket_skip(icp, companies)
+    if max_scored_companies > 0:
+        scored = scored[:max_scored_companies]
+    if len(breakdowns) != len(scored):
+        raise ScoringError("breakdown count %d differs from the %d scored companies" % (len(breakdowns), len(scored)))
+    return [dict(item) for item in breakdowns]

@@ -260,3 +260,65 @@ def test_runner_refuses_a_round_whose_release_identity_differs():
     ):
         with pytest.raises(rn.RunnerError):
             rn.verify_release_against_round(broken, worker_release_hash=release["worker_release_hash"], runtime_lock_hash=contracts.document_hash("lock"))
+
+
+# ---------------------------------------------------------------------------
+# Scoring assignments: the validator runs the pinned judge image on one output
+# ---------------------------------------------------------------------------
+
+SCORER_IMAGE = "sha256:" + "5" * 64
+
+
+def scoring_lease(run_id="r9", position=3):
+    from lab_arena import scoring
+
+    base = lease(run_id, position)
+    base.update({
+        "assignment_id": "%s:s1:1:%d:score" % (ROUND, position), "kind": "score", "work_item_id": contracts.document_hash("item-%d" % position),
+        "scored_run_id": "r1", "image_digest": SCORER_IMAGE, "scored_output": {"companies": [valid_company(1), valid_company(2)]}, "scorer_policy": scoring.build_scorer_policy(),
+    })
+    return base
+
+
+def test_scoring_lease_runs_the_judge_image_in_trusted_mode_and_signs_a_breakdown_receipt(tmp_path):
+    from lab_arena import scoring
+
+    work_item_id = contracts.document_hash("item-3")
+    breakdowns = [{"final_score": 71.0, "failure_reason": ""}, {"final_score": 44.5, "failure_reason": ""}]
+    output = scoring.build_scoring_output(work_item_id, breakdowns)
+    api = FakeApi([scoring_lease()])
+    sandbox = BridgingRuntime(output=output, calls=1)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    envelope = api.completions[0]
+    receipt = {k: v for k, v in envelope["body"]["receipt"].items() if k != "run_id"}
+    validated = contracts.validate_icp_receipt(receipt, verify_signature=verify)
+    assert validated["kind"] == "score" and validated["terminal_status"] == "accepted" and validated["image_digest"] == SCORER_IMAGE
+    assert envelope["body"]["output"] == output and validated["output_hash"] == contracts.document_hash(output)
+    spec = sandbox.specs[0]
+    assert spec.entry_file == rn.SCORER_ENTRY_FILE and spec.extra_environment[shim.TRUSTED_SCORER_ENV] == "1"
+    assert spec.rootfs_path == tmp_path / "images" / SCORER_IMAGE.replace(":", "-")
+    # The judge sandbox read a scoring input, not an ICP input.
+    events = api.events["r9"]
+    assert [e["event_type"] for e in events][-1] == "output_validated" and events[-1]["payload"]["breakdown_count"] == 2
+    assert validated["provider_call_root"] == rn.provider_call_root(envelope["body"]["calls"])
+
+
+@pytest.mark.parametrize("output, timed_out, expected", [
+    ({"schema_version": "leadpoet.lab_arena.scoring_output.v1", "work_item_id": contracts.document_hash("item-3"), "failure": "judge_key_refused"}, False, "judge_key_refused"),
+    ({"schema_version": "leadpoet.lab_arena.scoring_output.v1", "work_item_id": contracts.document_hash("item-3"), "failure": "judge_error"}, False, "judge_error"),
+    (None, True, "judge_timeout"),
+    (b"not json", False, "judge_error"),
+    ({"companies": [valid_company(1)]}, False, "judge_error"),
+])
+def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, timed_out, expected):
+    api = FakeApi([scoring_lease()])
+    sandbox = BridgingRuntime(output=output, timed_out=timed_out, calls=0)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    receipt = {k: v for k, v in api.completions[0]["body"]["receipt"].items() if k != "run_id"}
+    validated = contracts.validate_icp_receipt(receipt, verify_signature=verify)
+    assert validated["terminal_status"] == expected and validated["kind"] == "score"
+    assert api.completions[0]["body"].get("output") in (None, {}) and validated["output_hash"] == contracts.document_hash(None)

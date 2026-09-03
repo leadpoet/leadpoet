@@ -112,8 +112,8 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_rounds (
   round_id TEXT PRIMARY KEY
     CHECK (round_id ~ '^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(-[a-z0-9]{1,16})?$'),
   status TEXT NOT NULL DEFAULT 'open'
-    CHECK (status IN ('open', 'committed', 'stage1', 'stage1_closed', 'stage1_scored',
-                      'stage2', 'stage2_closed', 'scored', 'published', 'cancelled')),
+    CHECK (status IN ('open', 'committed', 'stage1', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored',
+                      'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published', 'cancelled')),
   status_generation BIGINT NOT NULL DEFAULT 0 CHECK (status_generation >= 0),
   stage_generation BIGINT NOT NULL DEFAULT 0 CHECK (stage_generation >= 0),
   configuration_hash TEXT NOT NULL CHECK (configuration_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   icp_position SMALLINT NOT NULL CHECK (icp_position BETWEEN 0 AND 49),
   icp_hash TEXT NOT NULL CHECK (icp_hash ~ '^sha256:[0-9a-f]{64}$'),
   attempt SMALLINT NOT NULL CHECK (attempt BETWEEN 0 AND 2),
+  -- 'execute' runs a miner's model on one ICP; 'score' runs the Arena judge on
+  -- one accepted output (a scoring work item) and is accounted against the
+  -- scored miner's keys. Score runs remember the execution they judge so the
+  -- validator that executed an output never scores it.
+  kind TEXT NOT NULL DEFAULT 'execute' CHECK (kind IN ('execute', 'score')),
+  work_item_id TEXT CHECK (work_item_id IS NULL OR work_item_id ~ '^sha256:[0-9a-f]{64}$'),
+  scored_run_id TEXT,
+  scored_runner_hotkey TEXT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'leased', 'submitted', 'accepted', 'failed')),
   runner_hotkey TEXT,
@@ -227,7 +235,8 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   cost_root TEXT,
   terminal_cause TEXT CHECK (terminal_cause IS NULL OR terminal_cause IN (
     'accepted', 'model_timeout', 'invalid_output', 'budget_exhausted', 'model_error',
-    'lease_expired', 'worker_lost', 'receipt_rejected', 'preflight_failed', 'stage_closed')),
+    'lease_expired', 'worker_lost', 'receipt_rejected', 'preflight_failed', 'stage_closed',
+    'judge_error', 'judge_timeout', 'judge_key_refused')),
   terminal_doc JSONB,
   per_icp_score NUMERIC(12, 6),
   score_ref TEXT,
@@ -561,7 +570,7 @@ AS $lab_arena__run_consumed$
 $lab_arena__run_consumed$;
 ALTER FUNCTION public.lab_arena__run_consumed(TEXT, TEXT) OWNER TO lab_arena_owner;
 
-CREATE OR REPLACE FUNCTION public.lab_arena__submission_stage_consumed(p_submission_id TEXT, p_stage SMALLINT, p_provider TEXT)
+CREATE OR REPLACE FUNCTION public.lab_arena__submission_stage_consumed(p_submission_id TEXT, p_stage SMALLINT, p_provider TEXT, p_kind TEXT)
 RETURNS BIGINT
 LANGUAGE sql
 STABLE
@@ -572,15 +581,17 @@ AS $lab_arena__submission_stage_consumed$
   FROM (
     SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind
     FROM public.lab_arena_ledger AS ledger
+    JOIN public.lab_arena_runs AS runs ON runs.run_id = ledger.run_id
     WHERE ledger.submission_id = p_submission_id
       AND ledger.stage = p_stage
       AND ledger.provider = p_provider
+      AND runs.kind = p_kind
       AND ledger.call_identity IS NOT NULL
     ORDER BY ledger.call_identity, ledger.entry_id DESC
   ) AS head
   WHERE head.entry_kind IN ('reservation', 'dispatch', 'settlement', 'uncertain');
 $lab_arena__submission_stage_consumed$;
-ALTER FUNCTION public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT) OWNER TO lab_arena_owner;
+ALTER FUNCTION public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT, TEXT) OWNER TO lab_arena_owner;
 
 -- Aggregate key state: 'ok' only when every required provider has a key
 -- whose newest preflight passed; 'none' before any key; otherwise 'failed'.
@@ -728,7 +739,7 @@ BEGIN
      OR v_run.lease_expires_at IS NULL
      OR v_run.lease_expires_at <= pg_catalog.clock_timestamp()
      OR v_run.stage_generation <> v_round.stage_generation
-     OR v_round.status <> ('stage' || v_run.stage::TEXT) THEN
+     OR v_round.status <> ('stage' || v_run.stage::TEXT || CASE v_run.kind WHEN 'score' THEN '_scoring' ELSE '' END) THEN
     RAISE EXCEPTION 'lab_arena_lease_stale' USING ERRCODE = 'P0003';
   END IF;
   RETURN v_run;
@@ -908,7 +919,7 @@ BEGIN
     SET stage2_scoring_plan_hash = v_patch ->> 'stage2_scoring_plan_hash',
         stage2_scoring_plan_doc = v_patch -> 'stage2_scoring_plan_doc'
     WHERE round_id = p_round_id;
-  ELSIF p_expected_status = 'stage1_closed' AND p_next_status = 'stage1_scored' THEN
+  ELSIF p_expected_status = 'stage1_judged' AND p_next_status = 'stage1_scored' THEN
     v_allowed := ARRAY['finalists', 'stage1_score_bundle_hash', 'stage1_scores_ref'];
     IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys)
        OR pg_catalog.jsonb_typeof(v_patch -> 'finalists') <> 'array'
@@ -922,7 +933,7 @@ BEGIN
         stage1_scores_ref = v_patch ->> 'stage1_scores_ref',
         stage1_score_bundle_hash = v_patch ->> 'stage1_score_bundle_hash'
     WHERE round_id = p_round_id;
-  ELSIF p_expected_status = 'stage2_closed' AND p_next_status = 'scored' THEN
+  ELSIF p_expected_status = 'stage2_judged' AND p_next_status = 'scored' THEN
     v_allowed := ARRAY['final_score_bundle_hash', 'final_scores_ref'];
     IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys)
        OR (v_patch ->> 'final_score_bundle_hash') !~ '^sha256:[0-9a-f]{64}$'
@@ -1419,10 +1430,10 @@ BEGIN
     END IF;
     RETURN pg_catalog.jsonb_build_object('status', 'request_id_reused');
   END IF;
-  IF v_round.status NOT IN ('stage1', 'stage2') THEN
+  IF v_round.status NOT IN ('stage1', 'stage2', 'stage1_scoring', 'stage2_scoring') THEN
     RETURN pg_catalog.jsonb_build_object('status', 'stage_closed', 'round_status', v_round.status);
   END IF;
-  v_stage := CASE v_round.status WHEN 'stage1' THEN 1 ELSE 2 END;
+  v_stage := CASE WHEN v_round.status IN ('stage1', 'stage1_scoring') THEN 1 ELSE 2 END;
   IF NOT (v_round.configuration_doc -> 'runner_allowlist' ? p_runner_hotkey) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_allowlisted');
   END IF;
@@ -1434,11 +1445,21 @@ BEGIN
   IF v_active >= v_limit THEN
     RETURN pg_catalog.jsonb_build_object('status', 'no_free_slot', 'active_leases', v_active, 'slot_limit', v_limit);
   END IF;
-  SELECT * INTO v_run FROM public.lab_arena_runs
-  WHERE round_id = p_round_id AND stage = v_stage AND status = 'pending'
-    AND stage_generation = v_round.stage_generation
-    AND miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
-  ORDER BY icp_position, created_at, assignment_id
+  -- Only the current phase's assignments are pending at its stage generation.
+  -- A validator never scores an output it executed (section 16 as revised).
+  SELECT * INTO v_run FROM public.lab_arena_runs AS runs
+  WHERE runs.round_id = p_round_id AND runs.stage = v_stage AND runs.status = 'pending'
+    AND runs.stage_generation = v_round.stage_generation
+    AND runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
+    AND (runs.kind = 'execute' OR runs.scored_runner_hotkey IS DISTINCT FROM p_runner_hotkey)
+    -- An audit is independent only when another validator scores it: a
+    -- validator never holds two scorings of one work item.
+    AND (runs.kind = 'execute' OR NOT EXISTS (
+      SELECT 1 FROM public.lab_arena_runs AS sibling
+      WHERE sibling.round_id = runs.round_id AND sibling.kind = 'score'
+        AND sibling.work_item_id = runs.work_item_id AND sibling.assignment_id <> runs.assignment_id
+        AND sibling.runner_hotkey = p_runner_hotkey))
+  ORDER BY runs.icp_position, runs.created_at, runs.assignment_id
   FOR UPDATE SKIP LOCKED
   LIMIT 1;
   IF NOT FOUND THEN
@@ -1458,6 +1479,9 @@ BEGIN
     'icp_position', v_run.icp_position,
     'icp_hash', v_run.icp_hash,
     'attempt', v_run.attempt,
+    'kind', v_run.kind,
+    'work_item_id', v_run.work_item_id,
+    'scored_run_id', v_run.scored_run_id,
     'lease_generation', v_run.lease_generation + 1,
     'stage_generation', v_round.stage_generation,
     'lease_expires_at', v_expires,
@@ -1559,7 +1583,9 @@ BEGIN
   -- Fairness is a fixed call quota per provider (section 7 as revised): the
   -- per-ICP quota bounds this attempt, the stage quota (per-ICP quota times
   -- the stage's ICP count times the attempt limit) bounds the participant.
-  v_quota := ((v_round.configuration_doc -> 'call_quotas') ->> p_provider)::INTEGER;
+  v_quota := CASE v_run.kind
+    WHEN 'score' THEN ((v_round.configuration_doc -> 'scoring_call_quotas') ->> p_provider)::INTEGER
+    ELSE ((v_round.configuration_doc -> 'call_quotas') ->> p_provider)::INTEGER END;
   IF v_quota IS NULL OR v_quota < 1 THEN
     RAISE EXCEPTION 'lab_arena_quota_missing' USING ERRCODE = '22023';
   END IF;
@@ -1579,7 +1605,7 @@ BEGIN
   -- the foreign key; a FOR UPDATE lock here deadlocks against settlement.
   IF v_reason IS NULL THEN
     SELECT * INTO v_submission FROM public.lab_arena_submissions WHERE submission_id = v_run.submission_id FOR NO KEY UPDATE;
-    v_consumed := public.lab_arena__submission_stage_consumed(v_run.submission_id, v_run.stage, p_provider);
+    v_consumed := public.lab_arena__submission_stage_consumed(v_run.submission_id, v_run.stage, p_provider, v_run.kind);
     IF v_consumed >= v_stage_quota THEN
       v_reason := 'stage_quota';
     END IF;
@@ -1908,7 +1934,8 @@ BEGIN
   IF pg_catalog.jsonb_typeof(p_receipt) IS DISTINCT FROM 'object'
      OR COALESCE(p_receipt_hash, '') !~ '^sha256:[0-9a-f]{64}$'
      OR (p_receipt ->> 'receipt_hash') IS DISTINCT FROM p_receipt_hash
-     OR p_terminal_cause NOT IN ('accepted', 'model_timeout', 'invalid_output', 'budget_exhausted', 'model_error')
+     OR p_terminal_cause NOT IN ('accepted', 'model_timeout', 'invalid_output', 'budget_exhausted', 'model_error',
+                                 'judge_error', 'judge_timeout', 'judge_key_refused')
      OR (p_terminal_cause = 'accepted' AND COALESCE(p_output_hash, '') !~ '^sha256:[0-9a-f]{64}$')
      OR COALESCE(p_provider_call_root, '') !~ '^sha256:[0-9a-f]{64}$'
      OR COALESCE(p_private_event_root, '') !~ '^sha256:[0-9a-f]{64}$'
@@ -1925,6 +1952,10 @@ BEGIN
   EXCEPTION WHEN SQLSTATE 'P0003' THEN
     RETURN pg_catalog.jsonb_build_object('status', 'stale');
   END;
+  IF (v_run.kind = 'execute' AND p_terminal_cause IN ('judge_error', 'judge_timeout', 'judge_key_refused'))
+     OR (v_run.kind = 'score' AND p_terminal_cause NOT IN ('accepted', 'judge_error', 'judge_timeout', 'judge_key_refused')) THEN
+    RAISE EXCEPTION 'lab_arena_complete_cause_kind_mismatch' USING ERRCODE = '22023';
+  END IF;
   SELECT COUNT(*) INTO v_open FROM (
     SELECT DISTINCT ON (ledger.call_identity) ledger.entry_kind
     FROM public.lab_arena_ledger AS ledger
@@ -1973,7 +2004,7 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
-  IF v_round.status NOT IN ('stage1', 'stage2') THEN
+  IF v_round.status NOT IN ('stage1', 'stage2', 'stage1_scoring', 'stage2_scoring') THEN
     RETURN pg_catalog.jsonb_build_object('status', 'no_stage', 'expired', 0, 'retried', 0);
   END IF;
   FOR v_run IN
@@ -1992,11 +2023,12 @@ BEGIN
     IF v_run.attempt < 2 AND v_run.stage_generation = v_round.stage_generation THEN
       INSERT INTO public.lab_arena_runs (
         run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-        attempt, status, lease_generation, stage_generation
+        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id, scored_runner_hotkey
       ) VALUES (
         v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
         v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
-        v_run.attempt + 1, 'pending', v_run.lease_generation, v_round.stage_generation
+        v_run.attempt + 1, 'pending', v_run.lease_generation, v_round.stage_generation,
+        v_run.kind, v_run.work_item_id, v_run.scored_run_id, v_run.scored_runner_hotkey
       );
       v_retried := v_retried + 1;
     END IF;
@@ -2032,8 +2064,8 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
   IF v_round.status <> ('stage' || p_stage::TEXT) THEN
-    IF (p_stage = 1 AND v_round.status IN ('stage1_closed', 'stage1_scored', 'stage2', 'stage2_closed', 'scored', 'published'))
-       OR (p_stage = 2 AND v_round.status IN ('stage2_closed', 'scored', 'published')) THEN
+    IF (p_stage = 1 AND v_round.status IN ('stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
+       OR (p_stage = 2 AND v_round.status IN ('stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published')) THEN
       RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
         'stage_generation', v_round.stage_generation);
     END IF;
@@ -2043,7 +2075,7 @@ BEGIN
   v_generation := v_round.stage_generation + 1;
   FOR v_run IN
     SELECT * FROM public.lab_arena_runs
-    WHERE round_id = p_round_id AND stage = p_stage AND status IN ('leased', 'pending', 'submitted')
+    WHERE round_id = p_round_id AND stage = p_stage AND kind = 'execute' AND status IN ('leased', 'pending', 'submitted')
     ORDER BY assignment_id, attempt
     FOR UPDATE
   LOOP
@@ -2061,7 +2093,7 @@ BEGIN
   SELECT COUNT(*) INTO v_incomplete FROM (
     SELECT DISTINCT ON (runs.assignment_id) runs.assignment_id, runs.status, runs.terminal_cause
     FROM public.lab_arena_runs AS runs
-    WHERE runs.round_id = p_round_id AND runs.stage = p_stage
+    WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'execute'
     ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
   ) AS latest
   WHERE latest.status <> 'accepted'
@@ -2085,6 +2117,172 @@ BEGIN
 END;
 $lab_arena_close_stage$;
 ALTER FUNCTION public.lab_arena_close_stage(TEXT, SMALLINT) OWNER TO lab_arena_owner;
+
+
+-- Turn the committed scoring plan into claimable scoring assignments: one
+-- pending score run per work item, bound to the accepted execution it judges
+-- and accounted against that miner's keys. The round moves to
+-- stageN_scoring at a new stage generation so only score runs are claimable.
+CREATE OR REPLACE FUNCTION public.lab_arena_open_scoring(
+  p_round_id TEXT,
+  p_stage SMALLINT,
+  p_work_items JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $lab_arena_open_scoring$
+DECLARE
+  v_round public.lab_arena_rounds;
+  v_expected TEXT;
+  v_next TEXT;
+  v_generation BIGINT;
+  v_item JSONB;
+  v_scored public.lab_arena_runs;
+  v_assignment TEXT;
+  v_created INTEGER := 0;
+BEGIN
+  IF p_stage NOT IN (1, 2) OR pg_catalog.jsonb_typeof(p_work_items) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION 'lab_arena_scoring_input_invalid' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
+  END IF;
+  v_expected := 'stage' || p_stage::TEXT || '_closed';
+  v_next := 'stage' || p_stage::TEXT || '_scoring';
+  IF v_round.status <> v_expected THEN
+    IF (p_stage = 1 AND v_round.status IN ('stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
+       OR (p_stage = 2 AND v_round.status IN ('stage2_scoring', 'stage2_judged', 'scored', 'published')) THEN
+      RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
+        'stage_generation', v_round.stage_generation);
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status,
+      'stage_generation', v_round.stage_generation);
+  END IF;
+  IF (p_stage = 1 AND v_round.stage1_scoring_plan_hash IS NULL)
+     OR (p_stage = 2 AND v_round.stage2_scoring_plan_hash IS NULL) THEN
+    RAISE EXCEPTION 'lab_arena_scoring_plan_missing' USING ERRCODE = '22023';
+  END IF;
+  v_generation := v_round.stage_generation + 1;
+  FOR v_item IN SELECT value FROM pg_catalog.jsonb_array_elements(p_work_items) LOOP
+    IF pg_catalog.jsonb_typeof(v_item) IS DISTINCT FROM 'object'
+       OR COALESCE(v_item ->> 'work_item_id', '') !~ '^sha256:[0-9a-f]{64}$'
+       OR COALESCE(v_item ->> 'output_hash', '') !~ '^sha256:[0-9a-f]{64}$'
+       OR COALESCE(v_item ->> 'scored_run_id', '') = '' THEN
+      RAISE EXCEPTION 'lab_arena_scoring_item_invalid' USING ERRCODE = '22023';
+    END IF;
+    SELECT * INTO v_scored FROM public.lab_arena_runs
+    WHERE run_id = v_item ->> 'scored_run_id' AND round_id = p_round_id AND stage = p_stage
+      AND kind = 'execute' AND status = 'accepted';
+    IF NOT FOUND OR v_scored.output_hash IS DISTINCT FROM (v_item ->> 'output_hash') THEN
+      RAISE EXCEPTION 'lab_arena_scored_run_invalid' USING ERRCODE = '22023';
+    END IF;
+    -- An audit item is scored a second time by another validator; it carries
+    -- its own assignment so both scorings stand side by side.
+    v_assignment := p_round_id || ':' || v_scored.submission_id || ':' || p_stage::TEXT || ':' || v_scored.icp_position::TEXT
+      || CASE WHEN COALESCE((v_item ->> 'audit')::BOOLEAN, FALSE) THEN ':audit' ELSE ':score' END;
+    INSERT INTO public.lab_arena_runs (
+      run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
+      attempt, status, stage_generation, kind, work_item_id, scored_run_id, scored_runner_hotkey
+    ) VALUES (
+      v_assignment || ':1', v_assignment, p_round_id, v_scored.submission_id, v_scored.miner_hotkey,
+      p_stage, v_scored.icp_position, v_scored.icp_hash, 1, 'pending', v_generation, 'score',
+      v_item ->> 'work_item_id', v_scored.run_id, v_scored.runner_hotkey
+    );
+    v_created := v_created + 1;
+  END LOOP;
+  UPDATE public.lab_arena_rounds
+  SET status = v_next, status_generation = status_generation + 1, stage_generation = v_generation
+  WHERE round_id = p_round_id;
+  RETURN pg_catalog.jsonb_build_object('status', 'ok', 'round_status', v_next,
+    'stage_generation', v_generation, 'assignments', v_created);
+END;
+$lab_arena_open_scoring$;
+ALTER FUNCTION public.lab_arena_open_scoring(TEXT, SMALLINT, JSONB) OWNER TO lab_arena_owner;
+
+-- Close the scoring window: open score runs fail as stage_closed, and the
+-- round is cancelled when any scoring assignment is incomplete for a reason
+-- that is not the scored miner's own key (an infrastructure gap is never
+-- turned into a miner's zero). Otherwise the round is stageN_judged and the
+-- Arena verifies the breakdowns and builds the bundle.
+CREATE OR REPLACE FUNCTION public.lab_arena_close_scoring(p_round_id TEXT, p_stage SMALLINT)
+RETURNS JSONB
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $lab_arena_close_scoring$
+DECLARE
+  v_round public.lab_arena_rounds;
+  v_run public.lab_arena_runs;
+  v_generation BIGINT;
+  v_incomplete INTEGER;
+  v_next TEXT;
+BEGIN
+  IF p_stage NOT IN (1, 2) THEN
+    RAISE EXCEPTION 'lab_arena_stage_invalid' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_round.status <> ('stage' || p_stage::TEXT || '_scoring') THEN
+    IF (p_stage = 1 AND v_round.status IN ('stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
+       OR (p_stage = 2 AND v_round.status IN ('stage2_judged', 'scored', 'published')) THEN
+      RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
+        'stage_generation', v_round.stage_generation);
+    END IF;
+    RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status,
+      'stage_generation', v_round.stage_generation);
+  END IF;
+  v_generation := v_round.stage_generation + 1;
+  FOR v_run IN
+    SELECT * FROM public.lab_arena_runs
+    WHERE round_id = p_round_id AND stage = p_stage AND kind = 'score' AND status IN ('leased', 'pending', 'submitted')
+    ORDER BY assignment_id, attempt
+    FOR UPDATE
+  LOOP
+    IF v_run.status = 'leased' THEN
+      PERFORM public.lab_arena__terminate_open_calls(v_run.run_id, 'stage_closed');
+    END IF;
+    UPDATE public.lab_arena_runs
+    SET status = 'failed', terminal_cause = 'stage_closed',
+        terminal_doc = pg_catalog.jsonb_build_object('closed_at', pg_catalog.clock_timestamp(),
+          'previous_status', v_run.status)
+    WHERE run_id = v_run.run_id;
+  END LOOP;
+  -- Audits are best effort: an audit nobody independent could claim never
+  -- cancels a round; only primary scorings are required.
+  SELECT COUNT(*) INTO v_incomplete FROM (
+    SELECT DISTINCT ON (runs.assignment_id) runs.assignment_id, runs.status, runs.terminal_cause
+    FROM public.lab_arena_runs AS runs
+    WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'score'
+      AND runs.assignment_id NOT LIKE '%:audit'
+    ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
+  ) AS latest
+  WHERE latest.status <> 'accepted'
+    AND COALESCE(latest.terminal_cause, '') <> 'judge_key_refused';
+  IF v_incomplete > 0 THEN
+    v_next := 'cancelled';
+    UPDATE public.lab_arena_rounds
+    SET status = 'cancelled', status_generation = status_generation + 1, stage_generation = v_generation,
+        cancel_reason = 'capacity:scoring' || p_stage::TEXT || ':' || v_incomplete::TEXT
+    WHERE round_id = p_round_id;
+  ELSE
+    v_next := 'stage' || p_stage::TEXT || '_judged';
+    UPDATE public.lab_arena_rounds
+    SET status = v_next, status_generation = status_generation + 1, stage_generation = v_generation
+    WHERE round_id = p_round_id;
+  END IF;
+  RETURN pg_catalog.jsonb_build_object(
+    'status', CASE WHEN v_next = 'cancelled' THEN 'cancelled' ELSE 'closed' END,
+    'round_status', v_next, 'incomplete_assignments', v_incomplete, 'stage_generation', v_generation);
+END;
+$lab_arena_close_scoring$;
+ALTER FUNCTION public.lab_arena_close_scoring(TEXT, SMALLINT) OWNER TO lab_arena_owner;
 
 CREATE OR REPLACE FUNCTION public.lab_arena_cancel_round(p_round_id TEXT, p_reason TEXT)
 RETURNS JSONB
@@ -2257,6 +2455,8 @@ BEGIN
     'public.lab_arena_complete_attempt(TEXT, TEXT, JSONB, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT)',
     'public.lab_arena_expire_leases(TEXT)',
     'public.lab_arena_close_stage(TEXT, SMALLINT)',
+    'public.lab_arena_open_scoring(TEXT, SMALLINT, JSONB)',
+    'public.lab_arena_close_scoring(TEXT, SMALLINT)',
     'public.lab_arena_cancel_round(TEXT, TEXT)',
     'public.lab_arena_record_run_scores(TEXT, SMALLINT, JSONB)'
   ] LOOP
@@ -2272,7 +2472,7 @@ BEGIN
   FOREACH signature IN ARRAY ARRAY[
     'public.lab_arena__ledger_head(TEXT)',
     'public.lab_arena__run_consumed(TEXT, TEXT)',
-    'public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT)',
+    'public.lab_arena__submission_stage_consumed(TEXT, SMALLINT, TEXT, TEXT)',
     'public.lab_arena__aggregate_preflight(JSONB)',
     'public.lab_arena__apply_terminal_funding(public.lab_arena_ledger, TEXT, BIGINT)',
     'public.lab_arena__terminate_open_calls(TEXT, TEXT)',

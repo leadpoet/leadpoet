@@ -1374,7 +1374,13 @@ class CoordinatorAllocationSourceV2:
                 if previous is not None
                 else None
             ),
-            reward_checkpoints=checkpoints,
+            reward_checkpoints=sorted(
+                checkpoints,
+                key=lambda item: (
+                    str(item["reward_kind"]),
+                    str(item["source_id"]),
+                ),
+            ),
         )
 
     def _policy_and_chain_state(

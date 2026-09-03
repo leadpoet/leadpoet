@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 import base64
+from datetime import datetime
 from typing import Any, Literal, Optional, Union
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -352,6 +353,154 @@ class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
     credential_ref: Optional[str] = None
     precheck_status: Optional[str] = None
     precheck_reasons: list[str] = Field(default_factory=list)
+
+
+class ResearchLabSourceAddStatusRequest(SignedResearchLabRequest):
+    """Signed request for one miner's private SOURCE_ADD status page."""
+
+    request_kind: Literal["source_add_status_v1"]
+    limit: int = Field(default=20, ge=1, le=50)
+    cursor: Optional[str] = Field(
+        default=None,
+        pattern=r"^source_add_submission:[0-9a-f]{16}$",
+    )
+
+
+class ResearchLabSourceAddStatusItem(BaseModel):
+    submission_id: str = Field(pattern=r"^source_add_submission:[0-9a-f]{16}$")
+    source_name: str = Field(min_length=1, max_length=160)
+    submitted_at: datetime
+    updated_at: datetime
+    decision_status: Literal["pending", "approved", "rejected"]
+    decision_reason_code: Literal[
+        "automated_checks_in_progress",
+        "additional_review_needed",
+        "source_credibility_not_verified",
+        "submission_details_not_verified",
+        "documentation_not_verified",
+        "provenance_not_verified",
+        "technical_validation_not_passed",
+        "automated_checks_not_passed",
+        "leg1_reward_pending",
+        "leg1_reward_active",
+        "leg1_reward_stopped",
+    ]
+    decision_reason: Literal[
+        "Automated Source Add checks are still in progress.",
+        "Automated verification was inconclusive and needs additional review.",
+        "The source did not pass the public credibility checks.",
+        "The submitted API details were incomplete or could not be verified.",
+        "The public API documentation could not be verified.",
+        "Independent public evidence for the source could not be verified.",
+        "The source did not pass technical validation.",
+        "The submission did not pass automated Source Add checks.",
+        "The source passed automated checks. Leg 1 reward setup is in progress.",
+        "The source passed automated checks and the Leg 1 reward is active.",
+        "The source passed automated checks. Future Leg 1 reward payments have stopped.",
+    ]
+    reward_status: Literal[
+        "not_decided",
+        "not_eligible",
+        "pending",
+        "active",
+        "stopped",
+    ]
+    alpha_percent: Optional[float] = Field(default=None, gt=0, le=100)
+    reward_epochs: Optional[int] = Field(default=None, gt=0)
+    start_epoch: Optional[int] = Field(default=None, ge=0)
+    end_epoch: Optional[int] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def status_contract_is_consistent(self) -> "ResearchLabSourceAddStatusItem":
+        reason_contract = {
+            "automated_checks_in_progress": (
+                "pending",
+                "Automated Source Add checks are still in progress.",
+            ),
+            "additional_review_needed": (
+                "pending",
+                "Automated verification was inconclusive and needs additional review.",
+            ),
+            "source_credibility_not_verified": (
+                "rejected",
+                "The source did not pass the public credibility checks.",
+            ),
+            "submission_details_not_verified": (
+                "rejected",
+                "The submitted API details were incomplete or could not be verified.",
+            ),
+            "documentation_not_verified": (
+                "rejected",
+                "The public API documentation could not be verified.",
+            ),
+            "provenance_not_verified": (
+                "rejected",
+                "Independent public evidence for the source could not be verified.",
+            ),
+            "technical_validation_not_passed": (
+                "rejected",
+                "The source did not pass technical validation.",
+            ),
+            "automated_checks_not_passed": (
+                "rejected",
+                "The submission did not pass automated Source Add checks.",
+            ),
+            "leg1_reward_pending": (
+                "approved",
+                "The source passed automated checks. Leg 1 reward setup is in progress.",
+            ),
+            "leg1_reward_active": (
+                "approved",
+                "The source passed automated checks and the Leg 1 reward is active.",
+            ),
+            "leg1_reward_stopped": (
+                "approved",
+                "The source passed automated checks. Future Leg 1 reward payments have stopped.",
+            ),
+        }
+        expected_status, expected_reason = reason_contract[self.decision_reason_code]
+        if self.decision_status != expected_status or self.decision_reason != expected_reason:
+            raise ValueError("SOURCE_ADD public decision fields are inconsistent")
+        expected_reward_state = {
+            "automated_checks_in_progress": "not_decided",
+            "additional_review_needed": "not_decided",
+            "source_credibility_not_verified": "not_eligible",
+            "submission_details_not_verified": "not_eligible",
+            "documentation_not_verified": "not_eligible",
+            "provenance_not_verified": "not_eligible",
+            "technical_validation_not_passed": "not_eligible",
+            "automated_checks_not_passed": "not_eligible",
+            "leg1_reward_pending": "pending",
+            "leg1_reward_active": "active",
+            "leg1_reward_stopped": "stopped",
+        }
+        if self.reward_status != expected_reward_state[self.decision_reason_code]:
+            raise ValueError("SOURCE_ADD public reward status is inconsistent")
+        reward_schedule = (
+            self.alpha_percent,
+            self.reward_epochs,
+            self.start_epoch,
+            self.end_epoch,
+        )
+        schedule_present = tuple(item is not None for item in reward_schedule)
+        if any(schedule_present) and not all(schedule_present):
+            raise ValueError("SOURCE_ADD public reward schedule is incomplete")
+        if self.decision_status != "approved" and any(schedule_present):
+            raise ValueError("SOURCE_ADD non-approved decision has a reward schedule")
+        if self.reward_status in {"active", "stopped"} and not all(schedule_present):
+            raise ValueError("SOURCE_ADD active reward schedule is missing")
+        if all(schedule_present) and self.end_epoch != self.start_epoch + self.reward_epochs - 1:
+            raise ValueError("SOURCE_ADD public reward epoch range is inconsistent")
+        return self
+
+
+class ResearchLabSourceAddStatusResponse(BaseModel):
+    schema_version: Literal["leadpoet.source_add_miner_status.v1"]
+    submissions: list[ResearchLabSourceAddStatusItem] = Field(max_length=50)
+    next_cursor: Optional[str] = Field(
+        default=None,
+        pattern=r"^source_add_submission:[0-9a-f]{16}$",
+    )
 
 
 class ResearchLabSourceAdapterRecheckResponse(BaseModel):

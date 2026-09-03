@@ -763,6 +763,7 @@ _WORKER_STARTUP_DIAGNOSTIC_PATHS = frozenset(
         "/health/v2-authority",
         "/health/routing-experiments",
         "/research-lab/status",
+        "/research-lab/source-adapters/status",
     }
 )
 _SOURCE_ADD_INDEPENDENT_PATHS = frozenset(

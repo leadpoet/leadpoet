@@ -53,6 +53,7 @@ def test_classify_path_unchanged():
     assert classify_path("/epoch/24123") == "validator"
     assert classify_path("/fulfillment/requests/active") == "miner"
     assert classify_path("/research-lab/source-adapters") == "miner"
+    assert classify_path("/research-lab/source-adapters/status") == "miner"
     assert classify_path("/anything-else") == "other"
 
 

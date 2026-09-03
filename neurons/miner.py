@@ -3300,6 +3300,102 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         print(f"   Precheck: {result.get('precheck_status')}")
     for reason in (result.get("precheck_reasons") or [])[:8]:
         print(f"     - {reason}")
+    print("   Run the miner again and select option 5 to check this submission.")
+
+
+def run_research_lab_source_add_status_flow(wallet, config, netuid: int) -> None:
+    """Show the signing miner's private, sanitized SOURCE_ADD decisions."""
+
+    print("\n" + "=" * 80)
+    print(" RESEARCH LAB — MY API SOURCE SUBMISSIONS")
+    print("=" * 80)
+    print("")
+    print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
+    print("")
+
+    cursor = None
+    seen_cursors: set[str] = set()
+    while True:
+        now = int(time.time())
+        payload = {
+            "miner_hotkey": wallet.hotkey.ss58_address,
+            "timestamp": now,
+            "idempotency_key": (
+                f"source-add-status:{wallet.hotkey.ss58_address}:{now}:"
+                f"{cursor or 'latest'}"
+            ),
+            "request_kind": "source_add_status_v1",
+            "limit": 20,
+        }
+        if cursor:
+            payload["cursor"] = cursor
+        result = _post_research_lab_json(
+            "/research-lab/source-adapters/status",
+            _research_lab_signed_payload(wallet, payload),
+            timeout=60,
+        )
+        if "error" in result:
+            print(f"❌ SOURCE_ADD status failed: HTTP {result.get('status_code')}")
+            print("   Submission status is temporarily unavailable.")
+            return
+
+        submissions = result.get("submissions")
+        if not isinstance(submissions, list):
+            print("❌ SOURCE_ADD status returned an invalid response.")
+            return
+        if not submissions and cursor is None:
+            print("No SOURCE_ADD submissions were found for this hotkey.")
+            return
+        if not submissions:
+            print("No older SOURCE_ADD submissions were found.")
+            return
+
+        for item in submissions:
+            if not isinstance(item, dict):
+                print("❌ SOURCE_ADD status returned an invalid response.")
+                return
+            decision = str(item.get("decision_status") or "pending").upper()
+            print(f"{decision}: {item.get('source_name') or 'API source'}")
+            print(f"   Submission ID: {item.get('submission_id') or 'unavailable'}")
+            print(f"   Submitted: {item.get('submitted_at') or 'unavailable'}")
+            print(f"   Reason: {item.get('decision_reason') or 'Status unavailable.'}")
+            reward_status = str(item.get("reward_status") or "not_decided")
+            alpha_percent = item.get("alpha_percent")
+            reward_epochs = item.get("reward_epochs")
+            start_epoch = item.get("start_epoch")
+            end_epoch = item.get("end_epoch")
+            if all(
+                value is not None
+                for value in (
+                    alpha_percent,
+                    reward_epochs,
+                    start_epoch,
+                    end_epoch,
+                )
+            ):
+                print(
+                    "   Reward: "
+                    f"{float(alpha_percent):g}% per epoch for "
+                    f"{int(reward_epochs)} epochs "
+                    f"({int(start_epoch)}–{int(end_epoch)}; {reward_status})"
+                )
+            else:
+                print(f"   Reward: {reward_status.replace('_', ' ')}")
+            print("")
+
+        next_cursor = result.get("next_cursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            return
+        if next_cursor in seen_cursors:
+            print("❌ SOURCE_ADD status pagination did not advance.")
+            return
+        if input("Show older submissions? [y/N]: ").strip().lower() not in {
+            "y",
+            "yes",
+        }:
+            return
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def main():
@@ -3437,12 +3533,13 @@ def main():
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
     print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
     print("  4. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
+    print("  5. Check API Source Submissions — View your private SOURCE_ADD decisions and rewards")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    mode_input = input("❓ Select mode (1/2/3/4) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3", "4"):
+    mode_input = input("❓ Select mode (1/2/3/4/5) [default: 1]: ").strip()
+    if mode_input not in ("1", "2", "3", "4", "5"):
         mode_input = "1"
 
     miner_mode = {
@@ -3450,6 +3547,7 @@ def main():
         "2": "fulfillment",
         "3": "research_lab_resume_credit",
         "4": "research_lab_source_add",
+        "5": "research_lab_source_add_status",
     }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
@@ -3484,6 +3582,22 @@ def main():
             run_research_lab_source_add_flow(temp_wallet, config, config.netuid)
         except Exception as e:
             bt.logging.error(f"❌ Error during source-add mode: {e}")
+            import traceback
+            traceback.print_exc()
+        print("\n👋 Done. Run the miner again to select another mode.")
+        raise SystemExit(0)
+
+    if miner_mode == "research_lab_source_add_status":
+        try:
+            temp_wallet = bt.Wallet(config=config)
+            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+            run_research_lab_source_add_status_flow(
+                temp_wallet,
+                config,
+                config.netuid,
+            )
+        except Exception as e:
+            bt.logging.error(f"❌ Error during source-add status mode: {e}")
             import traceback
             traceback.print_exc()
         print("\n👋 Done. Run the miner again to select another mode.")

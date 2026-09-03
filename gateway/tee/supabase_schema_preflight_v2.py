@@ -560,6 +560,26 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_v1",
+        (
+            "schema_version",
+            "submission_id",
+            "miner_hotkey",
+            "source_name",
+            "submitted_at",
+            "updated_at",
+            "decision_status",
+            "decision_reason_code",
+            "decision_reason",
+            "reward_status",
+            "alpha_percent",
+            "reward_epochs",
+            "start_epoch",
+            "end_epoch",
+        ),
+    ),
+    (
         "scripts/96-research-lab-source-add-functional-workflow.sql",
         "research_lab_source_add_identity_current",
         (
@@ -1172,6 +1192,14 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_source_add_post_accept_leg1_contract_v4",
     ),
     (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_page_v1",
+    ),
+    (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_contract_v1",
+    ),
+    (
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
         "research_lab_source_add_admit_v2",
     ),
@@ -1652,6 +1680,113 @@ def _verify_candidate_hybrid_purpose_contract_v1(
 SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
 )
+
+SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256 = (
+    "sha256:8096dcc13409b33b56ad70f9606c9fe8ac7c644583b02b9c70f97322dfe86e26"
+)
+SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256 = (
+    "sha256:fefb9294135f34d9e0f329288f9ee11c42b54e36eaa4941d92e20b69e1a9d2e1"
+)
+SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256 = (
+    "sha256:b2d1ba1bf1062a911dc4ab3d6619d93b5cf282d4daa3896c553e99e0520b2c11"
+)
+
+
+def _verify_source_add_miner_status_contract_v1(
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/rpc/"
+            "research_lab_source_add_miner_status_contract_v1"
+        ),
+        data=b"{}",
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD miner-status privacy contract is unavailable; apply "
+            "scripts/178-research-lab-source-add-miner-status.sql before "
+            f"restart (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD miner-status privacy contract probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD miner-status privacy contract is unavailable; apply "
+            "scripts/178-research-lab-source-add-miner-status.sql before "
+            f"restart (HTTP {status})"
+        )
+    try:
+        contract = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD miner-status privacy contract response is invalid"
+        ) from exc
+    expected = {
+        "schema_version": "leadpoet.source_add_miner_status_contract.v1",
+        "view_name": "research_lab_source_add_miner_status_v1",
+        "page_rpc": "research_lab_source_add_miner_status_page_v1",
+        "page_signature": "text,text,integer",
+        "view_columns": [
+            "schema_version",
+            "submission_id",
+            "miner_hotkey",
+            "source_name",
+            "submitted_at",
+            "updated_at",
+            "decision_status",
+            "decision_reason_code",
+            "decision_reason",
+            "reward_status",
+            "alpha_percent",
+            "reward_epochs",
+            "start_epoch",
+            "end_epoch",
+        ],
+        "view_security_invoker": True,
+        "view_security_barrier": True,
+        "page_security_invoker": True,
+        "page_stable": True,
+        "view_authority_sha256": (
+            SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256
+        ),
+        "page_authority_sha256": (
+            SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256
+        ),
+        "contract_authority_sha256": (
+            SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256
+        ),
+        "permissions": {
+            "view_service_role_select": True,
+            "view_anon_select": False,
+            "view_authenticated_select": False,
+            "view_public_select": False,
+            "page_service_role_callable": True,
+            "page_anon_callable": False,
+            "page_authenticated_callable": False,
+            "page_public_callable": False,
+            "contract_service_role_callable": True,
+            "contract_anon_callable": False,
+            "contract_authenticated_callable": False,
+        },
+    }
+    if contract != expected:
+        raise SupabaseSchemaPreflightV2Error(
+            "SOURCE_ADD miner-status privacy contract differs"
+        )
+    return dict(contract)
 
 
 def _verify_source_add_duplicate_privacy_contract_v1(
@@ -2779,17 +2914,25 @@ def verify_required_supabase_v2_schema(
             timeout_seconds=timeout_seconds,
         )
     )
+    source_add_miner_status_contract = (
+        _verify_source_add_miner_status_contract_v1(
+            headers=headers,
+            supabase_url=supabase_url,
+            opener=opener,
+            timeout_seconds=timeout_seconds,
+        )
+    )
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
         + len(required_rpcs)
-        + 6,
+        + 7,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(required_rpcs),
         "routing_model_transition_v2_required": (
             routing_model_transition_v2_required
         ),
-        "data_probe_count": 6,
+        "data_probe_count": 7,
         "schema_document_probe_count": 1,
         "chain_realized_settlement_activation_http_probe_count": (
             1 if activation_source == "postgrest" else 0
@@ -2810,6 +2953,9 @@ def verify_required_supabase_v2_schema(
         ),
         "source_add_claim_control_contract": (
             source_add_claim_control_contract
+        ),
+        "source_add_miner_status_contract": (
+            source_add_miner_status_contract
         ),
         "source_add_leg1_release_policy": source_add_leg1_release_policy,
         "migration_files": sorted(migrations),

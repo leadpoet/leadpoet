@@ -50,6 +50,9 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_SCHEMA,
     SOURCE_ADD_CLAIM_CONTROL_ROLLBACK_V1_CONTRACT_SHA256,
     SOURCE_ADD_CLAIM_CONTROL_V2_FUNCTION_AUTHORITY_SHA256,
+    SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256,
+    SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256,
+    SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_FUNCTION_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_TRIGGER_AUTHORITY_SHA256,
     SOURCE_ADD_PROVENANCE_LEG1_VIEW_AUTHORITY_SHA256,
@@ -313,6 +316,9 @@ SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
 SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
     "177-research-lab-source-add-provenance-authority-acl.sql"
 )
+SOURCE_ADD_MINER_STATUS_MIGRATION = (
+    "178-research-lab-source-add-miner-status.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -390,6 +396,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVENANCE_LEG1_MIGRATION,
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
+    SOURCE_ADD_MINER_STATUS_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -438,6 +445,7 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_174_source_add_restart_state_restore_valid",
     "post_175_source_add_provenance_leg1_valid",
     "post_176_source_add_provenance_origin_repair_valid",
+    "post_178_source_add_miner_status_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -6853,6 +6861,72 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-176 SOURCE_ADD provenance-origin contract differs"
             )
+        database.apply_migration(
+            scripts / SOURCE_ADD_MINER_STATUS_MIGRATION
+        )
+        applied.append(SOURCE_ADD_MINER_STATUS_MIGRATION)
+        source_add_miner_status_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_source_add_miner_status_contract_v1()
+                       ::TEXT;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if source_add_miner_status_contract != {
+            "schema_version": (
+                "leadpoet.source_add_miner_status_contract.v1"
+            ),
+            "view_name": "research_lab_source_add_miner_status_v1",
+            "page_rpc": "research_lab_source_add_miner_status_page_v1",
+            "page_signature": "text,text,integer",
+            "view_columns": [
+                "schema_version",
+                "submission_id",
+                "miner_hotkey",
+                "source_name",
+                "submitted_at",
+                "updated_at",
+                "decision_status",
+                "decision_reason_code",
+                "decision_reason",
+                "reward_status",
+                "alpha_percent",
+                "reward_epochs",
+                "start_epoch",
+                "end_epoch",
+            ],
+            "view_security_invoker": True,
+            "view_security_barrier": True,
+            "page_security_invoker": True,
+            "page_stable": True,
+            "view_authority_sha256": (
+                SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256
+            ),
+            "page_authority_sha256": (
+                SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256
+            ),
+            "contract_authority_sha256": (
+                SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256
+            ),
+            "permissions": {
+                "view_service_role_select": True,
+                "view_anon_select": False,
+                "view_authenticated_select": False,
+                "view_public_select": False,
+                "page_service_role_callable": True,
+                "page_anon_callable": False,
+                "page_authenticated_callable": False,
+                "page_public_callable": False,
+                "contract_service_role_callable": True,
+                "contract_anon_callable": False,
+                "contract_authenticated_callable": False,
+            },
+        }:
+            raise PostgresContractProbeError(
+                "post-178 SOURCE_ADD miner status contract differs"
+            )
         routing_purpose_contract = json.loads(
             database.psql(
                 """
@@ -7016,6 +7090,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "private_model_lineage_generation_contract": (
                 private_model_lineage_generation_contract
+            ),
+            "source_add_miner_status_contract": (
+                source_add_miner_status_contract
             ),
             "checks": {
                 name: True for name in EXPECTED_POSTGRES_CONTRACT_CHECKS

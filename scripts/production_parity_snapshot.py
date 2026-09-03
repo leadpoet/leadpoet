@@ -68,6 +68,9 @@ _SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
 _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
     "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
 )
+_SOURCE_ADD_MINER_STATUS_MIGRATION = (
+    "scripts/178-research-lab-source-add-miner-status.sql"
+)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -177,9 +180,15 @@ _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
         "sha256": "sha256:5589d4e10c0932c2b85913df425f4f19eb7542c5a8cc5560573e3c797f223b32",
         "transaction_mode": "candidate-file",
     },
+    {
+        "path": _SOURCE_ADD_MINER_STATUS_MIGRATION,
+        "sequence": 178,
+        "sha256": "sha256:3cbeaa65110d8efc9281a7c1c952c343dfed933a9c23be8e2083513d701f2b40",
+        "transaction_mode": "candidate-file",
+    },
 )
 _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION = (
-    "leadpoet.production_parity.schema_only_source_add_acl.v5"
+    "leadpoet.production_parity.schema_only_source_add_acl.v6"
 )
 _SOURCE_ADD_DUPLICATE_PRIVACY_FUNCTION_AUTHORITY_SHA256 = (
     "sha256:26bf34c94725b855f81c2e48b6afbd72d68db36a4aeffb5642494a5da32233e0"
@@ -241,6 +250,8 @@ _SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS = (
     "public.research_lab_source_add_requeue_provenance_v2(text,text,text,text,text,text,text)",
     "public.research_lab_source_add_reconcile_provenance_leg1_v1()",
     "public.research_lab_source_add_reserve_leg1_slot_v4(text,text,uuid,integer,integer)",
+    "public.research_lab_source_add_miner_status_contract_v1()",
+    "public.research_lab_source_add_miner_status_page_v1(text,text,integer)",
     "public.research_lab_source_add_restart_guard_state_v1()",
     "public.research_lab_source_add_restart_guard_state_v2()",
     "public.research_lab_source_add_restart_quiescence_v1(text,text,bigint)",
@@ -864,6 +875,9 @@ def _schema_only_source_add_acl_sql(
     provenance_authority_acl_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
     )
+    miner_status_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_MINER_STATUS_MIGRATION
+    )
     return f"""
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -887,8 +901,22 @@ BEGIN
         SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'anon'
     ) OR NOT EXISTS (
         SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'authenticated'
+    ) OR pg_catalog.to_regclass(
+        'public.research_lab_source_add_miner_status_v1'
+    ) IS NULL OR NOT COALESCE((
+        SELECT class.reloptions @> ARRAY[
+            'security_invoker=true', 'security_barrier=true'
+        ]
+        FROM pg_catalog.pg_class AS class
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = class.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND class.relname = 'research_lab_source_add_miner_status_v1'
+          AND class.relkind = 'v'
+    ), FALSE
     ) THEN
-        RAISE EXCEPTION 'schema-only SOURCE_ADD ACL roles are unavailable';
+        RAISE EXCEPTION
+            'schema-only SOURCE_ADD ACL roles or miner status view are unavailable';
     END IF;
     IF (SELECT COUNT(*) FROM schema_only_source_add_expected_acl)
            <> {len(expectations)}
@@ -934,6 +962,10 @@ $schema_only_source_add_acl_inventory$;
 {revoke_all}
 {grant_service}
 {grant_public}
+REVOKE ALL ON TABLE public.research_lab_source_add_miner_status_v1
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON TABLE public.research_lab_source_add_miner_status_v1
+    TO service_role;
 DO $schema_only_source_add_acl_readback$
 BEGIN
     IF (SELECT COUNT(*) FROM schema_only_source_add_expected_acl)
@@ -973,6 +1005,47 @@ BEGIN
                         = function_row.oid
               )
        )
+       OR NOT pg_catalog.has_table_privilege(
+            'service_role',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+       )
+       OR pg_catalog.has_table_privilege(
+            'anon',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+       )
+       OR pg_catalog.has_table_privilege(
+            'authenticated',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_class AS class
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(
+                    class.relacl,
+                    pg_catalog.acldefault('r', class.relowner)
+                )
+            ) AS privilege
+            WHERE class.oid = pg_catalog.to_regclass(
+                'public.research_lab_source_add_miner_status_v1'
+            )
+              AND privilege.grantee = 0
+              AND privilege.privilege_type = 'SELECT'
+       )
+       OR NOT COALESCE((
+            SELECT class.reloptions @> ARRAY[
+                'security_invoker=true', 'security_barrier=true'
+            ]
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND class.relname = 'research_lab_source_add_miner_status_v1'
+              AND class.relkind = 'v'
+       ), FALSE)
        OR EXISTS (
         SELECT 1
         FROM schema_only_source_add_expected_acl AS expected
@@ -1045,6 +1118,7 @@ SELECT pg_catalog.json_build_object(
     'migration_175_sha256', '{provenance_leg1_migration['sha256']}',
     'migration_176_sha256', '{provenance_origin_repair_migration['sha256']}',
     'migration_177_sha256', '{provenance_authority_acl_migration['sha256']}',
+    'migration_178_sha256', '{miner_status_migration['sha256']}',
     'function_signature_count', (SELECT COUNT(*) FROM actual_acl),
     'service_role_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE service_role_callable
@@ -1061,6 +1135,33 @@ SELECT pg_catalog.json_build_object(
     'authenticated_callable_function_count', (
         SELECT COUNT(*) FROM actual_acl WHERE authenticated_callable
     ),
+    'miner_status_view_acl_bound',
+        pg_catalog.has_table_privilege(
+            'service_role',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+        )
+        AND NOT pg_catalog.has_table_privilege(
+            'anon',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+        )
+        AND NOT pg_catalog.has_table_privilege(
+            'authenticated',
+            'public.research_lab_source_add_miner_status_v1',
+            'SELECT'
+        )
+        AND COALESCE((
+            SELECT class.reloptions @> ARRAY[
+                'security_invoker=true', 'security_barrier=true'
+            ]
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND class.relname = 'research_lab_source_add_miner_status_v1'
+              AND class.relkind = 'v'
+        ), FALSE),
     'function_acl_inventory', (
         SELECT pg_catalog.jsonb_object_agg(
             signature,
@@ -1223,6 +1324,9 @@ def restore_schema_only_source_add_acl_contract(
     provenance_authority_acl_migration = _schema_only_source_add_acl_migration(
         _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
     )
+    miner_status_migration = _schema_only_source_add_acl_migration(
+        _SOURCE_ADD_MINER_STATUS_MIGRATION
+    )
     expected = {
         "schema_version": _SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS),
@@ -1230,6 +1334,7 @@ def restore_schema_only_source_add_acl_contract(
         "migration_175_sha256": provenance_leg1_migration["sha256"],
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "migration_177_sha256": provenance_authority_acl_migration["sha256"],
+        "migration_178_sha256": miner_status_migration["sha256"],
         "function_signature_count": len(expected_inventory),
         "service_role_function_count": (
             len(_SCHEMA_ONLY_SOURCE_ADD_SERVICE_FUNCTIONS)
@@ -1245,6 +1350,7 @@ def restore_schema_only_source_add_acl_contract(
         "authenticated_callable_function_count": len(
             _SCHEMA_ONLY_SOURCE_ADD_PUBLIC_FUNCTIONS
         ),
+        "miner_status_view_acl_bound": True,
         "duplicate_privacy_authority_bound": True,
         "duplicate_privacy_permissions_bound": True,
         "post_accept_leg1_authority_bound": True,

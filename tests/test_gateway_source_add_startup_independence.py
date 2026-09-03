@@ -235,6 +235,7 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
         _WORKER_STARTUP_DIAGNOSTIC_PATHS=frozenset(
             {
                 "/research-lab/status",
+                "/research-lab/source-adapters/status",
             }
         ),
         _SOURCE_ADD_INDEPENDENT_PATHS=frozenset(
@@ -281,6 +282,7 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
             "/research-lab/admin/source-adapters/submission-1/provision",
         ),
         ("GET", "/research-lab/status"),
+        ("POST", "/research-lab/source-adapters/status"),
         ("GET", "/research-lab/allocations/attested/24124"),
     ]
     for method, path in allowed:
@@ -318,6 +320,13 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
     for method, path in allowed[:5]:
         response = await middleware(request(method, path), call_next)
         assert response.status_code == 503, (method, path)
+    assert (
+        await middleware(
+            request("POST", "/research-lab/source-adapters/status"),
+            call_next,
+        )
+        == "allowed"
+    )
 
     worker_authority["ready"] = True
     for method, path in allowed[:5]:
@@ -327,4 +336,6 @@ async def test_source_add_admin_and_allocation_bypass_exact_failed_worker_gate()
     independent_reads = allowed[5:]
     for method, path in independent_reads:
         assert await middleware(request(method, path), call_next) == "allowed"
-    assert calls == allowed + independent_reads
+    assert calls == allowed + [
+        ("POST", "/research-lab/source-adapters/status")
+    ] + independent_reads

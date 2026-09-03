@@ -78,6 +78,7 @@ The miner will ask which mode to run:
 - **Auto Research**
 - **Fulfillment**
 - **Submit API Source**
+- **Check API Source Submissions**
 
 ### Research Lab
 
@@ -104,6 +105,15 @@ emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
 allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
 apply. Operator testing and catalog provisioning happen later and do not gate
 Leg 1; only provisioned catalog sources can be used by improvement loops.
+
+Choose **Check API Source Submissions** to view your own submission decisions
+and Leg 1 reward state. The miner signs this read request with the same hotkey
+that made the submission. The gateway returns only that hotkey's records and
+safe, public reason categories. It does not show another miner's submissions,
+raw validation evidence, duplicate matches, catalog contents, or sources used
+by the current model. An **approved** result means that the automated Leg 1
+approval boundary passed; it does not mean that the source is already in the
+catalog or model.
 
 #### Auto Research
 

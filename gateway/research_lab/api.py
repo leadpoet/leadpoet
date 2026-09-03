@@ -107,6 +107,9 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabSourceAdapterSubmissionRequest,
     ResearchLabSourceAdapterSubmissionResponse,
+    ResearchLabSourceAddStatusItem,
+    ResearchLabSourceAddStatusRequest,
+    ResearchLabSourceAddStatusResponse,
     ResearchLabSourceMetadata,
     ResearchLabSourceAddCredentialRecipientRequest,
     ResearchLabCredentialRecipientResponse,
@@ -761,6 +764,105 @@ async def create_source_add_credential_recipient(
     raise HTTPException(
         status_code=410,
         detail="SOURCE_ADD miner credentials are not accepted",
+    )
+
+
+@router.post(
+    "/source-adapters/status",
+    response_model=ResearchLabSourceAddStatusResponse,
+)
+async def list_research_lab_source_add_status(
+    payload: ResearchLabSourceAddStatusRequest,
+    response: Response,
+):
+    """Return only the signing miner's sanitized SOURCE_ADD status page."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    await _verify_signed_miner(payload)
+
+    try:
+        rows = await call_rpc(
+            "research_lab_source_add_miner_status_page_v1",
+            {
+                "p_miner_hotkey": payload.miner_hotkey,
+                "p_cursor_submission_id": payload.cursor,
+                "p_limit": payload.limit,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_MINER_STATUS_READ_FAILED type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="SOURCE_ADD status is temporarily unavailable",
+        ) from exc
+    if not isinstance(rows, list) or len(rows) > payload.limit + 1:
+        logger.warning("SOURCE_ADD_MINER_STATUS_INVALID_PAGE")
+        raise HTTPException(
+            status_code=503,
+            detail="SOURCE_ADD status is temporarily unavailable",
+        )
+
+    items: list[ResearchLabSourceAddStatusItem] = []
+    seen_submission_ids: set[str] = set()
+    for raw_row in rows:
+        if (
+            not isinstance(raw_row, Mapping)
+            or str(raw_row.get("schema_version") or "")
+            != "leadpoet.source_add_miner_status.v1"
+            or str(raw_row.get("miner_hotkey") or "") != payload.miner_hotkey
+        ):
+            logger.warning("SOURCE_ADD_MINER_STATUS_OWNERSHIP_MISMATCH")
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD status is temporarily unavailable",
+            )
+        try:
+            item = ResearchLabSourceAddStatusItem.model_validate(
+                {
+                    "submission_id": raw_row.get("submission_id"),
+                    "source_name": raw_row.get("source_name"),
+                    "submitted_at": raw_row.get("submitted_at"),
+                    "updated_at": raw_row.get("updated_at"),
+                    "decision_status": raw_row.get("decision_status"),
+                    "decision_reason_code": raw_row.get("decision_reason_code"),
+                    "decision_reason": raw_row.get("decision_reason"),
+                    "reward_status": raw_row.get("reward_status"),
+                    "alpha_percent": raw_row.get("alpha_percent"),
+                    "reward_epochs": raw_row.get("reward_epochs"),
+                    "start_epoch": raw_row.get("start_epoch"),
+                    "end_epoch": raw_row.get("end_epoch"),
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "SOURCE_ADD_MINER_STATUS_INVALID_ROW type=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD status is temporarily unavailable",
+            ) from exc
+        if item.submission_id in seen_submission_ids:
+            logger.warning("SOURCE_ADD_MINER_STATUS_DUPLICATE_ROW")
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD status is temporarily unavailable",
+            )
+        seen_submission_ids.add(item.submission_id)
+        items.append(item)
+
+    has_more = len(items) > payload.limit
+    visible_items = items[: payload.limit]
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Pragma"] = "no-cache"
+    return ResearchLabSourceAddStatusResponse(
+        schema_version="leadpoet.source_add_miner_status.v1",
+        submissions=visible_items,
+        next_cursor=(visible_items[-1].submission_id if has_more else None),
     )
 
 

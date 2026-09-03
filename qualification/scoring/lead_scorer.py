@@ -2912,7 +2912,16 @@ async def _score_single_intent_signal(
                 source_url=signal.url,
                 miner_claim=signal.description,
                 target_signal_text=target_signal_text,
-                miner_signal_date=(str(signal.date) if signal.date else None),
+                # The Research Lab path applies its model-supplied date with
+                # ``check_evidence_freshness`` after this source judgment.
+                # Do not let the semantic source judge independently veto the
+                # same trusted date. Fulfillment and every untrusted-date call
+                # still receive and verify the submitted date as before.
+                miner_signal_date=(
+                    None
+                    if trust_signal_date
+                    else str(signal.date) if signal.date else None
+                ),
                 evidence_type=target_evidence_type,
                 declared_source=(
                     source_lower if enforce_source_integrity else None

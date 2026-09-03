@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -227,6 +227,73 @@ router = APIRouter(
     route_class=_ResearchLabCredentialSafeRoute,
 )
 _SOURCE_ADD_SUBMISSION_COOLDOWN_SECONDS = 20
+_SOURCE_ADD_CAP_LIMIT_TYPES = {
+    "hotkey_open_cap": "open_submissions",
+    "hotkey_day_cap": "daily",
+    "hotkey_30d_cap": "rolling_30d",
+}
+
+
+def _source_add_seconds_until_utc_midnight(now: datetime | None = None) -> int:
+    """Seconds until the daily cap resets.
+
+    The daily counter in ``research_lab_source_add_admit_v3`` is bounded by
+    ``date_trunc('day', NOW() AT TIME ZONE 'UTC')``, so the reset is the next
+    UTC midnight. Never returns 0, so a client at the boundary still backs off.
+    """
+
+    now = now or datetime.now(timezone.utc)
+    midnight = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return max(1, int((midnight - now).total_seconds()))
+
+
+def _source_add_cap_detail(status: str, config) -> dict:
+    """Structured 429 body for the three per-hotkey submission caps.
+
+    All three used to answer with the bare string "SOURCE_ADD submission
+    limit reached", which tells a miner neither which limit it hit nor when to
+    try again — so clients retry in a tight loop against a cap that will not
+    move for hours. The shape mirrors the cooldown 429 above. The limits
+    themselves are already published on the Research Lab config surface, so
+    naming them here discloses nothing new, and the hotkey is signature-verified
+    upstream, so a miner only ever learns about its own state.
+    """
+
+    limit_type = _SOURCE_ADD_CAP_LIMIT_TYPES[status]
+    if status == "hotkey_open_cap":
+        limit = int(config.source_add_max_concurrent_per_hotkey)
+        retry_after = None
+        message = (
+            f"You already have {limit} submissions in review. Retry once one of "
+            "them finishes."
+        )
+    elif status == "hotkey_day_cap":
+        limit = int(config.source_add_max_per_day_per_hotkey)
+        retry_after = _source_add_seconds_until_utc_midnight()
+        message = (
+            f"You have used all {limit} submissions for today. Retry in "
+            f"{retry_after} seconds, when the daily allowance resets at UTC "
+            "midnight."
+        )
+    else:
+        limit = int(config.source_add_max_per_30d_per_hotkey)
+        retry_after = None
+        message = (
+            f"You have used all {limit} submissions allowed in a rolling 30 "
+            "days. Retry once your oldest submission ages out of the window."
+        )
+
+    stats: dict = {"limit_type": limit_type, "limit": limit}
+    if retry_after is not None:
+        stats["retry_after_seconds"] = retry_after
+    return {
+        "code": "research_lab_rate_limited",
+        "route": "source_adapters",
+        "message": message,
+        "stats": stats,
+    }
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
@@ -947,8 +1014,11 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
                 },
             },
         )
-    if status in {"hotkey_open_cap", "hotkey_day_cap", "hotkey_30d_cap"}:
-        raise HTTPException(status_code=429, detail="SOURCE_ADD submission limit reached")
+    if status in _SOURCE_ADD_CAP_LIMIT_TYPES:
+        raise HTTPException(
+            status_code=429,
+            detail=_source_add_cap_detail(status, config),
+        )
     if status != "admitted":
         logger.warning("SOURCE_ADD_ADMISSION_UNEXPECTED status=%s", status)
         raise HTTPException(status_code=503, detail="SOURCE_ADD workflow temporarily unavailable")

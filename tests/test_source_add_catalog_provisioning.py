@@ -1894,3 +1894,98 @@ async def test_owner_recheck_refuses_legacy_submission_without_structured_metada
 
     assert exc_info.value.status_code == 400
     assert "submission metadata is incomplete or invalid" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "admit_status,limit_type,limit,expects_retry_after",
+    [
+        ("hotkey_open_cap", "open_submissions", 3, False),
+        ("hotkey_day_cap", "daily", 5, True),
+        ("hotkey_30d_cap", "rolling_30d", 10, False),
+    ],
+)
+async def test_hotkey_cap_429_names_the_limit_it_hit(
+    monkeypatch, admit_status, limit_type, limit, expects_retry_after
+):
+    """Each per-hotkey cap must say which limit it hit, not just "limit reached".
+
+    A bare refusal gives a miner no retry horizon, so clients retry in a tight
+    loop against a cap that will not move for hours.
+    """
+
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "is_autoresearch_maintenance_paused",
+        lambda *a, **k: _async_none(),
+    )
+    monkeypatch.setattr(
+        api,
+        "source_add_control_state",
+        lambda *a, **k: _async_value({"paused": False, "status": "active"}),
+    )
+    monkeypatch.setattr(
+        source_add_catalog,
+        "source_add_api_is_current_builtin_sync",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def cap_rpc(name, _params):
+        assert name == "research_lab_source_add_admit_v3"
+        return {"status": admit_status}
+
+    monkeypatch.setattr(api, "_source_add_rpc", cap_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-%s-1" % admit_status,
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.submit_research_lab_source_adapter(payload)
+
+    assert exc_info.value.status_code == 429
+    detail = exc_info.value.detail
+    assert detail["code"] == "research_lab_rate_limited"
+    assert detail["route"] == "source_adapters"
+    assert detail["stats"]["limit_type"] == limit_type
+    assert detail["stats"]["limit"] == limit
+    assert str(limit) in detail["message"]
+    if expects_retry_after:
+        retry_after = detail["stats"]["retry_after_seconds"]
+        assert 1 <= retry_after <= 86400
+    else:
+        assert "retry_after_seconds" not in detail["stats"]
+
+
+def test_daily_cap_retry_after_counts_to_the_next_utc_midnight():
+    from datetime import datetime, timezone
+
+    at_2359 = datetime(2026, 9, 3, 23, 59, 0, tzinfo=timezone.utc)
+    assert api._source_add_seconds_until_utc_midnight(at_2359) == 60
+    at_midnight = datetime(2026, 9, 3, 0, 0, 0, tzinfo=timezone.utc)
+    assert api._source_add_seconds_until_utc_midnight(at_midnight) == 86400

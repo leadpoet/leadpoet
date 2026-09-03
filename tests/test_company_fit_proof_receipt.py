@@ -254,7 +254,6 @@ def test_contract_identity_and_receipt_round_trip_match_model_fixture():
         lambda value: value["company_binding"].update(
             company_website=" https://acme.example"
         ),
-        lambda value: value["company_binding"].update(company_linkedin=""),
         lambda value: value["icp_binding"].update(employee_count=""),
         lambda value: value["employee_size_proof"].update(
             evidence_url="https://user:password@linkedin.com/company/acme"
@@ -293,6 +292,16 @@ def test_self_hash_tampering_is_rejected():
     payload["receipt_sha256"] = "0" * 64
     with pytest.raises(ValidationError):
         CompanyFitProofReceipt.model_validate(payload)
+
+
+def test_empty_linkedin_binding_round_trips_without_synthesis():
+    payload = _proof_payload()
+    payload["company_binding"]["company_linkedin"] = ""
+    _rehash_receipt(payload)
+
+    receipt = CompanyFitProofReceipt.model_validate(payload)
+
+    assert receipt.company_binding.company_linkedin == ""
 
 
 def test_effective_union_binding_is_audit_only_and_company_bound():

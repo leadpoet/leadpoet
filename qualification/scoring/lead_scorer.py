@@ -1019,10 +1019,7 @@ async def _llm_reverify_company(
     # prompt or telemetry request body.
     del proof_receipt
     locator = json.dumps(
-        {
-            "validated_company_name": str(company.company_name).strip(),
-            "registrable_dns_domain": prompt_identity["company"],
-        },
+        {"registrable_dns_domain": prompt_identity["company"]},
         sort_keys=True,
         separators=(",", ":"),
     )

@@ -177,6 +177,7 @@ def evaluate_company_identity(
 ) -> dict[str, str]:
     """Bind the submitted name, website, and LinkedIn to one observed entity."""
 
+    submitted_linkedin_raw = str(submitted_linkedin or "").strip()
     submitted = {
         "name": _company_name(submitted_name),
         "domain": _canonical_domain(submitted_website),
@@ -202,6 +203,9 @@ def evaluate_company_identity(
     if not submitted["name"] or not submitted["domain"]:
         receipt.update(decision="mismatch", reason_code="identity_unresolved")
         return receipt
+    if submitted_linkedin_raw and not submitted["linkedin_slug"]:
+        receipt.update(decision="mismatch", reason_code="identity_unresolved")
+        return receipt
     if not observed["name"] or not observed["domain"]:
         return receipt
     if observed["domain"] != submitted["domain"]:
@@ -222,14 +226,27 @@ def evaluate_company_identity(
             return receipt
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
-    if (
-        observed["name"] != submitted["name"]
-        and not submitted["linkedin_slug"]
-    ):
+    if observed["name"] != submitted["name"]:
         # A matching registrable domain with a different common/legal name is
         # not proof of a conflict by itself. Keep the result unavailable when
         # there is no second stable identifier to bind the alias.
-        return receipt
+        if submitted["linkedin_slug"]:
+            shorter_name = min(
+                (submitted["name"], observed["name"]),
+                key=len,
+            )
+            longer_name = max(
+                (submitted["name"], observed["name"]),
+                key=len,
+            )
+            if len(shorter_name) < 4 or not longer_name.startswith(shorter_name):
+                receipt.update(
+                    decision="mismatch",
+                    reason_code="identity_mismatch",
+                )
+                return receipt
+        else:
+            return receipt
     receipt.update(decision="match", reason_code="verifier_accepted")
     return receipt
 

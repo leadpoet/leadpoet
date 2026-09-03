@@ -2435,6 +2435,23 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
     return response.json()
 
 
+def _source_add_submission_error_message(result: dict) -> str:
+    """Return one safe, human-readable SOURCE_ADD gateway error."""
+
+    error = result.get("error")
+    if isinstance(error, dict):
+        detail = error.get("detail")
+        if isinstance(detail, dict):
+            message = detail.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return "The gateway did not accept this submission."
+
+
 def _get_research_lab_status(gateway_url: str) -> Optional[dict]:
     try:
         response = requests.get(f"{gateway_url.rstrip('/')}/research-lab/status", timeout=10)
@@ -3185,12 +3202,19 @@ def run_research_lab_resume_credit_blocked_flow(wallet, config, netuid: int) -> 
         print(f"   - {str(item.get('run_id', '?'))[:13]}: {item.get('status')}" + (f" ({extra})" if extra else ""))
 
 
-def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
+def run_research_lab_source_add_flow(
+    wallet,
+    config,
+    netuid: int,
+) -> Optional[bool]:
     """Miner-facing SOURCE_ADD API submission entrypoint.
 
     The gateway endpoint is launch-gated by RESEARCH_LAB_SOURCE_ADD_ENABLED.
     Until the operator enables it, this flow exits before collecting source
     details. API credentials are always operator-managed after submission.
+
+    True means the gateway returned a complete durable-admission receipt.
+    False means nothing was confirmed as saved. None means the miner cancelled.
     """
 
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
@@ -3204,11 +3228,11 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
 
     status = _get_research_lab_status(gateway_url)
     if status is None:
-        return
+        return False
     if not source_add_submission_ready(status):
         print("SOURCE_ADD submissions are not accepting new submissions on this gateway.")
         print("No source details were collected or sent.")
-        return
+        return False
 
     print("This submits a structured source/API candidate for operator review.")
     print("Do not paste API keys into docs, endpoint examples, rate limits, or provenance notes.")
@@ -3240,7 +3264,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         third_party_refs = _research_lab_prompt_source_add_third_party_refs()
     except ValueError as exc:
         print(f"❌ Invalid source submission: {exc}")
-        return
+        return False
 
     try:
         manifest, source_brief, idempotency_key, source_metadata = build_source_add_submission_docs(
@@ -3258,7 +3282,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         )
     except ValueError as exc:
         print(f"❌ Invalid source submission: {exc}")
-        return
+        return False
 
     print("")
     print("Submission preview:")
@@ -3272,8 +3296,8 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     print("   API credentials: operator-managed")
     confirm = input("   Submit for SOURCE_ADD review? [y/N]: ").strip().lower()
     if confirm not in {"y", "yes"}:
-        print("Cancelled.")
-        return
+        print("Cancelled. Nothing was sent or saved.")
+        return None
 
     import time
 
@@ -3287,20 +3311,40 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     }
     signed_payload = _research_lab_source_add_signed_payload(wallet, payload)
     result = _post_research_lab_json("/research-lab/source-adapters", signed_payload, timeout=180)
+    if not isinstance(result, dict):
+        print("❌ SOURCE_ADD submission failed: invalid gateway response")
+        return False
     if "error" in result:
         print(f"❌ SOURCE_ADD submission failed: HTTP {result.get('status_code')}")
-        print(f"   {result['error']}")
-        return
+        print(f"   {_source_add_submission_error_message(result)}")
+        return False
+
+    submission_id = result.get("submission_id")
+    adapter_id = result.get("adapter_id")
+    stage = result.get("stage")
+    expected_adapter_id = manifest.get("adapter_id")
+    if (
+        not isinstance(submission_id, str)
+        or re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id)
+        is None
+        or not isinstance(adapter_id, str)
+        or not adapter_id
+        or adapter_id != expected_adapter_id
+        or stage != "provenance_queued"
+    ):
+        print("❌ SOURCE_ADD submission failed: invalid admission receipt")
+        return False
 
     print("✅ SOURCE_ADD submission received")
-    print(f"   Submission ID: {result.get('submission_id')}")
-    print(f"   Adapter ID: {result.get('adapter_id')}")
-    print(f"   Stage: {result.get('stage')}")
+    print(f"   Submission ID: {submission_id}")
+    print(f"   Adapter ID: {adapter_id}")
+    print(f"   Stage: {stage}")
     if result.get("precheck_status"):
         print(f"   Precheck: {result.get('precheck_status')}")
     for reason in (result.get("precheck_reasons") or [])[:8]:
         print(f"     - {reason}")
     print("   Run the miner again and select option 5 to check this submission.")
+    return True
 
 
 def run_research_lab_source_add_status_flow(wallet, config, netuid: int) -> None:
@@ -3396,6 +3440,33 @@ def run_research_lab_source_add_status_flow(wallet, config, netuid: int) -> None
             return
         seen_cursors.add(next_cursor)
         cursor = next_cursor
+
+
+def _run_research_lab_source_add_mode(config) -> int:
+    """Run SOURCE_ADD once and make the process status match persistence."""
+
+    try:
+        temp_wallet = bt.Wallet(config=config)
+        print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+        outcome = run_research_lab_source_add_flow(
+            temp_wallet,
+            config,
+            config.netuid,
+        )
+    except Exception as exc:
+        bt.logging.error(f"❌ Error during source-add mode: {exc}")
+        traceback.print_exc()
+        outcome = False
+
+    if outcome is True:
+        print("\n👋 Done. Run the miner again to select another mode.")
+        return 0
+    if outcome is None:
+        return 0
+
+    print("\n❌ SOURCE_ADD submission NOT SAVED.")
+    print("   Only a displayed Submission ID confirms that the gateway accepted it.")
+    return 1
 
 
 def main():
@@ -3576,16 +3647,7 @@ def main():
         raise SystemExit(0)
 
     if miner_mode == "research_lab_source_add":
-        try:
-            temp_wallet = bt.Wallet(config=config)
-            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_source_add_flow(temp_wallet, config, config.netuid)
-        except Exception as e:
-            bt.logging.error(f"❌ Error during source-add mode: {e}")
-            import traceback
-            traceback.print_exc()
-        print("\n👋 Done. Run the miner again to select another mode.")
-        raise SystemExit(0)
+        raise SystemExit(_run_research_lab_source_add_mode(config))
 
     if miner_mode == "research_lab_source_add_status":
         try:

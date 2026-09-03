@@ -23,6 +23,8 @@ def epoch_test_cutover() -> SubnetEpochCutover:
 
 def epoch_test_environment(**updates: Any) -> dict[str, Any]:
     return {
+        "BITTENSOR_NETWORK": "finney",
+        "BITTENSOR_NETUID": "71",
         CUTOVER_JSON_ENV: json.dumps(epoch_test_cutover().to_dict()),
         **updates,
     }

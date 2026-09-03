@@ -2912,16 +2912,7 @@ async def _score_single_intent_signal(
                 source_url=signal.url,
                 miner_claim=signal.description,
                 target_signal_text=target_signal_text,
-                # The Research Lab path applies its model-supplied date with
-                # ``check_evidence_freshness`` after this source judgment.
-                # Do not let the semantic source judge independently veto the
-                # same trusted date. Fulfillment and every untrusted-date call
-                # still receive and verify the submitted date as before.
-                miner_signal_date=(
-                    None
-                    if trust_signal_date
-                    else str(signal.date) if signal.date else None
-                ),
+                miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
                 declared_source=(
                     source_lower if enforce_source_integrity else None
@@ -2965,7 +2956,46 @@ async def _score_single_intent_signal(
     s3_status = (three_stage_result.get("stage3") or {}).get("status")
     scrape_summary = three_stage_result.get("scrape") or {}
     pipeline_decision = three_stage_result.get("decision")
-    if not three_stage_result.get("client_ready"):
+    stage3_item = (((three_stage_result.get("verdict") or {}).get(
+        "signal_evaluations"
+    ) or [{}]) or [{}])[0]
+    risk_notes = (
+        stage3_item.get("risk_notes")
+        if isinstance(stage3_item, dict)
+        and isinstance(stage3_item.get("risk_notes"), list)
+        else []
+    )
+    unsupported_parts = (
+        stage3_item.get("unsupported_parts")
+        if isinstance(stage3_item, dict)
+        and isinstance(stage3_item.get("unsupported_parts"), list)
+        else []
+    )
+    supporting_quotes = (
+        stage3_item.get("supporting_quotes")
+        if isinstance(stage3_item, dict)
+        and isinstance(stage3_item.get("supporting_quotes"), list)
+        else []
+    )
+    trusted_date_only_rejection = bool(
+        trust_signal_date
+        and not three_stage_result.get("client_ready")
+        and pipeline_decision == "reject"
+        and three_stage_result.get("rejection_reason")
+        == "stage3_contradicted"
+        and s3_status == "contradicted"
+        and (three_stage_result.get("stage3") or {}).get(
+            "claim_matches_miner_date"
+        ) == "contradicted"
+        and stage3_item.get("signal_status") == "contradicted"
+        and stage3_item.get("verification_mode") == "source_grounded"
+        and stage3_item.get("confidence") in {"medium", "high"}
+        and stage3_item.get("same_entity_check") == "pass"
+        and bool(supporting_quotes)
+        and not unsupported_parts
+        and set(risk_notes) == {"date_mismatch"}
+    )
+    if not three_stage_result.get("client_ready") and not trusted_date_only_rejection:
         provider_unavailable = (
             pipeline_decision == "unavailable"
             or s1_status == "llm_error"
@@ -2995,6 +3025,13 @@ async def _score_single_intent_signal(
             verification_trace=_verification_trace(three_stage_result),
         )
         return 0.0, confidence, "verified", content_found_date, -1
+
+    if trusted_date_only_rejection:
+        logger.info(
+            "Intent signal date-only semantic rejection ignored after "
+            "deterministic freshness gate  source=%s",
+            signal.url[:60],
+        )
 
     if deferred_pregate_reason:
         _record_verdict(

@@ -103,7 +103,23 @@ Standalone verification of any published round uses
 `lab_arena.verify.rebuild_round(public_bundle, signing_key_document)` with
 only the public bundle and the round's signing key document.
 
-## 6. Go-live gates
+## 6. Model release
+
+After each published round with a crowned or defended king, the driver
+commits the king's frozen source to `leadpoet/leadpoet-sales-agent` on
+`main` as the `model/` tree, with the signed manifest at
+`arena/current.json` and one copy per round under `arena/history/`. The
+commit is atomic and fast-forward only; a defended king or a retry makes no
+new commit. The signed receipt is `arena/<round>/public/model_release.json`
+and is shown on `GET /rounds/{id}` as `model_release`.
+
+Live mode requires `LAB_ARENA_GITHUB_TOKEN` (a fine-grained token with
+contents write on that one repository) and accepts
+`LAB_ARENA_MODEL_REPOSITORY` and `LAB_ARENA_MODEL_BRANCH` overrides. Shadow
+mode never releases. An empty repository is bootstrapped with one README
+commit on the first release.
+
+## 7. Go-live gates
 
 - Seven consecutive shadow rounds published with the throughput gate
   (`ArenaService.shadow_report`) satisfied, including at least one round at
@@ -123,7 +139,7 @@ only the public bundle and the round's signing key document.
 - Paid pilot, then the reward release (plan section 19 step 9), which is the
   first change to files outside `lab_arena/`, `scripts/`, and `tests/`.
 
-## 7. Invariants to re-check after any change
+## 8. Invariants to re-check after any change
 
 - `python3 -m pytest tests/lab_arena -q`: the boundary tests prove no
   Arena module imports `gateway.tee` or `gateway.db`, no measured package

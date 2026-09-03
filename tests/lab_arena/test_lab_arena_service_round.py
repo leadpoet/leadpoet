@@ -24,6 +24,9 @@ from lab_arena import broker as br, contracts, runner as rn, runtime, service as
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_benchmark_tape import TapeProvider, load_tape
 from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
+from tests.lab_arena.test_lab_arena_model_release import REPO as MODEL_REPO, TOKEN as MODEL_TOKEN, FakeGitHub
+from lab_arena import model_release as mr
+import httpx
 
 KEYS: Dict[str, Keypair] = {}
 CANARY_EXA_KEY = "exa-canary-" + "x" * 30
@@ -244,6 +247,7 @@ class Harness:
         self.broken: set = set()
         self.challengers = challengers
         self.max_challengers = contracts.MAX_CHALLENGERS
+        self.github = FakeGitHub()
         self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
         self.service = self.build_service()
 
@@ -266,6 +270,7 @@ class Harness:
             broker_factory=broker_factory, scorer_factory=lambda policy: deterministic_scorer,
             defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers),
             clock=self.clock, scoring_workers=4,
+            model_release_client=mr.GitHubClient(MODEL_REPO, MODEL_TOKEN, http_client=httpx.Client(transport=httpx.MockTransport(self.github.handler))),
         )
         return svc.ArenaService(config)
 
@@ -372,8 +377,23 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     published = service.advance_round(round_id)
     assert published["status"] == "ok" and published["king_outcome"] == "crowned" and harness.status() == "published"
     assert_canary_absent(harness, connect)
-    assert service.advance_round(round_id)["status"] == "terminal"
+    # The winning model is committed to the sales-agent repository, then the round is terminal.
+    released = service.advance_round(round_id)
+    receipt = released["model_release"]
+    assert released["status"] == "ok" and receipt["changed"] is True and receipt["repository"] == MODEL_REPO and receipt["commit_sha"] == harness.github.refs["main"]
+    signing.verify_document_signature(receipt, hash_field="receipt_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
     row = service.store.get_round(round_id)
+    king_id = row["publication_doc"]["king_decision"]["king_submission_id"]
+    king_flavor = [flavor for flavor, sid in submissions.items() if sid == king_id][0]
+    repo_files = harness.github.files_at(receipt["commit_sha"])
+    expected = svc.build.inspect_package(package_bytes(king_flavor)).files
+    assert {k[len("model/"):]: v for k, v in repo_files.items() if k.startswith("model/")} == expected
+    manifest = json.loads(repo_files["arena/current.json"])
+    assert manifest == receipt["manifest"] and manifest["round_id"] == round_id and manifest["king_hotkey"] == published["king_hotkey"] and manifest["publication_hash"] == row["publication_doc"]["publication_hash"]
+    signing.verify_document_signature(manifest, hash_field="release_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
+    assert service.advance_round(round_id)["status"] == "terminal"
+    assert service.public_round(round_id)["model_release"]["commit_sha"] == receipt["commit_sha"]
+    assert json.loads(harness.objects.get("arena/%s/public/model_release.json" % round_id).decode()) == receipt
     basis = row["reward_basis_doc"]
     assert row["effective_reward_epoch"] == 24801 and basis["king_start_epoch"] == 24801 and basis["king_hotkey"] == published["king_hotkey"]
     signing.verify_document_signature(basis, hash_field="reward_basis_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
@@ -445,6 +465,9 @@ def test_full_round_publishes_a_verifiable_result_and_a_second_round_defends_the
     harness.run_stage_with_runners(2)
     while harness.status() != "published":
         assert service.advance_round(round2)["status"] == "ok"
+    # A defended king is already in the repository: the release step changes nothing, then the round is terminal.
+    defended_release = service.advance_round(round2)
+    assert defended_release["status"] == "ok" and defended_release["model_release"]["changed"] is False and defended_release["model_release"]["commit_sha"] == harness.github.refs["main"]
     assert service.advance_round(round2) == {"status": "terminal", "round_status": "published"}
     row2 = service.store.get_round(round2)
     scores2 = json.loads(harness.objects.get(row2["final_scores_ref"]).decode())["submission_scores"]
@@ -805,6 +828,7 @@ def test_king_that_fails_preflight_stays_in_the_round_with_zero_records_and_no_r
 def test_freeze_checks_eligibility_before_the_cap_and_records_every_exclusion(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=["Zulu-1", "Zulu-2", "Zulu-3", "Zulu-4", "Zulu-5"], runners=["alpha"])
     harness.max_challengers = 2
+    harness.service = harness.build_service()  # the cap is a round default, read when the service is built
     harness.chain.epoch = 29000
     service = harness.service
     configuration = service.create_round(datetime(2026, 10, 7, 0, 0, tzinfo=timezone.utc))

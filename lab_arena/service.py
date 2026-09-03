@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import benchmark, broker as broker_module, build, contracts, credentials, operations, rewards, scoring, signing, verify
+from lab_arena import benchmark, broker as broker_module, build, contracts, credentials, model_release as model_release_module, operations, rewards, scoring, signing, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, output_document_hash, validate_output_document
 from lab_arena.runner import cost_record, provider_call_record, worker_release_identity
@@ -185,6 +185,10 @@ class ServiceConfig:
     runtime_lock_hash: str = contracts.document_hash("runtime-lock")
     scoring_workers: int = 1
     network_name: str = "finney"
+    # The daily king's frozen source is committed to the public sales-agent
+    # repository after publication (section 12.4 extension). None disables it.
+    model_release_client: Optional[Any] = None
+    model_release_branch: str = model_release_module.DEFAULT_BRANCH
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -1082,6 +1086,19 @@ class ArenaService:
     def advance_round(self, round_id: str) -> Dict[str, Any]:
         """One idempotent compare-and-set step for the round's current state."""
 
+        # Every driver step may change the round's status; the runner-facing
+        # cache must never serve a row from before this process's own transition.
+        self._invalidate_hot_round()
+        try:
+            return self._advance_round_locked(round_id)
+        finally:
+            self._invalidate_hot_round()
+
+    def _invalidate_hot_round(self) -> None:
+        with self._hot_round_lock:
+            self._hot_round = None
+
+    def _advance_round_locked(self, round_id: str) -> Dict[str, Any]:
         with self._lock:
             round_row = self._round(round_id)
             status = round_row["status"]
@@ -1123,11 +1140,82 @@ class ArenaService:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])
                     raise
+            if status == "published" and self._config.model_release_client is not None and self._object_or_none(self._model_release_ref(round_id)) is None:
+                return self.release_king_model(round_id)
             return {"status": "terminal", "round_status": status}
+
+    # -- model release to the public sales-agent repository -------------------
+
+    @staticmethod
+    def _model_release_ref(round_id: str) -> str:
+        return "arena/%s/public/model_release.json" % round_id
+
+    def _object_or_none(self, ref: str) -> Optional[bytes]:
+        try:
+            return self._objects.get(ref)
+        except Exception:
+            return None
+
+    def release_king_model(self, round_id: str) -> Dict[str, Any]:
+        """Commit the published king's frozen source to the sales-agent repository.
+
+        Idempotent per round through a signed receipt object: a round with a
+        receipt is never released twice, a retry after a crash finds the
+        repository already holding the model, and rounds without a crowned or
+        defended king record a skipped receipt so the driver stops retrying.
+        """
+
+        row = self._round(round_id)
+        if row["status"] != "published":
+            raise ServiceError("round_not_published", 409)
+        receipt_ref = self._model_release_ref(round_id)
+        existing = self._object_or_none(receipt_ref)
+        if existing is not None:
+            return {"status": "ok", "model_release": json.loads(existing.decode("utf-8")), "round_status": "published"}
+        client = self._config.model_release_client
+        if client is None:
+            raise ServiceError("model_release_unconfigured", 409)
+        outcome = str(row.get("king_outcome") or "")
+        publication = row["publication_doc"]
+        if outcome not in ("crowned", "defended"):
+            receipt = self._put_signed(receipt_ref, contracts.hashed_document({"schema_version": model_release_module.RELEASE_RECEIPT_SCHEMA_VERSION, "round_id": round_id, "changed": False, "skipped": outcome or "no_king", "commit_sha": None, "parent_sha": None, "tree_sha": None, "branch": self._config.model_release_branch, "repository": client.repository, "release_hash": None, "manifest": None}, "receipt_hash"), "receipt_hash")
+            return {"status": "ok", "model_release": receipt, "round_status": "published"}
+        decision = publication.get("king_decision") or {}
+        king_submission = self._store.get_submission(str(decision.get("king_submission_id") or ""))
+        if king_submission is None or king_submission.get("miner_hotkey") != row.get("king_hotkey"):
+            raise ServiceError("model_release_king_missing", 500)
+        try:
+            inspection = build.inspect_package(self._objects.get(king_submission["package_ref"]))
+        except (build.PackageRejected, build.SecretMaterialFound, contracts.ArenaContractError) as exc:
+            raise ServiceError("model_release_package_invalid", 500) from exc
+        if inspection.source_tree_hash != king_submission.get("source_tree_hash") or inspection.package_hash != king_submission.get("package_hash"):
+            raise ServiceError("model_release_package_mismatch", 500)
+        build.scan_source_archive_raise(inspection.files)  # never commit secret material, even if the scan rules changed
+        configuration = row["configuration_doc"]
+        base_image_digest = configuration.get("base_image_digest") or (configuration.get("release") or {}).get("base_image_digest") or (configuration.get("artifact_rules") or {}).get("base_image_digest")
+        if not isinstance(base_image_digest, str):
+            raise ServiceError("model_release_base_image_missing", 500)
+        manifest = self._sign(model_release_module.release_manifest(
+            repository=client.repository, branch=self._config.model_release_branch, round_id=round_id, king_hotkey=str(row["king_hotkey"]), king_outcome=outcome,
+            submission_id=king_submission["submission_id"], package_hash=king_submission["package_hash"], source_tree_hash=king_submission["source_tree_hash"],
+            image_digest=str(king_submission.get("image_digest")), entry_point=inspection.entry_point, dependency_lock=list(inspection.dependency_lock),
+            base_image_digest=base_image_digest, file_count=len(inspection.files), configuration_hash=row["configuration_hash"], result_bundle_hash=row["result_bundle_hash"],
+            publication_hash=publication["publication_hash"], reward_basis_hash=publication["reward_basis_hash"], signing_public_key_hash=self._signer.public_key_hash,
+            released_at=_iso(self.now()),
+        ), "release_hash")
+        try:
+            result = model_release_module.release_king_model(client, branch=self._config.model_release_branch, manifest=manifest, files=inspection.files)
+        except model_release_module.ModelReleaseError as exc:
+            raise ServiceError("model_release_failed", 502) from exc
+        receipt_document = dict(result.to_document())
+        receipt_document.update({"round_id": round_id, "manifest": manifest, "skipped": None})
+        receipt = self._put_signed(receipt_ref, contracts.hashed_document(receipt_document, "receipt_hash"), "receipt_hash")
+        return {"status": "ok", "model_release": receipt, "round_status": "published"}
 
     def cancel(self, round_id: str, reason: str) -> Dict[str, Any]:
         if reason not in CANCEL_REASONS.values():
             raise ServiceError("cancel_reason_invalid", 400)
+        self._invalidate_hot_round()
         return self._store.cancel_round(round_id, reason)
 
     # -- public reads (section 14.1) -------------------------------------------
@@ -1171,7 +1259,11 @@ class ArenaService:
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
             "stage1_ranking": None, "final_ranking": None, "runner_fractions": None, "reward_basis": row.get("reward_basis_doc"),
+            "model_release": None,
         }
+        release = self._object_or_none(self._model_release_ref(round_id))
+        if release is not None:
+            view["model_release"] = json.loads(release.decode("utf-8"))
         if row["status"] == "published":
             bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
             view.update({"stage1_ranking": bundle.get("stage1_ranking"), "final_ranking": bundle.get("final_ranking"), "runner_fractions": bundle.get("runner_fractions"), "king_decision": bundle.get("king_decision")})

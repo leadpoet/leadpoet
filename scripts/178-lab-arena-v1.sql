@@ -1107,7 +1107,8 @@ BEGIN
           screening_result = COALESCE(v_patch -> 'screening_result', screening_result),
           is_king = COALESCE((v_patch ->> 'is_king')::BOOLEAN, is_king)
       WHERE submission_id = p_submission_id;
-    ELSIF p_expected_status = 'uploaded' AND p_next_status = 'rejected' THEN
+    ELSIF p_expected_status IN ('uploaded', 'accepted') AND p_next_status = 'rejected' THEN
+      -- An accepted submission is rejected only at freeze (funding, preflight, or capacity), always under a published rule.
       IF COALESCE(v_patch ->> 'rejection_rule', '') = '' THEN
         RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
       END IF;

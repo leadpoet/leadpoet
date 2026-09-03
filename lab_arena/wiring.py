@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, funding, runtime, scoring, signing
+from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, credentials, funding, model_release, runtime, scoring, signing
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
 from lab_arena.store import ArenaStore, PostgrestTransport
@@ -204,8 +204,18 @@ def build_service_from_environment(mode: str):
         scoring.apply_policy_to_environment(policy, environ=os.environ, cache_dir=_required("LAB_ARENA_SCORING_CACHE_DIR"), credentials={name: _required("LAB_ARENA_SCORING_" + name) for name in scoring.CREDENTIAL_ENV_NAMES})
         return scoring.lab_scorer(policy)
 
+    # The winning model is committed to the public sales-agent repository in
+    # live mode only; shadow rounds never publish a model. Live mode fails
+    # closed without the token so a release is never silently skipped.
+    github_token = os.environ.get("LAB_ARENA_GITHUB_TOKEN", "").strip()
+    model_release_client = None
+    if mode == "live":
+        if not github_token:
+            raise ServiceError("LAB_ARENA_GITHUB_TOKEN is required in live mode", 500)
+        model_release_client = model_release.GitHubClient(os.environ.get("LAB_ARENA_MODEL_REPOSITORY", model_release.DEFAULT_REPOSITORY).strip(), github_token)
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, signer=signer, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
+        model_release_client=model_release_client, model_release_branch=os.environ.get("LAB_ARENA_MODEL_BRANCH", model_release.DEFAULT_BRANCH).strip() or model_release.DEFAULT_BRANCH,
         generation_provider=generation_provider, price_table_source=lambda models: broker_module.fetch_openrouter_price_table(models),
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, scorer_factory=scorer_factory, defaults=defaults,
         runtime_lock_hash=lock.runtime_lock_hash, scoring_workers=int(os.environ.get("LAB_ARENA_SCORING_WORKERS", "4")),

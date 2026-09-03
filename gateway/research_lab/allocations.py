@@ -23,6 +23,7 @@ from gateway.research_lab.store import (
     _is_transient_store_error,
     create_research_lab_emission_allocation_snapshot,
     select_all,
+    select_many,
 )
 from leadpoet_verifier.economics import (
     CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
@@ -56,6 +57,72 @@ _ALLOCATION_V2_RETRY_GENERATIONS: dict[
 ] = {}
 _ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS = 3600.0
 _ALLOCATION_V2_RETRY_MAX_GENERATIONS = 8
+_ALLOCATION_V2_RECEIPT_TABLE = "research_lab_attested_execution_receipts_v2"
+_ALLOCATION_V2_RECEIPT_ROLE = "gateway_coordinator"
+_ALLOCATION_V2_RECEIPT_PURPOSE = "research_lab.allocation.v2"
+
+
+def _active_gateway_commit() -> str:
+    from gateway.build_info import get_build_info
+
+    commit = str(get_build_info().get("git_commit") or "").strip().lower()
+    if len(commit) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in commit
+    ):
+        raise RuntimeError("active gateway commit is unavailable for allocation retry")
+    return commit
+
+
+async def _load_durable_allocation_retry_generation(
+    *,
+    epoch_id: int,
+) -> int:
+    """Resume after failed allocation receipts from an earlier process."""
+
+    commit_sha = _active_gateway_commit()
+    rows = await select_many(
+        _ALLOCATION_V2_RECEIPT_TABLE,
+        columns=(
+            "sequence,receipt_status,failure_code,job_id,commit_sha,"
+            "epoch_id,purpose,role"
+        ),
+        filters=(
+            ("role", _ALLOCATION_V2_RECEIPT_ROLE),
+            ("purpose", _ALLOCATION_V2_RECEIPT_PURPOSE),
+            ("epoch_id", int(epoch_id)),
+            ("commit_sha", str(commit_sha)),
+            ("receipt_status", "failed"),
+        ),
+        order_by=(("sequence", True),),
+        limit=_ALLOCATION_V2_RETRY_MAX_GENERATIONS,
+    )
+    if not rows:
+        return 0
+
+    highest_sequence = -1
+    for row in rows:
+        sequence = row.get("sequence")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 0
+            or row.get("role") != _ALLOCATION_V2_RECEIPT_ROLE
+            or row.get("purpose") != _ALLOCATION_V2_RECEIPT_PURPOSE
+            or int(row.get("epoch_id", -1)) != int(epoch_id)
+            or str(row.get("commit_sha") or "").lower() != str(commit_sha)
+            or row.get("receipt_status") != "failed"
+            or not str(row.get("failure_code") or "").strip()
+            or not str(row.get("job_id") or "").startswith(
+                "scoring-v2:research-lab-allocation:"
+            )
+        ):
+            raise RuntimeError("durable allocation retry receipt is invalid")
+        highest_sequence = max(highest_sequence, sequence)
+
+    generation = highest_sequence + 1
+    if generation >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
+        raise RuntimeError("durable allocation retry generations are exhausted")
+    return generation
 
 
 def _allocation_v2_build_is_retryable(exc: BaseException) -> bool:
@@ -94,20 +161,30 @@ async def _build_allocation_v2_singleflight(
     task = _ALLOCATION_V2_INFLIGHT.get(key)
     if task is None:
         retry_state = _ALLOCATION_V2_RETRY_GENERATIONS.get(key)
-        generation = 0
+        memory_generation = 0
         if retry_state is not None:
-            retry_expires_at, generation = retry_state
+            retry_expires_at, memory_generation = retry_state
             if retry_expires_at <= loop.time():
                 _ALLOCATION_V2_RETRY_GENERATIONS.pop(key, None)
-                generation = 0
-        task = loop.create_task(
-            build_allocation_v2(
+                memory_generation = 0
+        selected_generation: list[int] = []
+
+        async def build_with_durable_generation() -> dict[str, Any]:
+            durable_generation = await _load_durable_allocation_retry_generation(
+                epoch_id=int(epoch_id),
+            )
+            generation = max(int(memory_generation), int(durable_generation))
+            if generation >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
+                raise RuntimeError("allocation retry generations are exhausted")
+            selected_generation.append(generation)
+            return await build_allocation_v2(
                 epoch_id=int(epoch_id),
                 netuid=int(netuid),
                 policy=dict(policy),
-                allocation_sequence=int(generation),
+                allocation_sequence=generation,
             )
-        )
+
+        task = loop.create_task(build_with_durable_generation())
         _ALLOCATION_V2_INFLIGHT[key] = task
 
         def clear(completed: asyncio.Task[dict[str, Any]]) -> None:
@@ -118,14 +195,11 @@ async def _build_allocation_v2_singleflight(
             try:
                 completed.result()
             except BaseException as exc:
-                if _allocation_v2_build_is_retryable(exc):
+                if selected_generation and _allocation_v2_build_is_retryable(exc):
                     _ALLOCATION_V2_RETRY_GENERATIONS[key] = (
                         loop.time()
                         + _ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS,
-                        min(
-                            generation + 1,
-                            _ALLOCATION_V2_RETRY_MAX_GENERATIONS - 1,
-                        ),
+                        selected_generation[0] + 1,
                     )
                 return
             _ALLOCATION_V2_RETRY_GENERATIONS.pop(key, None)

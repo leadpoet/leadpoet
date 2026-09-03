@@ -32,6 +32,10 @@ from gateway.research_lab.dev_eval_runner import (
     load_verified_dev_items,
     snapshot_readiness,
 )
+from gateway.research_lab.model_authority_v2 import (
+    MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1,
+    QualificationOutcomeIncompleteV2Error,
+)
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from research_lab.canonical import sha256_json
 from research_lab.eval import PrivateModelArtifactManifest
@@ -99,6 +103,34 @@ def _dev_items(count: int) -> list[dict]:
             }
         )
     return items
+
+
+def _incomplete_qualification_authority() -> dict:
+    body = {
+        "schema_version": MODEL_QUALIFICATION_AUTHORITY_SCHEMA_V1,
+        "source_commit": "a" * 40,
+        "git_commit_sha": "a" * 40,
+        "source_tree_hash": "sha256:" + "b" * 64,
+        "model_artifact_digest": "sha256:" + "b" * 64,
+        "manifest_hash": "sha256:" + "c" * 64,
+        "model_manifest_sha256": "sha256:" + "c" * 64,
+        "image_digest": IMAGE_DIGEST,
+        "protocol_major": 2,
+        "protocol_minor": 0,
+        "contract_sha256": "d" * 64,
+        "completion_state": "incomplete",
+        "disposition": "incomplete_retryable",
+        "retryable": True,
+        "failure_classes": ["retryable_provider"],
+        "partial_company_count": 0,
+        "invocation_sha256": "e" * 64,
+        "input_hash": "sha256:" + "f" * 64,
+        "route_completion_receipt_sha256": "1" * 64,
+        "provider_terminal_observation_hash": "sha256:" + "2" * 64,
+        "host_provider_observation_root": "sha256:" + "3" * 64,
+        "execution_receipt_hash": "sha256:" + "4" * 64,
+    }
+    return {**body, "authority_hash": sha256_json(body)}
 
 
 def _rich_company(index: int = 0) -> dict:
@@ -1023,6 +1055,102 @@ async def test_hybrid_discovery_restores_tree_caps_and_limits_live_icps(
     assert cost == 0
     assert {call["provider_call_cap"] for call in calls} == {22}
     assert {call["provider_cost_cap_microusd"] for call in calls} == {250_000}
+
+
+async def test_hybrid_discovery_retains_typed_incomplete_evidence(monkeypatch):
+    class ReplayStore:
+        miss_policy = "strict"
+
+        @staticmethod
+        def load_manifest():
+            return {"manifest_hash": "sha256:" + "9" * 64}
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            self.cache_ref = ""
+
+        async def run_with_provider_evidence(self, icp, context, **kwargs):
+            self.cache_ref = icp_evidence_cache_key(icp)
+            raise QualificationOutcomeIncompleteV2Error(
+                "qualification incomplete",
+                model_qualification_authority=(
+                    _incomplete_qualification_authority()
+                ),
+            )
+
+        def generated_provider_evidence_cache(self, cache_ref):
+            assert cache_ref == self.cache_ref
+            return {
+                "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+                "icp_ref": cache_ref,
+                "entries": {"measured-request": {"status": 503}},
+            }
+
+        @staticmethod
+        def attested_authorities():
+            return [
+                {
+                    "execution_receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "7" * 64
+                    }
+                }
+            ]
+
+        @staticmethod
+        def provider_evidence_summary(cache_ref):
+            return {
+                "cost_summary": {
+                    "paid_call_count": 1,
+                    "total_cost_usd": 0.01,
+                    "tracking_failed_count": 0,
+                    "cap_blocked": False,
+                    "cap_exceeded_after_success": False,
+                }
+            }
+
+    evaluator = AttestedReplayDevEvaluatorV2(
+        epoch_id=1,
+        worker_index=0,
+        snapshot_uri="/unused",
+        live_provider_call_cap=32,
+        live_cost_cap_microusd=500_000,
+        live_max_icps_per_node=1,
+        model_runner_factory=FakeRunner,
+    )
+    evaluator._dev_items = _dev_items(1)
+
+    async def prepared():
+        return (
+            Path("/unused"),
+            ReplayStore(),
+            {
+                "source_tree_hash": "sha256:" + "7" * 64,
+                "archive_sha256": "sha256:" + "6" * 64,
+            },
+        )
+
+    monkeypatch.setattr(evaluator, "_ensure_prepared", prepared)
+    candidate = SimpleNamespace(
+        tree_id="sha256:" + "5" * 64,
+        node_id="tree-node:" + "4" * 64,
+        build=SimpleNamespace(
+            candidate_model_manifest=SimpleNamespace(image_digest=IMAGE_DIGEST)
+        ),
+    )
+
+    caches, graphs, paid_calls, cost = (
+        await evaluator._discover_provider_overlay_locked(
+            candidates=(candidate,),
+            cohort_hash="sha256:" + "3" * 64,
+            remaining_tree_budget_microusd=250_000,
+        )
+    )
+
+    cache = caches[next(iter(caches))]
+    assert cache["entries"]["measured-request"]["status"] == 503
+    assert graphs == ({"root_receipt_hash": "sha256:" + "7" * 64},)
+    assert paid_calls == 1
+    assert cost == 10_000
 
 
 async def test_hybrid_discovery_reuses_identical_sibling_request_once(monkeypatch):

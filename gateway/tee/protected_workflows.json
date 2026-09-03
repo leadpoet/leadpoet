@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "149841257e72b9f0acc6b8bd62d934b2a519f896",
+  "baseline_commit": "44b58e1789034e558f8dbffadc5179960c486652",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -687,7 +687,7 @@
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
     {
-      "ast_sha256": "sha256:a5970a88eb195eb326158816214b73676653205660d60da3c43dbeeea9a28f0a",
+      "ast_sha256": "sha256:0426332d64a4112f0c26bbc1adae35a8c0003d414715c412173f3cf3deba0a61",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
@@ -8707,7 +8707,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:05a7754b5be98571cc986482efa9f88dfe6f45200be5f3e48fd105e6d0931c31",
-  "protected_source_commit": "149841257e72b9f0acc6b8bd62d934b2a519f896",
+  "manifest_hash": "sha256:ed84b0096c908329729882a1a3f63a1442916de8a22b3b07b1eac4f0140f3caf",
+  "protected_source_commit": "44b58e1789034e558f8dbffadc5179960c486652",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

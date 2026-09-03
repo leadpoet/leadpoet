@@ -38,6 +38,7 @@ CHAIN_FINALIZATION_EPOCH_BLOCKS = 360
 CHAIN_SUBTENSOR_MAX_TEMPO = 50_400
 CHAIN_MAX_HOTKEYS = 4096
 CHAIN_MAX_RPC_RESPONSE_BYTES = 8 * 1024 * 1024
+CHAIN_MAX_RUNTIME_METADATA_BYTES = 1024 * 1024
 CHAIN_RPC_TIMEOUT_MS = 30_000
 CHAIN_RPC_RETRY_BACKOFF_SECONDS = (1.0, 3.0)
 CHAIN_MAX_FINALIZATION_SCAN_BLOCKS = 96
@@ -45,6 +46,19 @@ CHAIN_MAX_BLOCK_EXTRINSICS = 8192
 CHAIN_MAX_CHECKPOINT_EVENTS = 15_000
 CHAIN_MAX_CHECKPOINT_COMPRESSED_BYTES = 64 * 1024 * 1024
 CHAIN_MAX_CHECKPOINT_DECOMPRESSED_BYTES = 128 * 1024 * 1024
+
+# ``RevealPeriodEpochs`` is a ValueQuery. A missing map entry therefore means
+# the SCALE metadata default, not an absent chain value. Keep that default
+# bound to the exact authenticated runtime metadata that was reviewed. An
+# unknown runtime fails closed until its metadata is added here.
+_REVEAL_PERIOD_METADATA_DEFAULTS_V2 = {
+    (
+        "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+        452,
+        1,
+        "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195",
+    ): 1,
+}
 
 _RAW_HASH_RE = re.compile(r"^(?:0x)?[0-9a-f]{64}$")
 _BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -97,7 +111,9 @@ def chain_source_policy_document(
             "chain_getBlock",
             "chain_getHeader",
             "state_getRuntimeVersion",
+            "state_getMetadata",
             "state_getStorage",
+            "state_getStorageHash",
             "state_call",
         ],
         "runtime_method": CHAIN_RPC_METHOD,
@@ -306,6 +322,107 @@ def subnet_epoch_storage_key(*, storage_name: str, netuid: int) -> str:
     return "0x" + key.hex()
 
 
+def reveal_period_epochs_storage_key(*, netuid: int) -> str:
+    """Build the exact Twox64Concat key for subnet reveal-period state."""
+
+    normalized_netuid = int(netuid)
+    if not 0 <= normalized_netuid <= 0xFFFF:
+        raise ChainSourceV2Error("subnet reveal-period netuid is invalid")
+    key = b"".join(
+        (
+            _twox128(b"SubtensorModule"),
+            _twox128(b"RevealPeriodEpochs"),
+            _twox64_concat(normalized_netuid.to_bytes(2, "little")),
+        )
+    )
+    return "0x" + key.hex()
+
+
+def decode_reveal_period_epochs_storage(value: Any) -> Optional[int]:
+    """Decode an optional SCALE u64 reveal-period storage override."""
+
+    if value is None:
+        return None
+    text = str(value or "")
+    if not text.startswith("0x"):
+        raise ChainSourceV2Error("subnet reveal-period storage is invalid")
+    try:
+        raw = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error(
+            "subnet reveal-period storage is invalid"
+        ) from exc
+    if len(raw) != 8:
+        raise ChainSourceV2Error("subnet reveal-period storage width is invalid")
+    result = int.from_bytes(raw, "little")
+    if result <= 0:
+        raise ChainSourceV2Error("subnet reveal-period storage is invalid")
+    return result
+
+
+def decode_runtime_metadata_commitment(value: Any) -> Dict[str, Any]:
+    """Hash one bounded SCALE runtime-metadata response without retaining it."""
+
+    text = str(value or "")
+    if not text.startswith("0x") or len(text) % 2:
+        raise ChainSourceV2Error("runtime metadata is invalid")
+    try:
+        raw = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error("runtime metadata is invalid hex") from exc
+    if (
+        len(raw) < 5
+        or len(raw) > CHAIN_MAX_RUNTIME_METADATA_BYTES
+        or raw[:4] != b"meta"
+        or raw[4] not in (14, 15)
+    ):
+        raise ChainSourceV2Error("runtime metadata is outside measured policy")
+    return {
+        "metadata_hash": sha256_bytes(raw),
+        "metadata_version": int(raw[4]),
+        "metadata_bytes": len(raw),
+    }
+
+
+def resolve_reveal_period_metadata_default_v2(
+    *,
+    genesis_hash: Any,
+    runtime_spec_version: Any,
+    runtime_transaction_version: Any,
+    metadata_hash: Any,
+) -> int:
+    """Resolve the reviewed ValueQuery default for one exact runtime."""
+
+    genesis = str(genesis_hash or "").lower()
+    if genesis.startswith("0x"):
+        genesis = genesis[2:]
+    digest = str(metadata_hash or "").lower()
+    if (
+        not _RAW_HASH_RE.fullmatch(genesis)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+        or isinstance(runtime_spec_version, bool)
+        or isinstance(runtime_transaction_version, bool)
+    ):
+        raise ChainSourceV2Error(
+            "reveal-period metadata authority is invalid"
+        )
+    try:
+        spec_version = int(runtime_spec_version)
+        transaction_version = int(runtime_transaction_version)
+    except (TypeError, ValueError) as exc:
+        raise ChainSourceV2Error(
+            "reveal-period metadata authority is invalid"
+        ) from exc
+    result = _REVEAL_PERIOD_METADATA_DEFAULTS_V2.get(
+        (genesis, spec_version, transaction_version, digest)
+    )
+    if result is None:
+        raise ChainSourceV2Error(
+            "reveal-period metadata authority is not reviewed"
+        )
+    return int(result)
+
+
 def decode_subnet_epoch_storage(value: Any, *, storage_name: str) -> int:
     """Decode one fixed-width SCALE scheduler storage value."""
 
@@ -327,6 +444,18 @@ def timestamp_now_storage_key() -> str:
     """Build the exact plain storage key for ``Timestamp.Now``."""
 
     return "0x" + (_twox128(b"Timestamp") + _twox128(b"Now")).hex()
+
+
+def system_events_storage_key() -> str:
+    """Build the exact plain storage key for ``System.Events``."""
+
+    return "0x" + (_twox128(b"System") + _twox128(b"Events")).hex()
+
+
+def system_event_count_storage_key() -> str:
+    """Build the exact plain storage key for ``System.EventCount``."""
+
+    return "0x" + (_twox128(b"System") + _twox128(b"EventCount")).hex()
 
 
 def decode_timestamp_now_storage(value: Any) -> int:

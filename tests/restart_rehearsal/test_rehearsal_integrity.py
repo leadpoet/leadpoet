@@ -2500,6 +2500,14 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
             rehearsal_sitecustomize.CURRENT_BLOCK - 1
         )
     ]
+    response = json.loads(
+        rehearsal_sitecustomize._local_chain_rpc(
+            json.dumps(request).encode(),
+            archive=True,
+        )
+    )
+    assert response["result"]["specVersion"] == 440
+
     with pytest.raises(ValueError, match="unknown RPC"):
         rehearsal_sitecustomize._local_chain_rpc(
             json.dumps(request).encode(),
@@ -2569,6 +2577,12 @@ def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(
             source_root / "config/stateful-epoch-cutover-sn71.json"
         ).read_text(encoding="utf-8")
     )
+    chain_signing_profile = json.loads(
+        (
+            source_root
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
     monkeypatch.setattr(rehearsal_sitecustomize, "SOURCE_ROOT", source_root)
     monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -2633,7 +2647,11 @@ def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(
             "bittensor_archive": "sha256:" + "2" * 64,
             "coingecko": "sha256:" + "3" * 64,
         },
-        epoch_authority={"mode": "stateful_v1", "cutover": cutover},
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": cutover,
+            "chain_signing_profile": chain_signing_profile,
+        },
         sleep=lambda _seconds: None,
     )
     settlement_epoch = rehearsal_sitecustomize._current_settlement_epoch_id() - 1
@@ -2655,7 +2673,24 @@ def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(
     assert result["next_epoch_block"] == rehearsal_sitecustomize.LAST_EPOCH_BLOCK
     assert result["close_block"] == rehearsal_sitecustomize.LAST_EPOCH_BLOCK - 1
     assert result["validator_uid"] == 0
-    assert result["active_source_epoch_id"] == settlement_epoch
+    assert result["latest_commit_source_epoch_id"] == settlement_epoch
+    assert result["scheduled_reveal_source_epoch_id"] == settlement_epoch - 1
+    assert result["scheduled_reveal_subnet_epoch_id"] == (
+        rehearsal_sitecustomize.SUBNET_EPOCH_INDEX - 2
+    )
+    assert result["epoch_start_block"] == (
+        rehearsal_sitecustomize._subnet_epoch_transition_block(
+            rehearsal_sitecustomize.SUBNET_EPOCH_INDEX - 1
+        )
+    )
+    assert result["reveal_window_start_block"] == (
+        rehearsal_sitecustomize._subnet_epoch_transition_block(
+            rehearsal_sitecustomize.SUBNET_EPOCH_INDEX - 1
+        )
+    )
+    assert result["subnet_reveal_period_epochs"] == 1
+    assert result["reveal_period_storage_override"] == 1
+    assert result["reveal_period_runtime_spec_version"] == 452
     assert result["weights"] == [[0, 65_535], [1, 16_384]]
 
     legacy_epoch = int(cutover["last_legacy_epoch_id"])

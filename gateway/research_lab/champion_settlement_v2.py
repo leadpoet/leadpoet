@@ -37,6 +37,21 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_weight_snapshot_v2,
     validate_weight_finalization_submission_v2,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    resolve_chain_signing_profile_hash,
+    select_chain_signing_profile,
+    validate_chain_signing_profile,
+)
+from leadpoet_canonical.chain_source_v2 import (
+    ChainSourceV2Error,
+    last_update_storage_key,
+    reveal_period_epochs_storage_key,
+    resolve_reveal_period_metadata_default_v2,
+    system_event_count_storage_key,
+    system_events_storage_key,
+    timelocked_weight_commits_storage_key,
+    weights_storage_key,
+)
 from leadpoet_verifier.economics import (
     CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
 )
@@ -76,6 +91,12 @@ CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1 = (
 CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2 = (
     "leadpoet.research_lab_chain_realized_obligation_credit.v2"
 )
+CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2 = (
+    "leadpoet.chain_realized_weight_observation.v2"
+)
+CHAIN_TIMELOCKED_REVEAL_PROOF_SCHEMA_VERSION_V2 = (
+    "leadpoet.chain_realized_timelocked_reveal_proof.v2"
+)
 CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1 = "scheduled_bonus_v1"
 CHAIN_REALIZED_AUTHORITY_TYPE_V1 = "chain_realized_emission_v1"
 CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1 = (
@@ -110,6 +131,10 @@ class ChampionSettlementV2Error(RuntimeError):
     """Finalized weight evidence is missing, inconsistent, or tampered."""
 
 
+class ChainRealizedAttributionUnprovenV2(ChampionSettlementV2Error):
+    """The chain vector is valid, but one source bundle is not proved."""
+
+
 def _chain_decimal_text_v1(value: Any, field: str) -> str:
     normalized = _non_negative_decimal_v1(value, field).quantize(
         _CHAIN_DECIMAL_QUANTUM_V1,
@@ -118,10 +143,272 @@ def _chain_decimal_text_v1(value: Any, field: str) -> str:
     return format(normalized, "f")
 
 
+def validate_timelocked_reveal_proof_v2(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "schema_version",
+        "bundle_hash",
+        "source_epoch_id",
+        "source_official_subnet_epoch_id",
+        "netuid",
+        "validator_hotkey",
+        "validator_hotkey_public_key",
+        "validator_uid",
+        "commitment_hash",
+        "reveal_round",
+        "commit_storage_key",
+        "commit_finalized_block",
+        "commit_finalized_block_hash",
+        "commit_state_transition_hash",
+        "reveal_window_start_block",
+        "reveal_window_start_block_hash",
+        "pre_reveal_block",
+        "pre_reveal_block_hash",
+        "pre_reveal_state_root",
+        "pre_reveal_commit_entry_hash",
+        "reveal_block",
+        "reveal_block_hash",
+        "reveal_parent_block_hash",
+        "reveal_state_root",
+        "reveal_commit_entry_absent",
+        "reveal_runtime_spec_version",
+        "reveal_runtime_transaction_version",
+        "reveal_runtime_code_hash",
+        "reveal_metadata_hash",
+        "reveal_period_epochs",
+        "system_events_storage_key",
+        "system_event_count_storage_key",
+        "event_witness",
+        "weights_storage_key",
+        "revealed_weights",
+        "revealed_weights_vector_hash",
+        "proof_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected_fields
+        or value.get("schema_version")
+        != CHAIN_TIMELOCKED_REVEAL_PROOF_SCHEMA_VERSION_V2
+    ):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal proof fields are invalid"
+        )
+    integer_fields = (
+        "source_epoch_id",
+        "source_official_subnet_epoch_id",
+        "netuid",
+        "validator_uid",
+        "reveal_round",
+        "commit_finalized_block",
+        "reveal_window_start_block",
+        "pre_reveal_block",
+        "reveal_block",
+        "reveal_runtime_spec_version",
+        "reveal_runtime_transaction_version",
+        "reveal_period_epochs",
+    )
+    try:
+        numbers = {field: int(value[field]) for field in integer_fields}
+    except (TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "timelocked reveal proof scope is invalid"
+        ) from exc
+    if (
+        any(isinstance(value[field], bool) for field in integer_fields)
+        or min(numbers.values()) < 0
+        or numbers["netuid"] <= 0
+        or numbers["reveal_period_epochs"] <= 0
+        or numbers["pre_reveal_block"] + 1 != numbers["reveal_block"]
+        or numbers["commit_finalized_block"] > numbers["pre_reveal_block"]
+        or numbers["reveal_window_start_block"] > numbers["reveal_block"]
+        or value.get("reveal_commit_entry_absent") is not True
+    ):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal proof scope is invalid"
+        )
+    for field in (
+        "bundle_hash",
+        "commitment_hash",
+        "commit_state_transition_hash",
+        "pre_reveal_commit_entry_hash",
+        "reveal_metadata_hash",
+        "revealed_weights_vector_hash",
+        "proof_hash",
+    ):
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(value.get(field) or "")
+        ):
+            raise ChampionSettlementV2Error(
+                "timelocked reveal proof hash is invalid"
+            )
+    if value["commit_state_transition_hash"] != value[
+        "pre_reveal_commit_entry_hash"
+    ]:
+        raise ChampionSettlementV2Error(
+            "timelocked reveal commit authority differs"
+        )
+    for field in (
+        "commit_finalized_block_hash",
+        "reveal_window_start_block_hash",
+        "pre_reveal_block_hash",
+        "pre_reveal_state_root",
+        "reveal_block_hash",
+        "reveal_parent_block_hash",
+        "reveal_state_root",
+        "reveal_runtime_code_hash",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field) or "")):
+            raise ChampionSettlementV2Error(
+                "timelocked reveal chain hash is invalid"
+            )
+    public_key = str(value.get("validator_hotkey_public_key") or "")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", public_key)
+        or not str(value.get("validator_hotkey") or "")
+        or value.get("reveal_parent_block_hash")
+        != value.get("pre_reveal_block_hash")
+        or value.get("system_events_storage_key")
+        != system_events_storage_key()
+        or value.get("system_event_count_storage_key")
+        != system_event_count_storage_key()
+        or value.get("commit_storage_key")
+        != timelocked_weight_commits_storage_key(
+            netuid=numbers["netuid"],
+            subnet_epoch_index=numbers[
+                "source_official_subnet_epoch_id"
+            ],
+        )
+        or value.get("weights_storage_key")
+        != weights_storage_key(
+            netuid=numbers["netuid"],
+            validator_uid=numbers["validator_uid"],
+        )
+    ):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal proof identity is invalid"
+        )
+    weights = value.get("revealed_weights")
+    if not isinstance(weights, list):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal vector is invalid"
+        )
+    normalized_weights: list[list[int]] = []
+    seen_uids: set[int] = set()
+    for pair in weights:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ChampionSettlementV2Error(
+                "timelocked reveal vector is invalid"
+            )
+        try:
+            uid, weight = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "timelocked reveal vector is invalid"
+            ) from exc
+        if (
+            isinstance(pair[0], bool)
+            or isinstance(pair[1], bool)
+            or not 0 <= uid <= 0xFFFF
+            or not 1 <= weight <= 0xFFFF
+            or uid in seen_uids
+        ):
+            raise ChampionSettlementV2Error(
+                "timelocked reveal vector is invalid"
+            )
+        seen_uids.add(uid)
+        normalized_weights.append([uid, weight])
+    normalized_weights.sort()
+    if (
+        normalized_weights != weights
+        or value["revealed_weights_vector_hash"]
+        != sha256_json(
+            {
+                "uids": [item[0] for item in weights],
+                "weights_u16": [item[1] for item in weights],
+            }
+        )
+    ):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal vector authority differs"
+        )
+    witness = value.get("event_witness")
+    witness_fields = {
+        "schema_version",
+        "profile_sha256",
+        "events_sha256",
+        "event_count",
+        "weights_set_record_index",
+        "weights_set_record_sha256",
+        "reveal_record_index",
+        "reveal_record_sha256",
+        "netuid",
+        "uid",
+        "account_id_hex",
+        "phase",
+        "runtime_event_index",
+        "weights_set_event_index",
+        "timelocked_weights_revealed_event_index",
+    }
+    if not isinstance(witness, Mapping) or set(witness) != witness_fields:
+        raise ChampionSettlementV2Error(
+            "timelocked reveal event witness is invalid"
+        )
+    for field in (
+        "profile_sha256",
+        "events_sha256",
+        "weights_set_record_sha256",
+        "reveal_record_sha256",
+    ):
+        if not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(witness.get(field) or "")
+        ):
+            raise ChampionSettlementV2Error(
+                "timelocked reveal event witness is invalid"
+            )
+    witness_integer_fields = (
+        "event_count",
+        "weights_set_record_index",
+        "reveal_record_index",
+        "netuid",
+        "uid",
+        "runtime_event_index",
+        "weights_set_event_index",
+        "timelocked_weights_revealed_event_index",
+    )
+    try:
+        witness_numbers = {
+            field: int(witness[field]) for field in witness_integer_fields
+        }
+    except (TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "timelocked reveal event witness is invalid"
+        ) from exc
+    if (
+        any(isinstance(witness[field], bool) for field in witness_integer_fields)
+        or min(witness_numbers.values()) < 0
+        or witness_numbers["weights_set_record_index"] + 1
+        != witness_numbers["reveal_record_index"]
+        or witness_numbers["netuid"] != numbers["netuid"]
+        or witness_numbers["uid"] != numbers["validator_uid"]
+        or witness.get("account_id_hex") != public_key
+        or witness.get("phase") != "Initialization"
+    ):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal event witness differs"
+        )
+    proof_body = {key: value[key] for key in value if key != "proof_hash"}
+    if value["proof_hash"] != sha256_json(proof_body):
+        raise ChampionSettlementV2Error(
+            "timelocked reveal proof hash differs"
+        )
+    return dict(value)
+
+
 def validate_chain_weight_observation_v1(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != {
+    common_fields = {
         "schema_version",
         "netuid",
         "epoch_id",
@@ -141,16 +428,48 @@ def validate_chain_weight_observation_v1(
         "last_update_block",
         "last_update_block_hash",
         "last_update_official_subnet_epoch_id",
-        "active_source_epoch_id",
         "weights_vector_hash",
-    }:
+    }
+    v1_fields = common_fields | {"active_source_epoch_id"}
+    v2_fields = common_fields | {
+        "latest_commit_source_epoch_id",
+        "epoch_start_block",
+        "epoch_start_block_hash",
+        "reveal_window_start_block",
+        "reveal_window_start_block_hash",
+        "scheduled_reveal_subnet_epoch_id",
+        "scheduled_reveal_source_epoch_id",
+        "revealed_bundle_hash",
+        "reveal_proof",
+        "subnet_reveal_period_epochs",
+        "reveal_period_storage_key",
+        "reveal_period_storage_override",
+        "reveal_period_metadata_hash",
+        "reveal_period_runtime_spec_version",
+        "chain_signing_profile",
+        "chain_signing_profile_hash",
+    }
+    if not isinstance(value, Mapping) or (
+        (
+            value.get("schema_version")
+            == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1
+            and set(value) != v1_fields
+        )
+        or (
+            value.get("schema_version")
+            == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+            and set(value) != v2_fields
+        )
+        or value.get("schema_version")
+        not in {
+            CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
+            CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
+        }
+    ):
         raise ChampionSettlementV2Error(
             "chain weight observation fields are invalid"
         )
-    if value.get("schema_version") != CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1:
-        raise ChampionSettlementV2Error(
-            "chain weight observation schema is invalid"
-        )
+    schema_version = str(value["schema_version"])
     try:
         netuid = int(value["netuid"])
         epoch_id = int(value["epoch_id"])
@@ -162,7 +481,13 @@ def validate_chain_weight_observation_v1(
         last_update_official_epoch = int(
             value["last_update_official_subnet_epoch_id"]
         )
-        active_source_epoch_id = int(value["active_source_epoch_id"])
+        latest_commit_source_epoch_id = int(
+            value[
+                "active_source_epoch_id"
+                if schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1
+                else "latest_commit_source_epoch_id"
+            ]
+        )
     except (TypeError, ValueError) as exc:
         raise ChampionSettlementV2Error(
             "chain weight observation scope is invalid"
@@ -179,7 +504,12 @@ def validate_chain_weight_observation_v1(
                 "validator_uid",
                 "last_update_block",
                 "last_update_official_subnet_epoch_id",
-                "active_source_epoch_id",
+                (
+                    "active_source_epoch_id"
+                    if schema_version
+                    == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1
+                    else "latest_commit_source_epoch_id"
+                ),
             )
         )
         or netuid <= 0
@@ -190,17 +520,155 @@ def validate_chain_weight_observation_v1(
             validator_uid,
             last_update_block,
             last_update_official_epoch,
-            active_source_epoch_id,
+            latest_commit_source_epoch_id,
         )
         < 0
         or next_epoch_block != close_block + 1
         or last_update_block > close_block
         or last_update_official_epoch > official_epoch
-        or active_source_epoch_id > epoch_id
+        or latest_commit_source_epoch_id > epoch_id
     ):
         raise ChampionSettlementV2Error(
             "chain weight observation scope is invalid"
         )
+    if schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2:
+        try:
+            epoch_start_block = int(value["epoch_start_block"])
+            reveal_window_start_block = int(
+                value["reveal_window_start_block"]
+            )
+            reveal_period = int(value["subnet_reveal_period_epochs"])
+            reveal_runtime_spec = int(
+                value["reveal_period_runtime_spec_version"]
+            )
+            normalized_profile = validate_chain_signing_profile(
+                value["chain_signing_profile"]
+            )
+            selected_reveal_profile = select_chain_signing_profile(
+                normalized_profile,
+                runtime_version={
+                    "specVersion": reveal_runtime_spec,
+                    "transactionVersion": int(
+                        normalized_profile["transaction_version"]
+                    ),
+                },
+                genesis_hash=str(normalized_profile["genesis_hash"]),
+            )
+            reveal_storage_override = value[
+                "reveal_period_storage_override"
+            ]
+            reveal_metadata_hash = value["reveal_period_metadata_hash"]
+            if reveal_storage_override is not None:
+                reveal_storage_override = int(reveal_storage_override)
+            reveal_period_default = resolve_reveal_period_metadata_default_v2(
+                genesis_hash=normalized_profile["genesis_hash"],
+                runtime_spec_version=reveal_runtime_spec,
+                runtime_transaction_version=normalized_profile[
+                    "transaction_version"
+                ],
+                metadata_hash=reveal_metadata_hash,
+            )
+            scheduled_reveal_subnet_epoch = value[
+                "scheduled_reveal_subnet_epoch_id"
+            ]
+            scheduled_reveal_source_epoch = value[
+                "scheduled_reveal_source_epoch_id"
+            ]
+            if scheduled_reveal_subnet_epoch is not None:
+                scheduled_reveal_subnet_epoch = int(
+                    scheduled_reveal_subnet_epoch
+                )
+            if scheduled_reveal_source_epoch is not None:
+                scheduled_reveal_source_epoch = int(
+                    scheduled_reveal_source_epoch
+                )
+        except (TypeError, ValueError, ChainSourceV2Error) as exc:
+            raise ChampionSettlementV2Error(
+                "chain weight observation reveal authority is invalid"
+            ) from exc
+        expected_scheduled_subnet_epoch = official_epoch - reveal_period
+        if expected_scheduled_subnet_epoch < 0:
+            expected_scheduled_subnet_epoch = None
+        proof_value = value["reveal_proof"]
+        revealed_bundle_hash = value["revealed_bundle_hash"]
+        proof = (
+            validate_timelocked_reveal_proof_v2(proof_value)
+            if proof_value is not None
+            else None
+        )
+        if (
+            isinstance(value["epoch_start_block"], bool)
+            or isinstance(value["reveal_window_start_block"], bool)
+            or isinstance(value["subnet_reveal_period_epochs"], bool)
+            or isinstance(value["reveal_period_runtime_spec_version"], bool)
+            or isinstance(value["reveal_period_storage_override"], bool)
+            or isinstance(value["scheduled_reveal_source_epoch_id"], bool)
+            or isinstance(value["scheduled_reveal_subnet_epoch_id"], bool)
+            or reveal_period < 1
+            or not 0
+            <= reveal_window_start_block
+            == epoch_start_block
+            <= close_block
+            or value["reveal_window_start_block_hash"]
+            != value["epoch_start_block_hash"]
+            or (
+                reveal_storage_override is not None
+                and reveal_storage_override != reveal_period
+            )
+            or (
+                reveal_storage_override is None
+                and reveal_period_default != reveal_period
+            )
+            or reveal_period
+            != int(selected_reveal_profile["subnet_reveal_period_epochs"])
+            or value["chain_signing_profile"] != normalized_profile
+            or value["chain_signing_profile_hash"]
+            != sha256_json(normalized_profile)
+            or scheduled_reveal_subnet_epoch
+            != expected_scheduled_subnet_epoch
+            or (
+                scheduled_reveal_source_epoch is not None
+                and (
+                    scheduled_reveal_subnet_epoch is None
+                    or scheduled_reveal_source_epoch < 0
+                    or scheduled_reveal_source_epoch > epoch_id
+                    or epoch_id - scheduled_reveal_source_epoch
+                    != official_epoch - scheduled_reveal_subnet_epoch
+                )
+            )
+            or ((proof is None) != (revealed_bundle_hash is None))
+            or (
+                revealed_bundle_hash is not None
+                and not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", str(revealed_bundle_hash)
+                )
+            )
+        ):
+            raise ChampionSettlementV2Error(
+                "chain weight observation reveal authority is invalid"
+            )
+        if proof is not None and (
+            proof["bundle_hash"] != revealed_bundle_hash
+            or int(proof["netuid"]) != netuid
+            or int(proof["source_epoch_id"])
+            != scheduled_reveal_source_epoch
+            or int(proof["source_official_subnet_epoch_id"])
+            != scheduled_reveal_subnet_epoch
+            or proof["validator_hotkey"] != value["validator_hotkey"]
+            or int(proof["validator_uid"]) != validator_uid
+            or int(proof["reveal_window_start_block"])
+            != reveal_window_start_block
+            or proof["reveal_window_start_block_hash"]
+            != value["reveal_window_start_block_hash"]
+            or int(proof["reveal_block"]) > close_block
+            or int(proof["reveal_period_epochs"]) != reveal_period
+            or proof["revealed_weights"] != value["weights"]
+            or proof["revealed_weights_vector_hash"]
+            != value["weights_vector_hash"]
+        ):
+            raise ChampionSettlementV2Error(
+                "chain weight observation reveal proof differs"
+            )
     for field in (
         "cutover_mapping_hash",
         "weights_vector_hash",
@@ -219,15 +687,49 @@ def validate_chain_weight_observation_v1(
             raise ChampionSettlementV2Error(
                 "chain weight observation %s is invalid" % field
             )
+    if schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2:
+        for field in (
+            "epoch_start_block_hash",
+            "reveal_window_start_block_hash",
+        ):
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", str(value.get(field) or "")
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain weight observation %s is invalid" % field
+                )
     validator_hotkey = str(value.get("validator_hotkey") or "")
     storage_key = str(value.get("weights_storage_key") or "")
     last_update_key = str(value.get("last_update_storage_key") or "")
+    reveal_period_key = str(value.get("reveal_period_storage_key") or "")
     hotkeys = value.get("metagraph_hotkeys")
     weights = value.get("weights")
     if (
         not validator_hotkey
-        or not storage_key.startswith("0x")
-        or not last_update_key.startswith("0x")
+        or (
+            schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1
+            and (
+                not storage_key.startswith("0x")
+                or not last_update_key.startswith("0x")
+            )
+        )
+        or (
+            schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+            and (
+                storage_key
+                != weights_storage_key(
+                    netuid=netuid,
+                    validator_uid=validator_uid,
+                )
+                or last_update_key
+                != last_update_storage_key(netuid=netuid)
+            )
+        )
+        or (
+            schema_version == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+            and reveal_period_key
+            != reveal_period_epochs_storage_key(netuid=netuid)
+        )
         or not isinstance(hotkeys, list)
         or validator_uid >= len(hotkeys)
         or hotkeys[validator_uid] != validator_hotkey
@@ -411,6 +913,16 @@ def _preliminary_compact_finalized_bundle_authority_v2(
         raise ChampionSettlementV2Error(
             "compact chain settlement finalization document is missing"
         )
+    epoch_authority = compact.get("epoch_authority")
+    extrinsic_authorization = finalization_doc.get(
+        "extrinsic_authorization"
+    )
+    if not isinstance(epoch_authority, Mapping) or not isinstance(
+        extrinsic_authorization, Mapping
+    ):
+        raise ChampionSettlementV2Error(
+            "compact chain settlement epoch authority is missing"
+        )
     try:
         netuid = int(weight_result["netuid"])
         epoch_id = int(weight_result["epoch_id"])
@@ -420,10 +932,23 @@ def _preliminary_compact_finalized_bundle_authority_v2(
         weights_u16 = [
             int(value) for value in weight_result["sparse_weights_u16"]
         ]
+        subnet_epoch_index = int(epoch_authority["subnet_epoch_index"])
+        settlement_epoch_id = int(epoch_authority["settlement_epoch_id"])
+        authorization_subnet_epoch = int(
+            extrinsic_authorization["subnet_epoch_index"]
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ChampionSettlementV2Error(
             "compact chain settlement scope is invalid"
         ) from exc
+    if (
+        settlement_epoch_id != epoch_id
+        or authorization_subnet_epoch != subnet_epoch_index
+        or int(extrinsic_authorization.get("epoch_id", -1)) != epoch_id
+    ):
+        raise ChampionSettlementV2Error(
+            "compact chain settlement epoch authority differs"
+        )
     result = {
         "bundle_hash": compact_weight_bundle_hash_v2(compact),
         "compact_submission_hash": str(compact["compact_submission_hash"]),
@@ -449,11 +974,25 @@ def _preliminary_compact_finalized_bundle_authority_v2(
         "uids": uids,
         "weights_u16": weights_u16,
         "weights_hash": str(weight_result["weights_hash"]),
+        "subnet_epoch_index": subnet_epoch_index,
+        "cutover_mapping_hash": str(
+            epoch_authority.get("cutover_mapping_hash") or ""
+        ),
+        "chain_signing_profile_hash": str(
+            extrinsic_authorization.get("chain_signing_profile_hash") or ""
+        ),
+        "runtime_spec_version": extrinsic_authorization.get(
+            "runtime_spec_version"
+        ),
+        "extrinsic_authorization": dict(extrinsic_authorization),
         "weight_result": dict(weight_result),
         "weight_snapshot": dict(compact["weight_snapshot"]),
         "finalized_block": finalized_block,
         "finalized_block_hash": str(
             finalization_doc.get("finalized_block_hash") or ""
+        ),
+        "state_transition_hash": str(
+            finalization_doc.get("state_transition_hash") or ""
         ),
         "authority_doc": dict(authority),
     }
@@ -475,21 +1014,27 @@ def select_compact_chain_realized_bundle_candidate_v2(
     *,
     observation: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """Return the one compact authority matching the realized chain vector."""
+    """Return the one compact authority proved by the finalized reveal event."""
 
     observed = validate_chain_weight_observation_v1(observation)
+    proof = (
+        observed.get("reveal_proof")
+        if observed["schema_version"]
+        == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+        else None
+    )
+    if (
+        observed["schema_version"]
+        == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+        and proof is None
+    ):
+        return None
     candidates: list[dict[str, Any]] = []
     for row in rows:
         authority = _preliminary_compact_finalized_bundle_authority_v2(row)
-        if (
+        common_match = (
             int(authority["netuid"]) == int(observed["netuid"])
-            and int(authority["epoch_id"])
-            == int(observed["active_source_epoch_id"])
             and authority["validator_hotkey"] == observed["validator_hotkey"]
-            and int(authority["finalized_block"])
-            == int(observed["last_update_block"])
-            and authority["finalized_block_hash"]
-            == observed["last_update_block_hash"]
             and [
                 [int(uid), int(weight)]
                 for uid, weight in zip(
@@ -497,8 +1042,69 @@ def select_compact_chain_realized_bundle_candidate_v2(
                 )
             ]
             == observed["weights"]
-        ):
+        )
+        if not common_match:
+            continue
+        if observed["schema_version"] == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1:
+            matches_authority = (
+                int(authority["epoch_id"])
+                == int(observed["active_source_epoch_id"])
+                and int(authority["finalized_block"])
+                == int(observed["last_update_block"])
+                and authority["finalized_block_hash"]
+                == observed["last_update_block_hash"]
+            )
+        else:
+            assert isinstance(proof, Mapping)
+            authorization = authority["extrinsic_authorization"]
+            try:
+                commit_profile = resolve_chain_signing_profile_hash(
+                    observed["chain_signing_profile"],
+                    authority["chain_signing_profile_hash"],
+                    runtime_spec_version=authority["runtime_spec_version"],
+                )
+            except Exception as exc:
+                raise ChampionSettlementV2Error(
+                    "compact chain settlement signing profile differs"
+                ) from exc
+            matches_authority = (
+                authority["bundle_hash"]
+                == observed["revealed_bundle_hash"]
+                == proof["bundle_hash"]
+                and int(authority["epoch_id"])
+                == int(observed["scheduled_reveal_source_epoch_id"])
+                == int(proof["source_epoch_id"])
+                and int(authority["subnet_epoch_index"])
+                == int(observed["scheduled_reveal_subnet_epoch_id"])
+                == int(proof["source_official_subnet_epoch_id"])
+                and int(authority["finalized_block"])
+                == int(proof["commit_finalized_block"])
+                and authority["finalized_block_hash"]
+                == proof["commit_finalized_block_hash"]
+                and authority["state_transition_hash"]
+                == proof["commit_state_transition_hash"]
+                and authority["cutover_mapping_hash"]
+                == observed["cutover_mapping_hash"]
+                and int(commit_profile["subnet_reveal_period_epochs"])
+                == int(observed["subnet_reveal_period_epochs"])
+                and authorization.get("hotkey_public_key")
+                == proof["validator_hotkey_public_key"]
+                and authorization.get("commitment_hash")
+                == proof["commitment_hash"]
+                and int(authorization.get("reveal_round", -1))
+                == int(proof["reveal_round"])
+                and [
+                    [int(uid), int(weight)]
+                    for uid, weight in zip(
+                        authority["uids"], authority["weights_u16"]
+                    )
+                ]
+                == proof["revealed_weights"]
+            )
+        if matches_authority:
             candidates.append(authority)
+    if not candidates:
+        return None
     identities = {
         (
             str(item["bundle_hash"]),
@@ -506,33 +1112,34 @@ def select_compact_chain_realized_bundle_candidate_v2(
         )
         for item in candidates
     }
-    if len(identities) > 1:
-        raise ChampionSettlementV2Error(
+    if len(candidates) != 1 or len(identities) != 1:
+        raise ChainRealizedAttributionUnprovenV2(
             "active chain vector has ambiguous compact bundle authority"
         )
-    return dict(candidates[0]) if candidates else None
+    return dict(candidates[0])
 
 
 def select_chain_realized_bundle_candidate_v1(
     rows: Sequence[Mapping[str, Any]],
     *,
     observation: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     observed = validate_chain_weight_observation_v1(observation)
+    observation_v2 = (
+        observed["schema_version"] == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+    )
+    if observation_v2:
+        return None
     observed_pairs = [list(item) for item in observed["weights"]]
+    authorities = [
+        _preliminary_finalized_bundle_authority_v1(row) for row in rows
+    ]
     candidates = []
-    for row in rows:
-        authority = _preliminary_finalized_bundle_authority_v1(row)
-        if (
+    for authority in authorities:
+        common_match = (
             int(authority["netuid"]) == int(observed["netuid"])
-            and int(authority["epoch_id"])
-            == int(observed["active_source_epoch_id"])
             and authority["validator_hotkey"]
             == observed["validator_hotkey"]
-            and int(authority["finalized_block"])
-            == int(observed["last_update_block"])
-            and authority["finalized_block_hash"]
-            == observed["last_update_block_hash"]
             and [
                 [int(uid), int(weight)]
                 for uid, weight in zip(
@@ -541,15 +1148,30 @@ def select_chain_realized_bundle_candidate_v1(
                 )
             ]
             == observed_pairs
-        ):
+        )
+        authority_match = (
+            int(authority["epoch_id"])
+            == int(observed["active_source_epoch_id"])
+            and int(authority["finalized_block"])
+            == int(observed["last_update_block"])
+            and authority["finalized_block_hash"]
+            == observed["last_update_block_hash"]
+        )
+        if common_match and authority_match:
             candidates.append(authority)
     if not candidates:
         raise ChampionSettlementV2Error(
             "no finalized canonical bundle matches the active chain vector"
         )
-    latest_block = max(int(item["finalized_block"]) for item in candidates)
+    latest_epoch = max(int(item["epoch_id"]) for item in candidates)
+    newest_epoch = [
+        item for item in candidates if int(item["epoch_id"]) == latest_epoch
+    ]
+    latest_block = max(int(item["finalized_block"]) for item in newest_epoch)
     latest = [
-        item for item in candidates if int(item["finalized_block"]) == latest_block
+        item
+        for item in newest_epoch
+        if int(item["finalized_block"]) == latest_block
     ]
     identities = {
         (
@@ -631,6 +1253,21 @@ def build_chain_realized_settlement_package_v1(
         raise ChampionSettlementV2Error(
             "chain settlement bundle differs from active weights"
         )
+    if observed["schema_version"] == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2:
+        proof = observed["reveal_proof"]
+        if (
+            proof is None
+            or observed["revealed_bundle_hash"] != bundle["bundle_hash"]
+            or int(bundle["epoch_id"])
+            != int(observed["scheduled_reveal_source_epoch_id"])
+            or int(authority["finalized_block"])
+            != int(proof["commit_finalized_block"])
+            or authority["finalized_block_hash"]
+            != proof["commit_finalized_block_hash"]
+        ):
+            raise ChampionSettlementV2Error(
+                "chain settlement bundle has no exact reveal proof"
+            )
     planned_uid_weight_percent = {
         int(uid): Decimal(str(weight)) * Decimal("100")
         for uid, weight in zip(
@@ -945,16 +1582,58 @@ def build_chain_realized_settlement_package_v1(
                 }
             )
     credits.sort(key=lambda item: str(item["credit_hash"]))
-    settlement_doc = {
-        "schema_version": (
-            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
-            if lifetime_cap_policy
-            else CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
-        ),
-        "netuid": int(observed["netuid"]),
-        "epoch_id": int(observed["epoch_id"]),
-        "credit_hashes": [str(item["credit_hash"]) for item in credits],
-        "observation_summary": {
+    if observed["schema_version"] == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2:
+        observation_summary = {
+            "schema_version": "leadpoet.chain_realized_observation_summary.v2",
+            "observation_hash": observation_hash,
+            "weights_vector_hash": str(observed["weights_vector_hash"]),
+            "close_block": int(observed["close_block"]),
+            "close_block_hash": str(observed["close_block_hash"]),
+            "official_subnet_epoch_id": int(
+                observed["official_subnet_epoch_id"]
+            ),
+            "validator_hotkey": str(observed["validator_hotkey"]),
+            "validator_uid": int(observed["validator_uid"]),
+            "source_bundle_hash": bundle["bundle_hash"],
+            "source_bundle_epoch_id": int(bundle["epoch_id"]),
+            "source_bundle_finalized_block": int(authority["finalized_block"]),
+            "source_bundle_finalized_block_hash": str(
+                authority["finalized_block_hash"]
+            ),
+            "last_update_block": int(observed["last_update_block"]),
+            "last_update_block_hash": str(observed["last_update_block_hash"]),
+            "latest_commit_source_epoch_id": int(
+                observed["latest_commit_source_epoch_id"]
+            ),
+            "reveal_window_start_block": int(
+                observed["reveal_window_start_block"]
+            ),
+            "reveal_window_start_block_hash": str(
+                observed["reveal_window_start_block_hash"]
+            ),
+            "scheduled_reveal_subnet_epoch_id": observed[
+                "scheduled_reveal_subnet_epoch_id"
+            ],
+            "scheduled_reveal_source_epoch_id": observed[
+                "scheduled_reveal_source_epoch_id"
+            ],
+            "subnet_reveal_period_epochs": int(
+                observed["subnet_reveal_period_epochs"]
+            ),
+            "chain_signing_profile_hash": str(
+                observed["chain_signing_profile_hash"]
+            ),
+            "reveal_proof_hash": str(
+                observed["reveal_proof"]["proof_hash"]
+            ),
+            "reveal_block": int(observed["reveal_proof"]["reveal_block"]),
+            "reveal_block_hash": str(
+                observed["reveal_proof"]["reveal_block_hash"]
+            ),
+            "complete": True,
+        }
+    else:
+        observation_summary = {
             "schema_version": "leadpoet.chain_realized_observation_summary.v1",
             "observation_hash": observation_hash,
             "weights_vector_hash": str(observed["weights_vector_hash"]),
@@ -972,14 +1651,20 @@ def build_chain_realized_settlement_package_v1(
                 authority["finalized_block_hash"]
             ),
             "last_update_block": int(observed["last_update_block"]),
-            "last_update_block_hash": str(
-                observed["last_update_block_hash"]
-            ),
-            "active_source_epoch_id": int(
-                observed["active_source_epoch_id"]
-            ),
+            "last_update_block_hash": str(observed["last_update_block_hash"]),
+            "active_source_epoch_id": int(observed["active_source_epoch_id"]),
             "complete": True,
-        },
+        }
+    settlement_doc = {
+        "schema_version": (
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            if lifetime_cap_policy
+            else CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        ),
+        "netuid": int(observed["netuid"]),
+        "epoch_id": int(observed["epoch_id"]),
+        "credit_hashes": [str(item["credit_hash"]) for item in credits],
+        "observation_summary": observation_summary,
     }
     if lifetime_cap_policy:
         settlement_doc["champion_credit_policy"] = (
@@ -1019,12 +1704,51 @@ def build_unattributed_chain_realized_settlement_package_v2(
     """
 
     observed = validate_chain_weight_observation_v1(observation)
-    settlement_doc = {
-        "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
-        "netuid": int(observed["netuid"]),
-        "epoch_id": int(observed["epoch_id"]),
-        "credit_hashes": [],
-        "observation_summary": {
+    if observed["schema_version"] == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2:
+        observation_summary = {
+            "schema_version": (
+                "leadpoet.chain_realized_unattributed_observation_summary.v2"
+            ),
+            "authority_mode": "unattributed_chain_observation",
+            "observation_hash": sha256_json(observed),
+            "weights_vector_hash": str(observed["weights_vector_hash"]),
+            "close_block": int(observed["close_block"]),
+            "close_block_hash": str(observed["close_block_hash"]),
+            "official_subnet_epoch_id": int(
+                observed["official_subnet_epoch_id"]
+            ),
+            "validator_hotkey": str(observed["validator_hotkey"]),
+            "validator_uid": int(observed["validator_uid"]),
+            "last_update_block": int(observed["last_update_block"]),
+            "last_update_block_hash": str(observed["last_update_block_hash"]),
+            "latest_commit_source_epoch_id": int(
+                observed["latest_commit_source_epoch_id"]
+            ),
+            "reveal_window_start_block": int(
+                observed["reveal_window_start_block"]
+            ),
+            "reveal_window_start_block_hash": str(
+                observed["reveal_window_start_block_hash"]
+            ),
+            "scheduled_reveal_subnet_epoch_id": observed[
+                "scheduled_reveal_subnet_epoch_id"
+            ],
+            "scheduled_reveal_source_epoch_id": observed[
+                "scheduled_reveal_source_epoch_id"
+            ],
+            "subnet_reveal_period_epochs": int(
+                observed["subnet_reveal_period_epochs"]
+            ),
+            "chain_signing_profile_hash": str(
+                observed["chain_signing_profile_hash"]
+            ),
+            "reveal_proof_hash": None,
+            "reveal_block": None,
+            "reveal_block_hash": None,
+            "complete": True,
+        }
+    else:
+        observation_summary = {
             "schema_version": (
                 "leadpoet.chain_realized_unattributed_observation_summary.v1"
             ),
@@ -1039,14 +1763,16 @@ def build_unattributed_chain_realized_settlement_package_v2(
             "validator_hotkey": str(observed["validator_hotkey"]),
             "validator_uid": int(observed["validator_uid"]),
             "last_update_block": int(observed["last_update_block"]),
-            "last_update_block_hash": str(
-                observed["last_update_block_hash"]
-            ),
-            "active_source_epoch_id": int(
-                observed["active_source_epoch_id"]
-            ),
+            "last_update_block_hash": str(observed["last_update_block_hash"]),
+            "active_source_epoch_id": int(observed["active_source_epoch_id"]),
             "complete": True,
-        },
+        }
+    settlement_doc = {
+        "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        "netuid": int(observed["netuid"]),
+        "epoch_id": int(observed["epoch_id"]),
+        "credit_hashes": [],
+        "observation_summary": observation_summary,
     }
     return {
         "settlement_doc": settlement_doc,
@@ -1637,27 +2363,8 @@ def validate_chain_realized_epoch_settlements_v1(
                 "chain realized settlement credit hashes are invalid"
             )
         observation_summary = document.get("observation_summary")
-        finalized_summary_fields = {
-                "schema_version",
-                "observation_hash",
-                "weights_vector_hash",
-                "close_block",
-                "close_block_hash",
-                "official_subnet_epoch_id",
-                "validator_hotkey",
-                "validator_uid",
-                "source_bundle_hash",
-                "source_bundle_epoch_id",
-                "source_bundle_finalized_block",
-                "source_bundle_finalized_block_hash",
-                "last_update_block",
-                "last_update_block_hash",
-                "active_source_epoch_id",
-                "complete",
-        }
-        unattributed_summary_fields = {
+        common_summary_fields = {
             "schema_version",
-            "authority_mode",
             "observation_hash",
             "weights_vector_hash",
             "close_block",
@@ -1667,40 +2374,101 @@ def validate_chain_realized_epoch_settlements_v1(
             "validator_uid",
             "last_update_block",
             "last_update_block_hash",
-            "active_source_epoch_id",
             "complete",
         }
+        finalized_source_fields = {
+            "source_bundle_hash",
+            "source_bundle_epoch_id",
+            "source_bundle_finalized_block",
+            "source_bundle_finalized_block_hash",
+        }
+        reveal_summary_fields = {
+            "latest_commit_source_epoch_id",
+            "reveal_window_start_block",
+            "reveal_window_start_block_hash",
+            "scheduled_reveal_subnet_epoch_id",
+            "scheduled_reveal_source_epoch_id",
+            "subnet_reveal_period_epochs",
+            "chain_signing_profile_hash",
+            "reveal_proof_hash",
+            "reveal_block",
+            "reveal_block_hash",
+        }
+        finalized_summary_fields_v1 = (
+            common_summary_fields
+            | finalized_source_fields
+            | {"active_source_epoch_id"}
+        )
+        finalized_summary_fields_v2 = (
+            common_summary_fields
+            | finalized_source_fields
+            | reveal_summary_fields
+        )
+        unattributed_summary_fields_v1 = (
+            common_summary_fields
+            | {"authority_mode", "active_source_epoch_id"}
+        )
+        unattributed_summary_fields_v2 = (
+            common_summary_fields
+            | {"authority_mode"}
+            | reveal_summary_fields
+        )
         finalized_authority = schema_version in {
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
         }
-        if not isinstance(observation_summary, Mapping) or (
-            finalized_authority
-            and (
-                set(observation_summary) != finalized_summary_fields
-                or observation_summary.get("schema_version")
-                != "leadpoet.chain_realized_observation_summary.v1"
-            )
-        ) or (
-            not finalized_authority
-            and (
-                set(observation_summary) != unattributed_summary_fields
-                or observation_summary.get("schema_version")
-                != (
-                    "leadpoet.chain_realized_unattributed_"
-                    "observation_summary.v1"
+        summary_schema = (
+            str(observation_summary.get("schema_version") or "")
+            if isinstance(observation_summary, Mapping)
+            else ""
+        )
+        summary_v2 = summary_schema in {
+            "leadpoet.chain_realized_observation_summary.v2",
+            "leadpoet.chain_realized_unattributed_observation_summary.v2",
+        }
+        expected_summary_fields = (
+            finalized_summary_fields_v2
+            if finalized_authority and summary_v2
+            else finalized_summary_fields_v1
+            if finalized_authority
+            else unattributed_summary_fields_v2
+            if summary_v2
+            else unattributed_summary_fields_v1
+        )
+        expected_summary_schema = (
+            "leadpoet.chain_realized_observation_summary.v2"
+            if finalized_authority and summary_v2
+            else "leadpoet.chain_realized_observation_summary.v1"
+            if finalized_authority
+            else "leadpoet.chain_realized_unattributed_observation_summary.v2"
+            if summary_v2
+            else "leadpoet.chain_realized_unattributed_observation_summary.v1"
+        )
+        if (
+            not isinstance(observation_summary, Mapping)
+            or set(observation_summary) != expected_summary_fields
+            or summary_schema != expected_summary_schema
+            or (
+                not finalized_authority
+                and (
+                    observation_summary.get("authority_mode")
+                    != "unattributed_chain_observation"
+                    or credit_hashes
                 )
-                or observation_summary.get("authority_mode")
-                != "unattributed_chain_observation"
-                or credit_hashes
             )
-        ) or observation_summary.get("complete") is not True:
+            or observation_summary.get("complete") is not True
+        ):
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
         hash_fields = ["observation_hash", "weights_vector_hash"]
         if finalized_authority:
             hash_fields.append("source_bundle_hash")
+        if summary_v2:
+            hash_fields.append("chain_signing_profile_hash")
+            hash_fields.append("reveal_window_start_block_hash")
+            if finalized_authority:
+                hash_fields.append("reveal_proof_hash")
         for field in hash_fields:
             if not re.fullmatch(
                 r"sha256:[0-9a-f]{64}",
@@ -1723,12 +2491,23 @@ def validate_chain_realized_epoch_settlements_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
+        if summary_v2 and finalized_authority and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(observation_summary.get("reveal_block_hash") or ""),
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
         try:
             summary_epoch = int(
                 observation_summary["official_subnet_epoch_id"]
             )
-            active_source_epoch = int(
-                observation_summary["active_source_epoch_id"]
+            latest_source_epoch = int(
+                observation_summary[
+                    "latest_commit_source_epoch_id"
+                    if summary_v2
+                    else "active_source_epoch_id"
+                ]
             )
             close_block = int(observation_summary["close_block"])
             last_update_block = int(
@@ -1741,14 +2520,94 @@ def validate_chain_realized_epoch_settlements_v1(
             ) from exc
         if min(
             summary_epoch,
-            active_source_epoch,
+            latest_source_epoch,
             close_block,
             last_update_block,
             validator_uid,
-        ) < 0 or last_update_block > close_block or active_source_epoch > epoch_id:
+        ) < 0 or last_update_block > close_block or latest_source_epoch > epoch_id:
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
+        scheduled_source_epoch = None
+        scheduled_subnet_epoch = None
+        reveal_block = None
+        if summary_v2:
+            try:
+                reveal_period = int(
+                    observation_summary["subnet_reveal_period_epochs"]
+                )
+                reveal_window_start_block = int(
+                    observation_summary["reveal_window_start_block"]
+                )
+                raw_scheduled_source_epoch = observation_summary[
+                    "scheduled_reveal_source_epoch_id"
+                ]
+                raw_scheduled_subnet_epoch = observation_summary[
+                    "scheduled_reveal_subnet_epoch_id"
+                ]
+                scheduled_source_epoch = (
+                    int(raw_scheduled_source_epoch)
+                    if raw_scheduled_source_epoch is not None
+                    else None
+                )
+                scheduled_subnet_epoch = (
+                    int(raw_scheduled_subnet_epoch)
+                    if raw_scheduled_subnet_epoch is not None
+                    else None
+                )
+                if finalized_authority:
+                    reveal_block = int(observation_summary["reveal_block"])
+            except (TypeError, ValueError) as exc:
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement reveal summary is invalid"
+                ) from exc
+            expected_scheduled_subnet_epoch = summary_epoch - reveal_period
+            if expected_scheduled_subnet_epoch < 0:
+                expected_scheduled_subnet_epoch = None
+            if (
+                isinstance(
+                    observation_summary["subnet_reveal_period_epochs"], bool
+                )
+                or isinstance(
+                    observation_summary["reveal_window_start_block"], bool
+                )
+                or isinstance(raw_scheduled_source_epoch, bool)
+                or isinstance(raw_scheduled_subnet_epoch, bool)
+                or reveal_period < 1
+                or not 0 <= reveal_window_start_block <= close_block
+                or scheduled_subnet_epoch != expected_scheduled_subnet_epoch
+                or (
+                    scheduled_source_epoch is not None
+                    and (
+                        scheduled_subnet_epoch is None
+                        or scheduled_source_epoch < 0
+                        or scheduled_source_epoch > epoch_id
+                        or epoch_id - scheduled_source_epoch
+                        != summary_epoch - scheduled_subnet_epoch
+                    )
+                )
+                or (
+                    finalized_authority
+                    and (
+                        isinstance(observation_summary["reveal_block"], bool)
+                        or reveal_block is None
+                        or not reveal_window_start_block
+                        <= reveal_block
+                        <= close_block
+                    )
+                )
+                or (
+                    not finalized_authority
+                    and (
+                        observation_summary["reveal_proof_hash"] is not None
+                        or observation_summary["reveal_block"] is not None
+                        or observation_summary["reveal_block_hash"] is not None
+                    )
+                )
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement reveal summary is invalid"
+                )
         if finalized_authority:
             if not re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -1776,12 +2635,25 @@ def validate_chain_realized_epoch_settlements_v1(
             if (
                 source_epoch < 0
                 or finalized_block < 0
-                or source_epoch != active_source_epoch
-                or finalized_block != last_update_block
-                or observation_summary[
-                    "source_bundle_finalized_block_hash"
-                ]
-                != observation_summary["last_update_block_hash"]
+                or (
+                    summary_v2
+                    and (
+                        scheduled_source_epoch is None
+                        or source_epoch != scheduled_source_epoch
+                        or finalized_block > close_block
+                    )
+                )
+                or (
+                    not summary_v2
+                    and (
+                        source_epoch != latest_source_epoch
+                        or finalized_block != last_update_block
+                        or observation_summary[
+                            "source_bundle_finalized_block_hash"
+                        ]
+                        != observation_summary["last_update_block_hash"]
+                    )
+                )
             ):
                 raise ChampionSettlementV2Error(
                     "chain realized settlement observation summary is invalid"

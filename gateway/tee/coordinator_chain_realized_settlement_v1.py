@@ -11,6 +11,7 @@ from gateway.research_lab.champion_settlement_v2 import (
     CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1,
     CHAIN_WEIGHT_OBSERVATION_RECEIPT_PURPOSE_V1,
     CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
+    CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
     ChampionSettlementV2Error,
     _preliminary_compact_finalized_bundle_authority_v2,
     _preliminary_finalized_bundle_authority_v1,
@@ -195,12 +196,18 @@ class CoordinatorChainRealizedSettlementV1:
         chain_source: CoordinatorChainSourceV2,
         expected_lineage_id: Optional[str] = None,
         expected_chain: Optional[str] = None,
+        chain_signing_profile: Optional[Mapping[str, Any]] = None,
         boot_verifier: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._reader = reader
         self._chain_source = chain_source
         self._expected_lineage_id = str(expected_lineage_id or "")
         self._expected_chain = str(expected_chain or "")
+        self._chain_signing_profile = (
+            dict(chain_signing_profile)
+            if isinstance(chain_signing_profile, Mapping)
+            else None
+        )
         self._boot_verifier = boot_verifier
 
     def _verify_compact_authority(
@@ -209,6 +216,7 @@ class CoordinatorChainRealizedSettlementV1:
         if (
             not self._expected_lineage_id
             or not self._expected_chain
+            or self._chain_signing_profile is None
             or self._boot_verifier is None
         ):
             raise CoordinatorChainRealizedSettlementV1Error(
@@ -221,7 +229,7 @@ class CoordinatorChainRealizedSettlementV1:
             verified = verify_compact_published_weight_authority_v2(
                 preliminary["authority_doc"],
                 identity_cache=None,
-                chain_signing_profile=None,
+                chain_signing_profile=self._chain_signing_profile,
                 expected_lineage_id=self._expected_lineage_id,
                 expected_chain=self._expected_chain,
                 boot_verifier=self._boot_verifier,
@@ -363,8 +371,64 @@ class CoordinatorChainRealizedSettlementV1:
             validator_hotkey=str(authority["validator_hotkey"]),
             context=context,
         )
+        reveal_proof = None
+        scheduled_source_epoch = chain_state[
+            "scheduled_reveal_source_epoch_id"
+        ]
+        scheduled_subnet_epoch = chain_state[
+            "scheduled_reveal_subnet_epoch_id"
+        ]
+        if (
+            scheduled_source_epoch is not None
+            and scheduled_subnet_epoch is not None
+        ):
+            reveal_rows = self._read(
+                "compact_finalized_authority_by_identity",
+                {
+                    "netuid": netuid,
+                    "source_epoch_id": int(scheduled_source_epoch),
+                    "validator_hotkey": str(authority["validator_hotkey"]),
+                },
+                context,
+            )
+            candidate_proofs = []
+            if len(reveal_rows) <= 10:
+                for reveal_row in reveal_rows:
+                    try:
+                        reveal_authority, reveal_verified = (
+                            self._verify_compact_authority(reveal_row)
+                        )
+                        if any(
+                            reveal_authority.get(field)
+                            != reveal_verified.get(field)
+                            for field in (
+                                "bundle_hash",
+                                "netuid",
+                                "epoch_id",
+                                "validator_hotkey",
+                                "finalized_block",
+                                "finalized_block_hash",
+                                "finalization_receipt_hash",
+                            )
+                        ):
+                            raise CoordinatorChainRealizedSettlementV1Error(
+                                "verified reveal authority differs"
+                            )
+                        candidate_proof = (
+                            self._chain_source.read_timelocked_reveal_proof(
+                                chain_state=chain_state,
+                                authority=reveal_authority,
+                                context=context,
+                            )
+                        )
+                        if candidate_proof is not None:
+                            candidate_proofs.append(candidate_proof)
+                    except CoordinatorChainRealizedSettlementV1Error:
+                        continue
+            if len(candidate_proofs) == 1:
+                reveal_proof = candidate_proofs[0]
         observation = {
-            "schema_version": CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
+            "schema_version": CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
             "netuid": netuid,
             "epoch_id": epoch_id,
             "official_subnet_epoch_id": int(
@@ -397,8 +461,53 @@ class CoordinatorChainRealizedSettlementV1:
             "last_update_official_subnet_epoch_id": int(
                 chain_state["last_update_official_subnet_epoch_id"]
             ),
-            "active_source_epoch_id": int(
-                chain_state["active_source_epoch_id"]
+            "latest_commit_source_epoch_id": int(
+                chain_state["latest_commit_source_epoch_id"]
+            ),
+            "epoch_start_block": int(chain_state["epoch_start_block"]),
+            "epoch_start_block_hash": str(
+                chain_state["epoch_start_block_hash"]
+            ),
+            "reveal_window_start_block": int(
+                chain_state["reveal_window_start_block"]
+            ),
+            "reveal_window_start_block_hash": str(
+                chain_state["reveal_window_start_block_hash"]
+            ),
+            "scheduled_reveal_subnet_epoch_id": chain_state[
+                "scheduled_reveal_subnet_epoch_id"
+            ],
+            "scheduled_reveal_source_epoch_id": chain_state[
+                "scheduled_reveal_source_epoch_id"
+            ],
+            "revealed_bundle_hash": (
+                str(reveal_proof["bundle_hash"])
+                if reveal_proof is not None
+                else None
+            ),
+            "reveal_proof": (
+                dict(reveal_proof) if reveal_proof is not None else None
+            ),
+            "subnet_reveal_period_epochs": int(
+                chain_state["subnet_reveal_period_epochs"]
+            ),
+            "reveal_period_storage_key": str(
+                chain_state["reveal_period_storage_key"]
+            ),
+            "reveal_period_storage_override": chain_state[
+                "reveal_period_storage_override"
+            ],
+            "reveal_period_metadata_hash": chain_state[
+                "reveal_period_metadata_hash"
+            ],
+            "reveal_period_runtime_spec_version": int(
+                chain_state["reveal_period_runtime_spec_version"]
+            ),
+            "chain_signing_profile": dict(
+                chain_state["chain_signing_profile"]
+            ),
+            "chain_signing_profile_hash": str(
+                chain_state["chain_signing_profile_hash"]
             ),
             "weights_vector_hash": sha256_json(
                 {
@@ -483,90 +592,128 @@ class CoordinatorChainRealizedSettlementV1:
             raise CoordinatorChainRealizedSettlementV1Error(
                 "chain settlement authority mode is invalid"
             )
-        compact_cutover_rows = self._read(
-            "compact_finalized_authority_cutover",
-            {"netuid": netuid},
-            context,
+        observation_v2 = (
+            observation["schema_version"]
+            == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
         )
-        compact_cutover_epoch: int | None = None
-        if compact_cutover_rows:
-            if len(compact_cutover_rows) != 1 or set(
-                compact_cutover_rows[0]
-            ) != {"epoch_id"}:
-                raise CoordinatorChainRealizedSettlementV1Error(
-                    "compact authority cutover is invalid"
-                )
-            raw_cutover_epoch = compact_cutover_rows[0]["epoch_id"]
-            if isinstance(raw_cutover_epoch, bool):
-                raise CoordinatorChainRealizedSettlementV1Error(
-                    "compact authority cutover is invalid"
-                )
-            try:
-                compact_cutover_epoch = int(raw_cutover_epoch)
-            except (TypeError, ValueError) as exc:
-                raise CoordinatorChainRealizedSettlementV1Error(
-                    "compact authority cutover is invalid"
-                ) from exc
-            if compact_cutover_epoch < 0:
-                raise CoordinatorChainRealizedSettlementV1Error(
-                    "compact authority cutover is invalid"
-                )
-        source_epoch_id = int(observation["active_source_epoch_id"])
-        use_compact = (
-            compact_cutover_epoch is not None
-            and source_epoch_id >= compact_cutover_epoch
+        source_epoch_id = int(
+            observation[
+                "latest_commit_source_epoch_id"
+                if observation_v2
+                else "active_source_epoch_id"
+            ]
         )
-        if use_compact:
-            rows = self._read(
-                "compact_finalized_authority_by_identity",
-                {
-                    "netuid": netuid,
-                    "source_epoch_id": source_epoch_id,
-                    "validator_hotkey": str(observation["validator_hotkey"]),
-                },
-                context,
-            )
-            try:
-                selected = select_compact_chain_realized_bundle_candidate_v2(
-                    rows,
-                    observation=observation,
+        if observation_v2:
+            revealed_bundle_hash = observation["revealed_bundle_hash"]
+            use_compact = revealed_bundle_hash is not None
+            rows = (
+                self._read(
+                    "compact_finalized_authority_by_bundle_hash",
+                    {
+                        "netuid": netuid,
+                        "bundle_hash": str(revealed_bundle_hash),
+                    },
+                    context,
                 )
-            except ChampionSettlementV2Error as exc:
-                raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc
-        else:
-            rows = self._read(
-                "finalized_authority_by_chain_vector",
-                {
-                    "netuid": netuid,
-                    "uids": [int(item[0]) for item in observation["weights"]],
-                    "weights_u16": [
-                        int(item[1]) for item in observation["weights"]
-                    ],
-                    "source_epoch_id": source_epoch_id,
-                    "validator_hotkey": str(
-                        observation["validator_hotkey"]
-                    ),
-                    "finalized_block": int(
-                        observation["last_update_block"]
-                    ),
-                    "finalized_block_hash": str(
-                        observation["last_update_block_hash"]
-                    ),
-                },
-                context,
+                if revealed_bundle_hash is not None
+                else []
             )
             try:
                 selected = (
-                    select_chain_realized_bundle_candidate_v1(
-                        rows, observation=observation
+                    select_compact_chain_realized_bundle_candidate_v2(
+                        rows,
+                        observation=observation,
                     )
                     if rows
                     else None
                 )
             except ChampionSettlementV2Error as exc:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    str(exc)
+                ) from exc
+        else:
+            compact_cutover_rows = self._read(
+                "compact_finalized_authority_cutover",
+                {"netuid": netuid},
+                context,
+            )
+            compact_cutover_epoch: int | None = None
+            if compact_cutover_rows:
+                if len(compact_cutover_rows) != 1 or set(
+                    compact_cutover_rows[0]
+                ) != {"epoch_id"}:
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "compact authority cutover is invalid"
+                    )
+                raw_cutover_epoch = compact_cutover_rows[0]["epoch_id"]
+                if isinstance(raw_cutover_epoch, bool):
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "compact authority cutover is invalid"
+                    )
+                try:
+                    compact_cutover_epoch = int(raw_cutover_epoch)
+                except (TypeError, ValueError) as exc:
+                    raise CoordinatorChainRealizedSettlementV1Error(
+                        "compact authority cutover is invalid"
+                    ) from exc
+            use_compact = (
+                compact_cutover_epoch is not None
+                and source_epoch_id >= compact_cutover_epoch
+            )
+            policy_id = (
+                "compact_finalized_authority_by_identity"
+                if use_compact
+                else "finalized_authority_by_chain_vector"
+            )
+            parameters = {
+                "netuid": netuid,
+                "source_epoch_id": source_epoch_id,
+                "validator_hotkey": str(observation["validator_hotkey"]),
+            }
+            if not use_compact:
+                parameters.update(
+                    {
+                        "uids": [
+                            int(item[0]) for item in observation["weights"]
+                        ],
+                        "weights_u16": [
+                            int(item[1]) for item in observation["weights"]
+                        ],
+                        "finalized_block": int(
+                            observation["last_update_block"]
+                        ),
+                        "finalized_block_hash": str(
+                            observation["last_update_block_hash"]
+                        ),
+                    }
+                )
+            rows = self._read(policy_id, parameters, context)
+            try:
+                selected = (
+                    select_compact_chain_realized_bundle_candidate_v2(
+                        rows,
+                        observation=observation,
+                    )
+                    if use_compact
+                    else (
+                        select_chain_realized_bundle_candidate_v1(
+                            rows, observation=observation
+                        )
+                        if rows
+                        else None
+                    )
+                )
+            except ChampionSettlementV2Error as exc:
                 raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc
         if authority_mode == "unattributed":
-            if selected is not None or payload.get("bundle_hash") is not None:
+            if (
+                selected is not None
+                or payload.get("bundle_hash") is not None
+                or (
+                    observation_v2
+                    and observation["revealed_bundle_hash"] is not None
+                )
+            ):
                 raise CoordinatorChainRealizedSettlementV1Error(
                     "unattributed settlement has finalized bundle authority"
                 )

@@ -254,7 +254,7 @@ def test_allocation_frontier_receipt_query_rejects_hash_injection():
                 "validator_hotkey": "eq.validator-hotkey",
                 "authority_stage": "eq.finalized",
                 "order": "bundle_hash.asc",
-                "limit": "2",
+                "limit": "11",
             },
         ),
     ],

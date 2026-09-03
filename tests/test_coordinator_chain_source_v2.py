@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import gzip
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
+from gateway.tee import coordinator_chain_source_v2 as chain_source_module
 from gateway.tee.coordinator_chain_source_v2 import (
     CoordinatorChainSourceV2,
     CoordinatorChainSourceV2Error,
@@ -19,8 +23,12 @@ from leadpoet_canonical.attested_v2 import (
 )
 from leadpoet_canonical.chain_source_v2 import (
     last_update_storage_key,
+    reveal_period_epochs_storage_key,
     ss58_encode_account_id,
     subnet_epoch_storage_key,
+    system_event_count_storage_key,
+    system_events_storage_key,
+    timelocked_weight_commits_storage_key,
     weights_storage_key,
 )
 
@@ -239,7 +247,10 @@ def test_finalized_metagraph_and_prices_are_bound_to_terminal_records():
 
 def _stateful_cutover():
     return SubnetEpochCutover(
-        network_genesis_hash="0x" + "1" * 64,
+        network_genesis_hash=(
+            "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44"
+            "b090c175ffde2a7e5ab36c03"
+        ),
         netuid=71,
         cutover_block=1_000,
         cutover_block_hash="0x" + "2" * 64,
@@ -250,6 +261,12 @@ def _stateful_cutover():
 
 
 def _stateful_source(broker, cutover):
+    chain_signing_profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
     return CoordinatorChainSourceV2(
         execute_provider=broker.execute,
         retry_policy_hashes={
@@ -260,6 +277,7 @@ def _stateful_source(broker, cutover):
         epoch_authority={
             "mode": "stateful_v1",
             "cutover": cutover.to_dict(),
+            "chain_signing_profile": chain_signing_profile,
         },
         sleep=lambda _seconds: None,
     )
@@ -348,12 +366,31 @@ def test_stateful_coordinator_rejects_skipped_cutover_index():
         source.read_finalized_metagraph(netuid=71, context=context)
 
 
+@pytest.mark.parametrize(
+    ("reveal_period_override", "runtime_spec_version", "expected_error"),
+    (
+        (1, 452, None),
+        (None, 452, None),
+        (1, 440, "metadata is invalid"),
+        (1, 436, "not explicitly supported"),
+        (2, 452, "reveal period differs"),
+    ),
+)
 def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
     monkeypatch,
+    reveal_period_override,
+    runtime_spec_version,
+    expected_error,
 ):
     cutover = _stateful_cutover()
-    source = _stateful_source(FakeBroker(1_400, cutover=cutover), cutover)
+    source = _stateful_source(FakeBroker(1_800, cutover=cutover), cutover)
     calls = []
+    if runtime_spec_version == 452:
+        monkeypatch.setattr(
+            chain_source_module,
+            "resolve_reveal_period_metadata_default_v2",
+            lambda **_kwargs: 1,
+        )
 
     def block_hash(block):
         return "%064x" % int(block)
@@ -370,9 +407,9 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
     def live_call(**kwargs):
         calls.append(("live", kwargs["method"], tuple(kwargs["params"])))
         if kwargs["method"] == "chain_getFinalizedHead":
-            return "0x" + block_hash(1_400)
+            return "0x" + block_hash(1_800)
         if kwargs["method"] == "chain_getHeader":
-            return header(1_400)
+            return header(1_800)
         raise AssertionError(kwargs)
 
     def archive_call(**kwargs):
@@ -384,7 +421,14 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
         if method == "chain_getHeader":
             return header(int(str(params[0]), 16))
         if method == "state_call":
-            return _selective_fixture(1_359)
+            return _selective_fixture(1_719)
+        if method == "state_getRuntimeVersion":
+            return {
+                "specVersion": runtime_spec_version,
+                "transactionVersion": 1,
+            }
+        if method == "state_getMetadata":
+            return "0x6d6574610e"
         if method == "state_getStorage":
             storage_key, at_hash = params
             block = int(str(at_hash), 16)
@@ -392,8 +436,23 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
                 storage_name="SubnetEpochIndex",
                 netuid=71,
             ):
-                epoch_index = 9 if block < 1_000 else (10 if block < 1_360 else 11)
+                epoch_index = (
+                    9
+                    if block < 1_000
+                    else 10
+                    if block < 1_360
+                    else 11
+                    if block < 1_720
+                    else 12
+                )
                 return "0x" + epoch_index.to_bytes(8, "little").hex()
+            if storage_key == subnet_epoch_storage_key(
+                storage_name="LastEpochBlock",
+                netuid=71,
+            ):
+                # A set_tempo call can reset this value without changing the
+                # official SubnetEpochIndex. It is not an epoch identity.
+                return "0x" + (1_600).to_bytes(8, "little").hex()
             if storage_key == weights_storage_key(
                 netuid=71,
                 validator_uid=0,
@@ -411,28 +470,65 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
                     + (1_345).to_bytes(8, "little")
                     + (1_200).to_bytes(8, "little")
                 ).hex()
+            if storage_key == reveal_period_epochs_storage_key(netuid=71):
+                return (
+                    None
+                    if reveal_period_override is None
+                    else "0x"
+                    + int(reveal_period_override).to_bytes(8, "little").hex()
+                )
         raise AssertionError(kwargs)
 
     monkeypatch.setattr(source, "_chain_call", live_call)
     monkeypatch.setattr(source, "_archive_call", archive_call)
     context = ExecutionContextV2(
-        job_id="chain-realized:101",
+        job_id="chain-realized:102",
         purpose="research_lab.chain_weight_observation.v1",
-        epoch_id=101,
+        epoch_id=102,
     )
+
+    if expected_error is not None:
+        with pytest.raises(
+            CoordinatorChainSourceV2Error,
+            match=expected_error,
+        ):
+            source.read_stateful_epoch_close_weights(
+                netuid=71,
+                epoch_id=102,
+                validator_hotkey=ss58_encode_account_id(OWNER),
+                context=context,
+            )
+        return
 
     result = source.read_stateful_epoch_close_weights(
         netuid=71,
-        epoch_id=101,
+        epoch_id=102,
         validator_hotkey=ss58_encode_account_id(OWNER),
         context=context,
     )
 
-    assert result["close_block"] == 1_359
-    assert result["next_epoch_block"] == 1_360
-    assert result["official_subnet_epoch_id"] == 10
+    assert result["close_block"] == 1_719
+    assert result["next_epoch_block"] == 1_720
+    assert result["official_subnet_epoch_id"] == 11
     assert result["last_update_block"] == 1_345
-    assert result["active_source_epoch_id"] == 101
+    assert result["latest_commit_source_epoch_id"] == 101
+    assert result["epoch_start_block"] == 1_360
+    assert result["epoch_start_block_hash"] == block_hash(1_360)
+    assert result["reveal_window_start_block"] == 1_360
+    assert result["reveal_window_start_block_hash"] == block_hash(1_360)
+    assert result["scheduled_reveal_subnet_epoch_id"] == 10
+    assert result["scheduled_reveal_source_epoch_id"] == 101
+    assert result["subnet_reveal_period_epochs"] == 1
+    assert result["reveal_period_storage_key"] == (
+        reveal_period_epochs_storage_key(netuid=71)
+    )
+    assert result["reveal_period_storage_override"] == reveal_period_override
+    assert result["reveal_period_metadata_hash"] == sha256_bytes(b"meta\x0e")
+    assert result["reveal_period_runtime_spec_version"] == runtime_spec_version
+    assert result["chain_signing_profile"]["network"] == "finney"
+    assert result["chain_signing_profile_hash"] == sha256_json(
+        result["chain_signing_profile"]
+    )
     assert result["weights"] == [[0, 65_535], [1, 16_384]]
     assert [item[1] for item in calls if item[0] == "live"] == [
         "chain_getFinalizedHead",
@@ -441,6 +537,15 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
     assert not any(
         source_kind == "archive" and method == "chain_getFinalizedHead"
         for source_kind, method, _params in calls
+    )
+    assert not any(
+        method == "state_getStorage"
+        and params[0]
+        == subnet_epoch_storage_key(
+            storage_name="LastEpochBlock",
+            netuid=71,
+        )
+        for _source_kind, method, params in calls
     )
 
 
@@ -593,3 +698,424 @@ def test_historical_archive_retries_are_recorded_and_bounded():
     assert result["epoch_id"] == 100
     assert sleeps == [1.0]
     assert len(context.transport_attempts) == 7
+
+
+REVEAL_EVENT_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "tests/fixtures/subtensor_events_spec452_block8984916.json"
+)
+
+
+def _scale_compact(value):
+    normalized = int(value)
+    if normalized < 1 << 6:
+        return bytes((normalized << 2,))
+    if normalized < 1 << 14:
+        return ((normalized << 2) | 1).to_bytes(2, "little")
+    if normalized < 1 << 30:
+        return ((normalized << 2) | 2).to_bytes(4, "little")
+    raise AssertionError("test SCALE compact value is too large")
+
+
+def _encode_timelocked_commits(entries):
+    encoded = bytearray(_scale_compact(len(entries)))
+    for entry in entries:
+        commitment = bytes.fromhex(entry["commitment_hex"])
+        encoded.extend(bytes.fromhex(entry["hotkey_public_key"]))
+        encoded.extend(int(entry["submitted_at"]).to_bytes(8, "little"))
+        encoded.extend(_scale_compact(len(commitment)))
+        encoded.extend(commitment)
+        encoded.extend(int(entry["reveal_round"]).to_bytes(8, "little"))
+    return "0x" + bytes(encoded).hex()
+
+
+def _encode_weights(entries):
+    encoded = bytearray(_scale_compact(len(entries)))
+    for uid, weight in entries:
+        encoded.extend(int(uid).to_bytes(2, "little"))
+        encoded.extend(int(weight).to_bytes(2, "little"))
+    return "0x" + bytes(encoded).hex()
+
+
+def _selective_reveal_fixture(*, block, validator_uid, validator_account):
+    hotkeys = [bytes((index,)) * 32 for index in range(24)]
+    hotkeys[int(validator_uid)] = bytes(validator_account)
+    encoded = bytearray((1,))
+    encoded.extend(_scale_compact(71))
+    encoded.extend(b"\x00" * 4)
+    encoded.extend(b"\x01" + OWNER)
+    encoded.extend(b"\x00")
+    encoded.extend(b"\x01" + _scale_compact(block))
+    encoded.extend(b"\x00" * 44)
+    encoded.extend(b"\x01" + _scale_compact(len(hotkeys)))
+    encoded.extend(b"".join(hotkeys))
+    encoded.extend(b"\x00" * 24)
+    return "0x" + bytes(encoded).hex()
+
+
+class RevealProofArchive:
+    def __init__(
+        self,
+        *,
+        removal_block=None,
+        event_mode="exact",
+        multiple_pre_entries=False,
+        runtime_spec_version=452,
+    ):
+        self.fixture = json.loads(
+            REVEAL_EVENT_FIXTURE_PATH.read_text(encoding="utf-8")
+        )
+        self.profile = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "leadpoet_canonical/subtensor_events_profile_v2.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.reveal_block = int(self.fixture["block_number"])
+        self.removal_block = int(
+            self.reveal_block if removal_block is None else removal_block
+        )
+        self.event_mode = str(event_mode)
+        self.multiple_pre_entries = bool(multiple_pre_entries)
+        self.runtime_spec_version = int(runtime_spec_version)
+        self.public_key = str(self.fixture["expected"]["account_id_hex"])
+        self.validator_uid = int(self.fixture["expected"]["uid"])
+        self.commitment = b"production-shaped-reveal-proof"
+        self.reveal_round = 8_984_916
+        self.exact_entry = {
+            "hotkey_public_key": self.public_key,
+            "submitted_at": self.reveal_block - 200,
+            "commitment_hex": self.commitment.hex(),
+            "reveal_round": self.reveal_round,
+        }
+        self.other_entry = {
+            "hotkey_public_key": self.public_key,
+            "submitted_at": self.reveal_block - 199,
+            "commitment_hex": b"other-queued-commitment".hex(),
+            "reveal_round": self.reveal_round + 1,
+        }
+        self.weights = [[3, 12_345], [8, 54_321]]
+        self.metadata_raw = gzip.decompress(
+            (
+                Path(__file__).resolve().parents[1]
+                / "tests/restart_rehearsal/fixtures/subtensor_metadata_spec452_parent8984915.scale.gz"
+            ).read_bytes()
+        )
+        self.calls = []
+        self._block_hashes = {}
+        self._hash_blocks = {}
+
+    def block_hash(self, block):
+        normalized = int(block)
+        observed = self._block_hashes.get(normalized)
+        if observed is None:
+            if normalized == self.reveal_block:
+                observed = str(self.fixture["block_hash"])[2:]
+            elif normalized == self.reveal_block - 1:
+                observed = str(self.profile["measurement"]["parent_hash"])[2:]
+            else:
+                observed = hashlib.sha256(
+                    ("reveal-proof-block:%d" % normalized).encode("ascii")
+                ).hexdigest()
+            self._block_hashes[normalized] = observed
+            self._hash_blocks[observed] = normalized
+        return observed
+
+    def _block_for_hash(self, value):
+        normalized = str(value)
+        if normalized.startswith("0x"):
+            normalized = normalized[2:]
+        if normalized not in self._hash_blocks:
+            raise AssertionError("unmeasured test block hash")
+        return self._hash_blocks[normalized]
+
+    def _header(self, block):
+        normalized = int(block)
+        return {
+            "number": hex(normalized),
+            "stateRoot": "0x"
+            + hashlib.sha256(
+                ("reveal-proof-state:%d" % normalized).encode("ascii")
+            ).hexdigest(),
+            "parentHash": "0x" + self.block_hash(normalized - 1),
+            "extrinsicsRoot": "0x"
+            + hashlib.sha256(
+                ("reveal-proof-extrinsics:%d" % normalized).encode("ascii")
+            ).hexdigest(),
+            "digest": {"logs": []},
+        }
+
+    def _events(self):
+        events = bytes.fromhex(str(self.fixture["system_events"])[2:])
+        event_count = str(self.fixture["system_event_count"])
+        if self.event_mode == "exact":
+            return "0x" + events.hex(), event_count
+        if self.event_mode == "wrong_identity":
+            account = bytes.fromhex(self.public_key)
+            assert events.count(account) == 1
+            return "0x" + events.replace(account, b"\x11" * 32, 1).hex(), event_count
+        if self.event_mode == "empty":
+            return "0x00", "0x00000000"
+        raise AssertionError("unknown test event mode")
+
+    def call(self, *, method, params, **_kwargs):
+        self.calls.append((str(method), tuple(params)))
+        if method == "chain_getBlockHash":
+            return "0x" + self.block_hash(int(params[0]))
+        if method == "chain_getHeader":
+            return self._header(self._block_for_hash(params[0]))
+        if method == "state_getRuntimeVersion":
+            return {
+                "specVersion": self.runtime_spec_version,
+                "transactionVersion": 1,
+            }
+        if method == "state_getMetadata":
+            return "0x" + self.metadata_raw.hex()
+        if method == "state_getStorageHash":
+            assert params[0] == chain_source_module.RUNTIME_CODE_STORAGE_KEY
+            return self.profile["runtime_code_storage_hash"]
+        if method == "state_call":
+            block = self._block_for_hash(params[2])
+            assert block == self.removal_block
+            return _selective_reveal_fixture(
+                block=block,
+                validator_uid=self.validator_uid,
+                validator_account=bytes.fromhex(self.public_key),
+            )
+        if method != "state_getStorage":
+            raise AssertionError("unexpected archive method %s" % method)
+        storage_key, at_hash = params
+        block = self._block_for_hash(at_hash)
+        commit_key = timelocked_weight_commits_storage_key(
+            netuid=71,
+            subnet_epoch_index=24_945,
+        )
+        if storage_key == commit_key:
+            entries = [self.exact_entry] if block < self.removal_block else []
+            if self.multiple_pre_entries and block == self.removal_block - 1:
+                entries.append(self.other_entry)
+            return _encode_timelocked_commits(entries)
+        if storage_key == reveal_period_epochs_storage_key(netuid=71):
+            return "0x" + (1).to_bytes(8, "little").hex()
+        if storage_key == weights_storage_key(
+            netuid=71,
+            validator_uid=self.validator_uid,
+        ):
+            assert block == self.removal_block
+            return _encode_weights(self.weights)
+        events, event_count = self._events()
+        if storage_key == system_events_storage_key():
+            assert block == self.removal_block
+            return events
+        if storage_key == system_event_count_storage_key():
+            assert block == self.removal_block
+            return event_count
+        raise AssertionError("unexpected archive storage key")
+
+
+def _reveal_proof_case(
+    monkeypatch,
+    *,
+    final_block,
+    window_start_block,
+    close_block,
+    removal_block=None,
+    event_mode="exact",
+    multiple_pre_entries=False,
+    runtime_spec_version=452,
+):
+    archive = RevealProofArchive(
+        removal_block=removal_block,
+        event_mode=event_mode,
+        multiple_pre_entries=multiple_pre_entries,
+        runtime_spec_version=runtime_spec_version,
+    )
+    source = _stateful_source(
+        FakeBroker(close_block, cutover=_stateful_cutover()),
+        _stateful_cutover(),
+    )
+    monkeypatch.setattr(source, "_archive_call", archive.call)
+    validator_hotkey = ss58_encode_account_id(bytes.fromhex(archive.public_key))
+    chain_state = {
+        "netuid": 71,
+        "official_subnet_epoch_id": 24_946,
+        "scheduled_reveal_subnet_epoch_id": 24_945,
+        "scheduled_reveal_source_epoch_id": 25_036,
+        "subnet_reveal_period_epochs": 1,
+        "validator_hotkey": validator_hotkey,
+        "validator_uid": archive.validator_uid,
+        "weights": archive.weights,
+        "reveal_window_start_block": int(window_start_block),
+        "reveal_window_start_block_hash": archive.block_hash(window_start_block),
+        "close_block": int(close_block),
+        "close_block_hash": archive.block_hash(close_block),
+    }
+    authority = {
+        "bundle_hash": "sha256:" + "b" * 64,
+        "netuid": 71,
+        "epoch_id": 25_036,
+        "subnet_epoch_index": 24_945,
+        "validator_hotkey": validator_hotkey,
+        "uids": [item[0] for item in archive.weights],
+        "weights_u16": [item[1] for item in archive.weights],
+        "finalized_block": int(final_block),
+        "finalized_block_hash": archive.block_hash(final_block),
+        "state_transition_hash": sha256_json(archive.exact_entry),
+        "extrinsic_authorization": {
+            "netuid": 71,
+            "epoch_id": 25_036,
+            "subnet_epoch_index": 24_945,
+            "validator_hotkey": validator_hotkey,
+            "hotkey_public_key": archive.public_key,
+            "commitment_hex": archive.commitment.hex(),
+            "commitment_hash": sha256_bytes(archive.commitment),
+            "reveal_round": archive.reveal_round,
+        },
+    }
+    context = ExecutionContextV2(
+        job_id="chain-realized:25037",
+        purpose="research_lab.chain_weight_observation.v1",
+        epoch_id=25_037,
+    )
+    return source, archive, chain_state, authority, context
+
+
+def test_timelocked_reveal_proof_uses_real_spec452_event_pair(monkeypatch):
+    event_block = 8_984_916
+    source, archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 24,
+        window_start_block=event_block - 60,
+        close_block=event_block + 8,
+    )
+
+    proof = source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    )
+
+    assert proof is not None
+    assert proof["reveal_block"] == event_block
+    assert proof["reveal_block_hash"] == str(archive.fixture["block_hash"])[2:]
+    assert proof["event_witness"]["event_count"] == 196
+    assert proof["event_witness"]["weights_set_record_index"] == 1
+    assert proof["event_witness"]["reveal_record_index"] == 2
+    assert proof["event_witness"]["account_id_hex"] == archive.public_key
+    assert proof["revealed_weights"] == archive.weights
+    assert proof["proof_hash"] == sha256_json(
+        {key: value for key, value in proof.items() if key != "proof_hash"}
+    )
+
+
+def test_timelocked_reveal_proof_accepts_normal_span_over_96_blocks(monkeypatch):
+    event_block = 8_984_916
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 220,
+        window_start_block=event_block - 360,
+        close_block=event_block + 12,
+    )
+    assert (
+        chain_state["close_block"]
+        - max(
+            authority["finalized_block"],
+            chain_state["reveal_window_start_block"],
+        )
+        > 96
+    )
+
+    proof = source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    )
+
+    assert proof is not None
+    assert proof["reveal_block"] == event_block
+
+
+def test_timelocked_reveal_proof_rejects_missing_exact_event(monkeypatch):
+    event_block = 8_984_916
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 24,
+        window_start_block=event_block - 60,
+        close_block=event_block + 8,
+        event_mode="wrong_identity",
+    )
+
+    assert source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    ) is None
+
+
+def test_timelocked_reveal_proof_rejects_tuple_removal_without_event(monkeypatch):
+    event_block = 8_984_916
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 24,
+        window_start_block=event_block - 60,
+        close_block=event_block + 8,
+        event_mode="empty",
+    )
+
+    assert source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    ) is None
+
+
+def test_timelocked_reveal_proof_rejects_multiple_pre_reveal_entries(monkeypatch):
+    event_block = 8_984_916
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 24,
+        window_start_block=event_block - 60,
+        close_block=event_block + 8,
+        multiple_pre_entries=True,
+    )
+
+    assert source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    ) is None
+
+
+def test_timelocked_reveal_proof_rejects_removal_before_window(monkeypatch):
+    event_block = 8_984_916
+    removal_block = event_block - 40
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 120,
+        window_start_block=event_block - 20,
+        close_block=event_block + 8,
+        removal_block=removal_block,
+    )
+
+    assert source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    ) is None
+
+
+def test_timelocked_reveal_proof_rejects_unknown_runtime(monkeypatch):
+    event_block = 8_984_916
+    source, _archive, chain_state, authority, context = _reveal_proof_case(
+        monkeypatch,
+        final_block=event_block - 24,
+        window_start_block=event_block - 60,
+        close_block=event_block + 8,
+        runtime_spec_version=451,
+    )
+
+    assert source.read_timelocked_reveal_proof(
+        chain_state=chain_state,
+        authority=authority,
+        context=context,
+    ) is None

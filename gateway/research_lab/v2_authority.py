@@ -1979,6 +1979,7 @@ async def settle_chain_realized_epoch_v1(
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
         CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1,
+        CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
         COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
         ChampionSettlementV2Error,
         select_compact_chain_realized_bundle_candidate_v2,
@@ -2109,7 +2110,12 @@ async def settle_chain_realized_epoch_v1(
         )
     settlement_telemetry.update(
         {
-            "source_epoch_id": int(observation["active_source_epoch_id"]),
+            "source_epoch_id": int(
+                observation.get("latest_commit_source_epoch_id")
+                if observation["schema_version"]
+                == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+                else observation["active_source_epoch_id"]
+            ),
             "validator_id_hash": observability_hash_identifier(
                 observation["validator_hotkey"]
             ),
@@ -2122,21 +2128,29 @@ async def settle_chain_realized_epoch_v1(
 
     if select_candidates is None:
         select_candidates = select_many
+    observation_v2 = (
+        observation["schema_version"]
+        == CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+    )
     with operation_stage(
         component="research_lab",
         operation="chain_realized_settlement",
         stage="compact_authority_cutover_lookup",
         **settlement_telemetry,
     ):
-        compact_cutover_rows = await select_candidates(
-            COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
-            columns="epoch_id",
-            filters=(
-                ("netuid", normalized_netuid),
-                ("authority_stage", "finalized"),
-            ),
-            order_by=(("epoch_id", False),),
-            limit=1,
+        compact_cutover_rows = (
+            []
+            if observation_v2
+            else await select_candidates(
+                COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
+                columns="epoch_id",
+                filters=(
+                    ("netuid", normalized_netuid),
+                    ("authority_stage", "finalized"),
+                ),
+                order_by=(("epoch_id", False),),
+                limit=1,
+            )
         )
     compact_cutover_epoch: int | None = None
     if compact_cutover_rows:
@@ -2161,13 +2175,31 @@ async def settle_chain_realized_epoch_v1(
             raise ResearchLabV2AuthorityError(
                 "compact weight authority cutover is invalid"
             )
-    source_epoch_id = int(observation["active_source_epoch_id"])
+    source_epoch_id = int(
+        observation[
+            "latest_commit_source_epoch_id"
+            if observation_v2
+            else "active_source_epoch_id"
+        ]
+    )
     use_compact_authority = (
-        compact_cutover_epoch is not None
+        observation_v2
+        and observation["revealed_bundle_hash"] is not None
+    ) or (
+        not observation_v2
+        and compact_cutover_epoch is not None
         and source_epoch_id >= compact_cutover_epoch
     )
     authority_mode_label = (
-        "compact_finalized" if use_compact_authority else "legacy_finalized"
+        (
+            "event_proved_compact"
+            if use_compact_authority
+            else "event_unattributed"
+        )
+        if observation_v2
+        else "compact_finalized"
+        if use_compact_authority
+        else "legacy_finalized"
     )
     authority_telemetry = {
         **settlement_telemetry,
@@ -2180,7 +2212,36 @@ async def settle_chain_realized_epoch_v1(
         stage="finalized_authority_lookup",
         **authority_telemetry,
     ):
-        if use_compact_authority:
+        candidate = None
+        candidate_rows = []
+        candidate_row_count = 0
+        if observation_v2:
+            revealed_bundle_hash = observation["revealed_bundle_hash"]
+            if revealed_bundle_hash is not None:
+                candidate_rows = await select_candidates(
+                    COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
+                    columns=(
+                        "bundle_hash,compact_submission_hash,netuid,epoch_id,"
+                        "validator_hotkey,authority_stage,schema_version,lineage_id,"
+                        "authority_hash,publication_receipt_hash,"
+                        "compact_finalization_hash,finalization_receipt_hash,authority_doc"
+                    ),
+                    filters=(
+                        ("netuid", normalized_netuid),
+                        ("bundle_hash", str(revealed_bundle_hash)),
+                        ("authority_stage", "finalized"),
+                    ),
+                    limit=2,
+                )
+                try:
+                    candidate = select_compact_chain_realized_bundle_candidate_v2(
+                        candidate_rows,
+                        observation=observation,
+                    )
+                except ChampionSettlementV2Error as exc:
+                    raise ResearchLabV2AuthorityError(str(exc)) from exc
+            candidate_row_count = len(candidate_rows)
+        elif use_compact_authority:
             candidate_rows = await select_candidates(
                 COMPACT_WEIGHT_AUTHORITY_TABLE_V2,
                 columns=(
@@ -2192,12 +2253,16 @@ async def settle_chain_realized_epoch_v1(
                 filters=(
                     ("netuid", normalized_netuid),
                     ("epoch_id", source_epoch_id),
-                    ("validator_hotkey", str(observation["validator_hotkey"])),
+                    (
+                        "validator_hotkey",
+                        str(observation["validator_hotkey"]),
+                    ),
                     ("authority_stage", "finalized"),
                 ),
                 order_by=(("bundle_hash", False),),
                 limit=2,
             )
+            candidate_row_count = len(candidate_rows)
         else:
             candidate_rows = await select_candidates(
                 "research_lab_finalized_weight_vector_candidates_v1",
@@ -2219,17 +2284,17 @@ async def settle_chain_realized_epoch_v1(
                 order_by=(("finalized_block", True), ("bundle_hash", False)),
                 limit=100,
             )
+            candidate_row_count = len(candidate_rows)
     record_operation_stage(
         component="research_lab",
         operation="chain_realized_settlement",
         stage="finalized_authority_lookup_result",
         status="passed",
-        row_count=len(candidate_rows),
+        row_count=candidate_row_count,
         **authority_telemetry,
     )
-    candidate = None
     finalization_graphs: list[dict[str, Any]] = []
-    if candidate_rows:
+    if candidate_rows and candidate is None:
         try:
             candidate = (
                 select_compact_chain_realized_bundle_candidate_v2(
@@ -2244,28 +2309,35 @@ async def settle_chain_realized_epoch_v1(
             )
         except ChampionSettlementV2Error as exc:
             raise ResearchLabV2AuthorityError(str(exc)) from exc
-        if candidate is not None:
-            finalization_receipt_hash = str(
-                candidate["finalization_receipt_hash"]
+    if observation_v2 and (
+        (candidate is None)
+        != (observation["revealed_bundle_hash"] is None)
+    ):
+        raise ResearchLabV2AuthorityError(
+            "event-proved compact authority is unavailable"
+        )
+    if candidate is not None:
+        finalization_receipt_hash = str(
+            candidate["finalization_receipt_hash"]
+        )
+        with operation_stage(
+            component="research_lab",
+            operation="chain_realized_settlement",
+            stage="finalization_receipt_graph_load",
+            **{
+                **authority_telemetry,
+                "bundle_hash": candidate["bundle_hash"],
+                "root_receipt_hash": finalization_receipt_hash,
+            },
+        ):
+            finalization_graphs = await _graphs_for_roots(
+                {finalization_receipt_hash},
+                load_graph=load_graph,
             )
-            with operation_stage(
-                component="research_lab",
-                operation="chain_realized_settlement",
-                stage="finalization_receipt_graph_load",
-                **{
-                    **authority_telemetry,
-                    "bundle_hash": candidate["bundle_hash"],
-                    "root_receipt_hash": finalization_receipt_hash,
-                },
-            ):
-                finalization_graphs = await _graphs_for_roots(
-                    {finalization_receipt_hash},
-                    load_graph=load_graph,
-                )
-            if len(finalization_graphs) != 1:
-                raise ResearchLabV2AuthorityError(
-                    "chain settlement finalization graph is ambiguous"
-                )
+        if len(finalization_graphs) != 1:
+            raise ResearchLabV2AuthorityError(
+                "chain settlement finalization graph is ambiguous"
+            )
     authority_mode = (
         "finalized_bundle" if candidate is not None else "unattributed"
     )

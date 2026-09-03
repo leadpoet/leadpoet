@@ -2188,6 +2188,9 @@ def get_v2_coordinator_job_manager():
                 expected_chain=(
                     f"wss://{CHAIN_ENDPOINT_HOST}:{CHAIN_ENDPOINT_PORT}"
                 ),
+                chain_signing_profile=configuration[
+                    "research_lab_execution_config"
+                ]["epoch_authority"]["chain_signing_profile"],
                 boot_verifier=runtime.verify_release_lineage_boot,
             )
         )

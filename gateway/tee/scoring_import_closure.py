@@ -42,6 +42,7 @@ MEASURED_DATA_PATHS = (
     "gateway/utils/industry_equivalence.json",
     "leadpoet_verifier/identity/public_suffix_list.dat",
     "leadpoet_verifier/leadpoet_industry_taxonomy.json",
+    "leadpoet_canonical/subtensor_events_profile_v2.json",
     "research_lab/sourcing_model_contract.json",
     "research_lab/sourcing_model_contract_v11.json",
     "research_lab/sourcing_model_contract_v12.json",

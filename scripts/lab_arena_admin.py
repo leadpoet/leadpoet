@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-PUBLIC_ROUND_FIELDS = ("round_id", "status", "status_generation", "stage_generation", "configuration_hash", "commitment_hash", "stage1_scoring_plan_hash", "stage2_scoring_plan_hash", "stage1_score_bundle_hash", "final_score_bundle_hash", "result_bundle_hash", "reward_basis_hash", "king_outcome", "king_hotkey", "effective_reward_epoch", "cancel_reason")
+PUBLIC_ROUND_FIELDS = ("round_id", "status", "status_generation", "stage_generation", "configuration_hash", "commitment_hash", "stage1_scoring_plan_hash", "final_score_bundle_hash", "result_bundle_hash", "reward_basis_hash", "king_outcome", "king_hotkey", "effective_reward_epoch", "cancel_reason")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,9 +60,10 @@ def run(args, service) -> int:
         except ValueError:
             print("cutoff must look like 2026-09-05T00:00:00Z", file=sys.stderr)
             return 2
-        current = service.current_round()
-        if current is not None:
-            print("a round is already open or running: %s (%s)" % (current["round_id"], current["status"]), file=sys.stderr)
+        open_round = service.open_round()
+        if open_round is not None:
+            # Rounds overlap: a running round never blocks the next one; only an open submission window does.
+            print("a round is already open for submissions: %s (%s)" % (open_round["round_id"], open_round["status"]), file=sys.stderr)
             return 3
         if service.store.get_round(round_id_for_cutoff(cutoff)) is not None:
             print("round %s already exists" % round_id_for_cutoff(cutoff), file=sys.stderr)

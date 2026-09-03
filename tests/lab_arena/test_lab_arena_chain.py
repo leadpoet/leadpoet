@@ -34,12 +34,8 @@ from lab_arena.chain import (
     ArenaChainConfig,
     ArenaChainConfigError,
     ArenaChainError,
-    ArenaExtrinsicStatusUnknown,
-    ArenaNotTransfer,
-    ArenaTransferAmountUnknown,
     InvalidBlockHash,
     MetagraphSnapshot,
-    account_id_or_none,
     banned_snapshot,
     bittensor_metagraph_source,
     coldkey_owns_hotkey,
@@ -50,7 +46,6 @@ from lab_arena.chain import (
     load_arena_cutover,
     metagraph_snapshot_from_object,
     normalize_block_hash,
-    parse_extrinsic,
     runner_allowlist,
     uid_for_hotkey,
     validate_banned_snapshot,
@@ -489,173 +484,14 @@ def test_is_finalized_detects_forks_and_unfinalized_blocks():
         chain.is_finalized(_digest("never-seen"))
 
 
-def test_block_parses_extrinsics_and_fails_closed():
-    fake, chain, deposit_hash = deposit_chain()
-    block = chain.block(deposit_hash.upper().replace("0X", "0x"))
-    assert block["block_hash"] == deposit_hash
-    assert block["block_number"] == DEPOSIT_NUMBER
-    assert [item["call"]["call_module"] for item in block["extrinsics"]] == ["Timestamp", "Balances"]
-    transfer = block["extrinsics"][1]
-    assert transfer["index"] == 1
-    assert transfer["address"] == BOB.ss58_address
-    assert transfer["call"]["call_args"][0] == {"name": "dest", "type": "MultiAddress", "value": ALICE.ss58_address}
-    assert block["extrinsics"][0]["address"] is None
-
-    with pytest.raises(ArenaBlockNotFound):
-        chain.block(_digest("unknown"))
-    with pytest.raises(InvalidBlockHash):
-        chain.block("0x1234")
-
-    broken = fake.add_block(DEPOSIT_NUMBER - 1, [timestamp_inherent(BLOCK_MILLIS), None])
-    with pytest.raises(ArenaChainError, match="undecodable"):
-        chain.block(broken)
-
-    no_call = fake.add_block(DEPOSIT_NUMBER - 2, [_Scale({"extrinsic_hash": _digest("x"), "address": BOB.ss58_address})])
-    with pytest.raises(ArenaChainError, match="no decoded call"):
-        chain.block(no_call)
-
-    mismatched = fake.add_block(DEPOSIT_NUMBER - 3, [timestamp_inherent(BLOCK_MILLIS)])
-    fake.blocks[mismatched]["header"]["hash"] = canonical_hash(1)
-    with pytest.raises(ArenaChainError, match="header hash differs"):
-        chain.block(mismatched)
-
-    nested = fake.add_block(DEPOSIT_NUMBER - 4, [timestamp_inherent(BLOCK_MILLIS)])
-    fake.blocks[nested] = {"block": fake.blocks[nested]}
-    assert chain.block(nested)["block_number"] == DEPOSIT_NUMBER - 4
-
-
-def test_parse_extrinsic_normalizes_account_encodings():
-    public_hex = ALICE.public_key.hex()
-    assert account_id_or_none("0x" + public_hex) == ALICE.ss58_address
-    assert account_id_or_none(public_hex.upper()) == ALICE.ss58_address
-    assert account_id_or_none(bytes.fromhex(public_hex)) == ALICE.ss58_address
-    assert account_id_or_none(tuple(bytes.fromhex(public_hex))) == ALICE.ss58_address
-    assert account_id_or_none({"Id": ALICE.ss58_address}) == ALICE.ss58_address
-    assert account_id_or_none(_Scale({"id": "0x" + public_hex})) == ALICE.ss58_address
-    assert account_id_or_none({"Index": 7}) is None
-    assert account_id_or_none("not-an-account") is None
-    assert account_id_or_none(None) is None
-    assert account_id_or_none(12) is None
-
-    parsed = parse_extrinsic(transfer_extrinsic("0x" + public_hex, {"Id": BOB.ss58_address}, 5), 1)
-    assert parsed["address"] == ALICE.ss58_address
-    assert parsed["call"]["call_args"][0]["value"] == BOB.ss58_address
-    assert parsed["extrinsic_hash"].startswith("0x")
-
-    with pytest.raises(ArenaChainError, match="call identity"):
-        parse_extrinsic(_Scale({"call": {"call_module": "", "call_function": "set", "call_args": []}}), 0)
-    with pytest.raises(ArenaChainError, match="call arguments"):
-        parse_extrinsic(_Scale({"call": {"call_module": "Balances", "call_function": "transfer", "call_args": ["bad"]}}), 0)
-    with pytest.raises(ArenaChainError, match="hash is malformed"):
-        parse_extrinsic(_Scale({"extrinsic_hash": "0x12", "call": {"call_module": "A", "call_function": "b", "call_args": []}}), 0)
-    with pytest.raises(ArenaChainError):
-        parse_extrinsic(transfer_extrinsic(BOB.ss58_address, ALICE.ss58_address, 1), -1)
-
-
-def test_block_timestamp_reads_storage_at_the_exact_hash():
-    fake, chain, deposit_hash = deposit_chain()
-    assert chain.block_timestamp(deposit_hash) == BLOCK_TIME
-    fake.timestamps[deposit_hash] = BLOCK_MILLIS + 7
-    assert chain.block_timestamp(deposit_hash).microsecond == 7000
-    del fake.timestamps[deposit_hash]
-    with pytest.raises(ArenaChainError, match="absent"):
-        chain.block_timestamp(deposit_hash)
-    fake.timestamps[deposit_hash] = 0
-    with pytest.raises(ArenaChainError, match="not positive"):
-        chain.block_timestamp(deposit_hash)
-    fake.fail.add("query")
-    with pytest.raises(ArenaChainError, match="query failed"):
-        chain.block_timestamp(deposit_hash)
-
-
-def test_extrinsic_status_is_fail_closed():
-    fake, chain, deposit_hash = deposit_chain()
-    assert chain.extrinsic_succeeded(deposit_hash, 1) is True
-    assert chain.extrinsic_succeeded(deposit_hash, 0) is True
-    events = chain.extrinsic_events(deposit_hash, 1)
-    assert [event["event_id"] for event in events] == ["ExtrinsicSuccess"]
-    assert events[0]["module_id"] == "System"
-
-    fake.events[deposit_hash] = [status_event(0), status_event(1, "ExtrinsicFailed")]
-    assert chain.extrinsic_succeeded(deposit_hash, 1) is False
-
-    fake.events[deposit_hash] = [status_event(0), status_event(1, "Transfer", module_id="Balances")]
-    with pytest.raises(ArenaExtrinsicStatusUnknown):
-        chain.extrinsic_succeeded(deposit_hash, 1)
-
-    fake.events[deposit_hash] = [status_event(0)]
-    with pytest.raises(ArenaExtrinsicStatusUnknown):
-        chain.extrinsic_succeeded(deposit_hash, 1)
-
-    fake.events[deposit_hash] = []
-    with pytest.raises(ArenaChainError, match="no events"):
-        chain.extrinsic_succeeded(deposit_hash, 1)
-
-    fake.events[deposit_hash] = [status_event(1), status_event(1, "ExtrinsicFailed")]
-    with pytest.raises(ArenaChainError, match="ambiguous"):
-        chain.extrinsic_succeeded(deposit_hash, 1)
-
-    fake.events[deposit_hash] = [status_event(1), {"phase": "ApplyExtrinsic", "extrinsic_idx": 1, "event": {"module_id": None, "event_id": "x"}}]
-    with pytest.raises(ArenaChainError, match="undecodable"):
-        chain.extrinsic_succeeded(deposit_hash, 1)
-
-    with pytest.raises(ArenaChainError):
-        chain.extrinsic_succeeded(deposit_hash, True)
-
-
-def test_transfer_details_accepts_only_direct_transfers():
-    fake, chain, deposit_hash = deposit_chain()
-    block = chain.block(deposit_hash)
-    details = chain.transfer_details(block, 1)
-    assert details == {
-        "extrinsic_index": 1,
-        "extrinsic_hash": block["extrinsics"][1]["extrinsic_hash"],
-        "sender": BOB.ss58_address,
-        "destination": ALICE.ss58_address,
-        "amount_rao": 500_000_000,
-        "call_function": "transfer_keep_alive",
-    }
-    with pytest.raises(ArenaNotTransfer, match="not a balance transfer"):
-        chain.transfer_details(block, 0)
-    with pytest.raises(ArenaNotTransfer, match="not present"):
-        chain.transfer_details(block, 2)
-
-    other = fake.add_block(
-        DEPOSIT_NUMBER - 1,
-        [
-            timestamp_inherent(BLOCK_MILLIS),
-            transfer_extrinsic(BOB.ss58_address, ALICE.ss58_address, None, function="transfer_all"),
-            batch_extrinsic(BOB.ss58_address),
-            transfer_extrinsic(BOB.ss58_address, ALICE.ss58_address, 0),
-            transfer_extrinsic(BOB.ss58_address, {"Index": 4}, 10),
-            transfer_extrinsic(None, ALICE.ss58_address, 10),
-        ],
-    )
-    parsed = chain.block(other)
-    with pytest.raises(ArenaTransferAmountUnknown):
-        chain.transfer_details(parsed, 1)
-    with pytest.raises(ArenaNotTransfer):
-        chain.transfer_details(parsed, 2)
-    with pytest.raises(ArenaTransferAmountUnknown):
-        chain.transfer_details(parsed, 3)
-    with pytest.raises(ArenaNotTransfer, match="destination"):
-        chain.transfer_details(parsed, 4)
-    with pytest.raises(ArenaNotTransfer, match="signer"):
-        chain.transfer_details(parsed, 5)
-    with pytest.raises(ArenaChainError, match="no parsed extrinsics"):
-        chain.transfer_details({"block_hash": other}, 0)
-
-
 def test_chain_failures_raise_typed_errors_with_cause():
     fake, chain, deposit_hash = deposit_chain()
-    fake.fail.update({"get_chain_finalised_head", "get_block", "get_events"})
+    fake.fail.update({"get_chain_finalised_head", "get_block_number"})
     with pytest.raises(ArenaChainError, match="get_chain_finalised_head failed") as info:
         chain.finalized_head()
     assert isinstance(info.value.__cause__, RuntimeError)
-    with pytest.raises(ArenaChainError, match="get_block failed"):
-        chain.block(deposit_hash)
-    with pytest.raises(ArenaChainError, match="get_events failed"):
-        chain.extrinsic_succeeded(deposit_hash, 1)
+    with pytest.raises(ArenaChainError, match="get_block_number failed"):
+        chain.is_finalized(deposit_hash)
 
     class Missing:
         pass
@@ -675,7 +511,7 @@ def test_client_calls_are_serialized_across_threads():
         try:
             for _ in range(10):
                 chain.finalized_head()
-                chain.block_timestamp(deposit_hash)
+                chain.is_finalized(deposit_hash)
                 chain.epoch_subtensor().substrate.get_block_hash(0)
         except Exception as exc:  # pragma: no cover - surfaced through the assertion below
             errors.append(exc)
@@ -687,7 +523,7 @@ def test_client_calls_are_serialized_across_threads():
         thread.join(timeout=60)
     assert not errors
     assert fake.overlap is False
-    assert fake.calls.count("get_block_hash") == 60
+    assert fake.calls.count("get_block_hash") == 120  # sixty direct calls plus one inside every is_finalized
 
 
 # ---------------------------------------------------------------------------

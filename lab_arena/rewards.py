@@ -13,12 +13,15 @@ public constants and the reward-basis schema helpers from
 ``lab_arena.contracts``. ``tests/lab_arena/test_lab_arena_rewards.py`` parses
 this file and rejects post-3.7 syntax.
 
-Arithmetic: the champion share is evaluated exactly with ``fractions.Fraction``
-over the shortest decimal representation of each float input (``repr``), then
-converted back to a float once. With the current 30% Research Lab share and
-9.5% leaderboard share the five weekly values are therefore exactly the floats
-``0.15125``, ``0.121``, ``0.09075``, ``0.0605`` and ``0.03025`` and compare
-equal to those literals on every side of the weight path.
+Arithmetic: the king's pool is ``LAB_ARENA_POOL_PERCENT`` of total emissions
+(``pool_basis`` is ``total_emissions``: it does not depend on the Research Lab
+or leaderboard allocations, which the reward adapter shrinks to make room).
+The champion share is evaluated exactly with ``fractions.Fraction`` and
+converted back to a float once, so the five weekly values are exactly the
+floats ``0.25``, ``0.2``, ``0.15``, ``0.1`` and ``0.05`` and compare equal to
+those literals on every side of the weight path. ``fulfillment_residual`` and
+``derive_research_lab_share`` remain the byte-for-byte mirrors of the canonical
+kernel the adapter uses to derive what fulfillment keeps.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from lab_arena.contracts import (
     EPOCHS_PER_REWARD_WEEK,
     KING_OUTCOMES,
     KING_POOL_SHARE_PERCENT_BY_WEEK,
+    LAB_ARENA_POOL_BASIS,
     LAB_ARENA_POOL_PERCENT,
     REWARD_BASIS_SCHEMA_VERSION,
     finalize_reward_basis,
@@ -170,17 +174,16 @@ def fulfillment_residual(research_lab_share: float, leaderboard_bonus_share: flo
     return float(_exact_residual(research_lab_share, leaderboard_bonus_share))
 
 
-def champion_share_for_week(
-    research_lab_share: float,
-    leaderboard_bonus_share: float,
-    week_index: int,
-) -> float:
-    """``residual * LAB_ARENA_POOL_PERCENT / 100 * week_share / 100`` exactly."""
+def champion_share_for_week(week_index: int) -> float:
+    """``LAB_ARENA_POOL_PERCENT / 100 * week_share / 100`` of total emissions, exactly.
 
-    residual = _exact_residual(research_lab_share, leaderboard_bonus_share)
+    The pool basis is total emissions: the king's share never shrinks when the
+    Research Lab or leaderboard allocations grow.
+    """
+
     pool = Fraction(LAB_ARENA_POOL_PERCENT, 100)
     week = Fraction(king_pool_share_percent(week_index), 100)
-    return float(residual * pool * week)
+    return float(pool * week)
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +277,11 @@ def champion_uid_matches(metagraph_hotkeys: Sequence[str], champion_uid: Any, ki
 def champion_values(
     basis: Any,
     epoch_id: int,
-    research_lab_share: float,
-    leaderboard_bonus_share: float,
     metagraph_hotkeys: Sequence[str],
 ) -> Dict[str, Any]:
     """The champion triple for one weight epoch from the governing basis.
 
+    ``champion_share`` is the week's share of total emissions.
     ``champion_share`` and ``effective_champion_share`` are always equal
     (section 13.1: the Arena never burns a gap). Both are ``0.0`` and
     ``champion_uid`` is ``None`` whenever the epoch is ineligible or the king
@@ -303,7 +305,7 @@ def champion_values(
         if uid is not None:
             if week_index is None:
                 raise ValueError("eligible basis without a king start epoch")
-            share = champion_share_for_week(research_lab_share, leaderboard_bonus_share, week_index)
+            share = champion_share_for_week(week_index)
     return {
         "champion_share": share,
         "effective_champion_share": share,
@@ -321,6 +323,7 @@ def champion_values(
 def reward_constants_document() -> Dict[str, Any]:
     return {
         "pool_percent": int(LAB_ARENA_POOL_PERCENT),
+        "pool_basis": str(LAB_ARENA_POOL_BASIS),
         "king_pool_share_percent_by_week": [int(v) for v in KING_POOL_SHARE_PERCENT_BY_WEEK],
         "epochs_per_reward_week": int(EPOCHS_PER_REWARD_WEEK),
         "eligibility_max_epochs": int(ELIGIBILITY_MAX_EPOCHS),

@@ -35,11 +35,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from gateway.qualification.utils.chain import get_transfer_details, verify_sr25519_signature
+from gateway.qualification.utils.chain import verify_sr25519_signature
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
     CUTOVER_PATH_ENV,
@@ -78,9 +78,7 @@ RUNNER_ELIGIBILITY_RULE = "validator_permit_minus_banned_plus_floor.v1"
 NETWORK_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
-SUCCESS_EVENT = "ExtrinsicSuccess"
 FAILED_EVENT = "ExtrinsicFailed"
-STATUS_EVENTS = (SUCCESS_EVENT, FAILED_EVENT)
 
 
 # ---------------------------------------------------------------------------
@@ -102,18 +100,6 @@ class InvalidBlockHash(ArenaChainError, ValueError):
 
 class ArenaBlockNotFound(ArenaChainError):
     """The endpoint does not know the requested block."""
-
-
-class ArenaNotTransfer(ArenaChainError):
-    """The extrinsic is not a verifiable ``Balances`` transfer."""
-
-
-class ArenaTransferAmountUnknown(ArenaChainError):
-    """The transfer carries no explicit positive amount (``transfer_all``)."""
-
-
-class ArenaExtrinsicStatusUnknown(ArenaChainError):
-    """No ``System.ExtrinsicSuccess`` or ``ExtrinsicFailed`` event exists."""
 
 
 # ---------------------------------------------------------------------------
@@ -180,60 +166,6 @@ def _chain_int(value: Any, field_name: str) -> int:
         except ValueError as exc:
             raise ArenaChainError("%s is not an integer" % field_name) from exc
     raise ArenaChainError("%s is not an integer" % field_name)
-
-
-def _ss58_encode(raw: bytes) -> str:
-    try:
-        from scalecodec import ss58_encode  # lazy: the codec ships with the substrate client
-    except ImportError as exc:
-        raise ArenaChainError("SS58 encoder is unavailable") from exc
-    try:
-        return str(ss58_encode(raw, SS58_FORMAT))
-    except Exception as exc:
-        raise ArenaChainError("SS58 encoding failed") from exc
-
-
-def account_id_or_none(value: Any) -> Optional[str]:
-    """Return the SS58 account id for a decoded ``AccountId``/``MultiAddress``.
-
-    ``None`` means the value is a legitimately decoded chain value that is not
-    an account identity (``MultiAddress::Index``, ``Raw``, ``Address32`` or
-    ``Address20`` variants, or no value at all). Callers that need an account
-    fail closed on ``None``. Raw 32-byte forms (hex, bytes, or byte tuples,
-    which the substrate client emits when ``decode_ss58`` is off) are encoded
-    with the Bittensor SS58 format.
-    """
-
-    decoded = _unwrap(value)
-    if decoded is None:
-        return None
-    if isinstance(decoded, Mapping):
-        if "Id" in decoded:
-            return account_id_or_none(decoded["Id"])
-        if "id" in decoded:
-            return account_id_or_none(decoded["id"])
-        return None
-    if isinstance(decoded, (bytes, bytearray)):
-        return _ss58_encode(bytes(decoded)) if len(decoded) == 32 else None
-    if isinstance(decoded, (list, tuple)):
-        if len(decoded) == 32 and all(
-            isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 255 for item in decoded
-        ):
-            return _ss58_encode(bytes(decoded))
-        return None
-    if isinstance(decoded, str):
-        text = decoded.strip()
-        hex_body = text[2:] if text[:2] in ("0x", "0X") else text
-        if _HEX64_RE.match(hex_body):
-            return _ss58_encode(bytes.fromhex(hex_body))
-        if SS58_RE.match(text):
-            return text
-        return None
-    return None
-
-
-def _millis_to_datetime(millis: int) -> datetime:
-    return datetime.fromtimestamp(millis // 1000, tz=timezone.utc) + timedelta(milliseconds=millis % 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -540,76 +472,6 @@ class _EpochSubtensor:
 
 
 # ---------------------------------------------------------------------------
-# Extrinsic parsing
-# ---------------------------------------------------------------------------
-
-
-def parse_extrinsic(raw: Any, index: int) -> Dict[str, Any]:
-    """Parse one decoded extrinsic into the shape ``get_transfer_details`` reads.
-
-    Structural failures (an undecoded extrinsic, no call, no call identity,
-    malformed arguments) raise; nothing is replaced with ``"Unknown"``.
-    Account-shaped values (``address`` and ``dest``/``destination`` arguments)
-    are normalized to SS58 or ``None`` through ``account_id_or_none``.
-    """
-
-    index = _require_int(index, "extrinsic index", minimum=0)
-    data = _unwrap(raw)
-    if not isinstance(data, Mapping):
-        raise ArenaChainError("extrinsic %d is undecodable" % index)
-    call = _unwrap(data.get("call"))
-    if not isinstance(call, Mapping):
-        raise ArenaChainError("extrinsic %d has no decoded call" % index)
-    module = call.get("call_module")
-    function = call.get("call_function")
-    if not isinstance(module, str) or not module or not isinstance(function, str) or not function:
-        raise ArenaChainError("extrinsic %d call identity is undecodable" % index)
-    raw_args = _unwrap(call.get("call_args"))
-    if raw_args is None:
-        raw_args = []
-    items: List[Tuple[str, Any, Any]] = []
-    if isinstance(raw_args, Mapping):
-        for name, value in raw_args.items():
-            if not isinstance(name, str):
-                raise ArenaChainError("extrinsic %d call arguments are undecodable" % index)
-            items.append((name, None, _unwrap(value)))
-    elif isinstance(raw_args, (list, tuple)):
-        for arg in raw_args:
-            arg = _unwrap(arg)
-            if not isinstance(arg, Mapping) or not isinstance(arg.get("name"), str):
-                raise ArenaChainError("extrinsic %d call arguments are undecodable" % index)
-            items.append((arg["name"], arg.get("type"), _unwrap(arg.get("value"))))
-    else:
-        raise ArenaChainError("extrinsic %d call arguments are undecodable" % index)
-    call_args: List[Dict[str, Any]] = []
-    for name, type_name, value in items:
-        if name in ("dest", "destination"):
-            value = account_id_or_none(value)
-        entry: Dict[str, Any] = {"name": name, "value": value}
-        if type_name is not None:
-            entry["type"] = type_name
-        call_args.append(entry)
-    address = account_id_or_none(data.get("address"))
-    extrinsic_hash: Optional[str] = None
-    raw_hash = data.get("extrinsic_hash")
-    if raw_hash is not None:
-        try:
-            extrinsic_hash = normalize_block_hash(raw_hash)
-        except InvalidBlockHash as exc:
-            raise ArenaChainError("extrinsic %d hash is malformed" % index) from exc
-    return {
-        "index": index,
-        "extrinsic_hash": extrinsic_hash,
-        "address": address,
-        "call": {"call_module": module, "call_function": function, "call_args": call_args},
-    }
-
-
-def _is_index(value: Any, index: int) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value == index
-
-
-# ---------------------------------------------------------------------------
 # ArenaChain
 # ---------------------------------------------------------------------------
 
@@ -733,151 +595,6 @@ class ArenaChain:
         if number > head.number:
             return False
         return self.finalized_block_hash(number, head=head) == normalized
-
-    # -- blocks, timestamps, events ---------------------------------------------
-
-    def block(self, block_hash: Any) -> Dict[str, Any]:
-        """Fetch one block by hash with every extrinsic parsed; parse failures raise."""
-
-        normalized = normalize_block_hash(block_hash)
-        raw = self._call("get_block", block_hash=normalized)
-        if raw is None:
-            raise ArenaBlockNotFound("block %s is unknown to the endpoint" % normalized)
-        data = _unwrap(raw)
-        if isinstance(data, Mapping) and "extrinsics" not in data and isinstance(data.get("block"), Mapping):
-            data = data["block"]
-        if not isinstance(data, Mapping):
-            raise ArenaChainError("block payload is not a mapping")
-        header = _unwrap(data.get("header"))
-        if not isinstance(header, Mapping):
-            raise ArenaChainError("block header is missing")
-        number = _chain_int(header.get("number"), "block number")
-        if number < 0:
-            raise ArenaChainError("block number is negative")
-        header_hash = header.get("hash")
-        if header_hash is not None and normalize_block_hash(header_hash) != normalized:
-            raise ArenaChainError("block header hash differs from the requested hash")
-        raw_extrinsics = data.get("extrinsics")
-        if not isinstance(raw_extrinsics, (list, tuple)):
-            raise ArenaChainError("block extrinsics are missing")
-        extrinsics = [parse_extrinsic(item, index) for index, item in enumerate(raw_extrinsics)]
-        return {"block_hash": normalized, "block_number": number, "extrinsics": extrinsics}
-
-    def block_timestamp(self, block_hash: Any) -> datetime:
-        """UTC time of the block from ``Timestamp.Now`` storage at that exact hash.
-
-        ``Timestamp.Now`` is what the ``Timestamp.set`` inherent writes, so
-        reading storage at the hash yields the same value as parsing the
-        inherent without decoding every extrinsic. An absent value raises.
-        """
-
-        normalized = normalize_block_hash(block_hash)
-        raw = self._call("query", module="Timestamp", storage_function="Now", params=[], block_hash=normalized)
-        value = _unwrap(raw)
-        if value is None:
-            raise ArenaChainError("Timestamp.Now is absent at %s" % normalized)
-        millis = _chain_int(value, "Timestamp.Now")
-        if millis <= 0:
-            raise ArenaChainError("Timestamp.Now is not positive at %s" % normalized)
-        return _millis_to_datetime(millis)
-
-    def extrinsic_events(self, block_hash: Any, extrinsic_index: int) -> List[Dict[str, Any]]:
-        """Events emitted while applying ``extrinsic_index`` in the block."""
-
-        normalized = normalize_block_hash(block_hash)
-        index = _require_int(extrinsic_index, "extrinsic index", minimum=0)
-        raw_events = self._call("get_events", block_hash=normalized)
-        if not isinstance(raw_events, (list, tuple)):
-            raise ArenaChainError("events payload is not a list")
-        if not raw_events:
-            raise ArenaChainError("no events at %s" % normalized)
-        matched: List[Dict[str, Any]] = []
-        for raw in raw_events:
-            event = _unwrap(raw)
-            if not isinstance(event, Mapping):
-                raise ArenaChainError("event at %s is undecodable" % normalized)
-            if not _is_index(event.get("extrinsic_idx"), index):
-                continue
-            info = _unwrap(event.get("event"))
-            if not isinstance(info, Mapping):
-                info = event
-            module_id = info.get("module_id")
-            event_id = info.get("event_id")
-            if not isinstance(module_id, str) or not isinstance(event_id, str):
-                raise ArenaChainError("event identity at %s is undecodable" % normalized)
-            matched.append(
-                {
-                    "extrinsic_idx": index,
-                    "phase": event.get("phase"),
-                    "module_id": module_id,
-                    "event_id": event_id,
-                    "attributes": _unwrap(info.get("attributes")),
-                }
-            )
-        return matched
-
-    def extrinsic_succeeded(self, block_hash: Any, extrinsic_index: int) -> bool:
-        """Fail-closed status: ``True`` only for an explicit ``System.ExtrinsicSuccess``.
-
-        ``System.ExtrinsicFailed`` returns ``False``. No status event raises
-        ``ArenaExtrinsicStatusUnknown``; two status events raise.
-        """
-
-        events = self.extrinsic_events(block_hash, extrinsic_index)
-        statuses = [
-            event["event_id"]
-            for event in events
-            if event["module_id"] == "System" and event["event_id"] in STATUS_EVENTS
-        ]
-        if not statuses:
-            raise ArenaExtrinsicStatusUnknown(
-                "extrinsic %d has no System status event" % _require_int(extrinsic_index, "extrinsic index")
-            )
-        if len(statuses) > 1:
-            raise ArenaChainError("extrinsic %d has ambiguous status events" % extrinsic_index)
-        return statuses[0] == SUCCESS_EVENT
-
-    def transfer_details(self, block: Mapping[str, Any], extrinsic_index: int) -> Dict[str, Any]:
-        """Sender, destination and amount of a direct ``Balances`` transfer.
-
-        Uses the Lab's pure ``get_transfer_details``. Anything that is not a
-        direct transfer (an inherent, another pallet, a batched or proxied
-        call, an index past the block) raises ``ArenaNotTransfer``; a transfer
-        without an explicit positive amount (``transfer_all``) raises
-        ``ArenaTransferAmountUnknown``.
-        """
-
-        index = _require_int(extrinsic_index, "extrinsic index", minimum=0)
-        extrinsics = block.get("extrinsics") if isinstance(block, Mapping) else None
-        if not isinstance(extrinsics, list):
-            raise ArenaChainError("block has no parsed extrinsics")
-        if index >= len(extrinsics):
-            raise ArenaNotTransfer("extrinsic %d is not present in the block" % index)
-        extrinsic = extrinsics[index]
-        try:
-            details = get_transfer_details(extrinsic)
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise ArenaNotTransfer("extrinsic %d transfer arguments are undecodable" % index) from exc
-        if details is None:
-            raise ArenaNotTransfer("extrinsic %d is not a balance transfer" % index)
-        sender = details.get("sender")
-        destination = details.get("destination")
-        if not isinstance(sender, str) or not SS58_RE.match(sender):
-            raise ArenaNotTransfer("extrinsic %d signer is not an account id" % index)
-        if not isinstance(destination, str) or not SS58_RE.match(destination):
-            raise ArenaNotTransfer("extrinsic %d destination is not an account id" % index)
-        amount = details.get("amount_rao")
-        if amount is None or isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
-            raise ArenaTransferAmountUnknown("extrinsic %d carries no explicit positive amount" % index)
-        return {
-            "extrinsic_index": index,
-            "extrinsic_hash": extrinsic.get("extrinsic_hash"),
-            "sender": sender,
-            "destination": destination,
-            "amount_rao": amount,
-            "call_function": str(details.get("call_function")),
-        }
-
     # -- finalized metagraph cache ------------------------------------------------
 
     def metagraph(self, finalized: bool = True, *, refresh: bool = False) -> MetagraphSnapshot:

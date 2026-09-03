@@ -113,11 +113,11 @@ def test_lab_generator_file_is_untouched_and_never_called_from_arena_code():
         assert forbidden not in source, forbidden
 
 
-def test_clean_tape_fills_fifty_slots_in_order_with_contract_fields():
+def test_clean_tape_fills_thirty_slots_in_order_with_contract_fields():
     provider = TapeProvider(load_tape("clean_run.json"))
     result, journal, store = run(provider)
-    assert provider.generation_calls == 3 and provider.exclusion_calls == 50
-    assert len(result.icps) == 50 and result.attempts_used == 3
+    assert provider.generation_calls == 2 and provider.exclusion_calls == 30
+    assert len(result.icps) == 30 and result.attempts_used == 2
     for slot, icp in enumerate(result.icps):
         assert icp["icp_id"] == "arena:%s:%s:%d" % (ROUND_ID, b.slot_batch(slot), slot)
         assert icp["industry"] == b.slot_industry(slot)
@@ -125,15 +125,16 @@ def test_clean_tape_fills_fifty_slots_in_order_with_contract_fields():
         assert isinstance(icp["employee_count"], list) and icp["employee_count"]
         assert icp["excluded_companies"] and all(".example.com" in item for item in icp["excluded_companies"])
         assert icp["intent_signals"] and icp["intent_signal"] == icp["intent_signals"][0]
-    assert [i["industry"] for i in b.stage_slice(result, 1)] == INDUSTRIES
-    assert [i["industry"] for i in b.stage_slice(result, 2)] == INDUSTRIES + INDUSTRIES[:10]
+    assert [i["industry"] for i in b.stage_slice(result, 1)] == INDUSTRIES + INDUSTRIES[:10]
+    with pytest.raises(contracts.ArenaContractError):
+        b.stage_slice(result, 2)
     kinds = [entry["kind"] for entry in result.journal_entries]
-    assert kinds.count("request") == 3 and kinds.count("response") == 3
-    assert kinds.count("acceptance") == 50 and kinds.count("exclusion") == 50 and "unknown" not in kinds
+    assert kinds.count("request") == 2 and kinds.count("response") == 2
+    assert kinds.count("acceptance") == 30 and kinds.count("exclusion") == 30 and "unknown" not in kinds
     assert contracts.verify_journal_chain(result.journal_entries) == result.journal_head_hash
     assert result.benchmark_root == contracts.benchmark_roots(result.icp_hashes)["benchmark_root"]
-    assert len(set(result.content_hashes)) == 50
-    assert len(store.refs()) == 53
+    assert len(set(result.content_hashes)) == 30
+    assert len(store.refs()) == 32  # thirty exclusion responses and two generation responses
     for entry in result.journal_entries:
         if entry["kind"] in ("response", "exclusion") and "response_ref" in entry:
             assert contracts.hash_bytes(store.get(entry["response_ref"])) == entry["response_hash"]
@@ -142,7 +143,7 @@ def test_clean_tape_fills_fifty_slots_in_order_with_contract_fields():
 def test_replacement_tape_replaces_only_rejected_slots_and_journals_every_rule():
     provider = TapeProvider(load_tape("replacement_run.json"))
     result, journal, store = run(provider)
-    assert provider.generation_calls == 4 and result.attempts_used == 4
+    assert provider.generation_calls == 3 and result.attempts_used == 3
     rejections = [entry for entry in result.journal_entries if entry["kind"] == "rejection"]
     rules = sorted((entry.get("slot"), entry["rejection_rule"]) for entry in rejections)
     assert (3, "schema.example_company_missing") in rules
@@ -157,7 +158,7 @@ def test_replacement_tape_replaces_only_rejected_slots_and_journals_every_rule()
     assert result.icps[5]["industry"] == "Privacy and Security"
     assert result.icps[27]["verified_example_company"] == "Biotechnology Example Co 9"
     accepted = [entry for entry in result.journal_entries if entry["kind"] == "acceptance"]
-    assert len(accepted) == 50 and len({entry["slot"] for entry in accepted}) == 50
+    assert len(accepted) == 30 and len({entry["slot"] for entry in accepted}) == 30
 
 
 def test_exhausted_attempts_cancel_with_every_attempt_journaled():
@@ -169,12 +170,12 @@ def test_exhausted_attempts_cancel_with_every_attempt_journaled():
     assert failure.value.attempts_used == 5
     entries = journal.entries()
     assert sum(1 for entry in entries if entry["kind"] == "request") == 5
-    assert sorted(failure.value.missing_slots) == [0, 20, 40]
+    assert sorted(failure.value.missing_slots) == [0, 20]
     stage_rules = {entry["rejection_rule"] for entry in entries if entry["kind"] == "rejection"}
     assert "schema.stage_invalid" in stage_rules
 
 
-@pytest.mark.parametrize("crash_after", [1, 2, 3, 4])
+@pytest.mark.parametrize("crash_after", [1, 2, 3])
 def test_kill_and_restart_reaches_the_same_root_without_regenerating(crash_after):
     tape = load_tape("replacement_run.json")
     reference, _, _ = run(TapeProvider(list(tape)))
@@ -214,8 +215,8 @@ def test_provider_failure_is_journaled_unknown_and_retried():
     provider = TapeProvider(load_tape("clean_run.json"), fail_at={2})
     result, _, _ = run(provider)
     kinds = [entry["kind"] for entry in result.journal_entries]
-    assert kinds.count("unknown") == 1 and kinds.count("request") == 4
-    assert result.attempts_used == 4 and len(result.icps) == 50
+    assert kinds.count("unknown") == 1 and kinds.count("request") == 3
+    assert result.attempts_used == 3 and len(result.icps) == 30
 
 
 def test_exclusion_failure_rejects_the_slot_and_replacement_refills_it():
@@ -279,8 +280,7 @@ def test_duplicate_intent_signature_and_generator_configuration_identity():
     icps[1]["intent_signal"] = icps[0]["intent_signal"]
     responses = [
         completion(icps, response_id="dup"),
-        completion([raw_icp(i, 2) for i in INDUSTRIES], response_id="b2"),
-        completion([raw_icp(i, 3) for i in INDUSTRIES[:10]], response_id="b3"),
+        completion([raw_icp(i, 2) for i in INDUSTRIES[:10]], response_id="b2"),
         completion([raw_icp("Information Technology", 12)], response_id="r1"),
     ]
     result, _, _ = run(TapeProvider(responses))
@@ -288,7 +288,7 @@ def test_duplicate_intent_signature_and_generator_configuration_identity():
     assert [entry["slot"] for entry in dup] == [1]
     assert result.icps[1]["verified_example_company"] == "Information Technology Example Co 12"
     configuration = b.generator_configuration()
-    assert configuration["model"] == "perplexity/sonar-pro" and configuration["batch_sizes"] == [20, 20, 10]
+    assert configuration["model"] == "perplexity/sonar-pro" and configuration["batch_sizes"] == [20, 10]
     assert configuration == b.generator_configuration()
     commitment = b.commit_benchmark(
         result,

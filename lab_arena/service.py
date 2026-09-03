@@ -27,12 +27,14 @@ from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
+TERMINAL_STATUSES = ("published", "cancelled")
+# One stage of 30 ICPs for every participant: 257 participants x 30 ICPs x 5
+# minutes is 38,550 sandbox-minutes, about 160 slots inside 80 percent of a
+# 300-minute window.
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
-    "stage_1": 210,
-    "stage_1_scoring": 60,
-    "stage_2": 210,
-    "final_scoring": 90,
+    "stage_1": 300,
+    "stage_1_scoring": 90,
 }
 CANCEL_REASONS = {
     "benchmark_leak": "benchmark_leaked_before_cutoff",
@@ -156,7 +158,6 @@ class RoundDefaults:
     openrouter_allowed_models: Tuple[str, ...] = ("openai/gpt-4o-mini",)
     floor_runner_hotkeys: Tuple[str, ...] = ()
     publication_terms_hash: str = contracts.document_hash("leadpoet.lab_arena.publication_terms.v1")
-    all_participants_run_stage_2: bool = False
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
     repository_commit: str = "0" * 40
     max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
@@ -170,6 +171,11 @@ class RoundDefaults:
     # the Arena repository every accepted image is mirrored into.
     image_rules: images.ImageRules = field(default_factory=images.ImageRules)
     registry_repository: str = ""
+    # The Arena repository stays private while a round runs. At publication
+    # every participant image is copied by digest into this public repository
+    # (same registry host) and the bundle names the public reference. Empty:
+    # no public copy, the bundle names the Arena reference.
+    public_registry_repository: str = ""
     # Automatic daily rounds: the UTC hour of each day's submission cutoff, or
     # None to leave round creation to the operator (``lab_arena_admin.py create``).
     daily_cutoff_hour_utc: Optional[int] = None
@@ -263,7 +269,7 @@ class ArenaService:
         self._clock = config.clock
         self._lock = threading.RLock()
         self._hot_round_lock = threading.Lock()
-        self._hot_round: Optional[Tuple[float, Optional[Dict[str, Any]]]] = None
+        self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._scorer_policy = scoring.build_scorer_policy()
         self._worker_release = worker_release_identity(repository_commit=config.defaults.repository_commit, runtime_lock_hash=config.runtime_lock_hash)
         self._brokers: Dict[str, broker_module.Broker] = {}
@@ -363,9 +369,6 @@ class ArenaService:
         stage_1_start = benchmark_deadline + timedelta(seconds=1)
         stage_1_close = stage_1_start + timedelta(minutes=minutes["stage_1"])
         stage_1_scoring_close = stage_1_close + timedelta(minutes=minutes["stage_1_scoring"])
-        stage_2_start = stage_1_scoring_close + timedelta(seconds=1)
-        stage_2_close = stage_2_start + timedelta(minutes=minutes["stage_2"])
-        final_scoring_close = stage_2_close + timedelta(minutes=minutes["final_scoring"])
         return {
             "submission_open": _iso(cutoff - timedelta(days=1)),
             "submission_cutoff": _iso(cutoff),
@@ -373,10 +376,7 @@ class ArenaService:
             "stage_1_start": _iso(stage_1_start),
             "stage_1_close": _iso(stage_1_close),
             "stage_1_scoring_close": _iso(stage_1_scoring_close),
-            "stage_2_start": _iso(stage_2_start),
-            "stage_2_close": _iso(stage_2_close),
-            "final_scoring_close": _iso(final_scoring_close),
-            "publication_deadline": _iso(final_scoring_close + timedelta(seconds=1)),
+            "publication_deadline": _iso(stage_1_scoring_close + timedelta(seconds=1)),
         }
 
     def runner_allowlist(self) -> Tuple[List[str], Dict[str, Any]]:
@@ -406,8 +406,6 @@ class ArenaService:
             "generator": benchmark.generator_configuration(),
             "tie_break_rule": "finalized_block_after_cutoff.v1",
             "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
-            "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
-            "finalist_count": contracts.FINALIST_COUNT,
             "max_challengers": int(defaults.max_challengers),
             "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
@@ -441,7 +439,6 @@ class ArenaService:
             "registry_repository": defaults.registry_repository,
             "publication_terms_hash": defaults.publication_terms_hash,
             "reward_constants": rewards.reward_constants_document(),
-            "all_participants_run_stage_2": bool(defaults.all_participants_run_stage_2 or self._config.mode == "shadow"),
         }
         configuration = self._sign(contracts.finalize_round_configuration(document), "configuration_hash")
         self._objects.put("arena/%s/price_table.json" % round_id, contracts.canonical_json(price_table).encode("utf-8"))
@@ -452,21 +449,22 @@ class ArenaService:
         return configuration
 
     def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
-        """Create the next daily round when no round is open or running.
+        """Create the next daily round when no round is open for submissions.
 
-        V1 runs one round at a time: runner-facing handlers resolve the newest
-        round that is not published or cancelled, so the next round is created
-        only after the previous one ends. Its cutoff is the next configured
-        UTC hour at least ``min_submission_hours`` ahead; a date whose round
-        already exists (published or cancelled that day) moves to the next
-        day, because a round id is its cutoff date. Idempotent: a second call
-        finds the round it created.
+        Rounds overlap: the day's round runs its benchmark while the next
+        round is already open, so miners can always submit. Every signed
+        request names its round, and the driver advances every round that is
+        not published or cancelled. The new round's cutoff is the next
+        configured UTC hour at least ``min_submission_hours`` ahead; a date
+        whose round already exists (published or cancelled that day) moves to
+        the next day, because a round id is its cutoff date. Idempotent: a
+        second call finds the round it created.
         """
 
         defaults = self._config.defaults
-        current = self.current_round()
-        if current is not None:
-            return {"status": "existing", "round_id": current["round_id"], "round_status": current["status"]}
+        open_round = self.open_round()
+        if open_round is not None:
+            return {"status": "existing", "round_id": open_round["round_id"], "round_status": open_round["status"]}
         if defaults.daily_cutoff_hour_utc is None:
             return {"status": "disabled"}
         hour = int(defaults.daily_cutoff_hour_utc)
@@ -485,14 +483,34 @@ class ArenaService:
         raise ServiceError("daily_round_dates_exhausted", 500)
 
     def current_round(self) -> Optional[Dict[str, Any]]:
+        """The newest round that is not published or cancelled (operator status)."""
+
         # Scan ids and statuses only; a full row can be large at hundreds of participants.
         for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at"):
-            if row["status"] not in ("published", "cancelled"):
+            if row["status"] not in TERMINAL_STATUSES:
                 return self._round(row["round_id"])
         return None
 
-    def _hot_current_round(self) -> Optional[Dict[str, Any]]:
-        """The current round for runner-facing handlers, cached for a few seconds.
+    def active_rounds(self) -> List[Dict[str, Any]]:
+        """Every round that is not published or cancelled, oldest first: ids and statuses only.
+
+        Rounds overlap (one open for submissions while the previous one runs),
+        so the driver advances each of them on every tick.
+        """
+
+        rows = [row for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at") if row["status"] not in TERMINAL_STATUSES]
+        return [{"round_id": row["round_id"], "status": row["status"]} for row in reversed(rows)]
+
+    def open_round(self) -> Optional[Dict[str, Any]]:
+        """The round open for submissions, if any (at most one at a time)."""
+
+        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at"):
+            if row["status"] == "open":
+                return self._round(row["round_id"])
+        return None
+
+    def _hot_round(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """One round's row for runner-facing handlers, cached for a few seconds.
 
         Claims and completions arrive by the thousand per stage; the SQL
         functions remain the authority for status, so a briefly stale row
@@ -501,13 +519,32 @@ class ArenaService:
 
         now = time.monotonic()
         with self._hot_round_lock:
-            cached = self._hot_round
+            cached = self._hot_rounds.get(round_id)
             if cached is not None and now - cached[0] < HOT_ROUND_TTL_SECONDS:
                 return cached[1]
-        row = self.current_round()
+        row = self._store.get_round(round_id)
+        if row is None:
+            return None
         with self._hot_round_lock:
-            self._hot_round = (now, row)
+            self._hot_rounds[round_id] = (now, row)
         return row
+
+    def _request_round(self, envelope: Any, *, scope: str, hot: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Validate a signed request and resolve the round its envelope names.
+
+        Rounds overlap, so the envelope, not "the current round", says which
+        round a submission, claim, or completion belongs to. An unknown round
+        is refused before any banned-list or status check.
+        """
+
+        validated = self.validate_request(envelope, scope=scope, round_id=None)
+        round_id = str(validated["round_id"])
+        round_row = self._hot_round(round_id) if hot else self._store.get_round(round_id)
+        if round_row is None:
+            raise ServiceError("round_unknown", 404)
+        if validated["hotkey"] in self._banned_snapshot(round_id):
+            raise ServiceError("hotkey_banned", 403)
+        return validated, round_row
 
     def latest_published_round(self) -> Optional[Dict[str, Any]]:
         rows = self._store.published_reward_bases(limit=1)
@@ -547,11 +584,10 @@ class ArenaService:
     def handle_submission(self, envelope: Any) -> Dict[str, Any]:
         """Register one image named by digest; the driver resolves and mirrors it (image-by-digest plan, section 2)."""
 
-        round_row = self.current_round()
-        if round_row is None or round_row["status"] != "open":
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_SUBMISSION)
+        if round_row["status"] != "open":
             raise ServiceError("submission_window_closed", 409)
         round_id = round_row["round_id"]
-        validated = self.validate_request(envelope, scope=contracts.SCOPE_SUBMISSION, round_id=round_id)
         body = contracts.validate_submission_body(validated["body"])
         try:
             reference = images.parse_reference(body["image_reference"])
@@ -666,7 +702,15 @@ class ArenaService:
         round_row = self._round(round_id)
         participants: List[Dict[str, Any]] = []
         accepted = [row for row in self._store.list_submissions(round_id, status="accepted") if not row.get("is_king")]
-        king = self._entering_king(round_id)
+        # The reigning king re-enters with its winning image unless its hotkey
+        # holds a fresh, eligible submission for this round: then that
+        # submission is the king's entry (still the king, so a resubmission
+        # can never restart the reward decay) and no carried copy is
+        # registered under the same hotkey, which the one-entry-per-miner
+        # index would refuse.
+        king_hotkey = self._reigning_king_hotkey()
+        fresh_king = next((row for row in accepted if king_hotkey and row["miner_hotkey"] == king_hotkey and (self._store.get_account(king_hotkey) or {}).get("preflight_status") == "ok"), None)
+        king = None if fresh_king is not None else self._entering_king(round_id)
         cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
         # Eligibility is checked before the cap so a miner without every
         # provider key preflighted never consumes an admission slot; freeze
@@ -678,19 +722,29 @@ class ArenaService:
             if account.get("preflight_status") != "ok":
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "credential.preflight_not_ok"})
                 continue
-            if frozen_count >= cap:
+            is_king = fresh_king is not None and row["submission_id"] == fresh_king["submission_id"]
+            if not is_king and frozen_count >= cap:
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "capacity.round_full"})
                 continue
-            frozen_count += 1
-            result = self._store.update_submission(round_id, row["submission_id"], "accepted", "frozen", {})
+            if not is_king:
+                frozen_count += 1
+            result = self._store.update_submission(round_id, row["submission_id"], "accepted", "frozen", {"is_king": True} if is_king else {})
             if result.get("status") in ("ok", "stale"):
-                participants.append(self._participant(row, is_king=False, preflight_failed=False))
+                participants.append(self._participant(row, is_king=is_king, preflight_failed=False))
         if king is not None:
             participants.append(king)
         for row in self._store.list_submissions(round_id, status="frozen"):
             if not any(p["submission_id"] == row["submission_id"] for p in participants):
                 participants.append(self._participant(row, is_king=bool(row.get("is_king")), preflight_failed=False))
         return participants
+
+    def _reigning_king_hotkey(self) -> Optional[str]:
+        """The hotkey of the king the most recent published round left reigning, if any."""
+
+        latest = self.latest_published_round()
+        if latest is None or not latest.get("king_hotkey") or latest.get("king_outcome") == "no_king":
+            return None
+        return str(latest["king_hotkey"])
 
     def _entering_king(self, round_id: str) -> Optional[Dict[str, Any]]:
         """The king published by the most recent published round enters automatically."""
@@ -777,13 +831,11 @@ class ArenaService:
 
     def open_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         round_row = self._round(round_id)
-        configuration = round_row["configuration_doc"]
+        if stage != 1:
+            raise ServiceError("stage_invalid", 400)
         participants = list(round_row.get("participants") or [])
-        if stage == 2 and not configuration.get("all_participants_run_stage_2"):
-            finalists = set(round_row.get("finalists") or [])
-            participants = [p for p in participants if p["submission_id"] in finalists or p.get("is_king")]
         _icps, hashes = self.benchmark_icps(round_id)
-        positions = list(range(0, contracts.STAGE_1_ICP_COUNT)) if stage == 1 else list(range(contracts.STAGE_1_ICP_COUNT, contracts.BENCHMARK_ICP_COUNT))
+        positions = list(range(0, contracts.BENCHMARK_ICP_COUNT))
         rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "preflight_failed": bool(p.get("preflight_failed"))} for p in participants]
         return self._store.open_stage(round_id, stage, rows, positions, [hashes[p] for p in positions])
 
@@ -1006,16 +1058,10 @@ class ArenaService:
                 contracts.canonical_json({"stage": stage, "at": _iso(self.now()), "rejected": rejected, "replays": replay_report, "result": result}).encode("utf-8"),
             )
             return {"status": "rescoring" if result.get("status") == "reopened" else result.get("status"), "round_status": result.get("round_status"), "rejected": len(rejected), "exhausted": result.get("exhausted")}
-        stage_1_rows = None
-        stage_1_bundle_hash = None
-        if stage == 2:
-            stage_1_bundle = json.loads(self._objects.get(round_row["stage1_scores_ref"]).decode("utf-8"))
-            stage_1_rows = stage_1_bundle["rows"]
-            stage_1_bundle_hash = stage_1_bundle["bundle_hash"]
         ref = "arena/%s/scores/stage%d.json" % (round_id, stage)
         bundle = self._put_signed(
             ref,
-            scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=breakdowns_by_item, refused_items={item: "judge_key_refused" for item in refused}, stage_1_rows=stage_1_rows, stage_1_bundle_hash=stage_1_bundle_hash),
+            scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=breakdowns_by_item, refused_items={item: "judge_key_refused" for item in refused}),
             "bundle_hash",
         )
         mismatches = sum(1 for entry in replay_report if entry.get("outcome") == "mismatch")
@@ -1029,11 +1075,8 @@ class ArenaService:
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
-        if stage == 1:
-            finalists = self._select_finalists(round_row, bundle)
-            transition = self._store.transition_round(round_id, "stage1_judged", "stage1_scored", {"finalists": finalists, "stage1_scores_ref": ref, "stage1_score_bundle_hash": bundle["bundle_hash"]})
-        else:
-            transition = self._store.transition_round(round_id, "stage2_judged", "scored", {"final_scores_ref": ref, "final_score_bundle_hash": bundle["bundle_hash"]})
+        # The one stage's bundle is the final bundle: the round is scored.
+        transition = self._store.transition_round(round_id, "stage1_judged", "scored", {"final_scores_ref": ref, "final_score_bundle_hash": bundle["bundle_hash"]})
         return {"status": transition.get("status"), "bundle_hash": bundle["bundle_hash"], "judge_executions": judge_executions, "replay_mismatches": mismatches}
 
     def _ranking_entries(self, round_row: Mapping[str, Any], bundle: Mapping[str, Any], score_key: str) -> List[Dict[str, Any]]:
@@ -1048,10 +1091,6 @@ class ArenaService:
     def _salt(self, round_row: Mapping[str, Any]) -> str:
         return str((round_row.get("commitment_doc") or {}).get("tie_break_block_hash") or "")
 
-    def _select_finalists(self, round_row: Mapping[str, Any], bundle: Mapping[str, Any]) -> List[str]:
-        ranking = verify.stage1_ranking(self._ranking_entries(round_row, bundle, "stage1_score"), self._salt(round_row))
-        return verify.select_finalists(ranking)
-
     # -- publication (sections 12.3, 12.4, 13) ---------------------------------
 
     def publish(self, round_id: str) -> Dict[str, Any]:
@@ -1059,17 +1098,16 @@ class ArenaService:
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
         configuration = round_row["configuration_doc"]
-        stage_1_bundle = json.loads(self._objects.get(round_row["stage1_scores_ref"]).decode("utf-8"))
         final_bundle = json.loads(self._objects.get(round_row["final_scores_ref"]).decode("utf-8"))
         salt = self._salt(round_row)
-        stage1_ranking = verify.stage1_ranking(self._ranking_entries(round_row, stage_1_bundle, "stage1_score"), salt)
-        finalists = list(round_row.get("finalists") or [])
-        final_entries = [e for e in self._ranking_entries(round_row, final_bundle, "final_score") if e["submission_id"] in finalists or e["is_king"]]
+        # One stage: every participant is ranked on its 30-ICP score.
+        final_entries = self._ranking_entries(round_row, final_bundle, "final_score")
         latest = self.latest_published_round()
         previous_king_hotkey = str(latest.get("king_hotkey") or "") if latest else ""
         participants_by_id = {p["submission_id"]: p for p in round_row.get("participants") or []}
+        public_references = self._publish_images(round_row)
         rows_by_submission: Dict[str, Dict[int, Dict[str, Any]]] = {}
-        for row in list(stage_1_bundle["rows"]) + list(final_bundle["rows"]):
+        for row in list(final_bundle["rows"]):
             rows_by_submission.setdefault(row["submission_id"], {})[int(row["icp_position"])] = row
         positions = list(range(contracts.BENCHMARK_ICP_COUNT))
 
@@ -1101,12 +1139,10 @@ class ArenaService:
             "benchmark_commitment": round_row["commitment_doc"],
             "benchmark_ref": round_row["benchmark_ref"],
             # Every participant's pinned image is public: anyone can pull the digest and rerun the round.
-            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "image_digest": p["image_digest"], "image_reference": str(p.get("image_reference") or ""), "entry_command": list(p.get("entry_command") or []), "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
+            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "image_digest": p["image_digest"], "image_reference": str(p.get("image_reference") or ""), "public_image_reference": public_references.get(p["submission_id"], str(p.get("image_reference") or "")), "entry_command": list(p.get("entry_command") or []), "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
             "scorer_policy": self._scorer_policy,
-            "stage_plans": {"stage_1": self._load_scoring_plan(round_row, 1), "stage_2": self._load_scoring_plan(round_row, 2)},
-            "score_bundles": {"stage_1": stage_1_bundle, "final": final_bundle},
-            "stage1_ranking": stage1_ranking,
-            "finalists": finalists,
+            "scoring_plan": self._load_scoring_plan(round_row, 1),
+            "score_bundle": final_bundle,
             "final_ranking": verify.final_ranking(final_entries, salt),
             "king_decision": decision,
             "receipts": [run["receipt_doc"] for run in runs if run.get("receipt_doc")],
@@ -1123,17 +1159,33 @@ class ArenaService:
         }
         contracts.check_strict_document(public_bundle, contracts.PUBLICATION_LIMITS)
         result_bundle_hash = contracts.document_hash(public_bundle)
-        basis = self._sign(rewards.reward_basis_document(
-            round_id=round_id, configuration_hash=round_row["configuration_hash"], commitment_hash=round_row["commitment_hash"], result_bundle_hash=result_bundle_hash,
-            published_at=published_at, finalized_epoch=finalized_epoch, king_hotkey=king_hotkey, king_outcome=decision["outcome"], previous_king_start_epoch=previous_start,
-        ), "reward_basis_hash")
-        publication = self._sign(contracts.hashed_document({
+        # Publication writes several objects to a write-once store, so a retry
+        # after a failed write or transition keeps the basis and publication a
+        # previous attempt already stored for this exact bundle: their
+        # timestamps, epoch, and signatures stay fixed instead of being signed
+        # again with different bytes.
+        basis_ref = self.public_prefix(round_id) + "reward_basis.json"
+        publication_ref = self.public_prefix(round_id) + "publication.json"
+        basis = self._stored_signed_document(basis_ref, "reward_basis_hash", round_id=round_id, result_bundle_hash=result_bundle_hash)
+        if basis is None:
+            basis = self._sign(rewards.reward_basis_document(
+                round_id=round_id, configuration_hash=round_row["configuration_hash"], commitment_hash=round_row["commitment_hash"], result_bundle_hash=result_bundle_hash,
+                published_at=published_at, finalized_epoch=finalized_epoch, king_hotkey=king_hotkey, king_outcome=decision["outcome"], previous_king_start_epoch=previous_start,
+            ), "reward_basis_hash")
+        else:
+            published_at = str(basis["published_at"])
+            effective_epoch = int(basis["effective_reward_epoch"])
+        stored_publication = self._stored_signed_document(publication_ref, "publication_hash", inner="publication", round_id=round_id, result_bundle_hash=result_bundle_hash, reward_basis_hash=basis["reward_basis_hash"])
+        publication = stored_publication if stored_publication is not None else self._sign(contracts.hashed_document({
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION, "round_id": round_id, "configuration_hash": round_row["configuration_hash"],
             "commitment_hash": round_row["commitment_hash"], "result_bundle_hash": result_bundle_hash, "result_bundle_ref": "arena/%s/public/bundle.json" % round_id,
             "king_decision": decision, "reward_basis_hash": basis["reward_basis_hash"], "published_at": published_at,
         }, "publication_hash"), "publication_hash")
+        # Deterministic objects first (identical bytes on every attempt), the signed ones last.
         self._objects.put(publication["result_bundle_ref"], contracts.canonical_json(public_bundle).encode("utf-8"))
-        self._objects.put("arena/%s/public/reward_basis.json" % round_id, contracts.canonical_json(basis).encode("utf-8"))
+        self._publish_public_prefix(round_id, round_row, public_bundle)
+        self._objects.put(basis_ref, contracts.canonical_json(basis).encode("utf-8"))
+        self._objects.put(publication_ref, contracts.canonical_json({"round_id": round_id, "publication": publication, "reward_basis": basis, "signing_key": self.signing_key_document()}).encode("utf-8"))
         transition = self._store.transition_round(round_id, "scored", "published", {
             "result_bundle_hash": result_bundle_hash,
             "publication_doc": publication,
@@ -1189,11 +1241,10 @@ class ArenaService:
         return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
 
     def handle_claim(self, envelope: Any) -> Dict[str, Any]:
-        round_row = self._hot_current_round()
-        if round_row is None:
-            raise ServiceError("no_open_round", 409)
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_CLAIM, hot=True)
         round_id = round_row["round_id"]
-        validated = self.validate_request(envelope, scope=contracts.SCOPE_CLAIM, round_id=round_id)
+        if round_row["status"] in TERMINAL_STATUSES:
+            raise ServiceError("round_ended", 409)
         body = validated["body"]
         if body.get("worker_release_hash") != self.worker_release_hash:
             raise ServiceError("worker_release_mismatch", 403)
@@ -1275,11 +1326,8 @@ class ArenaService:
         return self._store.append_events(run_id=run_id, lease_token_hash=hash_lease_token(lease_token), events=events)
 
     def handle_complete(self, envelope: Any) -> Dict[str, Any]:
-        round_row = self._hot_current_round()
-        if round_row is None:
-            raise ServiceError("no_open_round", 409)
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_COMPLETE, hot=True)
         round_id = round_row["round_id"]
-        validated = self.validate_request(envelope, scope=contracts.SCOPE_COMPLETE, round_id=round_id)
         body = validated["body"]
         raw_receipt = dict(body.get("receipt") or {})
         run_id = str(raw_receipt.pop("run_id", ""))
@@ -1412,7 +1460,7 @@ class ArenaService:
 
     def _invalidate_hot_round(self) -> None:
         with self._hot_round_lock:
-            self._hot_round = None
+            self._hot_rounds.clear()
 
     def _advance_round_locked(self, round_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -1428,38 +1476,28 @@ class ArenaService:
                 if now < _parse_iso(schedule["stage_1_start"]):
                     return {"status": "waiting", "round_status": status}
                 return self.open_stage(round_id, 1)
-            if status in ("stage1", "stage2"):
-                stage = 1 if status == "stage1" else 2
+            if status == "stage1":
                 self._store.expire_leases(round_id)
-                if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
-                    return self.close_stage(round_id, stage)
+                if now >= _parse_iso(schedule["stage_1_close"]) or self.stage_is_complete(round_id, 1):
+                    return self.close_stage(round_id, 1)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_closed", "stage2_closed"):
-                stage = 1 if status == "stage1_closed" else 2
-                if not round_row.get("stage%d_scoring_plan_hash" % stage):
-                    return self.commit_scoring_plan(round_id, stage)
-                return self.open_scoring(round_id, stage)
-            if status in ("stage1_scoring", "stage2_scoring"):
-                # Validators score the committed plan; the window is the stage's scoring close.
-                stage = 1 if status == "stage1_scoring" else 2
+            if status == "stage1_closed":
+                if not round_row.get("stage1_scoring_plan_hash"):
+                    return self.commit_scoring_plan(round_id, 1)
+                return self.open_scoring(round_id, 1)
+            if status == "stage1_scoring":
+                # Validators score the committed plan; the window is the scoring close.
                 self._store.expire_leases(round_id)
-                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
-                if now >= _parse_iso(window) or self.scoring_is_complete(round_id, stage):
-                    return self.close_scoring(round_id, stage)
+                if now >= _parse_iso(schedule["stage_1_scoring_close"]) or self.scoring_is_complete(round_id, 1):
+                    return self.close_scoring(round_id, 1)
                 return {"status": "waiting", "round_status": status}
-            if status in ("stage1_judged", "stage2_judged"):
-                stage = 1 if status == "stage1_judged" else 2
-                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+            if status == "stage1_judged":
                 try:
-                    return self.score_stage(round_id, stage)
+                    return self.score_stage(round_id, 1)
                 except scoring.ScoringError:
-                    if now >= _parse_iso(window) + timedelta(hours=2):
+                    if now >= _parse_iso(schedule["stage_1_scoring_close"]) + timedelta(hours=2):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
                     return {"status": "retry", "round_status": status}
-            if status == "stage1_scored":
-                if now < _parse_iso(schedule["stage_2_start"]):
-                    return {"status": "waiting", "round_status": status}
-                return self.open_stage(round_id, 2)
             if status == "scored":
                 try:
                     return self.publish(round_id)
@@ -1472,6 +1510,88 @@ class ArenaService:
             return {"status": "terminal", "round_status": status}
 
     # -- model release to the public sales-agent repository -------------------
+
+    def _publish_images(self, round_row: Mapping[str, Any]) -> Dict[str, str]:
+        """Copy every participant image from the private Arena repository into the public one.
+
+        The Arena repository is private until publication so a running round's
+        images are not readable by rivals; at publication each image is copied
+        by digest (blob mounts on the same registry host) and the bundle names
+        the public reference, which anyone can pull. Idempotent: blobs and
+        manifests already present are skipped, so a retried publish is cheap.
+        """
+
+        public_repository = str(self._config.defaults.public_registry_repository or "")
+        registry = self._config.registry
+        if not public_repository or registry is None:
+            return {}
+        rules = images.ImageRules.from_document(round_row["configuration_doc"]["image_rules"])
+        references: Dict[str, str] = {}
+        for participant in round_row.get("participants") or []:
+            reference_text = str(participant.get("image_reference") or "")
+            if not reference_text:
+                continue
+            try:
+                descriptor = images.resolve_image(registry, images.parse_reference(reference_text), rules)
+                copied = images.mirror_image(registry, descriptor, public_repository)
+            except images.ImageError as exc:
+                raise ServiceError("public_copy_failed:%s" % exc.rule_id, 502) from exc
+            references[str(participant["submission_id"])] = str(copied)
+        return references
+
+    @staticmethod
+    def public_prefix(round_id: str) -> str:
+        return "arena/%s/public/" % round_id
+
+    @staticmethod
+    def public_output_ref(round_id: str, output_hash: str) -> str:
+        return "arena/%s/public/outputs/%s.json" % (round_id, str(output_hash).split(":", 1)[-1])
+
+    def _publish_public_prefix(self, round_id: str, round_row: Mapping[str, Any], public_bundle: Mapping[str, Any]) -> None:
+        """Write the benchmark and every output under the public prefix.
+
+        With these objects, the bundle, and ``publication.json`` a verifier
+        needs only the bucket: the publication names the bundle, the bundle
+        names every output by hash, and the benchmark carries the committed
+        ICPs. Every byte here is deterministic, so a retried publish writes
+        the same objects again; written before the transition so a crash
+        mid-publish is repaired by the next publish.
+        """
+
+        icps, hashes = self.benchmark_icps(round_id)
+        self._objects.put(self.public_prefix(round_id) + "benchmark.json", contracts.canonical_json({"round_id": round_id, "icps": icps, "icp_hashes": hashes, "commitment": round_row.get("commitment_doc")}).encode("utf-8"))
+        written = set()
+        for entry in public_bundle.get("outputs") or []:
+            output_hash = str(entry["output_hash"])
+            if output_hash in written:
+                continue
+            self._objects.put(self.public_output_ref(round_id, output_hash), self._objects.get(entry["output_ref"]))
+            written.add(output_hash)
+
+    def _stored_signed_document(self, ref: str, hash_field: str, *, inner: Optional[str] = None, **expected: Any) -> Optional[Dict[str, Any]]:
+        """A hashed document a previous publish attempt stored at ``ref``, when it matches ``expected``.
+
+        ``inner`` names the key under which the document sits inside the stored
+        object. A missing, unreadable, tampered, or mismatching object yields
+        ``None``; the caller then signs a fresh document, and the write-once
+        store refuses it if different bytes already stand.
+        """
+
+        raw = self._object_or_none(ref)
+        if raw is None:
+            return None
+        try:
+            document = json.loads(raw.decode("utf-8"))
+            if inner is not None:
+                document = document.get(inner) if isinstance(document, dict) else None
+            if not isinstance(document, dict):
+                return None
+            contracts.verify_hashed_document(document, hash_field)
+        except (ValueError, ArenaContractError):
+            return None
+        if any(document.get(key) != value for key, value in expected.items()):
+            return None
+        return document
 
     @staticmethod
     def _model_release_ref(round_id: str) -> str:
@@ -1511,7 +1631,11 @@ class ArenaService:
         king_submission = self._store.get_submission(str(decision.get("king_submission_id") or ""))
         if king_submission is None or king_submission.get("miner_hotkey") != row.get("king_hotkey"):
             raise ServiceError("model_release_king_missing", 500)
-        image_reference = str(king_submission.get("image_reference") or "")
+        # The pointer names the public copy when the round published one, so the
+        # sales-agent repository points at an image anyone can pull.
+        bundle = json.loads(self._objects.get(publication["result_bundle_ref"]).decode("utf-8"))
+        published = next((p for p in bundle.get("participants") or [] if p.get("submission_id") == king_submission["submission_id"]), {})
+        image_reference = str(published.get("public_image_reference") or king_submission.get("image_reference") or "")
         image_digest = str(king_submission.get("image_digest") or "")
         entry_command = [str(item) for item in (king_submission.get("entry_command") or [])]
         if not image_reference or not image_digest or not entry_command:
@@ -1563,7 +1687,10 @@ class ArenaService:
     # -- public reads (section 14.1) -------------------------------------------
 
     def public_current(self) -> Dict[str, Any]:
-        current = self.current_round()
+        active = self.active_rounds()
+        current = active[-1] if active else None
+        open_round = next((row for row in active if row["status"] == "open"), None)
+        running = [row for row in active if row["status"] != "open"]
         latest = self.latest_published_round()
         epoch = None
         try:
@@ -1583,6 +1710,9 @@ class ArenaService:
         return {
             "mode": self._config.mode,
             "round": {"round_id": current["round_id"], "status": current["status"]} if current else None,
+            # Rounds overlap: miners submit to the open round while runners work the running ones.
+            "open_round": dict(open_round) if open_round else None,
+            "running_rounds": [dict(row) for row in running],
             "king": {"hotkey": latest.get("king_hotkey"), "outcome": latest.get("king_outcome"), "round_id": latest.get("round_id"), "king_start_epoch": latest.get("king_start_epoch")} if latest else None,
             "reward_week_index": week,
             "epoch_eligible": eligibility,
@@ -1597,10 +1727,10 @@ class ArenaService:
         row = self._round(round_id)
         view = {
             "round_id": round_id, "status": row["status"], "configuration": row["configuration_doc"], "commitment": row.get("commitment_doc"),
-            "participants": row.get("participants") if row["status"] not in ("open",) else None, "finalists": row.get("finalists"),
+            "participants": row.get("participants") if row["status"] not in ("open",) else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
-            "stage1_ranking": None, "final_ranking": None, "runner_fractions": None, "reward_basis": row.get("reward_basis_doc"),
+            "final_ranking": None, "runner_fractions": None, "reward_basis": row.get("reward_basis_doc"),
             "model_release": None,
         }
         release = self._object_or_none(self._model_release_ref(round_id))
@@ -1608,12 +1738,13 @@ class ArenaService:
             view["model_release"] = json.loads(release.decode("utf-8"))
         if row["status"] == "published":
             bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
-            view.update({"stage1_ranking": bundle.get("stage1_ranking"), "final_ranking": bundle.get("final_ranking"), "runner_fractions": bundle.get("runner_fractions"), "king_decision": bundle.get("king_decision")})
+            view.update({"final_ranking": bundle.get("final_ranking"), "runner_fractions": bundle.get("runner_fractions"), "king_decision": bundle.get("king_decision")})
         return view
 
     def public_benchmark(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
-        if row["status"] not in ("stage2_closed", "scored", "published"):
+        # The benchmark is public once every execution has ended.
+        if row["status"] not in ("stage1_closed", "stage1_scoring", "stage1_judged", "scored", "published"):
             raise ServiceError("benchmark_not_public", 403)
         icps, hashes = self.benchmark_icps(round_id)
         return {"round_id": round_id, "icps": icps, "icp_hashes": hashes, "commitment": row.get("commitment_doc")}
@@ -1628,11 +1759,10 @@ class ArenaService:
             raise ServiceError("round_not_published", 409)
         bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
         timings = []
-        for stage in (1, 2):
-            try:
-                timings.append(json.loads(self._objects.get("arena/%s/timing/stage%d_scoring.json" % (round_id, stage)).decode("utf-8")))
-            except benchmark.BenchmarkReplayError:
-                continue
+        try:
+            timings.append(json.loads(self._objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode("utf-8")))
+        except benchmark.BenchmarkReplayError:
+            pass
         return shadow.shadow_report(round_row=row, public_bundle=bundle, scoring_timings=timings)
 
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
@@ -1646,7 +1776,7 @@ class ArenaService:
         for run in runs:
             if run.get("output_ref"):
                 outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
-        bundles = {"stage_1": json.loads(self._objects.get(row["stage1_scores_ref"]).decode("utf-8")), "final": json.loads(self._objects.get(row["final_scores_ref"]).decode("utf-8"))}
+        bundles = {"final": json.loads(self._objects.get(row["final_scores_ref"]).decode("utf-8"))}
         return {
             "round_id": round_id, "submission_id": submission_id, "submission": {k: v for k, v in (self._store.get_submission(submission_id) or {}).items() if k in ("miner_hotkey", "image_digest", "image_reference", "entry_command", "is_king")},
             "outputs": outputs, "receipts": [run["receipt_doc"] for run in runs if run.get("receipt_doc")],

@@ -5,9 +5,9 @@ network, no provider call. From a published round bundle the verifier
 recomputes the first-N slice and employee-bucket skip (12.2), every per-ICP
 score through the Lab's published-bundle arithmetic
 (``leadpoet_verifier.research_evaluation.compute_evaluation_aggregates`` over
-the Lab's false-positive counters), the Stage 1 and final stage scores, the
-Stage 1 ranking, the finalist set, the final ranking, and the king decision
-(12.3), and it checks every hash and Arena signature (12.4).
+the Lab's false-positive counters), each participant's score over the one
+30-ICP stage, the final ranking, and the king decision (12.3), and it checks
+every hash and Arena signature (12.4).
 
 What this module can and cannot say: it verifies published documents,
 hashes, signatures, and recomputed aggregates. It claims nothing about the
@@ -67,12 +67,10 @@ from lab_arena.contracts import (
     ArenaSignatureError,
     BENCHMARK_ICP_COUNT,
     F,
-    FINALIST_COUNT,
     KING_OUTCOMES,
     MAX_CHALLENGERS,
     PUBLICATION_LIMITS,
     SCORE_BUNDLE_SCHEMA_VERSION,
-    STAGE_1_ICP_COUNT,
     TERMINAL_CAUSES,
     benchmark_roots,
     check_strict_document,
@@ -94,9 +92,9 @@ from lab_arena.signing import (
     verify_document_signature,
 )
 
-STAGE_1_DENOMINATOR = STAGE_1_ICP_COUNT
+# One stage: every score is the mean over the 30 ICPs.
 FINAL_DENOMINATOR = BENCHMARK_ICP_COUNT
-STAGE_DENOMINATORS = (STAGE_1_DENOMINATOR, FINAL_DENOMINATOR)
+STAGE_DENOMINATORS = (FINAL_DENOMINATOR,)
 MAX_COMPANIES_PER_ICP = 50
 ACCEPTED_CAUSE = "accepted"
 ZERO_ROW_CAUSES = tuple(cause for cause in TERMINAL_CAUSES if cause != ACCEPTED_CAUSE)
@@ -356,7 +354,7 @@ def stage_score(per_icp_scores: Sequence[float], denominator: int) -> float:
     """
 
     if denominator not in STAGE_DENOMINATORS:
-        raise ArenaContractError("stage denominator must be %d or %d" % STAGE_DENOMINATORS)
+        raise ArenaContractError("stage denominator must be %d" % FINAL_DENOMINATOR)
     scores = _require_list(per_icp_scores, "per_icp_scores")
     if len(scores) != denominator:
         raise ArenaContractError("expected exactly %d per-ICP scores, got %d" % (denominator, len(scores)))
@@ -367,7 +365,7 @@ def stage_score(per_icp_scores: Sequence[float], denominator: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Ranking, finalists, and king decision (section 12.3)
+# Ranking and king decision (section 12.3)
 # ---------------------------------------------------------------------------
 
 
@@ -377,50 +375,6 @@ def tie_break_hash(salt: str, artifact_hash: str) -> str:
     return document_hash(
         {"salt": _require_text(salt, "salt"), "artifact_hash": require_sha256(artifact_hash, "artifact_hash")}
     )
-
-
-def stage1_ranking(entries: Sequence[Mapping[str, Any]], salt: str) -> List[Dict[str, Any]]:
-    """Challengers by higher Stage 1 score, then lower salted artifact hash.
-
-    Each entry is ``{"submission_id", "artifact_hash", "stage1_score",
-    "is_king"}``; the king is excluded and advances separately.
-    """
-
-    seen = set()  # type: set
-    challengers = []  # type: List[Dict[str, Any]]
-    for entry in entries:
-        _require_mapping(entry, "ranking entry")
-        submission_id = _require_text(entry.get("submission_id"), "submission_id")
-        if submission_id in seen:
-            raise ArenaContractError("duplicate submission %s in ranking entries" % submission_id)
-        seen.add(submission_id)
-        if bool(entry.get("is_king", False)):
-            continue
-        challengers.append(
-            {
-                "submission_id": submission_id,
-                "stage1_score": _require_score(entry.get("stage1_score"), "stage1_score"),
-                "tie_break_hash": tie_break_hash(salt, entry.get("artifact_hash")),
-            }
-        )
-    challengers.sort(key=lambda row: (-row["stage1_score"], row["tie_break_hash"]))
-    ranked = []  # type: List[Dict[str, Any]]
-    for index, row in enumerate(challengers):
-        ranked.append(
-            {
-                "rank": index + 1,
-                "submission_id": row["submission_id"],
-                "stage1_score": row["stage1_score"],
-                "tie_break_hash": row["tie_break_hash"],
-            }
-        )
-    return ranked
-
-
-def select_finalists(ranking: Sequence[Mapping[str, Any]]) -> List[str]:
-    """The first ``FINALIST_COUNT`` challengers, or all when fewer exist."""
-
-    return [str(_require_mapping(row, "ranking row")["submission_id"]) for row in list(ranking)[:FINALIST_COUNT]]
 
 
 def _final_entry(entry: Any, salt: str) -> Dict[str, Any]:
@@ -682,7 +636,6 @@ SCORE_BUNDLE_FIELDS = (
     F("stage", "int", minimum=1, maximum=2),
     F("scorer_policy", "object"),
     F("scoring_plan_hash", "sha256"),
-    F("stage_1_bundle_hash", "sha256", required=False),
     F(
         "rows",
         "list[object]",
@@ -708,10 +661,8 @@ SCORE_BUNDLE_FIELDS = (
 
 def _stage_positions(stage: int) -> Tuple[int, ...]:
     if stage == 1:
-        return tuple(range(0, STAGE_1_ICP_COUNT))
-    if stage == 2:
-        return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
-    raise ArenaContractError("stage must be 1 or 2")
+        return tuple(range(0, BENCHMARK_ICP_COUNT))
+    raise ArenaContractError("stage must be 1")
 
 
 def _validate_indexes(values: Sequence[int], path: str) -> None:
@@ -761,10 +712,6 @@ def validate_score_bundle(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("score bundle scorer_policy must carry policy_hash")
     bundle["scorer_policy"] = policy
     stage = bundle["stage"]
-    if stage == 2 and not bundle.get("stage_1_bundle_hash"):
-        raise ArenaContractError("stage 2 bundle must bind stage_1_bundle_hash")
-    if stage == 1 and bundle.get("stage_1_bundle_hash") is not None:
-        raise ArenaContractError("stage 1 bundle cannot bind a stage 1 bundle")
     seen = set()  # type: set
     submission_ids = set()  # type: set
     for index, row in enumerate(bundle["rows"]):
@@ -908,39 +855,32 @@ def _verify_authority_documents(
         raise ArenaContractError("published benchmark does not match the committed leaves")
     report.verified("benchmark.commitment_leaves", commitment["benchmark_root"])
 
-    plans_doc = _require_mapping(bundle.get("stage_plans"), "stage_plans")
-    bundles_doc = _require_mapping(bundle.get("score_bundles"), "score_bundles")
-    plans = {}  # type: Dict[int, Dict[str, Any]]
-    score_bundles = {}  # type: Dict[int, Dict[str, Any]]
-    for stage in (1, 2):
-        plan_doc = _require_mapping(plans_doc.get(str(stage)), "stage_plans.%d" % stage)
-        plan = validate_scoring_plan(plan_doc)
-        _verify_signed(plan_doc, hash_field="plan_hash", public_key_der=public_key_der, key_hash=key_hash)
-        if (
-            plan["stage"] != stage
-            or plan["round_id"] != config["round_id"]
-            or plan["configuration_hash"] != config["configuration_hash"]
-            or plan["commitment_hash"] != commitment["commitment_hash"]
-            or plan["scorer_policy_hash"] != policy["policy_hash"]
-        ):
-            raise ArenaContractError("stage %d scoring plan does not bind this round" % stage)
-        plans[stage] = plan
-        report.verified("scoring_plan.%d.signature" % stage, plan["plan_hash"])
+    plan_doc = _require_mapping(bundle.get("scoring_plan"), "scoring_plan")
+    plan = validate_scoring_plan(plan_doc)
+    _verify_signed(plan_doc, hash_field="plan_hash", public_key_der=public_key_der, key_hash=key_hash)
+    if (
+        plan["stage"] != 1
+        or plan["round_id"] != config["round_id"]
+        or plan["configuration_hash"] != config["configuration_hash"]
+        or plan["commitment_hash"] != commitment["commitment_hash"]
+        or plan["scorer_policy_hash"] != policy["policy_hash"]
+    ):
+        raise ArenaContractError("the scoring plan does not bind this round")
+    report.verified("scoring_plan.signature", plan["plan_hash"])
 
-        bundle_doc = _require_mapping(bundles_doc.get(str(stage)), "score_bundles.%d" % stage)
-        score_bundle = validate_score_bundle(bundle_doc)
-        _verify_signed(bundle_doc, hash_field="bundle_hash", public_key_der=public_key_der, key_hash=key_hash)
-        if (
-            score_bundle["stage"] != stage
-            or score_bundle["round_id"] != config["round_id"]
-            or score_bundle["scoring_plan_hash"] != plan["plan_hash"]
-            or score_bundle["scorer_policy"]["policy_hash"] != policy["policy_hash"]
-        ):
-            raise ArenaContractError("stage %d score bundle does not bind its plan and policy" % stage)
-        if stage == 2 and score_bundle.get("stage_1_bundle_hash") != score_bundles[1]["bundle_hash"]:
-            raise ArenaContractError("stage 2 score bundle does not bind the stage 1 bundle")
-        score_bundles[stage] = score_bundle
-        report.verified("score_bundle.%d.signature" % stage, score_bundle["bundle_hash"])
+    bundle_doc = _require_mapping(bundle.get("score_bundle"), "score_bundle")
+    score_bundle = validate_score_bundle(bundle_doc)
+    _verify_signed(bundle_doc, hash_field="bundle_hash", public_key_der=public_key_der, key_hash=key_hash)
+    if (
+        score_bundle["stage"] != 1
+        or score_bundle["round_id"] != config["round_id"]
+        or score_bundle["scoring_plan_hash"] != plan["plan_hash"]
+        or score_bundle["scorer_policy"]["policy_hash"] != policy["policy_hash"]
+    ):
+        raise ArenaContractError("the score bundle does not bind its plan and policy")
+    report.verified("score_bundle.signature", score_bundle["bundle_hash"])
+    plans = {1: plan}  # type: Dict[int, Dict[str, Any]]
+    score_bundles = {1: score_bundle}  # type: Dict[int, Dict[str, Any]]
 
     return {
         "public_key_der": public_key_der,
@@ -1075,54 +1015,16 @@ def _rebuild_scores_and_decision(
     by_id = {str(item["submission_id"]): item for item in participants}
     all_ids = [str(item["submission_id"]) for item in participants]
 
-    stage1_rows = _recompute_stage_rows(1, context, outputs, output_hash_fn, all_ids)
-    stage1_scores = {}  # type: Dict[str, float]
-    for submission_id in all_ids:
-        rows = stage1_rows[submission_id]
-        stage1_scores[submission_id] = stage_score(
-            [rows[position]["per_icp_score"] for position in _stage_positions(1)], STAGE_1_DENOMINATOR
-        )
-    published_stage1 = context["score_bundles"][1]["submission_scores"]
-    if published_stage1 != stage1_scores:
-        raise ArenaContractError("stage 1 submission scores do not recompute")
-    report.verified("stage_1.per_icp_and_stage_scores", "%d submissions" % len(stage1_scores))
-
-    ranking = stage1_ranking(
-        [
-            {
-                "submission_id": submission_id,
-                "artifact_hash": participant_artifact_hash(by_id[submission_id]),
-                "stage1_score": stage1_scores[submission_id],
-                "is_king": bool(by_id[submission_id].get("is_king", False)),
-            }
-            for submission_id in all_ids
-        ],
-        salt,
-    )
-    _compare_rows(bundle.get("stage1_ranking"), ranking, "stage1_ranking")
-    report.verified("stage_1.ranking", "%d challengers" % len(ranking))
-    finalists = select_finalists(ranking)
-    if list(_require_list(bundle.get("finalists"), "finalists")) != finalists:
-        raise ArenaContractError("published finalists differ from the rebuilt finalist set")
-    report.verified("stage_1.finalists", ", ".join(finalists))
-
-    if config["all_participants_run_stage_2"]:
-        stage2_ids = list(all_ids)
-    else:
-        stage2_ids = list(finalists) + ([str(king["submission_id"])] if king is not None else [])
-    stage2_rows = _recompute_stage_rows(2, context, outputs, output_hash_fn, stage2_ids)
-
+    # One stage: every participant's 30 rows recompute into its final score.
+    rows_by_submission = _recompute_stage_rows(1, context, outputs, output_hash_fn, all_ids)
+    positions = _stage_positions(1)
     final_scores = {}  # type: Dict[str, float]
     valid = {}  # type: Dict[str, bool]
-    for submission_id in stage2_ids:
-        rows = dict(stage1_rows[submission_id])
-        rows.update(stage2_rows[submission_id])
-        all_positions = _stage_positions(1) + _stage_positions(2)
-        final_scores[submission_id] = stage_score(
-            [rows[position]["per_icp_score"] for position in all_positions], FINAL_DENOMINATOR
-        )
-        valid[submission_id] = result_is_valid(rows, all_positions)
-    published_final = context["score_bundles"][2]["submission_scores"]
+    for submission_id in all_ids:
+        rows = rows_by_submission[submission_id]
+        final_scores[submission_id] = stage_score([rows[position]["per_icp_score"] for position in positions], FINAL_DENOMINATOR)
+        valid[submission_id] = result_is_valid(rows, positions)
+    published_final = context["score_bundles"][1]["submission_scores"]
     if published_final != final_scores:
         raise ArenaContractError("final submission scores do not recompute")
     report.verified("final.per_icp_and_final_scores", "%d submissions" % len(final_scores))
@@ -1135,7 +1037,7 @@ def _rebuild_scores_and_decision(
             "final_score": final_scores[submission_id] if valid[submission_id] else None,
             "is_king": bool(by_id[submission_id].get("is_king", False)),
         }
-        for submission_id in stage2_ids
+        for submission_id in all_ids
     ]
     ranked = final_ranking(final_entries, salt)
     _compare_rows(bundle.get("final_ranking"), ranked, "final_ranking")
@@ -1179,8 +1081,6 @@ def _rebuild_scores_and_decision(
     else:
         report.not_checked("reward_basis", "no reward basis published in this bundle")
     return {
-        "stage1_scores": stage1_scores,
-        "finalists": finalists,
         "final_scores": final_scores,
         "decision": decision,
     }
@@ -1196,10 +1096,10 @@ def rebuild_round(
     """Rebuild every aggregate and decision of a published round.
 
     ``public_bundle`` holds ``round_configuration``, ``benchmark_commitment``,
-    ``benchmark`` (50 ICPs in slot order), ``participants``, ``scorer_policy``,
-    ``stage_plans`` and ``score_bundles`` keyed ``"1"``/``"2"``, ``outputs``
-    keyed by output hash, ``stage1_ranking``, ``finalists``, ``final_ranking``,
-    ``king_decision`` and optionally ``reward_basis``. ``signing_key_document``
+    ``benchmark`` (30 ICPs in slot order), ``participants``, ``scorer_policy``,
+    ``scoring_plan``, ``score_bundle``, ``outputs`` keyed by output hash,
+    ``final_ranking``, ``king_decision`` and optionally ``reward_basis``.
+    ``signing_key_document``
     is the ``GET /signing-key`` document; its key hash must equal
     ``round_configuration.signing_public_key_hash``. ``output_hash_fn`` and
     ``icp_hash_fn`` default to the canonical document hash.

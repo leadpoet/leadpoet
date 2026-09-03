@@ -80,8 +80,8 @@ def basis(*, outcome="crowned", effective=24801, start=24801, hotkey=KING_HOTKEY
 
 
 def apply_kernel(base, reward_basis, epoch_id):
-    lab_share = rewards.derive_research_lab_share(base["research_lab_allocation_doc"], base["research_lab_fallback_share"])
-    values = rewards.champion_values(reward_basis, epoch_id, lab_share, base["leaderboard_bonus_share"], base["metagraph_hotkeys"])
+    # The king's share is a share of total emissions: the lab and leaderboard shares do not enter it.
+    values = rewards.champion_values(reward_basis, epoch_id, base["metagraph_hotkeys"])
     return snapshot(epoch_id=epoch_id, champion_share=values["champion_share"], effective_champion_share=values["effective_champion_share"], champion_uid=values["champion_uid"]), values
 
 
@@ -106,14 +106,14 @@ def test_rewards_disabled_leaves_the_snapshot_and_every_weight_byte_identical():
 def test_eligible_king_receives_the_exact_week_share_through_the_champion_slot():
     base = snapshot()
     baseline = compute_final_weights(base)
-    proposed, values = apply_kernel(base, basis(), 24810)  # week 0: 100% of the Arena pool
+    proposed, values = apply_kernel(base, basis(), 24810)  # week 0: 100% of the Arena pool, 25% of emissions
     assert values["eligible"] is True and values["champion_uid"] == 3
-    assert values["champion_share"] == values["effective_champion_share"] == 0.15125
+    assert values["champion_share"] == values["effective_champion_share"] == 0.25
     result = compute_final_weights(proposed)
-    assert abs(weight_of(result, 3) - 0.15125) < 1e-9
+    assert abs(weight_of(result, 3) - 0.25) < 1e-9
     assert 3 not in baseline["uids"] or weight_of(baseline, 3) == 0.0
     assert burn_of(result) <= burn_of(baseline) + 1e-9  # the Arena amount is never burned
-    assert abs(result["components"]["fulfillment_pool_share"] - (baseline["components"]["fulfillment_pool_share"] - 0.15125)) < 1e-9
+    assert abs(result["components"]["fulfillment_pool_share"] - (baseline["components"]["fulfillment_pool_share"] - 0.25)) < 1e-9
     assert result["components"]["research_lab_share"] == baseline["components"]["research_lab_share"] == 0.3
     assert proposed["config_hash"] != base["config_hash"]  # visible but harmless weekly change
     # The lab share is derived from the allocation document identically on both sides.
@@ -123,7 +123,7 @@ def test_eligible_king_receives_the_exact_week_share_through_the_champion_slot()
 
 def test_week_decay_and_floor_are_visible_in_the_weight_vector():
     base = snapshot()
-    expected = {0: 0.15125, 1: 0.121, 2: 0.09075, 3: 0.0605, 4: 0.03025, 9: 0.03025}
+    expected = {0: 0.25, 1: 0.2, 2: 0.15, 3: 0.1, 4: 0.05, 9: 0.05}
     for week, share in expected.items():
         epoch = 24801 + 140 * week
         # A round publishes every twenty epochs: the governing row is recent and

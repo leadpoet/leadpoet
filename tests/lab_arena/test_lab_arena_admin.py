@@ -31,6 +31,9 @@ class FakeService:
     def current_round(self):
         return dict(self.row)
 
+    def open_round(self):
+        return dict(self.row) if self.row["status"] == "open" else None
+
     def latest_published_round(self):
         return None
 
@@ -95,6 +98,9 @@ class IdleService(FakeService):
     def current_round(self):
         return None
 
+    def open_round(self):
+        return None
+
     def create_round(self, cutoff):
         self.created.append(cutoff)
         return {"round_id": "arena-%s" % cutoff.strftime("%Y-%m-%d"), "schedule": {"submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")}}
@@ -110,6 +116,12 @@ def test_create_makes_the_round_for_a_cutoff_and_refuses_open_rounds_and_existin
     assert "already exists" in capsys.readouterr().err
     assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-05"]), service) == 2  # not a UTC instant
     capsys.readouterr()
-    busy = FakeService(status="stage1")
+    busy = FakeService(status="open")
     assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-06T00:00:00Z"]), busy) == 3
-    assert "already open or running" in capsys.readouterr().err
+    assert "already open for submissions" in capsys.readouterr().err
+    # Rounds overlap: a running round never blocks the next one.
+    running = FakeService(status="stage1")
+    running.created = []
+    running.create_round = lambda cutoff: IdleService.create_round(running, cutoff)
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-06T00:00:00Z"]), running) == 0
+    assert json.loads(capsys.readouterr().out)["created"] == "arena-2026-09-06" and len(running.created) == 1

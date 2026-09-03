@@ -302,12 +302,12 @@ class BatchPlan:
 
 
 def _build_slot_plan() -> Tuple[BatchPlan, ...]:
-    """Slots are 0..49 in order. Batch ``i`` covers the next
+    """Slots are 0..29 in order. Batch ``i`` covers the next
     ``GENERATION_BATCH_SIZES[i]`` slots and industry ``k`` of a batch is
-    ``INDUSTRIES[k]``; so slot ``s`` maps to ``INDUSTRIES[s % 20]`` for the two
-    twenty-slot batches and to ``INDUSTRIES[s - 40]`` for the ten-slot batch.
-    The fifty slots therefore hold three ICPs for each of the first ten
-    industries and two for each of the remaining ten."""
+    ``INDUSTRIES[k]``; so slot ``s`` maps to ``INDUSTRIES[s]`` for the
+    twenty-slot batch and to ``INDUSTRIES[s - 20]`` for the ten-slot batch.
+    The thirty slots therefore hold two ICPs for each of the first ten
+    industries and one for each of the remaining ten."""
 
     plans: List[BatchPlan] = []
     offset = 0
@@ -353,13 +353,11 @@ def slot_industry(slot: int) -> str:
 
 
 def stage_positions(stage: int) -> range:
-    """Stage 1 is slots 0..19; Stage 2 is slots 20..49 (section 8 step 7)."""
+    """The one stage covers every slot, 0..29 (section 8 step 7 as revised)."""
 
     if stage == 1:
-        return range(0, contracts.STAGE_1_ICP_COUNT)
-    if stage == 2:
-        return range(contracts.STAGE_1_ICP_COUNT, contracts.BENCHMARK_ICP_COUNT)
-    raise ArenaContractError("stage must be 1 or 2")
+        return range(0, contracts.BENCHMARK_ICP_COUNT)
+    raise ArenaContractError("stage must be 1")
 
 
 # ---------------------------------------------------------------------------
@@ -1047,8 +1045,6 @@ class BenchmarkResult:
     content_hashes: Tuple[str, ...]
     icp_leaf_hashes: Tuple[str, ...]
     benchmark_root: str
-    stage_1_root: str
-    stage_2_root: str
     journal_entries: Tuple[Mapping[str, Any], ...]
     journal_head_hash: str
     journal_length: int
@@ -1058,7 +1054,7 @@ class BenchmarkResult:
 
 
 def stage_slice(result: BenchmarkResult, stage: int) -> Tuple[Mapping[str, Any], ...]:
-    """The ICPs one stage receives: slots 0..19 for Stage 1, 20..49 for Stage 2."""
+    """The ICPs the one stage receives: every slot, 0..29, in slot order."""
 
     positions = stage_positions(stage)
     return tuple(result.icps[position] for position in positions)
@@ -1113,8 +1109,6 @@ def commit_benchmark(
         "journal_length": result.journal_length,
         "evaluation_date": evaluation_date,
         "benchmark_root": roots["benchmark_root"],
-        "stage_1_root": roots["stage_1_root"],
-        "stage_2_root": roots["stage_2_root"],
         "icp_leaf_hashes": roots["icp_leaf_hashes"],
         "generation_started_at": _iso_timestamp(started_at, "started_at"),
         "generation_finished_at": _iso_timestamp(finished_at, "finished_at"),
@@ -1595,8 +1589,6 @@ class _GenerationRun:
             content_hashes=tuple(item.content_hash for item in ordered),
             icp_leaf_hashes=tuple(roots["icp_leaf_hashes"]),
             benchmark_root=roots["benchmark_root"],
-            stage_1_root=roots["stage_1_root"],
-            stage_2_root=roots["stage_2_root"],
             journal_entries=entries,
             journal_head_hash=entries[-1]["entry_hash"],
             journal_length=len(entries),

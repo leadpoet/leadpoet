@@ -73,7 +73,11 @@ Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
 `LAB_ARENA_MAX_IMAGE_BYTES` (2 GiB of compressed layers), `LAB_ARENA_REPOSITORY_COMMIT`,
 `LAB_ARENA_SCORING_WORKERS` (4), `LAB_ARENA_BANNED_HOTKEYS_PATH` (JSON list),
 `LAB_ARENA_MAX_CHALLENGERS` (256, the admitted challengers per round; lower
-it only while capacity is being commissioned), `AWS_REGION`.
+it only while capacity is being commissioned),
+`LAB_ARENA_PUBLIC_REGISTRY_REPOSITORY` (a public repository on the same
+registry host as `LAB_ARENA_REGISTRY_REPOSITORY`; at publication every
+participant image is copied into it by digest and the bundle names the
+public reference; unset, the bundle names the Arena reference), `AWS_REGION`.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
 `shadow` (full rounds, publication marked shadow, no reward basis is
@@ -81,32 +85,45 @@ governing), or `live`. The reward release itself is a separate step (plan
 section 19 step 9) and is not enabled by this service.
 
 Start: `python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791`.
-The driver thread advances the current round once per `--tick-seconds`; the
-API and the driver share one process and one service role. While a round is
-open, each tick also admits every uploaded submission (resolve, check, mirror,
-pin) for up to five minutes before advancing, and at the cutoff it rejects any
-image that still cannot be resolved. After a round publishes, each tick
-releases the king model (section 7) until its receipt exists.
+The driver thread advances every active round (not published or cancelled),
+oldest first, once per `--tick-seconds`; `--driver-only` runs the ticks
+without the API and `--no-driver` serves the API without the ticks, so the
+two can run as separate processes. The API and the driver share one service
+role. While a round is open, each tick also admits every uploaded submission
+(resolve, check, mirror, pin) for up to five minutes before advancing, and at
+the cutoff it rejects any image that still cannot be resolved. After a round
+publishes, each tick releases the king model (section 7) until its receipt
+exists.
+
+A round is one stage: 30 ICPs for every participant, then one validator
+scoring window, then the bundle. The statuses are `open`, `committed`,
+`stage1`, `stage1_closed`, `stage1_scoring`, `stage1_judged`, `scored`,
+`published`, and `cancelled`. The default schedule after the cutoff is 30
+minutes for the benchmark, 300 minutes for the stage, and 90 minutes for
+scoring, so a round publishes about seven hours after its cutoff.
 
 ### Daily rounds
 
-V1 runs one round at a time: runner-facing handlers resolve the newest
-round that is not published or cancelled, so the next round is created only
-after the previous one ends. Set `LAB_ARENA_DAILY_CUTOFF_UTC=<hour>` and the
-service driver creates the next round itself whenever no round is open or
-running: its cutoff is the next occurrence of that UTC hour at least six
-hours ahead (the submission window), and a date whose round already exists
-moves to the next day, because a round id is its cutoff date. Leave the
-variable unset to create rounds by hand:
+Rounds overlap: the day's round runs its benchmark while the next round is
+already open, so miners can always submit. Every signed request names its
+round (`round_id` in the envelope): a submission goes to the open round it
+names, and a claim or completion to the running round it names; a request
+naming an unknown round is refused as `round_unknown`, and a submission to a
+round past its cutoff as `submission_window_closed`. `GET /arena/v1/current`
+reports `open_round` and `running_rounds` (plus `round`, the newest active
+round, for older clients). Set `LAB_ARENA_DAILY_CUTOFF_UTC=<hour>` and the
+service driver creates the next round itself whenever no round is open: its
+cutoff is the next occurrence of that UTC hour at least six hours ahead (the
+submission window), and a date whose round already exists moves to the next
+day, because a round id is its cutoff date. Leave the variable unset to
+create rounds by hand:
 
 ```bash
 python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
 ```
 
-The command refuses while a round is open or running and when that date's
-round exists. A day's cycle is the submission window plus the stage minutes
-in the round configuration, so with a six-hour window and the default stage
-minutes a round publishes well inside the day it is named for.
+The command refuses while a round is open for submissions and when that
+date's round exists; a running round never blocks it.
 
 ## 4. Runner environment
 
@@ -120,13 +137,15 @@ Each runner needs `LAB_ARENA_API_BASE_URL`, a Bittensor wallet
 allowlisted for the round, optional `LAB_ARENA_MAX_PARALLEL_RUNS`,
 `LAB_ARENA_RUNNER_WORK_DIR`, `LAB_ARENA_RUNSC_PATH`, and the same
 `LAB_ARENA_REPOSITORY_COMMIT` the service pins. Without `--round-id` a runner
-follows the Arena's current round: it asks `GET /arena/v1/current` at every
-idle poll, verifies each new round's signed release identity (worker release,
-runtime lock, shim, operation table) before its first claim, and rolls over
-to the next daily round without a restart. `--round-id` (or
-`LAB_ARENA_ROUND_ID`) pins one round instead. A runner refuses a round whose
-identity differs from its own. Runners hold no provider credential, no
-database credential, and no signing key.
+follows every running round: it asks `GET /arena/v1/current` at every idle
+poll for the `running_rounds` that have work (`stage1`, `stage1_scoring`),
+verifies each new round's signed release identity (worker release, runtime
+lock, shim, operation table) before its first claim, keeps each round's image
+sources by round id, claims the oldest round first, and rolls over to the
+next daily round without a restart. `--round-id` (or `LAB_ARENA_ROUND_ID`)
+pins one round instead. A runner refuses a round whose identity differs from
+its own. Runners hold no provider credential, no database credential, and no
+signing key.
 
 Runners need no Docker daemon. A lease names the image by its Arena
 repository reference and digest; the runner pulls the manifest and layers
@@ -174,8 +193,13 @@ status and body; a credential header or an unknown host is refused with a
 JSON `{"error": {"code": ...}}` body. The judge image keeps the shim's frame
 protocol on the same socket.
 
-Every participant's pinned reference is in the public round bundle, so
-anyone can pull the digest and rerun the round.
+The Arena repository is private while a round runs, so a rival cannot pull
+a competitor's image before the round ends; runners read it with the
+registry credential. At publication every participant image is copied by
+digest into `LAB_ARENA_PUBLIC_REGISTRY_REPOSITORY` (blob mounts on the same
+registry host; a retried publish skips what exists), and the bundle names
+each `public_image_reference` next to the Arena reference, so anyone can pull
+the digest and rerun the round.
 
 ## 5. Miner keys and call quotas
 
@@ -217,8 +241,8 @@ live in `tests/lab_arena/fixtures/deepline/`.
 ## 6. Validator scoring
 
 Validators run the judge as well as the models, and one validator is enough.
-After a stage closes and the scoring plan is committed, the round enters
-`stageN_scoring`: one scoring assignment per work item is claimable like an
+After the stage closes and the scoring plan is committed, the round enters
+`stage1_scoring`: one scoring assignment per work item is claimable like an
 ICP run by any allowlisted validator, its own executions included. The
 validator runs the Arena-built judge image, whose digest, reference, and
 entry command are pinned in the round configuration from
@@ -228,7 +252,7 @@ Deepline), Scrapingdog, and OpenRouter calls cross the same broker on the
 scored miner's keys under the per-work-item scoring quotas, and the judge models come from the signed
 scorer policy. Completion carries the breakdown document under a signed
 receipt. When every assignment is terminal the window closes to
-`stageN_judged`; an assignment left unjudged for any reason other than the
+`stage1_judged`; an assignment left unjudged for any reason other than the
 scored miner's own key cancels the round, exactly like an execution gap.
 
 The replay is the single integrity check. In the judged state the Arena runs
@@ -238,7 +262,7 @@ called. Reproduced with the same numbers: accepted. Reproduced with different
 numbers: the replayed numbers are scored and the validator is listed as a
 mismatch in the stage timing report. Not reproducible at all (judge requests
 with no recorded answer, a failed replay, an invalid output): the scoring is
-rejected as `replay_rejected`, the round returns to `stageN_scoring` for a
+rejected as `replay_rejected`, the round returns to `stage1_scoring` for a
 second attempt of that item, and an item that fails twice cancels the round
 rather than becoming a miner's zero. A scoring the scored miner's own key or
 quota refused (`judge_key_refused`, decided by the worker from the refusals
@@ -307,8 +331,8 @@ every one of those crosses the shim in trusted-scorer mode:
 ## 7. Model release
 
 After each published round with a crowned or defended king, the driver
-commits a pointer to the king's pinned image to
-`leadpoet/leadpoet-sales-agent` on `main` as the `model/` tree
+commits a pointer to the king's pinned image (its public copy when the
+round published one) to `leadpoet/leadpoet-sales-agent` on `main` as the `model/` tree
 (`model/IMAGE`, `model/DIGEST`, `model/ENTRYPOINT.json`, `model/README.md`),
 with the signed manifest at `arena/current.json` and one copy per round under
 `arena/history/`. The model itself is the image, which anyone pulls by
@@ -330,29 +354,28 @@ commit on the first release.
   (`ArenaService.shadow_report`) satisfied, including at least one round at
   the challenger count you intend to admit at launch.
 - Capacity sizing: every miner may enter one agent per round, up to 256.
-  Each admitted challenger costs about 100 sandbox-minutes in Stage 1 (20
-  ICPs at the 5-minute cap) and each finalist 150 in Stage 2. Size the floor
-  so admitted challengers × 100 fits in 80 percent of the 210-minute Stage 1
-  window: 257 participants need about 160 slots, or 20 hosts at 8 slots.
-  Stage 1 judge executions equal participants × 20 (5,140 at 257). They
-  are validator work now: size the scoring windows from the judge's real
-  duration. A judge run may take up to `SCORING_WALL_CLOCK_SECONDS` (15
-  minutes) against live providers, so a 60-minute Stage 1 scoring window
-  holds at most `slots × 60 / minutes-per-item` items; at 5,140 items and a
-  five-minute average, that needs about 430 slots, or a longer window. A
-  window that closes with items unjudged cancels the round. The Arena's
-  own replays run `LAB_ARENA_SCORING_WORKERS` at a time inside the stage
-  assembly. Measured on the test Mac, one replay subprocess costs about
-  4 s before any judging, because the judge entrypoint imports the
-  evaluator and the qualification scoring package; a 256-challenger round
-  with four workers did not finish its Stage 1 assembly inside two hours.
-  Size the workers as `5,120 × seconds-per-replay / workers` against the
-  time you can spend between the scoring window and Stage 2: with 4 s per
-  replay, 16 workers need about 21 minutes and 32 workers about 11. The
+  Each participant costs about 150 sandbox-minutes (30 ICPs at the 5-minute
+  cap) in the one stage. Size the floor so participants × 150 fits in 80
+  percent of the 300-minute stage window: 257 participants need about 160
+  slots, or 20 hosts at 8 slots. Judge executions equal participants × 30
+  (7,710 at 257). They are validator work: size the scoring window from the
+  judge's real duration. A judge run may take up to
+  `SCORING_WALL_CLOCK_SECONDS` (15 minutes) against live providers, so the
+  90-minute scoring window holds at most `slots × 90 / minutes-per-item`
+  items; at 7,710 items and a five-minute average, that needs about 430
+  slots, or a longer window. A window that closes with items unjudged
+  cancels the round. The Arena's own replays run `LAB_ARENA_SCORING_WORKERS`
+  at a time inside the stage assembly. Measured on the test Mac, one replay
+  subprocess costs about 4 s before any judging, because the judge
+  entrypoint imports the evaluator and the qualification scoring package.
+  Size the workers as `7,710 × seconds-per-replay / workers` against the
+  time you can spend between the scoring window and publication: with 4 s
+  per replay, 16 workers need about 32 minutes and 32 workers about 16. The
   assembly blocks the round until it finishes, so on a small host prefer
   fewer challengers or move the replay after publication. Scores are written
   in batches of 500 and scoring plans live in the object store, so round rows
-  stay small at any participant count.
+  stay small at any participant count. Rounds overlap, so the next round's
+  submission window costs no runner time while this one runs.
 - Scorer egress enforced with the nftables ruleset from
   `lab_arena.egress.scorer_nftables_ruleset` on the scoring host.
 - Runner floor sized from the shadow timing reports before the pilot.
@@ -380,11 +403,15 @@ commit on the first release.
   are named, not uploaded); the application refuses an oversized declared
   length before reading and rejects an oversized body after, but a proxy
   stops the bytes earlier.
-- Anyone can rebuild a published round from public material:
+- Anyone can rebuild a published round from the bucket's public prefix
+  alone (`arena/<round>/public/`: `publication.json` with the signed
+  publication, reward basis, and signing key; `bundle.json`;
+  `benchmark.json`; `outputs/<hash>.json`). `--api` adds a check that the
+  Arena serves the same publication:
 
 ```bash
 python3 scripts/lab_arena_verify.py --round arena-2026-09-05 \
-    --api https://arena.example --bucket-url https://bucket.example
+    --bucket-url https://bucket.example [--api https://arena.example]
 ```
 
 ## 10. Invariants to re-check after any change

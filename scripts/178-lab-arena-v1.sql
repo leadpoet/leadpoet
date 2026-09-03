@@ -123,8 +123,9 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_rounds (
   round_id TEXT PRIMARY KEY
     CHECK (round_id ~ '^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(-[a-z0-9]{1,16})?$'),
   status TEXT NOT NULL DEFAULT 'open'
-    CHECK (status IN ('open', 'committed', 'stage1', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored',
-                      'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published', 'cancelled')),
+    -- One stage: every participant runs the same 30 ICPs, is scored once, and the round publishes.
+    CHECK (status IN ('open', 'committed', 'stage1', 'stage1_closed', 'stage1_scoring', 'stage1_judged',
+                      'scored', 'published', 'cancelled')),
   status_generation BIGINT NOT NULL DEFAULT 0 CHECK (status_generation >= 0),
   stage_generation BIGINT NOT NULL DEFAULT 0 CHECK (stage_generation >= 0),
   configuration_hash TEXT NOT NULL CHECK (configuration_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -139,11 +140,6 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_rounds (
   evaluation_date TEXT,
   stage1_scoring_plan_hash TEXT,
   stage1_scoring_plan_doc JSONB,
-  stage2_scoring_plan_hash TEXT,
-  stage2_scoring_plan_doc JSONB,
-  finalists JSONB,
-  stage1_scores_ref TEXT,
-  stage1_score_bundle_hash TEXT,
   final_scores_ref TEXT,
   final_score_bundle_hash TEXT,
   result_bundle_hash TEXT CHECK (result_bundle_hash IS NULL OR result_bundle_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -411,9 +407,6 @@ BEGIN
      OR (OLD.commitment_doc IS NOT NULL AND NEW.commitment_doc IS DISTINCT FROM OLD.commitment_doc)
      OR (OLD.participant_set_hash IS NOT NULL AND NEW.participant_set_hash IS DISTINCT FROM OLD.participant_set_hash)
      OR (OLD.stage1_scoring_plan_hash IS NOT NULL AND NEW.stage1_scoring_plan_hash IS DISTINCT FROM OLD.stage1_scoring_plan_hash)
-     OR (OLD.stage2_scoring_plan_hash IS NOT NULL AND NEW.stage2_scoring_plan_hash IS DISTINCT FROM OLD.stage2_scoring_plan_hash)
-     OR (OLD.finalists IS NOT NULL AND NEW.finalists IS DISTINCT FROM OLD.finalists)
-     OR (OLD.stage1_score_bundle_hash IS NOT NULL AND NEW.stage1_score_bundle_hash IS DISTINCT FROM OLD.stage1_score_bundle_hash)
      OR (OLD.final_score_bundle_hash IS NOT NULL AND NEW.final_score_bundle_hash IS DISTINCT FROM OLD.final_score_bundle_hash)
      OR (OLD.result_bundle_hash IS NOT NULL AND NEW.result_bundle_hash IS DISTINCT FROM OLD.result_bundle_hash)
      OR (OLD.publication_doc IS NOT NULL AND NEW.publication_doc IS DISTINCT FROM OLD.publication_doc)
@@ -935,40 +928,12 @@ BEGIN
     SET stage1_scoring_plan_hash = v_patch ->> 'stage1_scoring_plan_hash',
         stage1_scoring_plan_doc = v_patch -> 'stage1_scoring_plan_doc'
     WHERE round_id = p_round_id;
-  ELSIF p_expected_status = 'stage2_closed' AND p_next_status = 'stage2_closed' THEN
-    v_allowed := ARRAY['stage2_scoring_plan_doc', 'stage2_scoring_plan_hash'];
-    IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys) OR (v_patch ->> 'stage2_scoring_plan_hash') !~ '^sha256:[0-9a-f]{64}$' THEN
-      RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
-    END IF;
-    IF v_round.stage2_scoring_plan_hash IS NOT NULL THEN
-      IF v_round.stage2_scoring_plan_hash = (v_patch ->> 'stage2_scoring_plan_hash') THEN
-        RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status, 'status_generation', v_round.status_generation);
-      END IF;
-      RAISE EXCEPTION 'lab_arena_scoring_plan_write_once' USING ERRCODE = '42501';
-    END IF;
-    UPDATE public.lab_arena_rounds
-    SET stage2_scoring_plan_hash = v_patch ->> 'stage2_scoring_plan_hash',
-        stage2_scoring_plan_doc = v_patch -> 'stage2_scoring_plan_doc'
-    WHERE round_id = p_round_id;
-  ELSIF p_expected_status = 'stage1_judged' AND p_next_status = 'stage1_scored' THEN
-    v_allowed := ARRAY['finalists', 'stage1_score_bundle_hash', 'stage1_scores_ref'];
-    IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys)
-       OR pg_catalog.jsonb_typeof(v_patch -> 'finalists') <> 'array'
-       OR (v_patch ->> 'stage1_score_bundle_hash') !~ '^sha256:[0-9a-f]{64}$'
-       OR v_round.stage1_scoring_plan_hash IS NULL THEN
-      RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
-    END IF;
-    UPDATE public.lab_arena_rounds
-    SET status = 'stage1_scored', status_generation = status_generation + 1,
-        finalists = v_patch -> 'finalists',
-        stage1_scores_ref = v_patch ->> 'stage1_scores_ref',
-        stage1_score_bundle_hash = v_patch ->> 'stage1_score_bundle_hash'
-    WHERE round_id = p_round_id;
-  ELSIF p_expected_status = 'stage2_judged' AND p_next_status = 'scored' THEN
+  ELSIF p_expected_status = 'stage1_judged' AND p_next_status = 'scored' THEN
+    -- The one stage's bundle is the final bundle.
     v_allowed := ARRAY['final_score_bundle_hash', 'final_scores_ref'];
     IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys)
        OR (v_patch ->> 'final_score_bundle_hash') !~ '^sha256:[0-9a-f]{64}$'
-       OR v_round.stage2_scoring_plan_hash IS NULL THEN
+       OR v_round.stage1_scoring_plan_hash IS NULL THEN
       RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
     END IF;
     UPDATE public.lab_arena_rounds
@@ -1355,14 +1320,14 @@ DECLARE
   v_created INTEGER := 0;
   v_preflight_failed BOOLEAN;
 BEGIN
-  IF p_stage NOT IN (1, 2)
+  IF p_stage <> 1
      OR pg_catalog.jsonb_typeof(p_participants) IS DISTINCT FROM 'array'
      OR pg_catalog.jsonb_array_length(p_participants) < 1
      OR p_icp_positions IS NULL OR p_icp_hashes IS NULL
      OR pg_catalog.array_length(p_icp_positions, 1) IS DISTINCT FROM pg_catalog.array_length(p_icp_hashes, 1) THEN
     RAISE EXCEPTION 'lab_arena_stage_input_invalid' USING ERRCODE = '22023';
   END IF;
-  v_expected := CASE p_stage WHEN 1 THEN 'committed' ELSE 'stage1_scored' END;
+  v_expected := 'committed';
   v_next := 'stage' || p_stage::TEXT;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
   IF NOT FOUND THEN
@@ -1382,8 +1347,7 @@ BEGIN
     v_preflight_failed := COALESCE((v_participant ->> 'preflight_failed')::BOOLEAN, FALSE);
     FOR v_index IN 1 .. pg_catalog.array_length(p_icp_positions, 1) LOOP
       v_position := p_icp_positions[v_index];
-      IF (p_stage = 1 AND v_position NOT BETWEEN 0 AND 19)
-         OR (p_stage = 2 AND v_position NOT BETWEEN 20 AND 49)
+      IF v_position NOT BETWEEN 0 AND 29
          OR p_icp_hashes[v_index] !~ '^sha256:[0-9a-f]{64}$' THEN
         RAISE EXCEPTION 'lab_arena_stage_position_invalid' USING ERRCODE = '22023';
       END IF;
@@ -1471,10 +1435,10 @@ BEGIN
     END IF;
     RETURN pg_catalog.jsonb_build_object('status', 'request_id_reused');
   END IF;
-  IF v_round.status NOT IN ('stage1', 'stage2', 'stage1_scoring', 'stage2_scoring') THEN
+  IF v_round.status NOT IN ('stage1', 'stage1_scoring') THEN
     RETURN pg_catalog.jsonb_build_object('status', 'stage_closed', 'round_status', v_round.status);
   END IF;
-  v_stage := CASE WHEN v_round.status IN ('stage1', 'stage1_scoring') THEN 1 ELSE 2 END;
+  v_stage := 1;
   IF NOT (v_round.configuration_doc -> 'runner_allowlist' ? p_runner_hotkey) THEN
     RETURN pg_catalog.jsonb_build_object('status', 'not_allowlisted');
   END IF;
@@ -1632,7 +1596,7 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_quota_missing' USING ERRCODE = '22023';
   END IF;
   v_stage_quota := v_quota::BIGINT
-    * (CASE v_run.stage WHEN 1 THEN (v_round.configuration_doc ->> 'stage_1_icp_count')::BIGINT ELSE (v_round.configuration_doc ->> 'stage_2_icp_count')::BIGINT END)
+    * (v_round.configuration_doc ->> 'stage_1_icp_count')::BIGINT
     * (v_round.configuration_doc ->> 'max_attempts_per_assignment')::BIGINT;
 
   -- Per-ICP quota on this attempt.
@@ -2067,7 +2031,7 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
-  IF v_round.status NOT IN ('stage1', 'stage2', 'stage1_scoring', 'stage2_scoring') THEN
+  IF v_round.status NOT IN ('stage1', 'stage1_scoring') THEN
     RETURN pg_catalog.jsonb_build_object('status', 'no_stage', 'expired', 0, 'retried', 0);
   END IF;
   FOR v_run IN
@@ -2119,7 +2083,7 @@ DECLARE
   v_incomplete INTEGER;
   v_next TEXT;
 BEGIN
-  IF p_stage NOT IN (1, 2) THEN
+  IF p_stage <> 1 THEN
     RAISE EXCEPTION 'lab_arena_stage_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
@@ -2127,8 +2091,7 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
   IF v_round.status <> ('stage' || p_stage::TEXT) THEN
-    IF (p_stage = 1 AND v_round.status IN ('stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
-       OR (p_stage = 2 AND v_round.status IN ('stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published')) THEN
+    IF v_round.status IN ('stage1_closed', 'stage1_scoring', 'stage1_judged', 'scored', 'published') THEN
       RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
         'stage_generation', v_round.stage_generation);
     END IF;
@@ -2208,7 +2171,7 @@ DECLARE
   v_assignment TEXT;
   v_created INTEGER := 0;
 BEGIN
-  IF p_stage NOT IN (1, 2) OR pg_catalog.jsonb_typeof(p_work_items) IS DISTINCT FROM 'array' THEN
+  IF p_stage <> 1 OR pg_catalog.jsonb_typeof(p_work_items) IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'lab_arena_scoring_input_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
@@ -2218,16 +2181,14 @@ BEGIN
   v_expected := 'stage' || p_stage::TEXT || '_closed';
   v_next := 'stage' || p_stage::TEXT || '_scoring';
   IF v_round.status <> v_expected THEN
-    IF (p_stage = 1 AND v_round.status IN ('stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
-       OR (p_stage = 2 AND v_round.status IN ('stage2_scoring', 'stage2_judged', 'scored', 'published')) THEN
+    IF v_round.status IN ('stage1_scoring', 'stage1_judged', 'scored', 'published') THEN
       RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
         'stage_generation', v_round.stage_generation);
     END IF;
     RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status,
       'stage_generation', v_round.stage_generation);
   END IF;
-  IF (p_stage = 1 AND v_round.stage1_scoring_plan_hash IS NULL)
-     OR (p_stage = 2 AND v_round.stage2_scoring_plan_hash IS NULL) THEN
+  IF v_round.stage1_scoring_plan_hash IS NULL THEN
     RAISE EXCEPTION 'lab_arena_scoring_plan_missing' USING ERRCODE = '22023';
   END IF;
   v_generation := v_round.stage_generation + 1;
@@ -2283,7 +2244,7 @@ DECLARE
   v_incomplete INTEGER;
   v_next TEXT;
 BEGIN
-  IF p_stage NOT IN (1, 2) THEN
+  IF p_stage <> 1 THEN
     RAISE EXCEPTION 'lab_arena_stage_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
@@ -2291,8 +2252,7 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
   END IF;
   IF v_round.status <> ('stage' || p_stage::TEXT || '_scoring') THEN
-    IF (p_stage = 1 AND v_round.status IN ('stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored', 'published'))
-       OR (p_stage = 2 AND v_round.status IN ('stage2_judged', 'scored', 'published')) THEN
+    IF v_round.status IN ('stage1_judged', 'scored', 'published') THEN
       RETURN pg_catalog.jsonb_build_object('status', 'existing', 'round_status', v_round.status,
         'stage_generation', v_round.stage_generation);
     END IF;
@@ -2367,7 +2327,7 @@ DECLARE
   v_rejected INTEGER := 0;
   v_exhausted INTEGER := 0;
 BEGIN
-  IF p_stage NOT IN (1, 2) OR p_run_ids IS NULL OR pg_catalog.array_length(p_run_ids, 1) IS NULL THEN
+  IF p_stage <> 1 OR p_run_ids IS NULL OR pg_catalog.array_length(p_run_ids, 1) IS NULL THEN
     RAISE EXCEPTION 'lab_arena_reject_input_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
@@ -2493,7 +2453,7 @@ DECLARE
   v_existing INTEGER := 0;
   v_value NUMERIC(12, 6);
 BEGIN
-  IF p_stage NOT IN (1, 2) OR pg_catalog.jsonb_typeof(p_scores) IS DISTINCT FROM 'array' THEN
+  IF p_stage <> 1 OR pg_catalog.jsonb_typeof(p_scores) IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'lab_arena_scores_input_invalid' USING ERRCODE = '22023';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR SHARE;
@@ -2639,7 +2599,7 @@ END;
 $lab_arena_function_acl$;
 
 COMMENT ON TABLE public.lab_arena_rounds IS
-  'Lab Arena V1 rounds: configuration, hash-chained generation journal, benchmark commitment, stage state, scoring plans, finalists, publication and signed reward basis (labarena.md section 11).';
+  'Lab Arena V1 rounds: configuration, hash-chained generation journal, benchmark commitment, the one stage''s state and scoring plan, publication and signed reward basis (labarena.md section 11).';
 COMMENT ON TABLE public.lab_arena_runs IS
   'Lab Arena V1 per-ICP logical assignments and their attempts; one active attempt per assignment, at most two attempts, preflight_failed records carry attempt 0.';
 COMMENT ON TABLE public.lab_arena_ledger IS

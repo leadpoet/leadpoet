@@ -229,6 +229,7 @@ def build_service_from_environment(mode: str):
         scorer_entry_command=tuple(scorer.entry_command),
         image_rules=image_rules,
         registry_repository=repository,
+        public_registry_repository=os.environ.get("LAB_ARENA_PUBLIC_REGISTRY_REPOSITORY", "").strip(),
     )
 
     def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:

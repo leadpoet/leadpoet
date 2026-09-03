@@ -16,6 +16,7 @@ from lab_arena import rewards, verify
 from lab_arena.contracts import (
     ArenaContractError,
     BENCHMARK_COMMITMENT_SCHEMA_VERSION,
+    BENCHMARK_ICP_COUNT,
     GENERATION_JOURNAL_SCHEMA_VERSION,
     KING_OUTCOMES,
     OUTPUT_DOCUMENT_SCHEMA_VERSION,
@@ -219,11 +220,11 @@ def _icps() -> List[dict]:
             "intent_signals": ["Hiring backend engineers"],
             "country": "United States",
         }
-        for position in range(50)
+        for position in range(BENCHMARK_ICP_COUNT)
     ]
 
 
-def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, all_stage_2: bool) -> dict:
+def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str]) -> dict:
     schedule = {spec.name: "2026-09-02T%02d:00:00Z" % index for index, spec in enumerate(STAGE_SCHEDULE_FIELDS)}
     return {
         "schema_version": ROUND_CONFIGURATION_SCHEMA_VERSION,
@@ -236,13 +237,11 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
             "model": "generator-model",
             "settings": {"temperature": 0.7},
             "journal_schema_version": GENERATION_JOURNAL_SCHEMA_VERSION,
-            "batch_sizes": [20, 20, 10],
+            "batch_sizes": [20, 10],
             "max_generation_attempts": 12,
         },
         "tie_break_rule": "finalized_block_after_cutoff.v1",
-        "stage_1_icp_count": 20,
-        "stage_2_icp_count": 30,
-        "finalist_count": 10,
+        "stage_1_icp_count": BENCHMARK_ICP_COUNT,
         "max_challengers": 15,
         "runner_slot_ceiling": 8,
         "max_attempts_per_assignment": 2,
@@ -284,11 +283,11 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
         "publication_terms_hash": _sha("terms"),
         "reward_constants": {
             "pool_percent": 25,
+            "pool_basis": "total_emissions",
             "king_pool_share_percent_by_week": [100, 80, 60, 40, 20],
             "epochs_per_reward_week": 140,
             "eligibility_max_epochs": 45,
         },
-        "all_participants_run_stage_2": all_stage_2,
     }
 
 
@@ -315,7 +314,6 @@ def _build_round(
     challenger_count: int = 15,
     king_mode: Any = "valid_lower",
     challenger_mode: str = "normal",
-    all_stage_2: bool = False,
     with_reward_basis: bool = True,
 ) -> Dict[str, Any]:
     """A synthetic published round. ``king_mode``: valid_lower, valid_top, tie, preflight, or None."""
@@ -351,7 +349,7 @@ def _build_round(
 
     config = sign_document(
         signer,
-        finalize_round_configuration(_round_configuration(signer.public_key_hash, runner_hotkeys, all_stage_2=all_stage_2)),
+        finalize_round_configuration(_round_configuration(signer.public_key_hash, runner_hotkeys)),
         hash_field="configuration_hash",
     )
     roots = benchmark_roots(icp_hashes)
@@ -369,8 +367,6 @@ def _build_round(
                 "journal_length": 3,
                 "evaluation_date": "2026-09-02",
                 "benchmark_root": roots["benchmark_root"],
-                "stage_1_root": roots["stage_1_root"],
-                "stage_2_root": roots["stage_2_root"],
                 "icp_leaf_hashes": roots["icp_leaf_hashes"],
                 "generation_started_at": "2026-09-02T00:00:00Z",
                 "generation_finished_at": "2026-09-02T00:20:00Z",
@@ -467,52 +463,28 @@ def _build_round(
         )
         return sign_document(signer, plan, hash_field="plan_hash")
 
-    def bundle_for(stage: int, rows: List[dict], scores: Dict[str, float], plan: dict, stage_1_hash: Any) -> dict:
+    def bundle_for(rows: List[dict], scores: Dict[str, float], plan: dict) -> dict:
         document = {
             "schema_version": SCORE_BUNDLE_SCHEMA_VERSION,
             "round_id": ROUND_ID,
-            "stage": stage,
+            "stage": 1,
             "scorer_policy": POLICY,
             "scoring_plan_hash": plan["plan_hash"],
             "rows": rows,
             "submission_scores": scores,
         }
-        if stage_1_hash is not None:
-            document["stage_1_bundle_hash"] = stage_1_hash
         return sign_document(signer, verify.finalize_score_bundle(document), hash_field="bundle_hash")
 
     all_ids = [item["submission_id"] for item in participants]
-    stage1_rows = rows_for(1, all_ids)
-    stage1_scores = {}
-    for submission_id in all_ids:
-        values = [row["per_icp_score"] for row in stage1_rows if row["submission_id"] == submission_id]
-        stage1_scores[submission_id] = verify.stage_score(values, 20)
-    plan1 = plan_for(1, stage1_rows)
-    bundle1 = bundle_for(1, stage1_rows, stage1_scores, plan1, None)
-
-    ranking = verify.stage1_ranking(
-        [
-            {
-                "submission_id": submission_id,
-                "artifact_hash": by_id[submission_id]["image_digest"],
-                "stage1_score": stage1_scores[submission_id],
-                "is_king": by_id[submission_id]["is_king"],
-            }
-            for submission_id in all_ids
-        ],
-        salt,
-    )
-    finalists = verify.select_finalists(ranking)
-    stage2_ids = list(all_ids) if all_stage_2 else finalists + (["king"] if king_mode is not None else [])
-    stage2_rows = rows_for(2, stage2_ids)
+    rows = rows_for(1, all_ids)
     final_scores = {}
     validity = {}
-    for submission_id in stage2_ids:
-        rows = {row["icp_position"]: row for row in stage1_rows + stage2_rows if row["submission_id"] == submission_id}
-        final_scores[submission_id] = verify.stage_score([rows[position]["per_icp_score"] for position in range(50)], 50)
-        validity[submission_id] = verify.result_is_valid(rows, tuple(range(50)))
-    plan2 = plan_for(2, stage2_rows)
-    bundle2 = bundle_for(2, stage2_rows, final_scores, plan2, bundle1["bundle_hash"])
+    for submission_id in all_ids:
+        by_position = {row["icp_position"]: row for row in rows if row["submission_id"] == submission_id}
+        final_scores[submission_id] = verify.stage_score([by_position[position]["per_icp_score"] for position in range(BENCHMARK_ICP_COUNT)], BENCHMARK_ICP_COUNT)
+        validity[submission_id] = verify.result_is_valid(by_position, tuple(range(BENCHMARK_ICP_COUNT)))
+    plan = plan_for(1, rows)
+    bundle = bundle_for(rows, final_scores, plan)
 
     final_entries = [
         {
@@ -522,7 +494,7 @@ def _build_round(
             "final_score": final_scores[submission_id] if validity[submission_id] else None,
             "is_king": by_id[submission_id]["is_king"],
         }
-        for submission_id in stage2_ids
+        for submission_id in all_ids
     ]
     final_rank = verify.final_ranking(final_entries, salt)
     king_entry = next((entry for entry in final_entries if entry["is_king"]), None)
@@ -534,11 +506,9 @@ def _build_round(
         "benchmark": icps,
         "participants": participants,
         "scorer_policy": POLICY,
-        "stage_plans": {"1": plan1, "2": plan2},
-        "score_bundles": {"1": bundle1, "2": bundle2},
+        "scoring_plan": plan,
+        "score_bundle": bundle,
         "outputs": outputs,
-        "stage1_ranking": ranking,
-        "finalists": finalists,
         "final_ranking": final_rank,
         "king_decision": decision,
     }
@@ -561,23 +531,18 @@ def _build_round(
         "key_document": key_document,
         "signer": signer,
         "salt": salt,
-        "stage1_scores": stage1_scores,
         "final_scores": final_scores,
-        "finalists": finalists,
         "decision": decision,
         "participants": participants,
     }
 
 
-def _resign_stage(round_data: Dict[str, Any], stage: int) -> None:
-    """Re-finalize and re-sign a mutated score bundle, cascading the stage 1 binding."""
+def _resign_bundle(round_data: Dict[str, Any]) -> None:
+    """Re-finalize and re-sign a mutated score bundle with the Arena key."""
 
     signer = round_data["signer"]
-    bundles = round_data["bundle"]["score_bundles"]
-    bundles[str(stage)] = sign_document(signer, verify.finalize_score_bundle(bundles[str(stage)]), hash_field="bundle_hash")
-    if stage == 1:
-        bundles["2"]["stage_1_bundle_hash"] = bundles["1"]["bundle_hash"]
-        bundles["2"] = sign_document(signer, verify.finalize_score_bundle(bundles["2"]), hash_field="bundle_hash")
+    bundle = round_data["bundle"]
+    bundle["score_bundle"] = sign_document(signer, verify.finalize_score_bundle(bundle["score_bundle"]), hash_field="bundle_hash")
 
 
 def _failed_details(report: Dict[str, Any]) -> str:
@@ -664,17 +629,17 @@ def test_first_n_slice_and_bucket_skip_are_recomputed():
         verify.slice_first_n(companies, 0)
 
 
-def test_stage_score_divides_by_exactly_20_and_50():
-    assert verify.stage_score([0.1] * 20, 20) == 0.1
-    assert verify.stage_score([50.0] * 19 + [0.0], 20) == 47.5
-    assert verify.stage_score([1.0] * 50, 50) == 1.0
-    assert verify.stage_score([1.0] * 20 + [0.0] * 30, 50) == 0.4
-    assert verify.stage_score(list(range(50)), 50) == verify.stage_score(list(reversed(range(50))), 50)
-    for scores, denominator in (([1.0] * 19, 20), ([1.0] * 21, 20), ([1.0] * 30, 30), ([1.0] * 49, 50)):
+def test_stage_score_divides_by_exactly_thirty():
+    assert verify.stage_score([0.1] * 30, 30) == 0.1
+    assert verify.stage_score([50.0] * 29 + [0.0], 30) == pytest.approx(1450.0 / 30)
+    assert verify.stage_score([1.0] * 30, 30) == 1.0
+    assert verify.stage_score([1.0] * 12 + [0.0] * 18, 30) == 0.4
+    assert verify.stage_score(list(range(30)), 30) == verify.stage_score(list(reversed(range(30))), 30)
+    for scores, denominator in (([1.0] * 29, 30), ([1.0] * 31, 30), ([1.0] * 20, 20), ([1.0] * 50, 50)):
         with pytest.raises(ArenaContractError):
             verify.stage_score(scores, denominator)
     with pytest.raises(ArenaContractError):
-        verify.stage_score([float("nan")] * 20, 20)
+        verify.stage_score([float("nan")] * 30, 30)
 
 
 def test_zero_rows_only_for_terminal_causes():
@@ -691,32 +656,6 @@ def test_zero_rows_only_for_terminal_causes():
 # ---------------------------------------------------------------------------
 # Ranking and decision
 # ---------------------------------------------------------------------------
-
-
-def test_stage1_ranking_finalists_and_tie_break():
-    salt = "0x" + "ab" * 32
-    entries = [
-        {"submission_id": "sub-%02d" % index, "artifact_hash": _sha("artifact-%d" % index), "stage1_score": float(index % 5), "is_king": False}
-        for index in range(15)
-    ]
-    entries.append({"submission_id": "king", "artifact_hash": _sha("king"), "stage1_score": 99.0, "is_king": True})
-    ranking = verify.stage1_ranking(entries, salt)
-    assert [row["submission_id"] for row in ranking if row["submission_id"] == "king"] == []
-    assert [row["rank"] for row in ranking] == list(range(1, 16))
-    scores = [row["stage1_score"] for row in ranking]
-    assert scores == sorted(scores, reverse=True)
-    for left, right in zip(ranking, ranking[1:]):
-        if left["stage1_score"] == right["stage1_score"]:
-            assert left["tie_break_hash"] < right["tie_break_hash"]
-            assert left["tie_break_hash"] == verify.tie_break_hash(salt, _sha("artifact-%d" % int(left["submission_id"][4:])))
-    finalists = verify.select_finalists(ranking)
-    assert len(finalists) == 10 and finalists == [row["submission_id"] for row in ranking[:10]]
-    assert verify.select_finalists(ranking[:6]) == [row["submission_id"] for row in ranking[:6]]
-    # A different salt can reorder exact ties but never scores.
-    other = verify.stage1_ranking(entries, "0x" + "cd" * 32)
-    assert [row["stage1_score"] for row in other] == scores
-    with pytest.raises(ArenaContractError):
-        verify.stage1_ranking(entries + [entries[0]], salt)
 
 
 def test_king_decision_all_outcomes_and_ties():
@@ -843,7 +782,7 @@ def test_redaction_keeps_fp_derivation_and_removes_payload():
 
 
 def test_score_bundle_schema_rejections(full_round):
-    bundle = full_round["bundle"]["score_bundles"]["1"]
+    bundle = full_round["bundle"]["score_bundle"]
     verify.validate_score_bundle(bundle)
     accepted_index = next(index for index, row in enumerate(bundle["rows"]) if row["cause"] == "accepted")
     zero_index = next(index for index, row in enumerate(bundle["rows"]) if row["cause"] != "accepted")
@@ -866,7 +805,7 @@ def test_score_bundle_schema_rejections(full_round):
         document["rows"].append(copy.deepcopy(document["rows"][0]))
 
     def wrong_stage_position(document):
-        document["rows"][accepted_index]["icp_position"] = 25
+        document["rows"][accepted_index]["icp_position"] = 35
 
     def scores_mismatch(document):
         document["submission_scores"]["ghost"] = 1.0
@@ -874,10 +813,8 @@ def test_score_bundle_schema_rejections(full_round):
     def bad_cause(document):
         document["rows"][zero_index]["cause"] = "refused"
 
-    def stage_two_without_binding(document):
-        document["stage"] = 2
-        for row in document["rows"]:
-            row["icp_position"] += 20
+    def stage_two(document):
+        document["stage"] = 2  # the Arena has one stage
 
     def breakdown_count(document):
         document["rows"][accepted_index]["breakdowns"].append(document["rows"][accepted_index]["breakdowns"][0])
@@ -893,7 +830,7 @@ def test_score_bundle_schema_rejections(full_round):
         wrong_stage_position,
         scores_mismatch,
         bad_cause,
-        stage_two_without_binding,
+        stage_two,
         breakdown_count,
         policy_hash_missing,
     ):
@@ -922,28 +859,20 @@ def test_full_round_fifteen_challengers_and_one_king(full_round):
     report = verify.rebuild_round(bundle, full_round["key_document"])
     _assert_ok(report)
     verified = {item["check"] for item in report["checks"] if item["status"] == "verified"}
-    assert {"stage_1.per_icp_and_stage_scores", "stage_1.finalists", "final.king_decision", "reward_basis.signature_and_decision"} <= verified
+    assert {"final.per_icp_and_final_scores", "final.ranking", "final.king_decision", "reward_basis.signature_and_decision"} <= verified
     participants = [item["submission_id"] for item in full_round["participants"]]
     assert len(participants) == 16
-    stage1 = bundle["score_bundles"]["1"]["rows"]
-    stage2 = bundle["score_bundles"]["2"]["rows"]
+    rows = bundle["score_bundle"]["rows"]
     for submission_id in participants:
-        assert sorted(row["icp_position"] for row in stage1 if row["submission_id"] == submission_id) == list(range(20))
-    finalists = full_round["finalists"]
-    assert len(finalists) == 10 and "king" not in finalists
-    stage1_scores = full_round["stage1_scores"]
-    challengers = [sid for sid in participants if sid != "king"]
-    assert min(stage1_scores[sid] for sid in finalists) >= max(stage1_scores[sid] for sid in challengers if sid not in finalists)
-    for submission_id in participants:
-        positions = sorted(row["icp_position"] for row in stage2 if row["submission_id"] == submission_id)
-        assert positions == (list(range(20, 50)) if submission_id in finalists or submission_id == "king" else [])
-    assert bundle["score_bundles"]["1"]["submission_scores"] == stage1_scores
-    assert set(bundle["score_bundles"]["2"]["submission_scores"]) == set(finalists) | {"king"}
+        assert sorted(row["icp_position"] for row in rows if row["submission_id"] == submission_id) == list(range(BENCHMARK_ICP_COUNT))
+    assert bundle["score_bundle"]["submission_scores"] == full_round["final_scores"]
+    assert set(bundle["score_bundle"]["submission_scores"]) == set(participants)  # one stage: every participant is scored on every ICP
+    assert [row["submission_id"] for row in bundle["final_ranking"]][0] == full_round["decision"]["winner_submission_id"]
     # The lower-scoring king is replaced by the strictly higher top challenger.
     decision = full_round["decision"]
     assert decision["outcome"] == "crowned"
     assert full_round["final_scores"][decision["winner_submission_id"]] > full_round["final_scores"]["king"]
-    assert any(row["cause"] == "model_timeout" for row in stage1) and any(row["skipped_company_indexes"] for row in stage1)
+    assert any(row["cause"] == "model_timeout" for row in rows) and any(row["skipped_company_indexes"] for row in rows)
 
 
 @pytest.mark.parametrize(
@@ -972,18 +901,16 @@ def test_round_outcomes_rebuild(king_mode, challenger_mode, expected_outcome):
     _assert_ok(verify.rebuild_round(round_data["bundle"], round_data["key_document"]))
 
 
-def test_fewer_than_ten_challengers_all_advance():
+def test_six_challengers_every_participant_scores_every_icp():
     round_data = _build_round(challenger_count=6)
-    assert sorted(round_data["finalists"]) == ["sub-%02d" % index for index in range(6)]
-    stage2 = round_data["bundle"]["score_bundles"]["2"]["rows"]
-    assert {row["submission_id"] for row in stage2} == set(round_data["finalists"]) | {"king"}
+    rows = round_data["bundle"]["score_bundle"]["rows"]
+    assert {row["submission_id"] for row in rows} == {"king"} | {"sub-%02d" % index for index in range(6)}
+    assert all(len([row for row in rows if row["submission_id"] == sid]) == BENCHMARK_ICP_COUNT for sid in round_data["final_scores"])
     _assert_ok(verify.rebuild_round(round_data["bundle"], round_data["key_document"]))
 
 
-def test_shadow_mode_everyone_runs_stage_two():
-    round_data = _build_round(challenger_count=12, all_stage_2=True, with_reward_basis=False)
-    stage2 = round_data["bundle"]["score_bundles"]["2"]["rows"]
-    assert {row["submission_id"] for row in stage2} == {item["submission_id"] for item in round_data["participants"]}
+def test_round_without_a_reward_basis_reports_it_unchecked():
+    round_data = _build_round(challenger_count=12, with_reward_basis=False)
     report = verify.rebuild_round(round_data["bundle"], round_data["key_document"])
     _assert_ok(report)
     assert any(item["check"] == "reward_basis" and item["status"] == "not_checked" for item in report["checks"])
@@ -992,16 +919,16 @@ def test_shadow_mode_everyone_runs_stage_two():
 def test_tampering_is_detected(full_round):
     key_document = full_round["key_document"]
 
-    def tampered(mutate, resign_stage=None) -> Dict[str, Any]:
+    def tampered(mutate, resign=False) -> Dict[str, Any]:
         # The signer holds an in-memory EC key that cannot be deep-copied.
         clone = {key: (value if key == "signer" else copy.deepcopy(value)) for key, value in full_round.items()}
         mutate(clone)
-        if resign_stage is not None:
-            _resign_stage(clone, resign_stage)
+        if resign:
+            _resign_bundle(clone)
         return verify.rebuild_round(clone["bundle"], key_document)
 
-    def accepted_row(clone, stage="1"):
-        return next(row for row in clone["bundle"]["score_bundles"][stage]["rows"] if row["cause"] == "accepted" and row["breakdowns"])
+    def accepted_row(clone):
+        return next(row for row in clone["bundle"]["score_bundle"]["rows"] if row["cause"] == "accepted" and row["breakdowns"])
 
     # 1. A breakdown edited without re-signing breaks the bundle hash.
     def edit_breakdown(clone):
@@ -1012,16 +939,16 @@ def test_tampering_is_detected(full_round):
     assert any(item["check"] == "rebuild" and item["status"] == "not_checked" for item in report["checks"])
 
     # 2. The same edit re-signed with the Arena key no longer recomputes.
-    report = tampered(edit_breakdown, resign_stage=1)
+    report = tampered(edit_breakdown, resign=True)
     assert report["ok"] is False and "per-ICP score" in _failed_details(report)
 
     # 3. A published stage score edited and re-signed does not recompute.
     def edit_score(clone):
-        scores = clone["bundle"]["score_bundles"]["1"]["submission_scores"]
+        scores = clone["bundle"]["score_bundle"]["submission_scores"]
         scores["sub-00"] = scores["sub-00"] + 0.5
 
-    report = tampered(edit_score, resign_stage=1)
-    assert report["ok"] is False and "stage 1 submission scores do not recompute" in _failed_details(report)
+    report = tampered(edit_score, resign=True)
+    assert report["ok"] is False and "final submission scores do not recompute" in _failed_details(report)
 
     # 4. A flipped signature byte fails.
     def edit_signature(clone):
@@ -1037,13 +964,13 @@ def test_tampering_is_detected(full_round):
     report = verify.rebuild_round(full_round["bundle"], other)
     assert report["ok"] is False and "signing key" in _failed_details(report)
 
-    # 6. A reordered Stage 1 ranking fails.
+    # 6. A reordered final ranking fails.
     def swap_ranking(clone):
-        ranking = clone["bundle"]["stage1_ranking"]
+        ranking = clone["bundle"]["final_ranking"]
         ranking[0], ranking[1] = ranking[1], ranking[0]
 
     report = tampered(swap_ranking)
-    assert report["ok"] is False and "stage1_ranking" in _failed_details(report)
+    assert report["ok"] is False and "final_ranking" in _failed_details(report)
 
     # 7. A changed king decision fails.
     def edit_decision(clone):
@@ -1061,36 +988,33 @@ def test_tampering_is_detected(full_round):
     report = tampered(reorder_output)
     assert report["ok"] is False and "does not hash" in _failed_details(report)
 
-    # 9. A finalist missing from Stage 2 (re-signed) is incomplete.
-    def drop_finalist_rows(clone):
-        finalist = clone["finalists"][0]
-        bundle2 = clone["bundle"]["score_bundles"]["2"]
-        bundle2["rows"] = [row for row in bundle2["rows"] if row["submission_id"] != finalist]
-        del bundle2["submission_scores"][finalist]
+    # 9. A participant missing from the bundle (re-signed) is incomplete.
+    def drop_participant_rows(clone):
+        bundle = clone["bundle"]["score_bundle"]
+        bundle["rows"] = [row for row in bundle["rows"] if row["submission_id"] != "sub-00"]
+        del bundle["submission_scores"]["sub-00"]
 
-    report = tampered(drop_finalist_rows, resign_stage=2)
+    report = tampered(drop_participant_rows, resign=True)
     assert report["ok"] is False and "incomplete" in _failed_details(report)
 
-    # 10. A non-finalist scored in Stage 2 (re-signed) must not be there.
-    def add_non_finalist(clone):
-        bundle2 = clone["bundle"]["score_bundles"]["2"]
-        outsider = next(sid for sid in clone["stage1_scores"] if sid not in clone["finalists"] and sid != "king")
-        finalist = clone["finalists"][0]
-        for row in [row for row in bundle2["rows"] if row["submission_id"] == finalist]:
+    # 10. A non-participant scored in the bundle (re-signed) must not be there.
+    def add_outsider(clone):
+        bundle = clone["bundle"]["score_bundle"]
+        for row in [row for row in bundle["rows"] if row["submission_id"] == "sub-00"]:
             copied = copy.deepcopy(row)
-            copied["submission_id"] = outsider
-            bundle2["rows"].append(copied)
-        bundle2["submission_scores"][outsider] = bundle2["submission_scores"][finalist]
+            copied["submission_id"] = "ghost"
+            bundle["rows"].append(copied)
+        bundle["submission_scores"]["ghost"] = bundle["submission_scores"]["sub-00"]
 
-    report = tampered(add_non_finalist, resign_stage=2)
+    report = tampered(add_outsider, resign=True)
     assert report["ok"] is False and "must not score" in _failed_details(report)
 
     # 11. A re-signed plan that dropped a work item no longer binds the bundle.
     def drop_work_item(clone):
-        plan = clone["bundle"]["stage_plans"]["1"]
+        plan = clone["bundle"]["scoring_plan"]
         plan = {k: v for k, v in plan.items() if k not in ("plan_hash", "signature")}
         plan["work_items"] = plan["work_items"][1:]
-        clone["bundle"]["stage_plans"]["1"] = sign_document(clone["signer"], finalize_scoring_plan(plan), hash_field="plan_hash")
+        clone["bundle"]["scoring_plan"] = sign_document(clone["signer"], finalize_scoring_plan(plan), hash_field="plan_hash")
 
     report = tampered(drop_work_item)
     assert report["ok"] is False and "plan" in _failed_details(report)
@@ -1117,10 +1041,10 @@ def test_tampering_is_detected(full_round):
 
     # 14. A zero row whose cause differs from the plan fails.
     def edit_zero_cause(clone):
-        row = next(row for row in clone["bundle"]["score_bundles"]["1"]["rows"] if row["cause"] == "model_timeout")
+        row = next(row for row in clone["bundle"]["score_bundle"]["rows"] if row["cause"] == "model_timeout")
         row["cause"] = "model_error"
 
-    report = tampered(edit_zero_cause, resign_stage=1)
+    report = tampered(edit_zero_cause, resign=True)
     assert report["ok"] is False and "scoring plan" in _failed_details(report)
 
     # The untouched round still verifies after all of the above.

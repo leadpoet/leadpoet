@@ -72,7 +72,7 @@ def superuser(connect):
     connection.close()
 
 
-def round_config(round_id: str, runners: List[str], *, quotas=None, stage_1_icps=20, stage_2_icps=30, max_attempts=2) -> Dict[str, Any]:
+def round_config(round_id: str, runners: List[str], *, quotas=None, stage_1_icps=contracts.STAGE_1_ICP_COUNT, max_attempts=2) -> Dict[str, Any]:
     """The configuration fields the SQL reads: runner allowlist and the call-quota inputs."""
 
     body = {
@@ -81,7 +81,6 @@ def round_config(round_id: str, runners: List[str], *, quotas=None, stage_1_icps
         "call_quotas": dict(quotas or contracts.CALL_QUOTAS_PER_ICP),
         "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
         "stage_1_icp_count": stage_1_icps,
-        "stage_2_icp_count": stage_2_icps,
         "max_attempts_per_assignment": max_attempts,
     }
     return contracts.hashed_document(body, "configuration_hash")
@@ -128,10 +127,11 @@ def commit_round(store: ArenaStore, round_id: str, participants) -> None:
 
 
 def stage_positions(stage: int):
-    return list(range(0, 20)) if stage == 1 else list(range(20, 50))
+    assert stage == 1, "the Arena runs one stage"
+    return list(range(0, contracts.STAGE_1_ICP_COUNT))
 
 
-def open_round(store: ArenaStore, round_id: str, *, participants=3, runners=1, prefix: str, quotas=None, stage_1_icps=20, max_attempts=2, king_index=None):
+def open_round(store: ArenaStore, round_id: str, *, participants=3, runners=1, prefix: str, quotas=None, stage_1_icps=contracts.STAGE_1_ICP_COUNT, max_attempts=2, king_index=None):
     runner_keys = [hotkey("%s-runner-%d" % (prefix, i)) for i in range(runners)]
     config = round_config(round_id, runner_keys, quotas=quotas, stage_1_icps=stage_1_icps, max_attempts=max_attempts)
     assert store.create_round(round_id, config)["status"] == "created"
@@ -283,7 +283,7 @@ def test_concurrent_publications_produce_one_result(store, superuser, connect):
     round_id = "arena-2026-09-02-pub"
     assert store.create_round(round_id, round_config(round_id, [hotkey("pub-runner")]))["status"] == "created"
     with superuser.cursor() as cursor:
-        cursor.execute("UPDATE public.lab_arena_rounds SET status = 'scored', stage1_scoring_plan_hash = %s, stage2_scoring_plan_hash = %s WHERE round_id = %s", (sha("p1"), sha("p2"), round_id))
+        cursor.execute("UPDATE public.lab_arena_rounds SET status = 'scored', stage1_scoring_plan_hash = %s WHERE round_id = %s", (sha("p1"), round_id))
     basis = {"reward_basis_hash": sha("basis"), "result_bundle_hash": sha("bundle"), "king_outcome": "crowned", "effective_reward_epoch": 100}
     patch = {
         "result_bundle_hash": sha("bundle"), "publication_doc": {"result_bundle_hash": sha("bundle")},
@@ -317,7 +317,7 @@ def test_concurrent_publications_produce_one_result(store, superuser, connect):
     other = "arena-2026-09-03-pub"
     assert store.create_round(other, round_config(other, [hotkey("pub-runner")]))["status"] == "created"
     with superuser.cursor() as cursor:
-        cursor.execute("UPDATE public.lab_arena_rounds SET status = 'scored', stage1_scoring_plan_hash = %s, stage2_scoring_plan_hash = %s WHERE round_id = %s", (sha("p3"), sha("p4"), other))
+        cursor.execute("UPDATE public.lab_arena_rounds SET status = 'scored', stage1_scoring_plan_hash = %s WHERE round_id = %s", (sha("p3"), other))
     other_patch = dict(patch, result_bundle_hash=sha("bundle2"), publication_doc={"result_bundle_hash": sha("bundle2")}, reward_basis_hash=sha("basis2"), reward_basis_doc=dict(basis, reward_basis_hash=sha("basis2"), result_bundle_hash=sha("bundle2")))
     with pytest.raises(ArenaStoreError):
         store.transition_round(other, "scored", "published", other_patch)
@@ -573,7 +573,7 @@ def test_close_stage_with_only_model_failures_freezes_results(store):
         result = store.complete_attempt(run_id=response["run_id"], lease_token_hash=hash_lease_token(token), receipt={"receipt_hash": sha("rc%d" % position)}, receipt_hash=sha("rc%d" % position), terminal_cause=cause, output_hash=sha("o%d" % position) if cause == "accepted" else "", output_ref="ref", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
         assert result["status"] == ("accepted" if cause == "accepted" else "failed")
         seen.append((position, response["attempt"]))
-    assert sorted(seen) == sorted([(p, 1) for p in range(0, 20, 2)] + [(p, a) for p in range(1, 20, 2) for a in (1, 2)])
+    assert sorted(seen) == sorted([(p, 1) for p in range(0, 30, 2)] + [(p, a) for p in range(1, 30, 2) for a in (1, 2)])
     closed = store.close_stage(round_id, 1)
     assert closed["status"] == "closed" and closed["incomplete_assignments"] == 0
     assert store.close_stage(round_id, 1)["status"] == "existing"
@@ -581,9 +581,9 @@ def test_close_stage_with_only_model_failures_freezes_results(store):
     # Scores are write-once per attempt.
     runs = store.list_runs(round_id, stage=1)
     scores = [{"run_id": r["run_id"], "per_icp_score": 12.5 if r["status"] == "accepted" else 0.0, "score_ref": "s"} for r in runs]
-    assert len(runs) == 30  # twenty first attempts and ten confirmation attempts
-    assert store.record_run_scores(round_id, 1, scores)["recorded"] == 30
-    assert store.record_run_scores(round_id, 1, scores)["existing"] == 30
+    assert len(runs) == 45  # thirty first attempts and fifteen confirmation attempts
+    assert store.record_run_scores(round_id, 1, scores)["recorded"] == 45
+    assert store.record_run_scores(round_id, 1, scores)["existing"] == 45
     with pytest.raises(ArenaStoreError):
         store.record_run_scores(round_id, 1, [dict(scores[0], per_icp_score=1.0)])
 
@@ -598,10 +598,11 @@ def test_preflight_failed_king_records_and_stage_two_positions(store):
     positions = stage_positions(1)
     assert store.open_stage(round_id, 1, parts, positions, [sha("i%d" % p) for p in positions])["status"] == "ok"
     king_runs = store.list_runs(round_id, stage=1, submission_id=parts[1]["submission_id"])
-    assert len(king_runs) == 20 and all(r["attempt"] == 0 and r["terminal_cause"] == "preflight_failed" and r["status"] == "failed" for r in king_runs)
+    assert len(king_runs) == 30 and all(r["attempt"] == 0 and r["terminal_cause"] == "preflight_failed" and r["status"] == "failed" for r in king_runs)
     assert claim(store, round_id, runner_keys[0], parallelism=8)[0]["miner_hotkey"] == parts[0]["miner_hotkey"]
-    # Stage 2 requires stage1_scored and positions 20..49.
-    assert store.open_stage(round_id, 2, parts, stage_positions(2), [sha("i%d" % p) for p in stage_positions(2)])["status"] == "stale"
+    # There is no second stage: opening one is refused as invalid input, not treated as stale.
+    with pytest.raises(ArenaStoreError):
+        store.open_stage(round_id, 2, parts, positions, [sha("i%d" % p) for p in positions])
     assert store.cancel_round(round_id, "test")["status"] == "cancelled"
     assert store.cancel_round(round_id, "test")["status"] == "existing"
     assert claim(store, round_id, runner_keys[0], parallelism=8)[0]["status"] == "stage_closed"
@@ -791,11 +792,11 @@ def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(st
     runners, parts = open_round(store, round_id, participants=2, runners=2, prefix="sc")
     executor, scorer = runners
     executed = _execute_everything(store, round_id, executor)
-    assert len(executed) == 40 and store.close_stage(round_id, 1)["status"] == "closed"
+    assert len(executed) == 60 and store.close_stage(round_id, 1)["status"] == "closed"
     _commit_plan(store, round_id, 1)
     items = _scoring_items(executed)
     opened = store.open_scoring(round_id, 1, items)
-    assert opened["status"] == "ok" and opened["round_status"] == "stage1_scoring" and opened["assignments"] == 40
+    assert opened["status"] == "ok" and opened["round_status"] == "stage1_scoring" and opened["assignments"] == 60
     assert store.open_scoring(round_id, 1, items)["status"] == "existing"
     # Any validator scores any item, the executor of that output included; the replay is the check.
     own, own_token, _, _ = claim(store, round_id, executor, parallelism=100, ceiling=100)
@@ -828,7 +829,7 @@ def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(st
     assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged" and closed["incomplete_assignments"] == 0
     assert store.close_scoring(round_id, 1)["status"] == "existing"
     score_runs = store.list_runs(round_id, stage=1, kind="score")
-    assert len(score_runs) == 40 and {run["runner_hotkey"] for run in score_runs} == {executor, scorer}
+    assert len(score_runs) == 60 and {run["runner_hotkey"] for run in score_runs} == {executor, scorer}
     # Replay rejection: two accepted scorings the Arena could not reproduce fail and reopen the window for their second attempts.
     accepted = sorted(run["run_id"] for run in score_runs if run["status"] == "accepted")
     rejected = store.reject_scorings(round_id, 1, accepted[:2])
@@ -856,7 +857,7 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     assert store.close_stage(round_id, 1)["status"] == "closed"
     _commit_plan(store, round_id, 1)
     items = _scoring_items(executed)
-    assert store.open_scoring(round_id, 1, items)["assignments"] == 20
+    assert store.open_scoring(round_id, 1, items)["assignments"] == 30
     response, token, _, _ = claim(store, round_id, scorer, parallelism=1, ceiling=1)
     assert response["kind"] == "score"
     # An expired scoring lease retries once and keeps its scoring identity.
@@ -866,8 +867,8 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     assert retry["status"] == "pending" and retry["scored_run_id"] == response["scored_run_id"] and retry["work_item_id"] == response["work_item_id"]
     # Closing with pending scoring work is an infrastructure gap: the round cancels, no miner gets a zero.
     closed = store.close_scoring(round_id, 1)
-    assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 20
-    assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:20"
+    assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 30
+    assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:30"
 
 
 def test_service_role_statements_locks_and_idle_transactions_are_bounded(superuser, store):
@@ -885,7 +886,7 @@ def test_service_role_statements_locks_and_idle_transactions_are_bounded(superus
     assert {"statement_timeout=30s", "lock_timeout=5s", "idle_in_transaction_session_timeout=60s"} <= settings, settings
     round_id = "arena-2026-11-30"
     open_round(store, round_id, participants=contracts.MAX_CHALLENGERS, prefix="cap")
-    assert len(store.list_runs(round_id, stage=1, status="pending")) == 20 * contracts.MAX_CHALLENGERS
+    assert len(store.list_runs(round_id, stage=1, status="pending")) == contracts.STAGE_1_ICP_COUNT * contracts.MAX_CHALLENGERS
     started = time.monotonic()
     cancelled = store.cancel_round(round_id, "capacity:test")
     seconds = time.monotonic() - started
@@ -926,7 +927,7 @@ def test_a_confirmation_attempt_goes_to_another_validator_and_an_unreached_one_l
             break
         accept(response, token)
         accepted += 1
-    assert accepted == 19
+    assert accepted == 29
     # Closing the stage with the confirmation still open leaves the first failure as the miner's zero.
     closed = store.close_stage(round_id, 1)
     assert closed["status"] == "closed" and closed["incomplete_assignments"] == 0, closed

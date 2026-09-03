@@ -69,15 +69,15 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
     for error in errors[:2]:
         print("STRESS-ERROR:", error)
     assert errors == [], (len(errors), retries)
-    assert len(completed) == 80
+    assert len(completed) == 120  # four participants over thirty ICPs
     runs = setup.list_runs(round_id, stage=1)
-    assert all(run["status"] == "accepted" for run in runs) and len(runs) == 80
+    assert all(run["status"] == "accepted" for run in runs) and len(runs) == 120
     ledger = setup.list_ledger()
     heads = {}
     for entry in ledger:
         if entry.get("round_id") == round_id and entry.get("call_identity"):
             heads[entry["call_identity"]] = entry["entry_kind"]
-    assert len(heads) == 240 and set(heads.values()) == {"settlement"}
+    assert len(heads) == 360 and set(heads.values()) == {"settlement"}  # three settlements per run over 120 runs
     for part in parts:
         account = setup.get_account(part["miner_hotkey"])
         assert account["preflight_status"] == "ok" and set(account["credentials"]) == set(contracts.MINER_KEY_PROVIDERS)

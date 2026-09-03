@@ -168,7 +168,9 @@ def build_scoring_plan(
     cancelled and is refused).
     """
 
-    positions = tuple(range(0, contracts.STAGE_1_ICP_COUNT)) if stage == 1 else tuple(range(contracts.STAGE_1_ICP_COUNT, contracts.BENCHMARK_ICP_COUNT))
+    if stage != 1:
+        raise ArenaContractError("stage must be 1")
+    positions = tuple(range(0, contracts.BENCHMARK_ICP_COUNT))
     latest: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     accepted: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     for run in runs:
@@ -365,13 +367,10 @@ def build_score_bundle(
     icps_by_position: Mapping[int, Mapping[str, Any]],
     outputs_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
     breakdowns_by_item: Mapping[str, Sequence[Mapping[str, Any]]],
-    stage_1_rows: Optional[Sequence[Mapping[str, Any]]] = None,
-    stage_1_bundle_hash: Optional[str] = None,
     refused_items: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """Turn each work item's breakdown into its submission's row, synthesize
-    zero rows, and compute stage scores (Stage 1 over 20; the Stage 2 bundle
-    carries the final 50-ICP score using the Stage 1 rows).
+    zero rows, and compute each submission's score over the 30 ICPs.
 
     ``refused_items`` maps a work item whose scoring the scored miner's own
     key or quota refused to its cause: that submission gets a zero row with
@@ -401,20 +400,8 @@ def build_score_bundle(
     for row in rows:
         by_submission.setdefault(row["submission_id"], []).append(float(row["per_icp_score"]))
     scores: Dict[str, float] = {}
-    if stage == 1:
-        for submission_id, values in by_submission.items():
-            scores[submission_id] = verify.stage_score(values, contracts.STAGE_1_ICP_COUNT)
-    else:
-        if stage_1_rows is None or not stage_1_bundle_hash:
-            raise ScoringError("stage 2 bundle requires the stage 1 rows and bundle hash")
-        stage_1_scores: Dict[str, List[float]] = {}
-        for row in stage_1_rows:
-            stage_1_scores.setdefault(str(row["submission_id"]), []).append(float(row["per_icp_score"]))
-        for submission_id, values in by_submission.items():
-            first = stage_1_scores.get(submission_id)
-            if first is None or len(first) != contracts.STAGE_1_ICP_COUNT:
-                raise ScoringError("submission %s lacks its stage 1 rows" % submission_id)
-            scores[submission_id] = verify.stage_score(list(first) + values, contracts.BENCHMARK_ICP_COUNT)
+    for submission_id, values in by_submission.items():
+        scores[submission_id] = verify.stage_score(values, contracts.BENCHMARK_ICP_COUNT)
     document = {
         "schema_version": contracts.SCORE_BUNDLE_SCHEMA_VERSION,
         "round_id": validated_plan["round_id"],
@@ -426,8 +413,6 @@ def build_score_bundle(
     }
     if refused:
         document["refused_work_items"] = [{"work_item_id": item_id, "cause": cause} for item_id, cause in sorted(refused.items())]
-    if stage == 2:
-        document["stage_1_bundle_hash"] = stage_1_bundle_hash
     return verify.finalize_score_bundle(document)
 
 

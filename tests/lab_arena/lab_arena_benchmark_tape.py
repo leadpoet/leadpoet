@@ -85,20 +85,18 @@ def completion(icps: Sequence[Mapping[str, Any]], *, response_id: str, fenced: b
 
 
 def batch_icps(*, ordinal_base: int = 0):
-    """The three fixed batches as raw ICP lists: b1 and b2 over 20 industries, b3 over the first 10."""
+    """The two fixed batches as raw ICP lists: b1 over the 20 industries, b2 over the first 10."""
 
     first = [raw_icp(industry, ordinal_base + 1) for industry in INDUSTRIES]
-    second = [raw_icp(industry, ordinal_base + 2) for industry in INDUSTRIES]
-    third = [raw_icp(industry, ordinal_base + 3) for industry in INDUSTRIES[:10]]
-    return first, second, third
+    second = [raw_icp(industry, ordinal_base + 2) for industry in INDUSTRIES[:10]]
+    return first, second
 
 
 def batch_responses(*, ordinal_base: int = 0) -> List[Dict[str, Any]]:
-    first, second, third = batch_icps(ordinal_base=ordinal_base)
+    first, second = batch_icps(ordinal_base=ordinal_base)
     return [
         completion(first, response_id="gen-b1"),
         completion(second, response_id="gen-b2", fenced=True),
-        completion(third, response_id="gen-b3"),
     ]
 
 
@@ -108,7 +106,7 @@ def write_default_tapes() -> None:
     # A run needing one replacement: b1 carries two invalid ICPs (slot 3 lacks an
     # example company, slot 5 uses an unsupported geography) and b2 repeats b1's
     # Biotechnology ICP verbatim (slot 27 duplicate), so slots 3, 5 and 27 are replaced.
-    first, second, third = batch_icps()
+    first, second = batch_icps()
     first[3]["verified_example_company"] = ""
     first[5]["geography"] = "Europe"
     second[7] = raw_icp("Biotechnology", 1)
@@ -116,13 +114,12 @@ def write_default_tapes() -> None:
     flawed = [
         completion(first, response_id="gen-b1-flawed"),
         completion(second, response_id="gen-b2-flawed", fenced=True),
-        completion(third, response_id="gen-b3"),
         completion(replacement, response_id="gen-r1"),
     ]
     (FIXTURES / "replacement_run.json").write_text(json.dumps(flawed, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     # Exhausted attempts: every Software ICP carries an unsupported stage.
     exhausted = []
-    for batch, response_id in zip(batch_icps(), ("gen-b1-exhausted", "gen-b2-exhausted", "gen-b3-exhausted")):
+    for batch, response_id in zip(batch_icps(), ("gen-b1-exhausted", "gen-b2-exhausted")):
         for icp in batch:
             if icp["industry"] == "Software":
                 icp["company_stage"] = "Unicorn"

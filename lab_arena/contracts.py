@@ -20,14 +20,17 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_
 # Public V1 constants (labarena.md section 1)
 # ---------------------------------------------------------------------------
 
-STAGE_1_ICP_COUNT = 20
-STAGE_2_ICP_COUNT = 30
-BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
-FINALIST_COUNT = 10
+# One stage: every participant runs the same 30 ICPs and there is no finalist
+# cut (owner decision, 2026-09-03). The stage is numbered 1 in every document.
+STAGE_1_ICP_COUNT = 30
+BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 RUNNER_SLOT_CEILING = 8
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
 LAB_ARENA_POOL_PERCENT = 25
+# The pool is a share of total emissions, not of what remains after the other
+# allocations (owner decision, 2026-09-03).
+LAB_ARENA_POOL_BASIS = "total_emissions"
 KING_POOL_SHARE_PERCENT_BY_WEEK = (100, 80, 60, 40, 20)
 EPOCHS_PER_REWARD_WEEK = 140
 ELIGIBILITY_MAX_EPOCHS = 45
@@ -55,9 +58,9 @@ ICP_WALL_CLOCK_SECONDS = 300
 SCORING_WALL_CLOCK_SECONDS = 900
 LEASE_TTL_SECONDS = 420
 
-# Generation requests are fixed (section 8): 20 + 20 + 10 across the ordered
-# industry list; the third request covers the first ten industries.
-GENERATION_BATCH_SIZES = (20, 20, 10)
+# Generation requests are fixed (section 8): 20 + 10 across the ordered
+# industry list; the second request covers the first ten industries.
+GENERATION_BATCH_SIZES = (20, 10)
 MAX_GENERATION_ATTEMPTS = 12
 
 # Signed request timestamp window (section 9.1).
@@ -119,11 +122,6 @@ ROUND_STATUSES = (
     "stage1_closed",
     "stage1_scoring",
     "stage1_judged",
-    "stage1_scored",
-    "stage2",
-    "stage2_closed",
-    "stage2_scoring",
-    "stage2_judged",
     "scored",
     "published",
     "cancelled",
@@ -134,12 +132,7 @@ ROUND_TRANSITIONS = {
     "stage1": ("stage1_closed", "cancelled"),
     "stage1_closed": ("stage1_scoring", "cancelled"),
     "stage1_scoring": ("stage1_judged", "cancelled"),
-    "stage1_judged": ("stage1_scored", "stage1_scoring", "cancelled"),
-    "stage1_scored": ("stage2", "cancelled"),
-    "stage2": ("stage2_closed", "cancelled"),
-    "stage2_closed": ("stage2_scoring", "cancelled"),
-    "stage2_scoring": ("stage2_judged", "cancelled"),
-    "stage2_judged": ("scored", "stage2_scoring", "cancelled"),
+    "stage1_judged": ("scored", "stage1_scoring", "cancelled"),
     "scored": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
@@ -640,14 +633,12 @@ STAGE_SCHEDULE_FIELDS = (
     F("stage_1_start", "iso8601"),
     F("stage_1_close", "iso8601"),
     F("stage_1_scoring_close", "iso8601"),
-    F("stage_2_start", "iso8601"),
-    F("stage_2_close", "iso8601"),
-    F("final_scoring_close", "iso8601"),
     F("publication_deadline", "iso8601"),
 )
 
 REWARD_CONSTANTS_FIELDS = (
     F("pool_percent", "int", minimum=0, maximum=100),
+    F("pool_basis", "str", choices=(LAB_ARENA_POOL_BASIS,)),
     F("king_pool_share_percent_by_week", "list[int]", minimum=5, maximum=5),
     F("epochs_per_reward_week", "int", minimum=1),
     F("eligibility_max_epochs", "int", minimum=1),
@@ -667,14 +658,12 @@ ROUND_CONFIGURATION_FIELDS = (
             F("model", "str", minimum=1, maximum=128),
             F("settings", "object"),
             F("journal_schema_version", "str", choices=(GENERATION_JOURNAL_SCHEMA_VERSION,)),
-            F("batch_sizes", "list[int]", minimum=3, maximum=3),
+            F("batch_sizes", "list[int]", minimum=2, maximum=2),
             F("max_generation_attempts", "int", minimum=3, maximum=64),
         ),
     ),
     F("tie_break_rule", "str", choices=("finalized_block_after_cutoff.v1",)),
     F("stage_1_icp_count", "int", minimum=1),
-    F("stage_2_icp_count", "int", minimum=1),
-    F("finalist_count", "int", minimum=1),
     F("max_challengers", "int", minimum=1),
     F("runner_slot_ceiling", "int", minimum=1),
     F("max_attempts_per_assignment", "int", minimum=1, maximum=2),
@@ -728,7 +717,6 @@ ROUND_CONFIGURATION_FIELDS = (
     F("registry_repository", "str", minimum=0, maximum=512),
     F("publication_terms_hash", "sha256"),
     F("reward_constants", "object", fields=REWARD_CONSTANTS_FIELDS),
-    F("all_participants_run_stage_2", "bool"),
     F("configuration_hash", "sha256", required=False),
     F("signature", "object", required=False),
 )
@@ -755,10 +743,8 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     config = validate_document(document, ROUND_CONFIGURATION_FIELDS)
     if not ROUND_ID_RE.match(config["round_id"]):
         raise ArenaContractError("round_id has an invalid shape")
-    if config["stage_1_icp_count"] != STAGE_1_ICP_COUNT or config["stage_2_icp_count"] != STAGE_2_ICP_COUNT:
-        raise ArenaContractError("stage ICP counts are fixed public constants")
-    if config["finalist_count"] != FINALIST_COUNT:
-        raise ArenaContractError("finalist count is a fixed public constant")
+    if config["stage_1_icp_count"] != STAGE_1_ICP_COUNT:
+        raise ArenaContractError("the stage ICP count is a fixed public constant")
     if config["max_attempts_per_assignment"] != MAX_ATTEMPTS_PER_ASSIGNMENT:
         raise ArenaContractError("attempt limit is a fixed public constant")
     if config["runner_slot_ceiling"] > RUNNER_SLOT_CEILING:
@@ -776,6 +762,7 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     rewards = config["reward_constants"]
     if (
         rewards["pool_percent"] != LAB_ARENA_POOL_PERCENT
+        or rewards["pool_basis"] != LAB_ARENA_POOL_BASIS
         or tuple(rewards["king_pool_share_percent_by_week"]) != KING_POOL_SHARE_PERCENT_BY_WEEK
         or rewards["epochs_per_reward_week"] != EPOCHS_PER_REWARD_WEEK
         or rewards["eligibility_max_epochs"] != ELIGIBILITY_MAX_EPOCHS
@@ -864,8 +851,6 @@ BENCHMARK_COMMITMENT_FIELDS = (
     F("journal_length", "int", minimum=1),
     F("evaluation_date", "str", minimum=10, maximum=10),
     F("benchmark_root", "sha256"),
-    F("stage_1_root", "sha256"),
-    F("stage_2_root", "sha256"),
     F("icp_leaf_hashes", "list[sha256]", minimum=BENCHMARK_ICP_COUNT, maximum=BENCHMARK_ICP_COUNT),
     F("generation_started_at", "iso8601"),
     F("generation_finished_at", "iso8601"),
@@ -887,8 +872,6 @@ def benchmark_roots(icp_hashes: Sequence[str]) -> Dict[str, Any]:
     return {
         "icp_leaf_hashes": leaves,
         "benchmark_root": ordered_root(leaves),
-        "stage_1_root": ordered_root(leaves[:STAGE_1_ICP_COUNT]),
-        "stage_2_root": ordered_root(leaves[STAGE_1_ICP_COUNT:]),
     }
 
 
@@ -897,10 +880,6 @@ def validate_benchmark_commitment(document: Any) -> Dict[str, Any]:
     leaves = commitment["icp_leaf_hashes"]
     if commitment["benchmark_root"] != ordered_root(leaves):
         raise ArenaContractError("benchmark root does not match leaves")
-    if commitment["stage_1_root"] != ordered_root(leaves[:STAGE_1_ICP_COUNT]):
-        raise ArenaContractError("stage 1 root does not match leaves")
-    if commitment["stage_2_root"] != ordered_root(leaves[STAGE_1_ICP_COUNT:]):
-        raise ArenaContractError("stage 2 root does not match leaves")
     if not re.match(r"^0x[0-9a-f]{64}$", commitment["tie_break_block_hash"]):
         raise ArenaContractError("tie-break block hash must be 0x-prefixed hex")
     if "commitment_hash" in commitment:
@@ -1009,7 +988,7 @@ SCORING_WORK_ITEM_FIELDS = (
 SCORING_PLAN_FIELDS = (
     F("schema_version", "str", choices=(SCORING_PLAN_SCHEMA_VERSION,)),
     F("round_id", "str", minimum=6, maximum=64),
-    F("stage", "int", minimum=1, maximum=2),
+    F("stage", "int", minimum=1, maximum=1),
     F("configuration_hash", "sha256"),
     F("commitment_hash", "sha256"),
     F("scorer_policy_hash", "sha256"),
@@ -1059,7 +1038,7 @@ ICP_RECEIPT_FIELDS = (
     F("submission_id", "str", minimum=1, maximum=64),
     F("assignment_id", "str", minimum=1, maximum=64),
     F("attempt", "int", minimum=1, maximum=MAX_ATTEMPTS_PER_ASSIGNMENT),
-    F("stage", "int", minimum=1, maximum=2),
+    F("stage", "int", minimum=1, maximum=1),
     F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
     F("lease_generation", "int", minimum=1),
     F("runner_hotkey", "hotkey"),

@@ -51,7 +51,7 @@ def fake_scorer(counter, delay=0.0, fail_first=0):
 
 
 def runs_for(submissions, stage=1, *, outputs=None, causes=None):
-    positions = range(0, 20) if stage == 1 else range(20, 50)
+    positions = range(0, 30)  # the one stage covers every benchmark slot
     rows = []
     for submission in submissions:
         for position in positions:
@@ -66,7 +66,7 @@ def runs_for(submissions, stage=1, *, outputs=None, causes=None):
     return rows
 
 
-_ICPS = {position: make_icp(position) for position in range(50)}
+_ICPS = {position: make_icp(position) for position in range(30)}
 
 
 def icp_hashes():
@@ -102,8 +102,8 @@ def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_r
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=scoring.build_scorer_policy()["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
     shared_items = [item for item in plan["work_items"] if item["output_hash"] == shared]
     assert sorted(item["submission_id"] for item in shared_items) == ["c1", "king"] and len({item["work_item_id"] for item in shared_items}) == 2
-    # Every accepted assignment is one item: four submissions over 20 ICPs, minus the two zero rows.
-    assert len(plan["work_items"]) == 80 - 2 and len({(item["submission_id"], item["icp_position"]) for item in plan["work_items"]}) == 78
+    # Every accepted assignment is one item: four submissions over 30 ICPs, minus the two zero rows.
+    assert len(plan["work_items"]) == 120 - 2 and len({(item["submission_id"], item["icp_position"]) for item in plan["work_items"]}) == 118
     assert plan["zero_rows"] == [{"submission_id": "c2", "icp_position": 1, "cause": "model_timeout"}, {"submission_id": "c3", "icp_position": 2, "cause": "preflight_failed"}]
     with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
         scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=scoring.build_scorer_policy()["policy_hash"], runs=runs_for(["c9"], causes={("c9", 3): "lease_expired"}), icp_hashes_by_position=icp_hashes())
@@ -114,17 +114,17 @@ def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_break
 
     shared = contracts.document_hash(["shared"])
     submissions = ["king"] + ["c%d" % i for i in range(15)]
-    outputs = {(submission, position): shared for submission in submissions for position in range(20)}
+    outputs = {(submission, position): shared for submission in submissions for position in range(30)}
     runs = runs_for(submissions, outputs=outputs)
     policy = scoring.build_scorer_policy()
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
-    assert len(plan["work_items"]) == 320 and len({item["submission_id"] for item in plan["work_items"]}) == 16
+    assert len(plan["work_items"]) == 480 and len({item["submission_id"] for item in plan["work_items"]}) == 16
     counter = {"executions": 0, "lock": threading.Lock()}
     companies = [company(i) for i in range(5)]
     results = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter, delay=0.001), workers=8)
-    assert results.judge_executions == 320 and counter["executions"] == 320
+    assert results.judge_executions == 480 and counter["executions"] == 480
     bundle = scoring.build_score_bundle(plan=plan, policy=policy, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, breakdowns_by_item=results.breakdowns_by_item)
-    assert len(bundle["rows"]) == 320
+    assert len(bundle["rows"]) == 480
     per_position = {}
     for row in bundle["rows"]:
         per_position.setdefault(row["icp_position"], set()).add(contracts.document_hash(row["breakdowns"]))
@@ -133,7 +133,7 @@ def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_break
     assert len(set(bundle["submission_scores"].values())) == 1
     # A restart resumes from durable results without re-executing the judge.
     resumed = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter), workers=4, existing=results.breakdowns_by_item)
-    assert resumed.judge_executions == 0 and counter["executions"] == 320
+    assert resumed.judge_executions == 0 and counter["executions"] == 480
 
 
 def test_judge_infrastructure_failures_retry_then_raise_never_zero():
@@ -151,30 +151,26 @@ def test_judge_infrastructure_failures_retry_then_raise_never_zero():
         scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=broken)
 
 
-def test_stage_two_bundle_carries_final_fifty_icp_scores_and_run_records():
+def test_one_stage_bundle_carries_thirty_icp_scores_and_run_records():
     policy = scoring.build_scorer_policy()
     out1 = contracts.document_hash(["o1"])
     counter = {"executions": 0, "lock": threading.Lock()}
     companies = [company(1), company(2, "10,001+"), company(3)]  # the second is outside the buckets and is skipped
-    stage1_runs = runs_for(["king", "c1"], outputs={("king", p): out1 for p in range(20)} | {("c1", p): out1 for p in range(20)}, causes={("c1", 4): "invalid_output"})
-    plan1 = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=stage1_runs, icp_hashes_by_position=icp_hashes())
-    r1 = scoring.run_scoring_plan(plan1, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, scorer=fake_scorer(counter))
-    bundle1 = scoring.build_score_bundle(plan=plan1, policy=policy, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, breakdowns_by_item=r1.breakdowns_by_item)
-    king_row = [row for row in bundle1["rows"] if row["submission_id"] == "king"][0]
+    runs = runs_for(["king", "c1"], outputs={(s, p): out1 for s in ("king", "c1") for p in range(30)}, causes={("c1", 4): "invalid_output"})
+    plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
+    result = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, scorer=fake_scorer(counter))
+    bundle = scoring.build_score_bundle(plan=plan, policy=policy, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, breakdowns_by_item=result.breakdowns_by_item)
+    king_row = [row for row in bundle["rows"] if row["submission_id"] == "king"][0]
     assert king_row["scored_company_indexes"] == [0, 2] and king_row["skipped_company_indexes"] == [1]
     expected = verify.per_icp_score(_ICPS[0], king_row["breakdowns"], policy, icp_hash=icp_hashes()[0])["per_icp_score"]
     assert king_row["per_icp_score"] == expected == (60.0 + 61.0) / 5
-    assert bundle1["submission_scores"]["king"] == expected
-    assert bundle1["submission_scores"]["c1"] == verify.stage_score([expected] * 19 + [0.0], 20)
-    stage2_runs = runs_for(["king", "c1"], stage=2, outputs={(s, p): out1 for s in ("king", "c1") for p in range(20, 50)})
-    plan2 = scoring.build_scoring_plan(round_id=ROUND, stage=2, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=stage2_runs, icp_hashes_by_position=icp_hashes())
-    r2 = scoring.run_scoring_plan(plan2, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, scorer=fake_scorer(counter))
-    bundle2 = scoring.build_score_bundle(plan=plan2, policy=policy, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, breakdowns_by_item=r2.breakdowns_by_item, stage_1_rows=bundle1["rows"], stage_1_bundle_hash=bundle1["bundle_hash"])
-    assert bundle2["stage"] == 2 and bundle2["stage_1_bundle_hash"] == bundle1["bundle_hash"]
-    assert bundle2["submission_scores"]["king"] == verify.stage_score([expected] * 50, 50) == expected
-    assert bundle2["submission_scores"]["c1"] == verify.stage_score([expected] * 49 + [0.0], 50)
-    records = scoring.run_scores_for_store(bundle1, stage1_runs, score_ref="ref")
-    assert len(records) == 40 and {r["per_icp_score"] for r in records if r["run_id"] == "c1:4:1"} == {0.0}
-    assert verify.validate_score_bundle(bundle2)["bundle_hash"] == bundle2["bundle_hash"]
-    with pytest.raises(scoring.ScoringError):
-        scoring.build_score_bundle(plan=plan2, policy=policy, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, breakdowns_by_item=r2.breakdowns_by_item)
+    assert bundle["stage"] == 1 and "stage_1_bundle_hash" not in bundle
+    assert bundle["submission_scores"]["king"] == verify.stage_score([expected] * 30, 30) == expected
+    assert bundle["submission_scores"]["c1"] == verify.stage_score([expected] * 29 + [0.0], 30)
+    assert len([row for row in bundle["rows"] if row["submission_id"] == "c1"]) == 30
+    records = scoring.run_scores_for_store(bundle, runs, score_ref="ref")
+    assert len(records) == 60 and {r["per_icp_score"] for r in records if r["run_id"] == "c1:4:1"} == {0.0}
+    assert verify.validate_score_bundle(bundle)["bundle_hash"] == bundle["bundle_hash"]
+    # The Arena has one stage: a plan for a second one is refused.
+    with pytest.raises((scoring.ScoringError, contracts.ArenaContractError)):
+        scoring.build_scoring_plan(round_id=ROUND, stage=2, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())

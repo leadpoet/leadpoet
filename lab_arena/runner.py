@@ -1,6 +1,6 @@
 """Arena runner (labarena.md sections 9, 10, 14.3, 15.1; image-by-digest plan).
 
-A runner follows the Arena's current round, claims one pending assignment per
+A runner follows every running Arena round, claims one pending assignment per
 free local slot, materializes the pinned image's root filesystem from the
 Arena registry, executes the image's own entry command in a fresh gVisor
 sandbox for that single ICP, bridges the sandbox's provider requests (plain
@@ -531,6 +531,8 @@ class RunnerConfig:
     # the exact judge reference for scoring assignments (empty: not checked).
     registry_repository: str = ""
     scorer_image_reference: str = ""
+    # Rounds overlap: the sources every followed round pinned, by round id.
+    round_sources: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.max_parallel_runs, bool) or not isinstance(self.max_parallel_runs, int) or self.max_parallel_runs < 1:
@@ -540,10 +542,27 @@ class RunnerConfig:
         self.socket_root.mkdir(parents=True, exist_ok=True)
 
     def adopt_round(self, configuration: Mapping[str, Any]) -> None:
-        """Pin the image sources a round's signed configuration names."""
+        """Pin the image sources a round's signed configuration names.
 
-        self.registry_repository = str(configuration.get("registry_repository") or "")
-        self.scorer_image_reference = str((configuration.get("release") or {}).get("scorer_image_reference") or "")
+        The sources are kept per round because a runner follows every running
+        round at once; the flat fields hold the last adopted round's sources
+        for a runner pinned to one round.
+        """
+
+        sources = {
+            "registry_repository": str(configuration.get("registry_repository") or ""),
+            "scorer_image_reference": str((configuration.get("release") or {}).get("scorer_image_reference") or ""),
+        }
+        round_id = str(configuration.get("round_id") or "")
+        if round_id:
+            self.round_sources[round_id] = sources
+        self.registry_repository = sources["registry_repository"]
+        self.scorer_image_reference = sources["scorer_image_reference"]
+
+    def sources_for(self, round_id: str) -> Dict[str, str]:
+        """The image sources pinned for ``round_id`` (the flat fields when the round was not adopted by id)."""
+
+        return dict(self.round_sources.get(str(round_id)) or {"registry_repository": self.registry_repository, "scorer_image_reference": self.scorer_image_reference})
 
 
 def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
@@ -644,7 +663,7 @@ class AssignmentExecutor:
             # The image and its process come from the lease, pinned by the Arena
             # at admission; the runner checks them against the round's sources.
             image_reference = str(lease.get("image_reference") or "")
-            _check_lease_image(config, kind, image_reference, str(lease["image_digest"]))
+            _check_lease_image(config, kind, image_reference, str(lease["image_digest"]), round_id=str(lease.get("round_id") or config.round_id or ""))
             rootfs = config.image_cache.rootfs_for(str(lease["image_digest"]), image_reference)
             spec = runtime.SandboxSpec(
                 sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
@@ -756,24 +775,28 @@ class AssignmentExecutor:
         )
 
 
-def _check_lease_image(config: RunnerConfig, kind: str, image_reference: str, image_digest: str) -> None:
-    """A lease may only point at the round's Arena repository or the round's exact judge image."""
+def _check_lease_image(config: RunnerConfig, kind: str, image_reference: str, image_digest: str, *, round_id: str = "") -> None:
+    """A lease may only point at its round's Arena repository or its round's exact judge image."""
 
     if not image_reference:
         raise RunnerError("lease carries no image reference")
     reference = images.parse_reference(image_reference)
     if reference.digest != image_digest:
         raise RunnerError("lease image reference does not name the lease digest")
+    sources = config.sources_for(round_id)
     if kind == "score":
-        if config.scorer_image_reference and image_reference != config.scorer_image_reference:
+        if sources["scorer_image_reference"] and image_reference != sources["scorer_image_reference"]:
             raise RunnerError("scoring lease names an image other than the round's judge")
-    elif config.registry_repository and reference.name != config.registry_repository:
+    elif sources["registry_repository"] and reference.name != sources["registry_repository"]:
         raise RunnerError("lease image is outside the round's Arena repository")
 
 
 # ---------------------------------------------------------------------------
 # Claim loop
 # ---------------------------------------------------------------------------
+
+# The round statuses in which assignments can be leased: executions and validator scorings.
+WORKING_STATUSES = ("stage1", "stage1_scoring")
 
 
 class Runner:
@@ -785,41 +808,56 @@ class Runner:
         self.completed: List[Dict[str, Any]] = []
         self.abandoned = 0
         self._pinned = config.round_id is not None
-        self._round_id: Optional[str] = config.round_id
+        self._round_ids: List[str] = [config.round_id] if config.round_id else []
 
     @property
     def round_id(self) -> Optional[str]:
-        return self._round_id
+        """The first followed round (the pinned round, or the oldest running round)."""
+
+        return self._round_ids[0] if self._round_ids else None
+
+    @property
+    def round_ids(self) -> List[str]:
+        return list(self._round_ids)
 
     def refresh_round(self) -> Optional[str]:
-        """Follow the Arena's current round; a changed round is re-verified before any claim.
+        """Follow every running round the Arena reports; a new round is verified before any claim.
 
-        A runner started without ``--round-id`` asks ``/arena/v1/current`` at
-        every idle poll, so the daily rounds roll over without a restart.
+        Rounds overlap, so a runner started without ``--round-id`` asks
+        ``/arena/v1/current`` at every idle poll for the rounds with work
+        (executing or scoring), adopts each new round's signed configuration
+        once, and drops rounds that ended. The daily rounds roll over without
+        a restart.
         """
 
         if self._pinned:
-            return self._round_id
+            return self.round_id
         config = self._config
-        current = (config.api.current().get("round") or {}) if True else {}
-        round_id = current.get("round_id") if isinstance(current, Mapping) else None
-        if not round_id:
-            self._round_id = None
-            return None
-        if round_id != self._round_id:
-            configuration = config.api.round(str(round_id)).get("configuration") or {}
-            verify_release_against_round(configuration, worker_release_hash=config.worker_release_hash, runtime_lock_hash=config.runtime_lock_hash)
-            config.adopt_round(configuration)
-            self._round_id = str(round_id)
-        return self._round_id
+        current = config.api.current()
+        rows = current.get("running_rounds") if isinstance(current, Mapping) else None
+        if not isinstance(rows, list):
+            row = current.get("round") if isinstance(current, Mapping) else None
+            rows = [row] if isinstance(row, Mapping) else []
+        wanted = []
+        for row in rows:
+            if isinstance(row, Mapping) and row.get("round_id") and str(row.get("status") or "") in WORKING_STATUSES:
+                wanted.append(str(row["round_id"]))
+        for round_id in wanted:
+            if round_id not in self._round_ids:
+                configuration = dict(config.api.round(round_id).get("configuration") or {})
+                verify_release_against_round(configuration, worker_release_hash=config.worker_release_hash, runtime_lock_hash=config.runtime_lock_hash)
+                config.adopt_round(dict(configuration, round_id=round_id))
+        self._round_ids = wanted
+        return self.round_id
 
-    def claim_one(self) -> Dict[str, Any]:
+    def claim_one(self, round_id: Optional[str] = None) -> Dict[str, Any]:
         config = self._config
-        if self._round_id is None:
+        round_id = round_id or self.round_id
+        if round_id is None:
             return {"status": "no_open_round"}
         envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_CLAIM,
-            round_id=self._round_id,
+            round_id=round_id,
             hotkey=config.identity.hotkey,
             body={"declared_parallelism": config.max_parallel_runs, "worker_release_hash": config.worker_release_hash},
             timestamp=int(config.clock().timestamp()),
@@ -866,19 +904,22 @@ class Runner:
                 return 0  # the Arena or the round is unavailable: poll again later
         taken = 0
         futures = []
-        for _ in range(max_claims):
-            if not self._slots.acquire(blocking=False):
-                break
-            try:
-                response = self.claim_one()
-            except RunnerError:
-                self._slots.release()
-                break
-            if response.get("status") != "leased":
-                self._slots.release()
-                break
-            taken += 1
-            futures.append(self._pool.submit(self._run_lease, response))
+        for round_id in list(self._round_ids):
+            # Oldest round first: its deadline is nearer. Each round is claimed
+            # until it has nothing to lease or the local slots are full.
+            while taken < max_claims:
+                if not self._slots.acquire(blocking=False):
+                    break
+                try:
+                    response = self.claim_one(round_id)
+                except RunnerError:
+                    self._slots.release()
+                    break
+                if response.get("status") != "leased":
+                    self._slots.release()
+                    break
+                taken += 1
+                futures.append(self._pool.submit(self._run_lease, response))
         for future in futures:
             future.result()
         return taken

@@ -93,24 +93,18 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert committed["status"] == "ok" and committed["participants"] == 3 and harness.status() == "committed"
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     opened = service.advance_round(round_id)
-    assert opened["status"] == "ok" and opened["assignments"] == 60 and harness.status() == "stage1"
+    assert opened["status"] == "ok" and opened["assignments"] == 90 and harness.status() == "stage1"
     harness.run_stage_with_runners(2)
     runs = service.store.list_runs(round_id, stage=1)
-    assert len(runs) == 60 and all(run["status"] == "accepted" for run in runs)
-    assert service.advance_round(round_id)["work_items"] == 60 and harness.status() == "stage1_closed"
-    assert service.advance_round(round_id)["work_items"] == 60 and harness.status() == "stage1_scoring"
+    assert len(runs) == 90 and all(run["status"] == "accepted" for run in runs)
+    assert service.advance_round(round_id)["work_items"] == 90 and harness.status() == "stage1_closed"
+    assert service.advance_round(round_id)["work_items"] == 90 and harness.status() == "stage1_scoring"
     harness.run_stage_with_runners(2)
     assert service.advance_round(round_id)["status"] == "closed" and harness.status() == "stage1_judged"
-    assert service.advance_round(round_id)["judge_executions"] == 60 and harness.status() == "stage1_scored"
-    assert sorted(service.store.get_round(round_id)["finalists"]) == sorted(submissions.values())
     # A restarted service (a fresh PostgREST client) continues the same round.
     harness.service = harness.build_service()
     service = harness.service
-    harness.clock.advance_to(harness.schedule()["stage_2_start"])
-    assert service.advance_round(round_id)["assignments"] == 90 and harness.status() == "stage2"
-    harness.run_stage_with_runners(2)
-    assert service.advance_round(round_id)["status"] == "ok" and harness.status() == "stage2_closed"
-    harness.advance_until("scored")
+    assert service.advance_round(round_id)["judge_executions"] == 90 and harness.status() == "scored"
     published = service.advance_round(round_id)
     assert published["status"] == "ok" and published["king_outcome"] == "crowned" and harness.status() == "published"
     rt.assert_canary_absent(harness, harness.connect)
@@ -122,9 +116,8 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
         outputs[entry["output_hash"]] = json.loads(harness.objects.get(entry["output_ref"]).decode())
     verifier_bundle = {
         "round_configuration": bundle["round_configuration"], "benchmark_commitment": bundle["benchmark_commitment"], "benchmark": benchmark["icps"],
-        "participants": bundle["participants"], "scorer_policy": bundle["scorer_policy"], "stage_plans": {"1": bundle["stage_plans"]["stage_1"], "2": bundle["stage_plans"]["stage_2"]},
-        "score_bundles": {"1": bundle["score_bundles"]["stage_1"], "2": bundle["score_bundles"]["final"]}, "outputs": outputs,
-        "stage1_ranking": bundle["stage1_ranking"], "finalists": bundle["finalists"], "final_ranking": bundle["final_ranking"], "king_decision": bundle["king_decision"], "reward_basis": row["reward_basis_doc"],
+        "participants": bundle["participants"], "scorer_policy": bundle["scorer_policy"], "scoring_plan": bundle["scoring_plan"], "score_bundle": bundle["score_bundle"], "outputs": outputs,
+        "final_ranking": bundle["final_ranking"], "king_decision": bundle["king_decision"], "reward_basis": row["reward_basis_doc"],
     }
     report = verify.rebuild_round(verifier_bundle, service.signing_key_document())
     assert report["ok"], report

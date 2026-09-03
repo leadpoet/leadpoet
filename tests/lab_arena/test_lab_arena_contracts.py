@@ -33,14 +33,14 @@ def signed(keypair: Keypair, **overrides):
 
 
 def test_public_constants_are_the_plan_values():
-    assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.FINALIST_COUNT) == (20, 30, 10)
+    assert (c.STAGE_1_ICP_COUNT, c.BENCHMARK_ICP_COUNT) == (30, 30)  # one stage of 30 ICPs, no finalist cut
+    assert c.GENERATION_BATCH_SIZES == (20, 10)
     assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 8, 2)
     assert c.LAB_ARENA_POOL_PERCENT == 25
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
     assert c.MINER_KEY_PROVIDERS == ("scrapingdog", "deepline", "openrouter") and c.CALL_QUOTAS_PER_ICP == {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
     assert (c.ICP_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 420)
-    assert c.GENERATION_BATCH_SIZES == (20, 20, 10)
     from leadpoet_canonical.constants import EPOCH_LENGTH
 
     assert EPOCH_LENGTH * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600
@@ -123,12 +123,9 @@ def base_round_configuration():
             "submission_cutoff": "2026-09-02T00:00:00Z",
             "benchmark_deadline": "2026-09-02T00:30:00Z",
             "stage_1_start": "2026-09-02T00:30:01Z",
-            "stage_1_close": "2026-09-02T04:00:00Z",
-            "stage_1_scoring_close": "2026-09-02T05:00:00Z",
-            "stage_2_start": "2026-09-02T05:00:01Z",
-            "stage_2_close": "2026-09-02T08:30:00Z",
-            "final_scoring_close": "2026-09-02T10:00:00Z",
-            "publication_deadline": "2026-09-02T10:00:01Z",
+            "stage_1_close": "2026-09-02T05:30:00Z",
+            "stage_1_scoring_close": "2026-09-02T07:00:00Z",
+            "publication_deadline": "2026-09-02T07:00:01Z",
         },
         "generator": {
             "prompt_hash": c.document_hash("prompt"),
@@ -136,13 +133,11 @@ def base_round_configuration():
             "model": "perplexity/sonar-pro",
             "settings": {"temperature": 0.7, "max_tokens": 16000},
             "journal_schema_version": c.GENERATION_JOURNAL_SCHEMA_VERSION,
-            "batch_sizes": [20, 20, 10],
+            "batch_sizes": [20, 10],
             "max_generation_attempts": 12,
         },
         "tie_break_rule": "finalized_block_after_cutoff.v1",
-        "stage_1_icp_count": 20,
-        "stage_2_icp_count": 30,
-        "finalist_count": 10,
+        "stage_1_icp_count": 30,
         "max_challengers": 15,
         "runner_slot_ceiling": 8,
         "max_attempts_per_assignment": 2,
@@ -175,8 +170,7 @@ def base_round_configuration():
         "image_rules": {"schema_version": "leadpoet.lab_arena.image_rules.v1", "max_image_bytes": 2147483648, "max_layers": 64, "max_rootfs_bytes": 8589934592, "platform": {"os": "linux", "architecture": "amd64"}, "layer_media_types": ["application/vnd.oci.image.layer.v1.tar+gzip"]},
         "registry_repository": "arena.example/lab-arena/models",
         "publication_terms_hash": c.document_hash("terms"),
-        "reward_constants": {"pool_percent": 25, "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
-        "all_participants_run_stage_2": True,
+        "reward_constants": {"pool_percent": 25, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
     }
 
 
@@ -184,7 +178,7 @@ def test_round_configuration_pins_public_constants_and_hashes():
     config = c.finalize_round_configuration(base_round_configuration())
     assert c.validate_round_configuration(config)["configuration_hash"] == config["configuration_hash"]
     for mutate in (
-        lambda d: d.update(stage_1_icp_count=19),
+        lambda d: d.update(stage_1_icp_count=29),
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
         lambda d: d.update(runner_slot_ceiling=9),
@@ -192,9 +186,9 @@ def test_round_configuration_pins_public_constants_and_hashes():
         lambda d: d.update(call_quota_hash=c.document_hash("other")),
         lambda d: d.update(miner_key_providers=["scrapingdog"]),
         lambda d: d["reward_constants"].update(pool_percent=30),
-        lambda d: d["generator"].update(batch_sizes=[25, 25]),
+        lambda d: d["generator"].update(batch_sizes=[15, 15]),
         lambda d: d.update(floor_runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address]),
-        lambda d: d["schedule"].update(stage_2_close="2026-09-02T00:00:00Z"),
+        lambda d: d["schedule"].update(stage_1_scoring_close="2026-09-02T00:00:00Z"),
         lambda d: d.update(unexpected=1),
         lambda d: d.update(round_id="bad id"),
     ):
@@ -208,14 +202,14 @@ def test_round_configuration_pins_public_constants_and_hashes():
 
 
 def test_benchmark_commitment_binds_slot_order():
-    hashes = [c.document_hash({"icp": i}) for i in range(50)]
+    hashes = [c.document_hash({"icp": i}) for i in range(30)]
     roots = c.benchmark_roots(hashes)
     swapped = list(hashes)
     swapped[0], swapped[1] = swapped[1], swapped[0]
     assert c.benchmark_roots(swapped)["benchmark_root"] != roots["benchmark_root"]
-    assert c.benchmark_roots(swapped)["stage_2_root"] == roots["stage_2_root"]
+    assert set(roots) == {"icp_leaf_hashes", "benchmark_root"}
     with pytest.raises(c.ArenaContractError):
-        c.benchmark_roots(hashes[:49])
+        c.benchmark_roots(hashes[:29])
     commitment = c.finalize_benchmark_commitment({
         "schema_version": c.BENCHMARK_COMMITMENT_SCHEMA_VERSION,
         "round_id": "arena-2026-09-02",
@@ -232,7 +226,7 @@ def test_benchmark_commitment_binds_slot_order():
     })
     assert c.validate_benchmark_commitment(commitment)
     with pytest.raises(c.ArenaContractError):
-        c.validate_benchmark_commitment(dict(commitment, stage_1_root=roots["stage_2_root"]))
+        c.validate_benchmark_commitment(dict(commitment, benchmark_root=c.benchmark_roots(swapped)["benchmark_root"]))
 
 
 def test_journal_chain_and_receipt_and_reward_basis_contracts():
@@ -267,7 +261,7 @@ def test_journal_chain_and_receipt_and_reward_basis_contracts():
         "schema_version": c.REWARD_BASIS_SCHEMA_VERSION, "round_id": "arena-2026-09-02", "configuration_hash": c.document_hash("cfg"),
         "commitment_hash": c.document_hash("cm"), "result_bundle_hash": c.document_hash("rb"), "published_at": "2026-09-02T10:00:00Z",
         "effective_reward_epoch": 24800, "king_hotkey": keypair.ss58_address, "king_outcome": "crowned", "king_start_epoch": 24800,
-        "reward_constants": {"pool_percent": 25, "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
+        "reward_constants": {"pool_percent": 25, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
     })
     assert c.validate_reward_basis(basis)
     with pytest.raises(c.ArenaContractError):

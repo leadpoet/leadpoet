@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lab Arena runner entrypoint (labarena.md sections 9, 14.3).
 
-A runner follows the Arena's current round (or one pinned with
+A runner follows every running Arena round (or one pinned with
 ``--round-id``), claims one assignment per free local slot
 (``LAB_ARENA_MAX_PARALLEL_RUNS``, default 1), materializes the pinned image
 from the Arena registry, executes it in a fresh gVisor sandbox, and submits
@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a Leadpoet Lab Arena runner")
     parser.add_argument("--api-base-url", required=False, default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
-    parser.add_argument("--round-id", required=False, default=os.environ.get("LAB_ARENA_ROUND_ID", ""), help="pin one round; unset follows the Arena's current round across days")
+    parser.add_argument("--round-id", required=False, default=os.environ.get("LAB_ARENA_ROUND_ID", ""), help="pin one round; unset follows every running Arena round across days")
     parser.add_argument("--wallet-name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
     parser.add_argument("--hotkey-name", default=os.environ.get("LAB_ARENA_HOTKEY_NAME", "default"))
     parser.add_argument("--work-dir", default=os.environ.get("LAB_ARENA_RUNNER_WORK_DIR", "/var/lib/lab-arena/runner"))

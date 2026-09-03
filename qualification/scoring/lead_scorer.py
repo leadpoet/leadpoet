@@ -886,7 +886,6 @@ async def _request_company_reverify_json(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.0,
-        "response_format": {"type": "json_object"},
     }
     try:
         timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)

@@ -21,9 +21,17 @@ from lab_arena import contracts, verify
 from lab_arena.contracts import ArenaContractError
 
 SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
+# Every OpenRouter model the Research Lab judge calls, by the judge's own role
+# for it. The broker refuses any other model on a scoring run, so this mapping
+# must cover the judge image exactly; ``test_lab_arena_judge_routes`` scans
+# the judge's source for model literals against it.
 DEFAULT_JUDGE_MODELS = {
-    "company_fit": "perplexity/sonar-pro",
-    "intent_verification": "perplexity/sonar-pro",
+    "company_fit_reverification": "perplexity/sonar",
+    "intent_signal_judge": "anthropic/claude-sonnet-4.5",
+    "intent_verification": "openai/gpt-4o-mini",
+    "intent_precheck": "google/gemini-2.5-flash-lite",
+    "intent_three_stage_stage3": "perplexity/sonar-pro",
+    "role_batch_check": "google/gemini-2.5-flash",
 }
 # Every scorer behavior the Lab reads from the environment, pinned by policy.
 POLICY_ENV_BINDINGS = {
@@ -282,13 +290,14 @@ def score_work_item(
                 raise JudgeKeyRefused("the scored miner's key refused the judge: %s" % exc.code) from exc
             last_error = exc
             continue
-        if any(scorer_breakdown_has_retryable_infrastructure_failure(item_row) for item_row in breakdowns):
-            last_error = ScoringError("judge reported an infrastructure failure")
+        failed = [item_row for item_row in breakdowns if scorer_breakdown_has_retryable_infrastructure_failure(item_row)]
+        if failed:
+            last_error = ScoringError("judge reported an infrastructure failure: %s" % str(failed[0].get("failure_reason") or "")[:200])
             continue
         if len(breakdowns) != len(scored_indexes):
             raise ScoringError("scorer returned %d breakdowns for %d scored companies" % (len(breakdowns), len(scored_indexes)))
         return breakdowns
-    raise ScoringError("work item %s could not be scored: %s" % (item.get("work_item_id"), type(last_error).__name__ if last_error else "unknown"))
+    raise ScoringError("work item %s could not be scored: %s: %s" % (item.get("work_item_id"), type(last_error).__name__ if last_error else "unknown", str(last_error or "")[:240]))
 
 
 @dataclass
@@ -349,16 +358,27 @@ def build_score_bundle(
     breakdowns_by_item: Mapping[str, Sequence[Mapping[str, Any]]],
     stage_1_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     stage_1_bundle_hash: Optional[str] = None,
+    refused_items: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """Copy each work item's breakdown to every submission with that output,
     synthesize zero rows, and compute stage scores (Stage 1 over 20; the
-    Stage 2 bundle carries the final 50-ICP score using the Stage 1 rows)."""
+    Stage 2 bundle carries the final 50-ICP score using the Stage 1 rows).
+
+    ``refused_items`` maps a work item whose scoring the scored miner's own
+    key or quota refused to its cause: every submission sharing that output
+    gets a zero row with that cause, and the bundle declares the item.
+    """
 
     validated_plan = contracts.validate_scoring_plan(plan)
     validated_policy = contracts.validate_scorer_policy(policy)
     stage = int(validated_plan["stage"])
+    refused = dict(refused_items or {})
     rows: List[Dict[str, Any]] = []
     for item in validated_plan["work_items"]:
+        if item["work_item_id"] in refused:
+            for submission_id in item["submission_ids"]:
+                rows.append(verify.zero_row(submission_id, item["icp_position"], item["icp_hash"], refused[item["work_item_id"]], output_hash=item["output_hash"]))
+            continue
         breakdowns = breakdowns_by_item.get(item["work_item_id"])
         if breakdowns is None:
             raise ScoringError("work item %s has no breakdowns" % item["work_item_id"])
@@ -397,6 +417,8 @@ def build_score_bundle(
         "rows": rows,
         "submission_scores": scores,
     }
+    if refused:
+        document["refused_work_items"] = [{"work_item_id": item_id, "cause": cause} for item_id, cause in sorted(refused.items())]
     if stage == 2:
         document["stage_1_bundle_hash"] = stage_1_bundle_hash
     return verify.finalize_score_bundle(document)
@@ -454,10 +476,19 @@ def build_scoring_output(work_item_id: str, breakdowns: Sequence[Mapping[str, An
     return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "breakdowns": [dict(item) for item in breakdowns]}
 
 
-def build_scoring_failure(work_item_id: str, failure: str) -> Dict[str, Any]:
+MAX_FAILURE_DETAIL_CHARS = 300
+
+
+def build_scoring_failure(work_item_id: str, failure: str, detail: str = "") -> Dict[str, Any]:
+    """A failure document; ``detail`` is a bounded operator-facing reason, never a payload."""
+
     if failure not in SCORING_FAILURES:
         raise ScoringError("unknown scoring failure")
-    return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": failure}
+    document = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": failure}
+    text = str(detail or "").strip()
+    if text:
+        document["detail"] = text[:MAX_FAILURE_DETAIL_CHARS]
+    return document
 
 
 def scoring_output_from_bytes(raw: bytes) -> Dict[str, Any]:
@@ -483,9 +514,15 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     contracts.require_sha256(work_item_id, "work_item_id")
     keys = set(document)
     if "failure" in document:
-        if keys != {"schema_version", "work_item_id", "failure"} or document["failure"] not in SCORING_FAILURES:
+        if keys - {"detail"} != {"schema_version", "work_item_id", "failure"} or document["failure"] not in SCORING_FAILURES:
             raise ScoringError("scoring failure document is invalid")
-        return {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": document["failure"]}
+        detail = document.get("detail", "")
+        if not isinstance(detail, str) or len(detail) > MAX_FAILURE_DETAIL_CHARS:
+            raise ScoringError("scoring failure detail is invalid")
+        failure_document = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": work_item_id, "failure": document["failure"]}
+        if detail:
+            failure_document["detail"] = detail
+        return failure_document
     if keys != {"schema_version", "work_item_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
         raise ScoringError("scoring output document is invalid")
     breakdowns = []

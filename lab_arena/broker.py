@@ -361,6 +361,7 @@ class RunContext:
     submission_id: str
     stage: int
     kind: str = "execute"  # "execute" runs a miner model; "score" runs the Arena judge on a miner's output
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -405,8 +406,11 @@ def _decode_terminal(document: Any) -> Tuple[int, Dict[str, str], bytes]:
 
 
 def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
+    """A generic error reply for the model; the call summary keeps the code so
+    the worker can tell a refused key or quota from a judge's own failure."""
+
     body = json.dumps({"error": {"code": code}}, separators=(",", ":")).encode("utf-8")
-    return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call))
+    return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call, error_code=code))
 
 
 class Broker:
@@ -518,6 +522,7 @@ class Broker:
         request_hash = contracts.document_hash(normalized)
         call_identity = contracts.provider_call_identity(
             assignment_id=context.assignment_id,
+            attempt=int(getattr(context, "attempt", 1)),
             icp_position=context.icp_position,
             action_sequence=action_sequence,
             operation_id=operation_id,
@@ -624,6 +629,13 @@ class Broker:
             actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
         )
         settle_status = settled.get("status")
+        if settle_status == "settled" and getattr(context, "kind", "execute") == "score" and response.status in (401, 403):
+            # The provider rejected the scored miner's own key while the judge
+            # was running: the call is recorded, and the judge sees a key
+            # refusal, which is that miner's zero rather than a judge error
+            # that would leave the item unjudged and cancel the round.
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "response_hash": payload["response_hash"], "event_cursor": settled.get("event_cursor"), "event_head_hash": settled.get("event_head_hash")})
+            return _error_result("call_refused", summary)
         if settle_status == "settled":
             summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "response_hash": payload["response_hash"], "event_cursor": settled.get("event_cursor"), "event_head_hash": settled.get("event_head_hash")})
             return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)

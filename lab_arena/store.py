@@ -60,6 +60,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_close_stage": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_open_scoring": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_close_scoring": (("p_round_id", "text"), ("p_stage", "smallint")),
+    "lab_arena_reject_scorings": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_run_ids", "text[]")),
     "lab_arena_cancel_round": (("p_round_id", "text"), ("p_reason", "text")),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
 }
@@ -681,6 +682,14 @@ class ArenaStore:
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_scoring", {"p_round_id": round_id, "p_stage": int(stage)}), "close_scoring")
+
+    def reject_scorings(self, round_id: str, stage: int, run_ids: Sequence[str]) -> Dict[str, Any]:
+        """Fail scorings the replay could not reproduce and reopen the scoring window for their second attempts."""
+
+        return _require_mapping(
+            self._transport.rpc("lab_arena_reject_scorings", {"p_round_id": round_id, "p_stage": int(stage), "p_run_ids": [str(item) for item in run_ids]}),
+            "reject_scorings",
+        )
 
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")

@@ -257,8 +257,12 @@ def per_icp_score(
     }
 
 
-def zero_row(submission_id: str, icp_position: int, icp_hash: str, cause: str) -> Dict[str, Any]:
-    """A synthesized zero row for a timeout, missing, invalid, refused, or preflight-failed ICP."""
+def zero_row(submission_id: str, icp_position: int, icp_hash: str, cause: str, output_hash: Optional[str] = None) -> Dict[str, Any]:
+    """A synthesized zero row for a timeout, missing, invalid, refused, or preflight-failed ICP.
+
+    A refused scoring keeps its output hash so the verifier can bind the row
+    to the work item the bundle declares as refused.
+    """
 
     if cause not in ZERO_ROW_CAUSES:
         raise ArenaContractError("zero row cause must be one of %s" % ", ".join(ZERO_ROW_CAUSES))
@@ -266,7 +270,7 @@ def zero_row(submission_id: str, icp_position: int, icp_hash: str, cause: str) -
         "submission_id": _require_text(submission_id, "submission_id"),
         "icp_position": _require_position(icp_position),
         "icp_hash": require_sha256(icp_hash, "icp_hash"),
-        "output_hash": None,
+        "output_hash": require_sha256(output_hash, "output_hash") if output_hash else None,
         "cause": cause,
         "scored_company_indexes": [],
         "skipped_company_indexes": [],
@@ -662,6 +666,16 @@ SCORE_BUNDLE_FIELDS = (
         maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1),
     ),
     F("submission_scores", "object"),
+    # Work items the scored miner's own key or quota refused after the plan
+    # was committed; their submissions carry zero rows with the same cause.
+    F(
+        "refused_work_items",
+        "list[object]",
+        fields=(F("work_item_id", "sha256"), F("cause", "str", choices=ZERO_ROW_CAUSES)),
+        minimum=0,
+        maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1),
+        required=False,
+    ),
     F("bundle_hash", "sha256", required=False),
     F("signature", "object", required=False),
 )
@@ -703,7 +717,7 @@ def _validate_row(row: Mapping[str, Any], stage: int, path: str) -> None:
             if not breakdown_is_redacted(breakdown):
                 raise ArenaContractError("%s.breakdowns[%d] is not redacted" % (path, index))
         return
-    if row.get("output_hash") is not None:
+    if row.get("output_hash") is not None and row.get("cause") != "judge_key_refused":
         raise ArenaContractError("%s zero row cannot carry an output_hash" % path)
     if scored or skipped or row["breakdowns"]:
         raise ArenaContractError("%s zero row cannot carry companies or breakdowns" % path)
@@ -993,7 +1007,15 @@ def _recompute_stage_rows(
                 raise ArenaContractError("%s breakdowns differ from another row of the same work item" % path)
         else:
             planned_cause = zero_rows.get(key)
-            if planned_cause is None or planned_cause != row["cause"]:
+            if planned_cause is None:
+                # Not planned as a zero: it must be a work item the bundle declares refused.
+                work_item = work_items.get((icp_hash, row.get("output_hash")))
+                declared = {(item["work_item_id"], item["cause"]) for item in score_bundle.get("refused_work_items") or []}
+                if work_item is None or submission_id not in work_item["submission_ids"] or (work_item["work_item_id"], row["cause"]) not in declared:
+                    raise ArenaContractError("%s zero row is not in the scoring plan with cause %s" % (path, row["cause"]))
+                if row["breakdowns"] or row["per_icp_score"] != 0.0 or row["scored_company_indexes"] or row["skipped_company_indexes"]:
+                    raise ArenaContractError("%s refused work item row is not a zero row" % path)
+            elif planned_cause != row["cause"]:
                 raise ArenaContractError("%s zero row is not in the scoring plan with cause %s" % (path, row["cause"]))
         rows_by_submission.setdefault(submission_id, {})[position] = row
     if seen != expected:

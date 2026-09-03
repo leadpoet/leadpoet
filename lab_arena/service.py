@@ -27,7 +27,6 @@ from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
-AUDIT_TOLERANCE_POINTS = 10.0  # audit re-scores beyond this mean difference are flagged, never silently averaged
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 210,
@@ -166,7 +165,6 @@ class RoundDefaults:
     repository_commit: str = "0" * 40
     max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     scorer_image_digest: str = "sha256:" + "0" * 64  # the Arena-built judge image validators run for scoring assignments
-    audit_percent: int = 10  # share of scoring work items scored a second time by another validator
 
 
 @dataclass
@@ -361,7 +359,10 @@ class ArenaService:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
         allowlist, banned_snapshot = self.runner_allowlist()
-        price_table = broker_module.validate_price_table(self._config.price_table_source(defaults.openrouter_allowed_models))
+        # The table prices the miners' allowed models and the judge's models: a
+        # scoring run reserves against the same table as an execution.
+        priced_models = sorted(set(defaults.openrouter_allowed_models) | {str(model) for model in self._scorer_policy["judge_models"].values()})
+        price_table = broker_module.validate_price_table(self._config.price_table_source(priced_models))
         document = {
             "schema_version": contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,
             "round_id": round_id,
@@ -392,7 +393,6 @@ class ArenaService:
             "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
             "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
             "call_quota_hash": operations.CALL_QUOTA_HASH,
-            "audit_percent": int(defaults.audit_percent),
             "icp_wall_clock_seconds": contracts.ICP_WALL_CLOCK_SECONDS,
             "scorer_policy_hash": self._scorer_policy["policy_hash"],
             "scoring_cap_microusd": defaults.scoring_cap_microusd,
@@ -743,10 +743,6 @@ class ArenaService:
 
     # -- validator scoring (sections 10 and 16 as revised) ----------------------
 
-    def _audit_selected(self, round_row: Mapping[str, Any], work_item_id: str) -> bool:
-        percent = int(round_row["configuration_doc"].get("audit_percent") or 0)
-        return int(work_item_id[7:11], 16) % 100 < percent
-
     def open_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         """Turn the committed plan into scoring assignments validators claim."""
 
@@ -763,38 +759,26 @@ class ArenaService:
             run = accepted.get((submission_id, int(item["icp_position"])))
             if run is None or run.get("output_hash") != item["output_hash"]:
                 raise ServiceError("scoring_plan_run_mismatch", 500)
-            items.append({"work_item_id": item["work_item_id"], "output_hash": item["output_hash"], "scored_run_id": run["run_id"], "audit": False})
-            if self._audit_selected(round_row, item["work_item_id"]):
-                items.append({"work_item_id": item["work_item_id"], "output_hash": item["output_hash"], "scored_run_id": run["run_id"], "audit": True})
+            items.append({"work_item_id": item["work_item_id"], "output_hash": item["output_hash"], "scored_run_id": run["run_id"]})
         result = self._store.open_scoring(round_id, stage, items)
         return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
-        """Every primary scoring is terminal and no audit is still in progress.
-
-        Audits are best effort: one nobody independent could claim must not
-        hold the round open, but one a validator is working on is waited for.
-        """
-
         runs = self._store.list_runs(round_id, stage=stage, kind="score")
-        primaries = [run for run in runs if not str(run["assignment_id"]).endswith(":audit")]
-        audits = [run for run in runs if str(run["assignment_id"]).endswith(":audit")]
-        return all(run["status"] in ("accepted", "failed") for run in primaries) and not any(run["status"] in ("leased", "submitted") for run in audits)
+        return all(run["status"] in ("accepted", "failed") for run in runs)
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return self._store.close_scoring(round_id, stage)
 
-    def _scoring_outputs(self, round_id: str, stage: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-        """Primary and audit score runs by work item; the latest attempt wins."""
+    def _scoring_outputs(self, round_id: str, stage: int) -> Dict[str, Dict[str, Any]]:
+        """The score run that counts for each work item: an accepted attempt, else the latest."""
 
-        primary: Dict[str, Dict[str, Any]] = {}
-        audits: Dict[str, Dict[str, Any]] = {}
+        chosen: Dict[str, Dict[str, Any]] = {}
         for run in self._store.list_runs(round_id, stage=stage, kind="score"):
-            bucket = audits if str(run["assignment_id"]).endswith(":audit") else primary
-            current = bucket.get(run["work_item_id"])
-            if current is None or (run["status"] == "accepted" and current["status"] != "accepted") or int(run["attempt"]) > int(current["attempt"]):
-                bucket[run["work_item_id"]] = run
-        return primary, audits
+            current = chosen.get(run["work_item_id"])
+            if current is None or (run["status"] == "accepted" and current["status"] != "accepted") or (run["status"] == current["status"] and int(run["attempt"]) > int(current["attempt"])):
+                chosen[run["work_item_id"]] = run
+        return chosen
 
     def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
@@ -805,32 +789,46 @@ class ArenaService:
             raise ServiceError("scoring_output_item_mismatch", 500)
         return scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(self._scorer_policy["max_scored_companies"]))
 
-    def _replayed_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], reported: Sequence[Mapping[str, Any]], report: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Re-derive the breakdowns from the run's recorded judge responses; the replay is authoritative."""
+    def _replayed_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], reported: Sequence[Mapping[str, Any]], report: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """Re-derive the breakdowns from the run's recorded judge responses.
+
+        Reproduced with the same numbers: accepted. Reproduced with different
+        numbers: the replayed numbers stand and the validator is flagged. Not
+        reproducible at all: ``None``, and the scoring is rejected.
+        """
 
         from lab_arena import replay as replay_module
 
         input_document = scoring.build_scoring_input(work_item_id=str(run["work_item_id"]), icp=icp, companies=companies, policy=self._scorer_policy, evaluation_date=str(self._round(run["round_id"]).get("evaluation_date") or ""))
         work_dir = Path(self._config.replay_work_dir or tempfile.gettempdir())
+        entry = {"run_id": run["run_id"], "runner": run.get("runner_hotkey"), "work_item_id": run["work_item_id"]}
         try:
             output, summary = replay_module.replay_work_item(input_document=input_document, ledger_entries=self._store.list_ledger(run_id=run["run_id"]), work_dir=work_dir, entry_command=self._config.replay_entry_command)
         except (replay_module.ReplayError, scoring.ScoringError) as exc:
-            report.append({"run_id": run["run_id"], "runner": run.get("runner_hotkey"), "outcome": "replay_failed", "detail": str(exc)[:120]})
-            return list(reported)
+            report.append(dict(entry, outcome="rejected", reason="replay_failed", detail=str(exc)[:120]))
+            return None
         if "failure" in output:
-            report.append({"run_id": run["run_id"], "runner": run.get("runner_hotkey"), "outcome": "replay_" + str(output["failure"]), "served": summary["served"], "misses": len(summary["misses"])})
-            return list(reported)
+            report.append(dict(entry, outcome="rejected", reason="replay_" + str(output["failure"]), served=summary["served"], misses=len(summary["misses"])))
+            return None
         try:
             replayed = scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(self._scorer_policy["max_scored_companies"]))
         except scoring.ScoringError as exc:
-            report.append({"run_id": run["run_id"], "runner": run.get("runner_hotkey"), "outcome": "replay_invalid", "detail": str(exc)[:120]})
-            return list(reported)
-        matched = contracts.document_hash(replayed) == contracts.document_hash(list(reported))
-        report.append({"run_id": run["run_id"], "runner": run.get("runner_hotkey"), "outcome": "match" if matched else "mismatch", "served": summary["served"], "misses": len(summary["misses"])})
+            report.append(dict(entry, outcome="rejected", reason="replay_invalid", detail=str(exc)[:120]))
+            return None
+        # The score-bearing form decides a match: the redacted breakdown keeps
+        # exactly what the score and FP derivation read, and drops payload
+        # fields (quotes, traces, receipts) a judge may not reproduce verbatim.
+        matched = contracts.document_hash([verify.redact_breakdown(b) for b in replayed]) == contracts.document_hash([verify.redact_breakdown(b) for b in reported])
+        report.append(dict(entry, outcome="match" if matched else "mismatch", served=summary["served"], misses=len(summary["misses"])))
         return replayed
 
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
-        """Assemble the stage bundle from validator-scored work items."""
+        """Assemble the stage bundle from validator-scored work items.
+
+        Every accepted scoring is replayed first. A scoring the replay cannot
+        reproduce is rejected and re-scored: the round returns to the scoring
+        window for the rejected items' second attempts.
+        """
 
         round_row = self._round(round_id)
         if round_row["status"] != "stage%d_judged" % stage:
@@ -838,16 +836,16 @@ class ArenaService:
         plan = self._load_scoring_plan(round_row, stage)
         icps, _hashes = self.benchmark_icps(round_id)
         outputs = self._outputs_by_hash(round_id, stage)
-        primary, audits = self._scoring_outputs(round_id, stage)
+        chosen = self._scoring_outputs(round_id, stage)
         scoring_started = _iso(self.now())
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         refused: List[str] = []
-        audit_report: List[Dict[str, Any]] = []
         replay_report: List[Dict[str, Any]] = []
+        rejected: List[str] = []
         judge_executions = 0
         for item in plan["work_items"]:
             work_item_id = item["work_item_id"]
-            run = primary.get(work_item_id)
+            run = chosen.get(work_item_id)
             if run is None:
                 raise ServiceError("scoring_assignment_missing", 500)
             icp = icps[int(item["icp_position"])]
@@ -855,20 +853,25 @@ class ArenaService:
             if run["status"] != "accepted":
                 if run.get("terminal_cause") != "judge_key_refused":
                     raise scoring.ScoringError("work item %s was not judged" % work_item_id)
-                breakdowns_by_item[work_item_id] = []  # the scored miner's own key refused the judge: zero
-                refused.append(work_item_id)
+                refused.append(work_item_id)  # the scored miner's own key refused the judge: a declared zero row
                 continue
             breakdowns = self._verified_breakdowns(run, icp=icp, companies=companies)
             judge_executions += 1
             if self._config.replay_verification:
-                breakdowns = self._replayed_breakdowns(run, icp=icp, companies=companies, reported=breakdowns, report=replay_report)
+                replayed = self._replayed_breakdowns(run, icp=icp, companies=companies, reported=breakdowns, report=replay_report)
+                if replayed is None:
+                    rejected.append(run["run_id"])
+                    continue
+                breakdowns = replayed
             breakdowns_by_item[work_item_id] = breakdowns
-            audit = audits.get(work_item_id)
-            if audit is not None and audit["status"] == "accepted" and audit.get("runner_hotkey") != run.get("runner_hotkey"):
-                second = self._verified_breakdowns(audit, icp=icp, companies=companies)
-                first_mean = sum(float(b["final_score"]) for b in breakdowns) / max(1, len(breakdowns))
-                second_mean = sum(float(b["final_score"]) for b in second) / max(1, len(second))
-                audit_report.append({"work_item_id": work_item_id, "scorer": run.get("runner_hotkey"), "auditor": audit.get("runner_hotkey"), "delta": round(abs(first_mean - second_mean), 6), "flagged": abs(first_mean - second_mean) > AUDIT_TOLERANCE_POINTS})
+        timing_ref = "arena/%s/timing/stage%d_scoring.json" % (round_id, stage)
+        if rejected:
+            result = self._store.reject_scorings(round_id, stage, rejected)
+            self._objects.put(
+                "arena/%s/timing/stage%d_rejections_%d.json" % (round_id, stage, int(result.get("stage_generation") or 0)),
+                contracts.canonical_json({"stage": stage, "at": _iso(self.now()), "rejected": rejected, "replays": replay_report, "result": result}).encode("utf-8"),
+            )
+            return {"status": "rescoring" if result.get("status") == "reopened" else result.get("status"), "round_status": result.get("round_status"), "rejected": len(rejected), "exhausted": result.get("exhausted")}
         stage_1_rows = None
         stage_1_bundle_hash = None
         if stage == 2:
@@ -878,12 +881,13 @@ class ArenaService:
         ref = "arena/%s/scores/stage%d.json" % (round_id, stage)
         bundle = self._put_signed(
             ref,
-            scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=breakdowns_by_item, stage_1_rows=stage_1_rows, stage_1_bundle_hash=stage_1_bundle_hash),
+            scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=breakdowns_by_item, refused_items={item: "judge_key_refused" for item in refused}, stage_1_rows=stage_1_rows, stage_1_bundle_hash=stage_1_bundle_hash),
             "bundle_hash",
         )
+        mismatches = sum(1 for entry in replay_report if entry.get("outcome") == "mismatch")
         self._objects.put(
-            "arena/%s/timing/stage%d_scoring.json" % (round_id, stage),
-            contracts.canonical_json({"stage": stage, "started_at": scoring_started, "finished_at": _iso(self.now()), "judge_executions": judge_executions, "work_items": len(plan["work_items"]), "key_refused_items": refused, "audits": audit_report, "replays": replay_report}).encode("utf-8"),
+            timing_ref,
+            contracts.canonical_json({"stage": stage, "started_at": scoring_started, "finished_at": _iso(self.now()), "judge_executions": judge_executions, "work_items": len(plan["work_items"]), "key_refused_items": refused, "replays": replay_report, "replay_mismatches": mismatches}).encode("utf-8"),
         )
         runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(bundle, runs, score_ref=ref))
@@ -892,7 +896,7 @@ class ArenaService:
             transition = self._store.transition_round(round_id, "stage1_judged", "stage1_scored", {"finalists": finalists, "stage1_scores_ref": ref, "stage1_score_bundle_hash": bundle["bundle_hash"]})
         else:
             transition = self._store.transition_round(round_id, "stage2_judged", "scored", {"final_scores_ref": ref, "final_score_bundle_hash": bundle["bundle_hash"]})
-        return {"status": transition.get("status"), "bundle_hash": bundle["bundle_hash"], "judge_executions": judge_executions, "audits": len(audit_report), "flagged_audits": sum(1 for a in audit_report if a["flagged"])}
+        return {"status": transition.get("status"), "bundle_hash": bundle["bundle_hash"], "judge_executions": judge_executions, "replay_mismatches": mismatches}
 
     def _ranking_entries(self, round_row: Mapping[str, Any], bundle: Mapping[str, Any], score_key: str) -> List[Dict[str, Any]]:
         entries = []
@@ -1103,7 +1107,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
-        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
+        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
 
     def _broker_for(self, round_id: str) -> broker_module.Broker:
         with self._lock:

@@ -39,7 +39,11 @@ CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
 # Judge calls made while scoring one work item (one output on one ICP), also
 # on the scored miner's keys: verification scrapes, corroboration searches,
 # and the three-stage judge for up to five companies.
-SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 60, "deepline": 40, "openrouter": 60}
+# Sized from the real judge through the shim (tests/lab_arena/test_lab_arena_real_judge.py):
+# per company about 6 Scrapingdog fetches (homepage, Wayback check, evidence
+# pages), 3 OpenRouter calls, and 1 Deepline contents call, with retry headroom
+# for five companies. A judge that exhausts a quota is the scored miner's zero.
+SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 150, "deepline": 40, "openrouter": 120}
 CALL_QUOTA_SCHEMA_VERSION = "lab_arena.call_quotas.v2"
 # Assignment kinds: a validator either executes a miner's model on one ICP or
 # scores one output on one ICP with the Arena judge.
@@ -126,12 +130,12 @@ ROUND_TRANSITIONS = {
     "stage1": ("stage1_closed", "cancelled"),
     "stage1_closed": ("stage1_scoring", "cancelled"),
     "stage1_scoring": ("stage1_judged", "cancelled"),
-    "stage1_judged": ("stage1_scored", "cancelled"),
+    "stage1_judged": ("stage1_scored", "stage1_scoring", "cancelled"),
     "stage1_scored": ("stage2", "cancelled"),
     "stage2": ("stage2_closed", "cancelled"),
     "stage2_closed": ("stage2_scoring", "cancelled"),
     "stage2_scoring": ("stage2_judged", "cancelled"),
-    "stage2_judged": ("scored", "cancelled"),
+    "stage2_judged": ("scored", "stage2_scoring", "cancelled"),
     "scored": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
@@ -155,6 +159,8 @@ TERMINAL_CAUSES = (
     "judge_error",
     "judge_timeout",
     "judge_key_refused",
+    # The Arena could not reproduce the scoring from its recorded judge responses.
+    "replay_rejected",
 )
 # Causes that the miner caused: no second attempt (section 9.1).
 MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
@@ -162,7 +168,7 @@ MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
 )
 SCORE_TERMINAL_CAUSES = ("accepted", "judge_error", "judge_timeout", "judge_key_refused")
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
-INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected", "judge_error", "judge_timeout"})
+INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected", "judge_error", "judge_timeout", "replay_rejected"})
 
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
@@ -678,8 +684,6 @@ ROUND_CONFIGURATION_FIELDS = (
     F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
     F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in MINER_KEY_PROVIDERS)),
     F("call_quota_hash", "sha256"),
-    # Share of scoring work items that a second validator scores again (audit).
-    F("audit_percent", "int", minimum=0, maximum=100),
     F("icp_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy_hash", "sha256"),
     F("scoring_cap_microusd", "int", minimum=0),
@@ -1118,17 +1122,24 @@ EVENT_TYPES = (
 def provider_call_identity(
     *,
     assignment_id: str,
+    attempt: int,
     icp_position: int,
     action_sequence: int,
     operation_id: str,
     request_hash: str,
 ) -> str:
-    """Worker-owned call identity; the model supplies no identity field."""
+    """Worker-owned call identity; the model supplies no identity field.
+
+    The identity is per attempt: a retried attempt is its own run with its own
+    lease, quota, and ledger lineage, so its calls never collide with the
+    entries of the attempt it replaces.
+    """
 
     return document_hash(
         {
             "call": PROVIDER_CALL_SCHEMA_VERSION,
             "assignment_id": str(assignment_id),
+            "attempt": int(attempt),
             "icp_position": int(icp_position),
             "action_sequence": int(action_sequence),
             "operation_id": str(operation_id),

@@ -163,7 +163,6 @@ def base_round_configuration():
         "call_quotas": dict(c.CALL_QUOTAS_PER_ICP),
         "call_quota_hash": c.document_hash(c.call_quota_document()),
         "scoring_call_quotas": dict(c.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
-        "audit_percent": 10,
         "icp_wall_clock_seconds": 300,
         "scorer_policy_hash": c.document_hash("policy"),
         "scoring_cap_microusd": 50_000_000,
@@ -282,5 +281,5 @@ def test_journal_chain_and_receipt_and_reward_basis_contracts():
     bad = dict(plan, work_items=[dict(plan["work_items"][0], work_item_id=c.document_hash("wrong"))])
     with pytest.raises(c.ArenaContractError):
         c.validate_scoring_plan(bad)
-    identity = c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=c.document_hash("q"))
-    assert identity != c.provider_call_identity(assignment_id="a1", icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=c.document_hash("q"))
+    identity = c.provider_call_identity(attempt=1, assignment_id="a1", icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=c.document_hash("q"))
+    assert identity != c.provider_call_identity(attempt=1, assignment_id="a1", icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=c.document_hash("q"))

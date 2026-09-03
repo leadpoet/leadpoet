@@ -41,10 +41,10 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
     item = {"work_item_id": work_item_id, "output_hash": contracts.document_hash({"companies": companies})}
     try:
         breakdowns = scoring.score_work_item(item, icp=icp, companies=companies, scorer=scorer, max_scored_companies=int(policy["max_scored_companies"]))
-    except scoring.JudgeKeyRefused:
-        return scoring.build_scoring_failure(work_item_id, "judge_key_refused")
-    except scoring.ScoringError:
-        return scoring.build_scoring_failure(work_item_id, "judge_error")
+    except scoring.JudgeKeyRefused as exc:
+        return scoring.build_scoring_failure(work_item_id, "judge_key_refused", detail=str(exc))
+    except scoring.ScoringError as exc:
+        return scoring.build_scoring_failure(work_item_id, "judge_error", detail=str(exc))
     return scoring.build_scoring_output(work_item_id, breakdowns)
 
 

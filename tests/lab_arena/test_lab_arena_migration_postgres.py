@@ -234,7 +234,7 @@ def test_append_only_tables_and_write_once_rounds_resist_owner_level_mutation(st
     response, token, _, _ = claim(store, round_id, runners[0])
     run_id = response["run_id"]
     lease_hash = hash_lease_token(token)
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q"))
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q"))
     assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={"q": 1})["status"] == "reserved"
     event = make_event(response, 0, "")
     assert store.append_events(run_id=run_id, lease_token_hash=lease_hash, events=[event])["status"] == "appended"
@@ -396,8 +396,8 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     runners, parts = open_round(store, round_id, participants=1, prefix="lx", quotas={"deepline": 2, "scrapingdog": 30, "openrouter": 60}, stage_1_icps=1, max_attempts=1)
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q1"))
-    dispatched_identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("q2"))
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q1"))
+    dispatched_identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("q2"))
     assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity)["status"] == "dispatched"
@@ -423,13 +423,13 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     assert "per_icp_cap_microusd" not in second and second["lease_generation"] == 2
     # The stage quota still counts the lost attempt's uncertain call (the recovered one does not).
     lease2 = hash_lease_token(token2)
-    heavy = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("heavy"))
-    first_ok = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("first-ok"))
+    heavy = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("heavy"))
+    first_ok = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("first-ok"))
     assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=first_ok, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     refused = store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
     assert refused["status"] == "refused" and refused["reason"] == "stage_quota"
     # Another provider's quota is independent, and the refusal is recorded and replayed.
-    other = contracts.provider_call_identity(assignment_id=second["assignment_id"], icp_position=0, action_sequence=2, operation_id="scrapingdog.google", request_hash=sha("other"))
+    other = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=2, operation_id="scrapingdog.google", request_hash=sha("other"))
     assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "refused"
     # No third attempt after the second expires.
@@ -445,7 +445,7 @@ def test_model_caused_failure_gets_no_second_attempt_and_completion_requires_clo
     runners, parts = open_round(store, round_id, participants=1, prefix="mc")
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="openrouter.chat", request_hash=sha("q"))
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="openrouter.chat", request_hash=sha("q"))
     assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=9000, call_doc={})["status"] == "reserved"
     receipt = {"receipt_hash": sha("receipt")}
     blocked = store.complete_attempt(run_id=run_id, lease_token_hash=lease_hash, receipt=receipt, receipt_hash=sha("receipt"), terminal_cause="model_timeout", output_hash="", output_ref="", provider_call_root=sha("a"), private_event_root=sha("b"), cost_root=sha("c"))
@@ -482,8 +482,8 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
         leases.append((response, hash_lease_token(token)))
     # Prepare one reserved and one dispatched call on every lease before the race.
     for index, (response, lease_hash) in enumerate(leases):
-        reserved = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
-        dispatched = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
+        reserved = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
+        dispatched = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
         assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=reserved, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
         assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
         assert setup.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched)["status"] == "dispatched"
@@ -498,8 +498,8 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
         worker = workers[index % 2]
         kind = index % 6
         start.wait(timeout=30)
-        identity_r = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
-        identity_d = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
+        identity_r = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
+        identity_d = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
         if kind == 0:
             result = claim(worker, round_id, runners[0], parallelism=100, ceiling=100)[0]
         elif kind == 1:
@@ -603,7 +603,7 @@ def test_concurrent_reservations_never_exceed_the_call_quota(connect):
     lock = threading.Lock()
 
     def reserve(index: int):
-        identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="deepline.execute", request_hash=sha("c%d" % index))
+        identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="deepline.execute", request_hash=sha("c%d" % index))
         result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
         with lock:
             results.append((result["status"], result.get("reason")))
@@ -614,13 +614,13 @@ def test_concurrent_reservations_never_exceed_the_call_quota(connect):
     assert statuses.count("reserved") == 12  # the per-ICP Deepline quota, under sixteen concurrent workers
     assert statuses.count("refused") == 38 and {reason for status, reason in results if status == "refused"} == {"per_icp_quota"}
     # Quotas are per provider: Scrapingdog calls on the same attempt are untouched by the Deepline quota.
-    other = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=99, operation_id="scrapingdog.google", request_hash=sha("g"))
+    other = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=99, operation_id="scrapingdog.google", request_hash=sha("g"))
     assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     # A miner missing one provider key is refused for every provider, even the ones it holds.
     account = setup.get_account(miner)
     assert account["preflight_status"] == "ok" and "balance_microusd" not in account
     setup.record_preflight(miner, "deepline", {"preflight_status": "failed", "provider": "deepline", "key_hash": account["credentials"]["deepline"]["key_hash"]})
-    blocked = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=100, operation_id="scrapingdog.google", request_hash=sha("blocked"))
+    blocked = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=100, operation_id="scrapingdog.google", request_hash=sha("blocked"))
     refused = setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=blocked, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})
     assert refused["status"] == "refused" and refused["reason"] == "key_preflight"
     for instance in instances + [setup]:
@@ -648,7 +648,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     instances = [ArenaStore(PsycopgTransport(connect)), ArenaStore(PsycopgTransport(connect))]
 
     def reserve(index: int):
-        identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="openrouter.chat", request_hash=sha("o%d" % index))
+        identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="openrouter.chat", request_hash=sha("o%d" % index))
         result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1_000_000, call_doc={})
         with lock:
             results.append((index, result["status"]))
@@ -660,7 +660,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     account = setup.get_account(miner)
     assert account["outstanding_openrouter_reservation_microusd"] == 10_000_000
     reserved_index = next(index for index, status in results if status == "reserved")
-    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=reserved_index, operation_id="openrouter.chat", request_hash=sha("o%d" % reserved_index))
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=reserved_index, operation_id="openrouter.chat", request_hash=sha("o%d" % reserved_index))
     # Two instances mark the same dispatch: exactly one non-idempotent dispatch.
     dispatch_results = []
 
@@ -682,7 +682,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     assert account["outstanding_openrouter_reservation_microusd"] == 9_000_000 and account["settled_since_preflight_microusd"] == 250_000
     # A worker-reported uncertain call consumes its full reservation and a late settle cannot release it.
     uncertain_index = next(index for index, status in results if status == "reserved" and index != reserved_index)
-    uid = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=uncertain_index, operation_id="openrouter.chat", request_hash=sha("o%d" % uncertain_index))
+    uid = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=uncertain_index, operation_id="openrouter.chat", request_hash=sha("o%d" % uncertain_index))
     assert setup.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=uid)["status"] == "dispatched"
     assert setup.mark_uncertain(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=uid, call_doc={"why": "timeout"}, event=None)["status"] == "uncertain"
     late = setup.settle_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=uid, actual_microusd=0, terminal_response={}, event=None)
@@ -691,7 +691,7 @@ def test_openrouter_capacity_dispatch_uniqueness_and_settlement_rules(connect):
     assert account["settled_since_preflight_microusd"] == 1_250_000 and account["outstanding_openrouter_reservation_microusd"] == 8_000_000
     # Settling a merely reserved (never dispatched) call is refused; a preflight refresh resets settled-since.
     rid = next(index for index, status in results if status == "reserved" and index not in (reserved_index, uncertain_index))
-    r_identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=0, action_sequence=rid, operation_id="openrouter.chat", request_hash=sha("o%d" % rid))
+    r_identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=rid, operation_id="openrouter.chat", request_hash=sha("o%d" % rid))
     assert setup.settle_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=r_identity, actual_microusd=1, terminal_response={}, event=None)["status"] == "reserved"
     refreshed = setup.record_preflight(miner, "openrouter", {"preflight_status": "ok", "provider": "openrouter", "key_hash": sha("key" + parts[0]["submission_id"] + "openrouter")[7:], "limit_microusd": 20_000_000, "limit_remaining_microusd": 12_000_000, "usage_microusd": 8_000_000})
     assert refreshed["settled_since_preflight_microusd"] == 0 and refreshed["observed_limit_remaining_microusd"] == 12_000_000
@@ -726,8 +726,8 @@ def test_events_are_ordered_hash_chained_and_replay_safe(store):
 
 
 # ---------------------------------------------------------------------------
-# Validator scoring: scoring assignments, the executor-is-not-scorer rule,
-# judge causes, and the scoring window's close and cancel behavior.
+# Validator scoring: scoring assignments claimed by any validator, replay
+# rejection, judge causes, and the scoring window's close and cancel behavior.
 # ---------------------------------------------------------------------------
 
 
@@ -761,14 +761,11 @@ def _commit_plan(store, round_id, stage):
 def _scoring_items(executed):
     items = []
     for (submission_id, position), run_id in sorted(executed.items()):
-        item = {"work_item_id": sha("item-%s-%d" % (submission_id, position)), "output_hash": sha(run_id + "-output"), "scored_run_id": run_id, "audit": False}
-        items.append(item)
-        if position == 0:  # the ICP-0 items are also audited by a second validator
-            items.append(dict(item, audit=True))
+        items.append({"work_item_id": sha("item-%s-%d" % (submission_id, position)), "output_hash": sha(run_id + "-output"), "scored_run_id": run_id})
     return items
 
 
-def test_scoring_assignments_are_claimed_by_other_validators_and_close_to_judged(store):
+def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(store):
     round_id = "arena-2026-09-02-sc"
     runners, parts = open_round(store, round_id, participants=2, runners=2, prefix="sc")
     executor, scorer = runners
@@ -777,10 +774,12 @@ def test_scoring_assignments_are_claimed_by_other_validators_and_close_to_judged
     _commit_plan(store, round_id, 1)
     items = _scoring_items(executed)
     opened = store.open_scoring(round_id, 1, items)
-    assert opened["status"] == "ok" and opened["round_status"] == "stage1_scoring" and opened["assignments"] == 40 + 2  # two audits (ICP 0 of each miner)
+    assert opened["status"] == "ok" and opened["round_status"] == "stage1_scoring" and opened["assignments"] == 40
     assert store.open_scoring(round_id, 1, items)["status"] == "existing"
-    # The executor never scores its own executions: it sees nothing pending; the other validator does.
-    assert claim(store, round_id, executor, parallelism=100, ceiling=100)[0]["status"] == "no_pending"
+    # Any validator scores any item, the executor of that output included; the replay is the check.
+    own, own_token, _, _ = claim(store, round_id, executor, parallelism=100, ceiling=100)
+    assert own["status"] == "leased" and own["kind"] == "score" and own["scored_run_id"] in executed.values()
+    assert _complete_accepted(store, own["run_id"], hash_lease_token(own_token), own["run_id"])["status"] == "accepted"
     response, token, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
     assert response["status"] == "leased" and response["kind"] == "score" and response["scored_run_id"] in executed.values() and response["work_item_id"]
     lease_hash = hash_lease_token(token)
@@ -792,7 +791,7 @@ def test_scoring_assignments_are_claimed_by_other_validators_and_close_to_judged
     # Score-run provider calls draw on the scoring quota of the scored miner's keys.
     response2, token2, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
     lease2 = hash_lease_token(token2)
-    identity = contracts.provider_call_identity(assignment_id=response2["assignment_id"], icp_position=response2["icp_position"], action_sequence=0, operation_id="openrouter.chat", request_hash=sha("judge"))
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=response2["assignment_id"], icp_position=response2["icp_position"], action_sequence=0, operation_id="openrouter.chat", request_hash=sha("judge"))
     reserved = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1000, call_doc={})
     assert reserved["status"] == "reserved"
     assert store.mark_dispatched(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity)["status"] == "dispatched"
@@ -804,20 +803,28 @@ def test_scoring_assignments_are_claimed_by_other_validators_and_close_to_judged
         if r["status"] != "leased":
             break
         assert _complete_accepted(store, r["run_id"], hash_lease_token(t), r["run_id"])["status"] == "accepted"
-    # With one independent validator the two audits stay unclaimed: the scorer of a primary never audits it.
-    pending_audits = [run for run in store.list_runs(round_id, stage=1, kind="score") if run["assignment_id"].endswith(":audit")]
-    assert len(pending_audits) == 2 and all(run["status"] == "pending" for run in pending_audits)
     closed = store.close_scoring(round_id, 1)
-    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged" and closed["incomplete_assignments"] == 0  # audits are best effort
+    assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged" and closed["incomplete_assignments"] == 0
     assert store.close_scoring(round_id, 1)["status"] == "existing"
     score_runs = store.list_runs(round_id, stage=1, kind="score")
-    primaries = [run for run in score_runs if not run["assignment_id"].endswith(":audit")]
-    assert len(score_runs) == 42 and len(primaries) == 40 and all(run["runner_hotkey"] == scorer and run["scored_runner_hotkey"] == executor for run in primaries)
-    assert all(run["status"] == "failed" and run["terminal_cause"] == "stage_closed" for run in score_runs if run["assignment_id"].endswith(":audit"))
-    # The judged round takes the scored transition, not the closed one.
-    stale = store.transition_round(round_id, "stage1_closed", "stage1_scored", {"finalists": [], "stage1_score_bundle_hash": sha("b"), "stage1_scores_ref": "arena/x"})
-    assert stale["status"] == "stale" and stale["round_status"] == "stage1_judged"
-    assert store.transition_round(round_id, "stage1_judged", "stage1_scored", {"finalists": [], "stage1_score_bundle_hash": sha("b"), "stage1_scores_ref": "arena/x"})["status"] == "ok"
+    assert len(score_runs) == 40 and {run["runner_hotkey"] for run in score_runs} == {executor, scorer}
+    # Replay rejection: two accepted scorings the Arena could not reproduce fail and reopen the window for their second attempts.
+    accepted = sorted(run["run_id"] for run in score_runs if run["status"] == "accepted")
+    rejected = store.reject_scorings(round_id, 1, accepted[:2])
+    assert rejected["status"] == "reopened" and rejected["rejected"] == 2 and rejected["exhausted"] == 0 and store.get_round(round_id)["status"] == "stage1_scoring"
+    retries = [run for run in store.list_runs(round_id, stage=1, kind="score") if run["status"] == "pending"]
+    assert len(retries) == 2 and all(run["attempt"] == 2 and run["stage_generation"] == rejected["stage_generation"] for run in retries)
+    assert all(run["terminal_cause"] == "replay_rejected" for run in store.list_runs(round_id, stage=1, kind="score") if run["run_id"] in accepted[:2])
+    assert store.reject_scorings(round_id, 1, accepted[:2])["status"] == "stale"  # only a judged round rejects
+    for retry in retries:
+        r, t, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
+        assert r["status"] == "leased" and r["attempt"] == 2
+        assert _complete_accepted(store, r["run_id"], hash_lease_token(t), r["run_id"])["status"] == "accepted"
+    assert store.close_scoring(round_id, 1)["round_status"] == "stage1_judged"
+    # A second rejection of the same item has no attempt left: the round cancels rather than zeroing the miner.
+    second = sorted(run["run_id"] for run in store.list_runs(round_id, stage=1, kind="score") if run["status"] == "accepted" and run["attempt"] == 2)
+    exhausted = store.reject_scorings(round_id, 1, second[:1])
+    assert exhausted["status"] == "cancelled" and exhausted["exhausted"] == 1 and store.get_round(round_id)["cancel_reason"] == "capacity:replay1:1"
 
 
 def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_runs(store, superuser):
@@ -827,7 +834,7 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     executed = _execute_everything(store, round_id, executor)
     assert store.close_stage(round_id, 1)["status"] == "closed"
     _commit_plan(store, round_id, 1)
-    items = [item for item in _scoring_items(executed) if not item["audit"]]
+    items = _scoring_items(executed)
     assert store.open_scoring(round_id, 1, items)["assignments"] == 20
     response, token, _, _ = claim(store, round_id, scorer, parallelism=1, ceiling=1)
     assert response["kind"] == "score"

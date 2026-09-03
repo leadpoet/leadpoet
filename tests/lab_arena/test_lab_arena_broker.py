@@ -222,7 +222,7 @@ def test_openrouter_reserves_maximum_cost_and_settles_actual_from_pinned_table()
     sent = transport.sent[0]
     assert sent["headers"]["authorization"] == "Bearer " + KEY
     body = json.loads(sent["body"])
-    assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny"} and body["stream"] is False
+    assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny", "zdr": True} and body["stream"] is False
     assert store.openrouter_capacity == 10_000_000 - expected_actual
 
 
@@ -281,7 +281,7 @@ def test_fault_injection_points_produce_single_accounting_results():
     broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": []})]))
     identity_args = dict(operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "crash"}}, action_sequence=5, timeout_ms=1000)
     request_hash = contracts.document_hash(operations.validate_operation_request("deepline.execute", {"tool": "exa_search", "payload": {"query": "crash"}}))
-    identity = contracts.provider_call_identity(assignment_id=CONTEXT.assignment_id, icp_position=0, action_sequence=5, operation_id="deepline.execute", request_hash=request_hash)
+    identity = contracts.provider_call_identity(attempt=1, assignment_id=CONTEXT.assignment_id, icp_position=0, action_sequence=5, operation_id="deepline.execute", request_hash=request_hash)
     store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={}, lease_ttl_seconds=420)
     result = broker.execute(CONTEXT, **identity_args)
     assert result.status == 200 and len(transport.sent) == 1
@@ -384,3 +384,18 @@ def test_price_table_parsing_and_validation():
     assert cost == 831
     parsed = br.parse_broker_document({"status": 200, "headers": {"content-type": "application/json"}, "body_b64": base64.b64encode(b"{}").decode(), "call": {"a": 1}})
     assert parsed.body == b"{}" and parsed.call == {"a": 1}
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_provider_rejecting_the_scored_miners_key_is_a_refusal_only_on_a_scoring_run(status):
+    """A revoked key under the judge is the scored miner's outcome; a model's own 401 stays a generic provider error."""
+
+    scoring_context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key " + DL_KEY}})]))
+    result = broker.execute(scoring_context, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
+    assert result.status == 402 and json.loads(result.body) == {"error": {"code": "call_refused"}}
+    assert result.call["error_code"] == "call_refused" and result.call["outcome"] == "settled"  # recorded, then refused to the judge
+    assert DL_KEY.encode() not in result.body
+    broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
+    assert result.status == 502 and "error_code" not in result.call and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}

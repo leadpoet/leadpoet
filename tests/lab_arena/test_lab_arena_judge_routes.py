@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
@@ -19,7 +21,7 @@ import pytest
 from lab_arena import broker as br
 from lab_arena import contracts
 from lab_arena import operations as ops
-from lab_arena import shim
+from lab_arena import scoring, shim
 
 EVALUATOR_SEARCH = {"query": "Acme series B funding announcement", "type": "auto", "numResults": 5, "contents": {"highlights": {"query": "raised a Series B", "maxCharacters": 400}}}
 EVALUATOR_CONTENTS = {"ids": ["https://example.com/news"], "text": {"maxCharacters": 12000}, "maxAgeHours": 0}
@@ -112,3 +114,51 @@ def test_quota_document_pins_judge_quotas_and_the_broker_allows_judge_models_onl
         br.Broker(store=None, key_for=lambda h, p: None, price_table=table, allowed_models=["openai/gpt-4o-mini"], judge_models=["perplexity/sonar"], transport=None)
     context = br.RunContext(run_id="r", assignment_id="a", icp_position=0, lease_token_hash=contracts.document_hash("l"), miner_hotkey="5" + "a" * 47, submission_id="s", stage=1)
     assert context.kind == "execute" and br.RunContext(**{**context.__dict__, "kind": "score"}).kind == "score"
+
+
+# ---------------------------------------------------------------------------
+# The signed judge model list mirrors the judge's own source (a scoring run may
+# call no other model), so a model change in the qualification scorer breaks
+# this test before it breaks a live round.
+# ---------------------------------------------------------------------------
+
+JUDGE_SOURCE_FILES = (
+    "qualification/scoring/lead_scorer.py",
+    "qualification/scoring/intent_signal_gate.py",
+    "qualification/scoring/verification_helpers.py",
+    "qualification/scoring/role_batch_check.py",
+    "qualification/scoring/intent_precheck.py",
+    "qualification/scoring/company_verification.py",
+    "qualification/scoring/intent_verification_three_stage.py",
+    "qualification/scoring/deepline_evidence_repair.py",
+    "gateway/qualification/utils/helpers.py",
+)
+# Bare OpenAI names passed to ``openrouter_chat`` and any vendor-prefixed id, including
+# environment defaults such as ``os.environ.get("...", "perplexity/sonar")``.
+_BARE_MODEL_LITERAL = re.compile(r'(?:model\s*=\s*|"model"\s*:\s*)"(gpt-[A-Za-z0-9._-]+)"')
+_VENDOR_MODEL_LITERAL = re.compile(r'"((?:openai|anthropic|perplexity|google|meta-llama|mistralai|deepseek|x-ai|qwen|cohere)/[A-Za-z0-9._:-]+)"')
+
+
+def judge_source_models() -> set:
+    """Every model literal the judge's source can send, as the OpenRouter id it puts on the wire."""
+
+    root = Path(__file__).resolve().parents[2]
+    found = set()
+    for relative in JUDGE_SOURCE_FILES:
+        path = root / relative
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        found.update(_VENDOR_MODEL_LITERAL.findall(source))
+        # ``openrouter_chat`` in gateway/qualification/utils/helpers.py prefixes bare OpenAI names.
+        found.update("openai/" + literal for literal in _BARE_MODEL_LITERAL.findall(source))
+    return found
+
+
+def test_signed_judge_models_cover_every_model_literal_in_the_judge_source():
+    pytest.importorskip("qualification.scoring.lead_scorer")
+    policy_models = set(scoring.build_scorer_policy()["judge_models"].values())
+    source_models = judge_source_models()
+    assert source_models, "no judge model literals found; the scan pattern is stale"
+    assert source_models <= policy_models, sorted(source_models - policy_models)
+    assert policy_models <= source_models, sorted(policy_models - source_models)

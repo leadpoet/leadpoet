@@ -208,12 +208,10 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   attempt SMALLINT NOT NULL CHECK (attempt BETWEEN 0 AND 2),
   -- 'execute' runs a miner's model on one ICP; 'score' runs the Arena judge on
   -- one accepted output (a scoring work item) and is accounted against the
-  -- scored miner's keys. Score runs remember the execution they judge so the
-  -- validator that executed an output never scores it.
+  -- scored miner's keys. Score runs remember the execution they judge.
   kind TEXT NOT NULL DEFAULT 'execute' CHECK (kind IN ('execute', 'score')),
   work_item_id TEXT CHECK (work_item_id IS NULL OR work_item_id ~ '^sha256:[0-9a-f]{64}$'),
   scored_run_id TEXT,
-  scored_runner_hotkey TEXT,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'leased', 'submitted', 'accepted', 'failed')),
   runner_hotkey TEXT,
@@ -236,7 +234,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   terminal_cause TEXT CHECK (terminal_cause IS NULL OR terminal_cause IN (
     'accepted', 'model_timeout', 'invalid_output', 'budget_exhausted', 'model_error',
     'lease_expired', 'worker_lost', 'receipt_rejected', 'preflight_failed', 'stage_closed',
-    'judge_error', 'judge_timeout', 'judge_key_refused')),
+    'judge_error', 'judge_timeout', 'judge_key_refused', 'replay_rejected')),
   terminal_doc JSONB,
   per_icp_score NUMERIC(12, 6),
   score_ref TEXT,
@@ -450,9 +448,15 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'lab_arena_runs rows are never deleted' USING ERRCODE = '42501';
   END IF;
+  -- One explicit exception to terminal immutability: the gateway may fail an
+  -- accepted score run as replay_rejected when its replay of the recorded
+  -- provider responses cannot reproduce the reported scoring. The validator's
+  -- receipt, output, event chain, and lease columns stay exactly as delivered,
+  -- so the rejection is visible and re-checkable from the ledger.
   IF OLD.status IN ('accepted', 'failed') AND (
-       NEW.status <> OLD.status
-       OR NEW.terminal_cause IS DISTINCT FROM OLD.terminal_cause
+       ((NEW.status <> OLD.status OR NEW.terminal_cause IS DISTINCT FROM OLD.terminal_cause)
+        AND NOT (OLD.status = 'accepted' AND OLD.kind = 'score'
+                 AND NEW.status = 'failed' AND NEW.terminal_cause = 'replay_rejected'))
        OR NEW.receipt_doc IS DISTINCT FROM OLD.receipt_doc
        OR NEW.receipt_hash IS DISTINCT FROM OLD.receipt_hash
        OR NEW.output_hash IS DISTINCT FROM OLD.output_hash
@@ -1446,19 +1450,13 @@ BEGIN
     RETURN pg_catalog.jsonb_build_object('status', 'no_free_slot', 'active_leases', v_active, 'slot_limit', v_limit);
   END IF;
   -- Only the current phase's assignments are pending at its stage generation.
-  -- A validator never scores an output it executed (section 16 as revised).
+  -- Any allowlisted validator scores any item, its own executions included:
+  -- the Arena replays every scoring from the recorded judge responses, which
+  -- is the single integrity check, so one validator is enough.
   SELECT * INTO v_run FROM public.lab_arena_runs AS runs
   WHERE runs.round_id = p_round_id AND runs.stage = v_stage AND runs.status = 'pending'
     AND runs.stage_generation = v_round.stage_generation
     AND runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
-    AND (runs.kind = 'execute' OR runs.scored_runner_hotkey IS DISTINCT FROM p_runner_hotkey)
-    -- An audit is independent only when another validator scores it: a
-    -- validator never holds two scorings of one work item.
-    AND (runs.kind = 'execute' OR NOT EXISTS (
-      SELECT 1 FROM public.lab_arena_runs AS sibling
-      WHERE sibling.round_id = runs.round_id AND sibling.kind = 'score'
-        AND sibling.work_item_id = runs.work_item_id AND sibling.assignment_id <> runs.assignment_id
-        AND sibling.runner_hotkey = p_runner_hotkey))
   ORDER BY runs.icp_position, runs.created_at, runs.assignment_id
   FOR UPDATE SKIP LOCKED
   LIMIT 1;
@@ -2023,12 +2021,12 @@ BEGIN
     IF v_run.attempt < 2 AND v_run.stage_generation = v_round.stage_generation THEN
       INSERT INTO public.lab_arena_runs (
         run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id, scored_runner_hotkey
+        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id
       ) VALUES (
         v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
         v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
         v_run.attempt + 1, 'pending', v_run.lease_generation, v_round.stage_generation,
-        v_run.kind, v_run.work_item_id, v_run.scored_run_id, v_run.scored_runner_hotkey
+        v_run.kind, v_run.work_item_id, v_run.scored_run_id
       );
       v_retried := v_retried + 1;
     END IF;
@@ -2180,17 +2178,14 @@ BEGIN
     IF NOT FOUND OR v_scored.output_hash IS DISTINCT FROM (v_item ->> 'output_hash') THEN
       RAISE EXCEPTION 'lab_arena_scored_run_invalid' USING ERRCODE = '22023';
     END IF;
-    -- An audit item is scored a second time by another validator; it carries
-    -- its own assignment so both scorings stand side by side.
-    v_assignment := p_round_id || ':' || v_scored.submission_id || ':' || p_stage::TEXT || ':' || v_scored.icp_position::TEXT
-      || CASE WHEN COALESCE((v_item ->> 'audit')::BOOLEAN, FALSE) THEN ':audit' ELSE ':score' END;
+    v_assignment := p_round_id || ':' || v_scored.submission_id || ':' || p_stage::TEXT || ':' || v_scored.icp_position::TEXT || ':score';
     INSERT INTO public.lab_arena_runs (
       run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-      attempt, status, stage_generation, kind, work_item_id, scored_run_id, scored_runner_hotkey
+      attempt, status, stage_generation, kind, work_item_id, scored_run_id
     ) VALUES (
       v_assignment || ':1', v_assignment, p_round_id, v_scored.submission_id, v_scored.miner_hotkey,
       p_stage, v_scored.icp_position, v_scored.icp_hash, 1, 'pending', v_generation, 'score',
-      v_item ->> 'work_item_id', v_scored.run_id, v_scored.runner_hotkey
+      v_item ->> 'work_item_id', v_scored.run_id
     );
     v_created := v_created + 1;
   END LOOP;
@@ -2254,13 +2249,10 @@ BEGIN
           'previous_status', v_run.status)
     WHERE run_id = v_run.run_id;
   END LOOP;
-  -- Audits are best effort: an audit nobody independent could claim never
-  -- cancels a round; only primary scorings are required.
   SELECT COUNT(*) INTO v_incomplete FROM (
     SELECT DISTINCT ON (runs.assignment_id) runs.assignment_id, runs.status, runs.terminal_cause
     FROM public.lab_arena_runs AS runs
     WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'score'
-      AND runs.assignment_id NOT LIKE '%:audit'
     ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
   ) AS latest
   WHERE latest.status <> 'accepted'
@@ -2283,6 +2275,86 @@ BEGIN
 END;
 $lab_arena_close_scoring$;
 ALTER FUNCTION public.lab_arena_close_scoring(TEXT, SMALLINT) OWNER TO lab_arena_owner;
+
+
+-- Reject scorings the Arena could not reproduce from their recorded judge
+-- responses: each named accepted score run fails as replay_rejected and gets
+-- a second attempt; a run with no attempt left cancels the round (an
+-- unreproducible scoring is never turned into a miner's zero). The round
+-- returns to the scoring window at a new stage generation.
+CREATE OR REPLACE FUNCTION public.lab_arena_reject_scorings(
+  p_round_id TEXT,
+  p_stage SMALLINT,
+  p_run_ids TEXT[]
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $lab_arena_reject_scorings$
+DECLARE
+  v_round public.lab_arena_rounds;
+  v_run public.lab_arena_runs;
+  v_run_id TEXT;
+  v_generation BIGINT;
+  v_rejected INTEGER := 0;
+  v_exhausted INTEGER := 0;
+BEGIN
+  IF p_stage NOT IN (1, 2) OR p_run_ids IS NULL OR pg_catalog.array_length(p_run_ids, 1) IS NULL THEN
+    RAISE EXCEPTION 'lab_arena_reject_input_invalid' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_round.status <> ('stage' || p_stage::TEXT || '_judged') THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status);
+  END IF;
+  v_generation := v_round.stage_generation + 1;
+  FOREACH v_run_id IN ARRAY p_run_ids LOOP
+    SELECT * INTO v_run FROM public.lab_arena_runs
+    WHERE run_id = v_run_id AND round_id = p_round_id AND stage = p_stage AND kind = 'score' AND status = 'accepted'
+    FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'lab_arena_reject_run_invalid' USING ERRCODE = '22023';
+    END IF;
+    UPDATE public.lab_arena_runs
+    SET status = 'failed', terminal_cause = 'replay_rejected',
+        terminal_doc = pg_catalog.jsonb_build_object('rejected_at', pg_catalog.clock_timestamp(), 'previous_status', 'accepted',
+                                                     'rejected_at_stage_generation', v_round.stage_generation)
+    WHERE run_id = v_run.run_id;
+    v_rejected := v_rejected + 1;
+    IF v_run.attempt < 2 THEN
+      INSERT INTO public.lab_arena_runs (
+        run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
+        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id
+      ) VALUES (
+        v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
+        v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
+        v_run.attempt + 1, 'pending', v_run.lease_generation, v_generation,
+        v_run.kind, v_run.work_item_id, v_run.scored_run_id
+      );
+    ELSE
+      v_exhausted := v_exhausted + 1;
+    END IF;
+  END LOOP;
+  IF v_exhausted > 0 THEN
+    UPDATE public.lab_arena_rounds
+    SET status = 'cancelled', status_generation = status_generation + 1, stage_generation = v_generation,
+        cancel_reason = 'capacity:replay' || p_stage::TEXT || ':' || v_exhausted::TEXT
+    WHERE round_id = p_round_id;
+    RETURN pg_catalog.jsonb_build_object('status', 'cancelled', 'round_status', 'cancelled',
+      'rejected', v_rejected, 'exhausted', v_exhausted, 'stage_generation', v_generation);
+  END IF;
+  UPDATE public.lab_arena_rounds
+  SET status = 'stage' || p_stage::TEXT || '_scoring', status_generation = status_generation + 1, stage_generation = v_generation
+  WHERE round_id = p_round_id;
+  RETURN pg_catalog.jsonb_build_object('status', 'reopened', 'round_status', 'stage' || p_stage::TEXT || '_scoring',
+    'rejected', v_rejected, 'exhausted', 0, 'stage_generation', v_generation);
+END;
+$lab_arena_reject_scorings$;
+ALTER FUNCTION public.lab_arena_reject_scorings(TEXT, SMALLINT, TEXT[]) OWNER TO lab_arena_owner;
 
 CREATE OR REPLACE FUNCTION public.lab_arena_cancel_round(p_round_id TEXT, p_reason TEXT)
 RETURNS JSONB
@@ -2457,6 +2529,7 @@ BEGIN
     'public.lab_arena_close_stage(TEXT, SMALLINT)',
     'public.lab_arena_open_scoring(TEXT, SMALLINT, JSONB)',
     'public.lab_arena_close_scoring(TEXT, SMALLINT)',
+    'public.lab_arena_reject_scorings(TEXT, SMALLINT, TEXT[])',
     'public.lab_arena_cancel_round(TEXT, TEXT)',
     'public.lab_arena_record_run_scores(TEXT, SMALLINT, JSONB)'
   ] LOOP

@@ -287,13 +287,84 @@ def execute(
 ) -> Tuple[int, Dict[str, str], bytes]:
     """Match, validate, and dispatch one client request."""
 
-    if trusted_scorer_mode():
+    trusted = trusted_scorer_mode()
+    if trusted:
         url, headers = strip_caller_credentials(url, headers)
     try:
         operation_id, parameters = operations.match_request(method, url, body, headers)
     except operations.OperationError as exc:
-        raise ShimRequestError(exc.code) from None
+        page_fetch = _trusted_page_fetch(method, url, body) if trusted and exc.code == "no_matching_operation" else None
+        if page_fetch is None:
+            _trace({"event": "no_match", "method": str(method).upper(), "url": _trace_url(url), "code": exc.code})
+            raise ShimRequestError(exc.code) from None
+        operation_id, parameters = page_fetch
+        _trace({"event": "page_fetch", "method": "GET", "url": _trace_url(url), "operation_id": operation_id})
+        return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+    _trace({"event": "matched", "method": str(method).upper(), "url": _trace_url(url), "operation_id": operation_id})
     return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+
+
+PAGE_FETCH_OPERATION = "scrapingdog.scrape"
+
+
+def _trusted_page_fetch(method: str, url: str, body: bytes) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """The judge sees the web only through Scrapingdog.
+
+    The Research Lab judge reads company homepages and evidence pages with a
+    direct GET. Inside the Arena's judge sandbox no provider host is reachable
+    but the broker, so in trusted-scorer mode a plain HTTPS GET to a host that
+    is not a provider becomes the closed ``scrapingdog.scrape`` operation on
+    that URL, accounted against the scored miner's Scrapingdog quota. The
+    mapping is deterministic, so the replay makes the same frames. Anything
+    else (another method, a body, a provider host) is still refused.
+    """
+
+    if str(method).upper() != "GET" or body:
+        return None
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not host or host in operations.PROVIDER_HOSTS:
+        return None
+    target = urlunsplit(("https", parts.netloc, parts.path or "/", parts.query, ""))
+    try:
+        parameters = operations.validate_operation_request(PAGE_FETCH_OPERATION, {"url": target})
+    except operations.OperationError:
+        return None
+    return PAGE_FETCH_OPERATION, parameters
+
+
+TRACE_PATH_ENV = "LAB_ARENA_SHIM_TRACE_PATH"
+
+
+def _trace_url(url: Any) -> str:
+    """The request's scheme, host, and path only: never its query, which may carry a key."""
+
+    try:
+        parts = urlsplit(str(url))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))[:300]
+    except ValueError:
+        return ""
+
+
+def _trace(record: Mapping[str, Any]) -> None:
+    """Append one diagnostic line when ``LAB_ARENA_SHIM_TRACE_PATH`` is set.
+
+    Off by default; a rehearsal or an operator diagnosing a judge or model that
+    cannot reach a provider turns it on. Never raises and never records bodies,
+    headers, or query strings.
+    """
+
+    path = os.environ.get(TRACE_PATH_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(record), sort_keys=True) + "\n")
+    except OSError:
+        return
 
 
 TRUSTED_SCORER_ENV = "LAB_ARENA_SHIM_TRUSTED_SCORER"

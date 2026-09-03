@@ -43,7 +43,7 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
             try:
                 cursor, head = int(response["event_cursor"]), str(response["event_head_hash"])
                 for sequence in range(3):
-                    identity = contracts.provider_call_identity(assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=sequence, operation_id="deepline.execute", request_hash=sha("%s-%d" % (run_id, sequence)))
+                    identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=sequence, operation_id="deepline.execute", request_hash=sha("%s-%d" % (run_id, sequence)))
                     reserved = store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
                     assert reserved["status"] == "reserved", reserved
                     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity)["status"] == "dispatched"

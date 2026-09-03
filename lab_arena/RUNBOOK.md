@@ -49,8 +49,7 @@ Optional: `LAB_ARENA_NETUID` (71), `LAB_ARENA_NETWORK` (finney),
 `LAB_ARENA_BASE_IMAGE_DIGEST`, `LAB_ARENA_REPOSITORY_COMMIT`,
 `LAB_ARENA_SCORING_WORKERS` (4), `LAB_ARENA_BANNED_HOTKEYS_PATH` (JSON list),
 `LAB_ARENA_MAX_CHALLENGERS` (256, the admitted challengers per round; lower
-it only while capacity is being commissioned), `LAB_ARENA_AUDIT_PERCENT` (10),
-`AWS_REGION`. Required for validator scoring: `LAB_ARENA_SCORER_IMAGE_DIGEST`,
+it only while capacity is being commissioned), `AWS_REGION`. Required for validator scoring: `LAB_ARENA_SCORER_IMAGE_DIGEST`,
 the pinned judge image.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
@@ -119,62 +118,81 @@ live in `tests/lab_arena/fixtures/deepline/`.
 
 ## 6. Validator scoring
 
-Validators run the judge as well as the models. After a stage closes and the
-scoring plan is committed, the round enters `stageN_scoring`: one scoring
-assignment per work item (plus `LAB_ARENA_AUDIT_PERCENT` of them a second
-time as audits) is claimable like an ICP run, never by the validator that
-executed that output. The validator runs the Arena-built judge image, whose
-digest is pinned in the round configuration from `LAB_ARENA_SCORER_IMAGE_DIGEST`,
-in the sandbox with the trusted-scorer shim mode; the judge's Exa,
-Scrapingdog, and OpenRouter calls cross the same broker on the scored
-miner's keys under the per-work-item scoring quotas, and the judge models
-come from the signed scorer policy. Completion carries the breakdown
-document under a signed receipt. When every assignment is terminal the
-window closes to `stageN_judged`; an assignment left unjudged for any reason
-other than the scored miner's own key cancels the round, exactly like an
-execution gap. The Arena then verifies each breakdown against the plan and
-the scored output and replays it: the same judge entrypoint runs again in a
-subprocess on the Arena host against the responses the broker recorded for
-that scoring run (no provider is called), and the replayed breakdowns are the
-ones scored; a validator whose report differs is listed as a mismatch in the
-stage timing report. Audits are independent by construction, a validator
-never holds two scorings of one work item, and best effort, an audit nobody
-independent could claim fails at close without cancelling the round; a mean
-difference above 10 points between the two scorings is flagged. The score
-bundle and per-ICP scores are then built and recorded as before.
-`LAB_ARENA_REPLAY_VERIFICATION=0` disables the replay only for local
-rehearsal; production keeps it on.
+Validators run the judge as well as the models, and one validator is enough.
+After a stage closes and the scoring plan is committed, the round enters
+`stageN_scoring`: one scoring assignment per work item is claimable like an
+ICP run by any allowlisted validator, its own executions included. The
+validator runs the Arena-built judge image, whose digest is pinned in the
+round configuration from `LAB_ARENA_SCORER_IMAGE_DIGEST`, in the sandbox with
+the trusted-scorer shim mode; the judge's Exa-compatible (routed to
+Deepline), Scrapingdog, and OpenRouter calls cross the same broker on the
+scored miner's keys under the per-work-item scoring quotas, and the judge models come from the signed
+scorer policy. Completion carries the breakdown document under a signed
+receipt. When every assignment is terminal the window closes to
+`stageN_judged`; an assignment left unjudged for any reason other than the
+scored miner's own key cancels the round, exactly like an execution gap.
+
+The replay is the single integrity check. In the judged state the Arena runs
+the same judge entrypoint again, in a subprocess on the Arena host, against
+the responses the broker recorded for each scoring run; no provider is
+called. Reproduced with the same numbers: accepted. Reproduced with different
+numbers: the replayed numbers are scored and the validator is listed as a
+mismatch in the stage timing report. Not reproducible at all (judge requests
+with no recorded answer, a failed replay, an invalid output): the scoring is
+rejected as `replay_rejected`, the round returns to `stageN_scoring` for a
+second attempt of that item, and an item that fails twice cancels the round
+rather than becoming a miner's zero. A scoring the scored miner's own key or
+quota refused (`judge_key_refused`, decided by the worker from the refusals
+it recorded, or a provider 401/403 on a scoring run) is that miner's zero:
+the signed score bundle declares the work item under `refused_work_items`
+and every submission sharing that output gets a zero row with that cause,
+which the public verifier accepts only against that declaration. Two miners
+with byte-identical outputs share one work item, so a refusal on the first
+miner's keys also zeroes the second; identical outputs are rare enough that
+V1 accepts this. The rejected attempt keeps its receipt,
+output, and event chain unchanged in the ledger, so anyone can rerun the
+replay from the ledger and check the rejection; this is the one exception to
+terminal-attempt immutability, and it applies only to accepted score runs. `LAB_ARENA_REPLAY_VERIFICATION=0`
+disables the replay only for local rehearsal; production keeps it on.
 
 Build the judge image from this repository with the scorer entrypoint
 (`lab_arena/scorer_entrypoint.py`) and the evaluator's dependencies, pin its
 digest, and give every validator the same image through the registry the
-runner already pulls miner images from.
+runner already pulls miner images from. There is no committed build recipe
+for the judge image yet; until one lands, the image is an operator artifact
+and its digest must be recorded with the round configuration that pins it.
 
-## 6. Daily round
+### How the judge reaches the web
 
-1. The driver creates and advances rounds by wall clock; the admin CLI is
-   for supervised steps only:
-   `python3 scripts/lab_arena_admin.py status --round <id>`,
-   `... advance --round <id> --expect-status <status> [--dry-run]`,
-   `... cancel --round <id> --reason <closed reason> [--dry-run]`.
-2. Submissions arrive through `POST /arena/v1/submissions`; admission
-   (`lab_arena/admission.py`) builds each package offline from the pinned
-   base image and wheelhouse, screens it on a floor runner, and freezes or
-   rejects it under a published rule.
-3. The benchmark is generated after the submission cutoff and committed by
-   ordered root before stage 1 opens. A root that differs at read time
-   cancels the round (`benchmark_root_changed`).
-4. Stage 1 scores all participants on 20 ICPs; the
-   top 10 plus the king enter stage 2 for the
-   remaining 30. Infrastructure gaps cancel the
-   round; model-caused failures score zero rows.
-5. Publication writes the signed public bundle, the signed publication
-   document, and the signed reward basis. Publication re-scans every frozen
-   source archive; a sanitizer failure keeps the round unpublished.
+The Research Lab judge (`qualification.scoring.lead_scorer` behind
+`research_lab.eval.evaluator`) reads company homepages, evidence pages, and
+the Wayback Machine with plain GETs, calls Exa contents, scrapes with
+Scrapingdog, and calls OpenRouter with six models. Inside the judge sandbox
+every one of those crosses the shim in trusted-scorer mode:
 
-Standalone verification of any published round uses
-`lab_arena.verify.rebuild_round(public_bundle, signing_key_document)` with
-only the public bundle and the round's signing key document.
+- A plain HTTPS GET to a host that is not a provider becomes the closed
+  `scrapingdog.scrape` operation on that URL (`lab_arena.shim`), accounted
+  against the scored miner's Scrapingdog quota. The judge sees the web only
+  through Scrapingdog; egress stays closed.
+- The judge's OpenRouter privacy request (`provider: data_collection deny,
+  zdr`) is accepted only as a subset of the table's pinned policy and dropped;
+  the table's policy (deny, no fallbacks, ZDR) is what goes out. JSON reply
+  formats, its JSON schema, and `include_reasoning` are accepted fields.
+- The signed scorer policy pins exactly the models the judge's source calls
+  (`lab_arena.scoring.DEFAULT_JUDGE_MODELS`); the broker refuses any other
+  model on a scoring run, and `tests/lab_arena/test_lab_arena_judge_routes.py`
+  scans the judge's source so a model change fails the test before a round.
+  The round prices the judge models next to the miners' allowed models.
+- `tests/lab_arena/test_lab_arena_real_judge.py` runs the real evaluator
+  through the entrypoint and the shim against a shape-valid fake provider:
+  every request must match one operation, use only pinned models, and
+  reproduce identical requests and redacted breakdowns on a second run.
+- Scoring quotas per work item are sized from that run (about 6 Scrapingdog,
+  3 OpenRouter, and 1 Deepline call per company) with retry headroom.
+- `LAB_ARENA_SHIM_TRACE_PATH=<file>` makes the shim append one JSON line per
+  intercepted request (method, host, path, matched operation or refusal
+  code; never bodies, headers, or queries). Off by default; use it in a
+  rehearsal when a judge or a model cannot reach a provider.
 
 ## 7. Model release
 
@@ -217,8 +235,8 @@ commit on the first release.
 - `python3 -m pytest tests/lab_arena -q`: the boundary tests prove no
   Arena module imports `gateway.tee` or `gateway.db`, no measured package
   imports `lab_arena`, and the enclave allowlists exclude it.
-- Operation table hash `sha256:65c501101fa66687b1128d4699c2850e67b62be81ee325fdf10a945c07232857` and call quota
-  hash `sha256:e89b37df6fc1199d9f97ad2c44e858aad2b0ee12a6a4ab1416939108a94e1c45` are pinned on every round
+- Operation table hash `sha256:22bc6c5df8b3c950478c6923a6c3f741874673522929568fbd7bd921d112b6af` and call quota
+  hash `sha256:9576d3f811ba884c2b06beed105a5471a8ba310a321257e513d45ccf98d8bac4` are pinned on every round
   configuration; changing either changes the round identity.
 - No secret value may appear in any table, object, event, log, or public
   bundle; the round tests inject canary provider keys and assert absence.

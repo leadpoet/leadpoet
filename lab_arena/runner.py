@@ -568,6 +568,14 @@ class AssignmentExecutor:
                     else:
                         terminal = "accepted"
                         events.append("output_validated", {"company_count": len(output_document["companies"]), "output_hash": output_document_hash(output_document)})
+            if scoring_run and terminal in ("judge_error", "judge_timeout"):
+                # The judge folds provider errors into its own failure handling, so
+                # the worker decides from the ledger it kept: a key or quota refusal
+                # on the scored miner's keys is that miner's outcome, not the judge's.
+                refusals = [str(call.get("error_code")) for call in state.calls if call.get("error_code") in scoring.KEY_REFUSAL_CODES]
+                if refusals:
+                    terminal = "judge_key_refused"
+                    events.append("output_rejected", {"reason": "judge_key_refused:" + refusals[0]})
         finally:
             server.stop()
             shutil.rmtree(run_dir, ignore_errors=True)

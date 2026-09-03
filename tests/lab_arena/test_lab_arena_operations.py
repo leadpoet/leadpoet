@@ -148,7 +148,7 @@ def test_table_is_closed_and_every_operation_is_miner_billed():
     assert ops.OPERATIONS["scrapingdog.google"].fixed_params == {"results": 10}
     chat = ops.OPERATIONS["openrouter.chat"].fixed_params
     assert chat["stream"] is False
-    assert chat["provider"] == {"data_collection": "deny", "allow_fallbacks": False}
+    assert chat["provider"] == {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
     assert not hasattr(ops, "PROVIDER_PRICE_LIST") and not hasattr(ops, "fixed_cost_microusd")
 
 
@@ -339,8 +339,8 @@ def test_get_operation_rejects_a_body_and_coerces_booleans():
         ("Cookie", "forbidden_header"),
         ("Proxy-Authorization", "forbidden_header"),
         ("X-Auth-Token", "forbidden_header"),
-        ("X-Title", "unknown_header"),
-        ("HTTP-Referer", "unknown_header"),
+        ("Origin", "unknown_header"),
+        ("X-Request-Id", "unknown_header"),
         ("X-Forwarded-For", "unknown_header"),
         ("X-Stainless-Lang", "unknown_header"),
     ],
@@ -492,7 +492,6 @@ def test_scrapingdog_google_field_rules():
         ({"tool_choice": "auto"}, "forbidden_field"),
         ({"functions": []}, "forbidden_field"),
         ({"plugins": [{"id": "web"}]}, "forbidden_field"),
-        ({"provider": {"allow_fallbacks": True}}, "forbidden_field"),
         ({"stream": True}, "forbidden_field"),
         ({"stream": False}, "forbidden_field"),
         ({"reasoning": {"effort": "high"}}, "forbidden_field"),
@@ -501,8 +500,12 @@ def test_scrapingdog_google_field_rules():
         ({"models": ["openai/gpt-4o"]}, "forbidden_field"),
         ({"web_search_options": {}}, "forbidden_field"),
         ({"modalities": ["image"]}, "forbidden_field"),
-        ({"response_format": {"type": "json_object"}}, "invalid_field"),
-        ({"response_format": {"type": "json_schema", "json_schema": {}}}, "unknown_field"),
+        ({"response_format": {"type": "json"}}, "invalid_field"),
+        ({"response_format": {"type": "json_schema", "schema": {}}}, "unknown_field"),
+        ({"provider": {"allow_fallbacks": True}}, "invalid_request"),
+        ({"provider": {"data_collection": "deny", "order": ["openai"]}}, "invalid_request"),
+        ({"provider": {}}, "invalid_request"),
+        ({"provider": "deny"}, "invalid_request"),
         ({"max_tokens": 0}, "invalid_field"),
         ({"max_tokens": 4097}, "invalid_field"),
         ({"max_tokens": 2.0}, "invalid_field"),
@@ -528,6 +531,20 @@ def test_openrouter_chat_rejections(extra, code):
     parameters = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
     parameters.update(extra)
     reject("openrouter.chat", parameters, code)
+
+
+def test_openrouter_chat_accepts_the_judge_request_shape():
+    """The judge's privacy request is a subset of the pinned policy and is dropped; JSON reply formats pass."""
+
+    base = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "temperature": 0, "max_tokens": 400}
+    superseded = ops.validate_operation_request("openrouter.chat", dict(base, provider={"data_collection": "deny", "zdr": True}))
+    assert "provider" not in superseded and superseded["max_tokens"] == 400
+    assert ops.validate_operation_request("openrouter.chat", dict(base, response_format={"type": "json_object"}))["response_format"] == {"type": "json_object"}
+    schema = {"type": "json_schema", "json_schema": {"name": "verify", "strict": True, "schema": {"type": "object", "properties": {"verified": {"type": "boolean"}}, "required": ["verified"]}}}
+    assert ops.validate_operation_request("openrouter.chat", dict(base, response_format=schema))["response_format"] == schema
+    outbound = ops.build_outbound_request("openrouter.chat", ops.validate_operation_request("openrouter.chat", dict(base, provider={"zdr": True})))
+    assert json.loads(outbound.body)["provider"] == {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
+    ops.check_request_headers({"Content-Type": "application/json", "HTTP-Referer": "https://leadpoet.ai", "X-Title": "Leadpoet Qualification"})
 
 
 def test_openrouter_chat_total_size_is_bounded():

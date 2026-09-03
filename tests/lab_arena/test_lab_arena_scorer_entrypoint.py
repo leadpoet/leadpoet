@@ -80,8 +80,9 @@ def test_entrypoint_reports_failures_as_documents_never_crashes(tmp_path, monkey
     monkeypatch.setattr(scoring, "MAX_JUDGE_RETRIES", 1)
     document, _ = scoring_input(tmp_path)
     result = entry.score_input(document)
-    assert result == {"schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": document["work_item_id"], "failure": expected}
-    assert scoring.validate_scoring_output_document(result)["failure"] == expected
+    assert {k: v for k, v in result.items() if k != "detail"} == {"schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION, "work_item_id": document["work_item_id"], "failure": expected}
+    assert result["detail"] and len(result["detail"]) <= scoring.MAX_FAILURE_DETAIL_CHARS  # a bounded operator-facing reason
+    assert scoring.validate_scoring_output_document(result) == result
 
 
 def test_entrypoint_rejects_a_foreign_input_schema(tmp_path):

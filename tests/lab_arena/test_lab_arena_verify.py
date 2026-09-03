@@ -263,7 +263,6 @@ def _round_configuration(signing_key_hash: str, runner_hotkeys: List[str], *, al
         "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
         "call_quota_hash": contracts.document_hash(contracts.call_quota_document()),
         "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
-        "audit_percent": 10,
         "icp_wall_clock_seconds": 300,
         "scorer_policy_hash": POLICY["policy_hash"],
         "scoring_cap_microusd": 5_000_000,

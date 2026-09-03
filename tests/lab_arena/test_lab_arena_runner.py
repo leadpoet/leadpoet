@@ -322,3 +322,57 @@ def test_judge_failures_map_to_judge_causes_with_no_output(tmp_path, output, tim
     validated = contracts.validate_icp_receipt(receipt, verify_signature=verify)
     assert validated["terminal_status"] == expected and validated["kind"] == "score"
     assert api.completions[0]["body"].get("output") in (None, {}) and validated["output_hash"] == contracts.document_hash(None)
+
+
+class RefusingApi(FakeApi):
+    """The broker refuses the scored miner's key or quota: a 402 body, and the call summary keeps the code."""
+
+    def __init__(self, leases, *, code="budget_refused"):
+        super().__init__(leases)
+        self.code = code
+
+    def provider(self, run_id, lease_token, frame):
+        self.provider_frames.append(dict(frame))
+        with self.lock:
+            state = self.cursor[run_id]
+            payload = {"call_identity": contracts.document_hash(["call", frame["action_sequence"]]), "operation_id": frame["operation_id"], "reserved_microusd": 0, "actual_microusd": 0, "outcome": "refused", "error_code": self.code}
+            event = contracts.build_private_event(event_type="provider_call", sequence=state["event_cursor"], prev_hash=state["event_head_hash"], timestamp="2026-09-02T01:00:00Z", payload=payload)
+            self.events.setdefault(run_id, []).append(event)
+            state.update(event_cursor=event["sequence"] + 1, event_head_hash=event["event_hash"])
+            call = dict(payload, event_cursor=state["event_cursor"], event_head_hash=state["event_head_hash"])
+        body = b'{"error":{"code":"%s"}}' % self.code.encode()
+        return {"status": 402, "headers": {"content-type": "application/json", "content-length": str(len(body))}, "body_b64": base64.b64encode(body).decode(), "call": call}
+
+
+class RefusedJudgeRuntime(BridgingRuntime):
+    """The real judge folds a refused provider call into its own failure document."""
+
+    def run_icp(self, spec, **_):
+        self.specs.append(spec)
+        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            status, _headers, _body = shim.dispatch("openrouter.chat", {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "judge"}]}, 5000)
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        assert status == 402
+        spec.output_path.write_bytes(json.dumps(self.output).encode())
+        return runtime.fake_result(exit_code=0, output_bytes=runtime.read_output(spec))
+
+
+@pytest.mark.parametrize("code, expected", [("budget_refused", "judge_key_refused"), ("budget_exhausted", "judge_key_refused"), ("call_refused", "judge_key_refused"), ("provider_unavailable", "judge_error")])
+def test_a_refused_key_or_quota_during_judging_is_the_scored_miners_outcome(tmp_path, code, expected):
+    """The worker reclassifies a judge error from the refusal it recorded; any other broker error stays a judge error."""
+
+    from lab_arena import scoring
+
+    failure = scoring.build_scoring_failure(contracts.document_hash("item-3"), "judge_error", detail="provider error")
+    api = RefusingApi([scoring_lease()], code=code)
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    receipt = {k: v for k, v in api.completions[0]["body"]["receipt"].items() if k != "run_id"}
+    validated = contracts.validate_icp_receipt(receipt, verify_signature=verify)
+    assert validated["terminal_status"] == expected and validated["kind"] == "score"
+    reasons = [e["payload"].get("reason") for e in api.events["r9"] if e["event_type"] == "output_rejected"]
+    assert ("judge_key_refused:" + code in reasons) == (expected == "judge_key_refused")
+    assert api.completions[0]["body"]["calls"][0]["error_code"] == code  # the refusal travels with the receipt's calls

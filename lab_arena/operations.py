@@ -59,16 +59,20 @@ OPENROUTER_MAX_CONTENT_CHARS = 32_000
 # Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
 # injects this policy into every chat body; it is table data so its hash is
 # bound into the round configuration.
+# Zero data retention is the judge's own request for the page content it
+# sends to a model; the Arena pins it for every OpenRouter call.
 OPENROUTER_STRICT_PROVIDER_POLICY: Mapping[str, Any] = MappingProxyType(
-    {"data_collection": "deny", "allow_fallbacks": False}
+    {"data_collection": "deny", "allow_fallbacks": False, "zdr": True}
 )
 
 # Structural limits for operation parameters (see module docstring). They are
 # deliberately looser than every field schema so the schema produces the
 # precise error code; ``max_total_bytes`` is the ceiling on any operation's
 # ``max_request_bytes``, which is enforced per operation.
+# Depth allows a caller's JSON schema (the judge's verifier nests ten levels);
+# bytes stay bounded per operation.
 OPERATION_LIMITS = contracts.StrictLimits(
-    max_depth=6,
+    max_depth=12,
     max_list_items=128,
     max_object_keys=64,
     max_string_bytes=4 * OPENROUTER_MAX_CONTENT_CHARS,
@@ -111,10 +115,14 @@ ALLOWED_REQUEST_HEADERS = frozenset(
         "date",
         "expect",
         "host",
+        # OpenRouter's app-attribution headers; the judge sends them, the
+        # broker never forwards a caller header.
+        "http-referer",
         "keep-alive",
         "pragma",
         "te",
         "user-agent",
+        "x-title",
     }
 )
 # Caller-supplied credentials are refused rather than stripped (section 18.4).
@@ -310,6 +318,10 @@ class Operation:
     deepline_tool: str = ""
     # Named reply transform applied before the scrub; "" keeps the provider body.
     response_transform: str = ""
+    # Body fields a caller may send only as a subset of the table's own value
+    # for the same fixed param; they are dropped and the fixed param stands.
+    # The judge asks OpenRouter for the privacy policy the table already pins.
+    superseded_fields: Mapping[str, Mapping[str, Any]] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS or self.method not in METHODS:
@@ -357,6 +369,13 @@ class Operation:
             raise ValueError("operation host is invalid")
         if set(self.fixed_params) & set(self.request_fields):
             raise ValueError("fixed params may not overlap request fields")
+        for name, allowed in self.superseded_fields.items():
+            fixed = self.fixed_params.get(name)
+            if name in self.request_fields or not isinstance(fixed, Mapping) or not isinstance(allowed, Mapping):
+                raise ValueError("superseded fields must name an object-valued fixed param")
+            if any(key not in fixed or fixed[key] != value for key, value in allowed.items()):
+                raise ValueError("a superseded field may only accept values the fixed param already carries")
+        object.__setattr__(self, "superseded_fields", MappingProxyType({name: _deep_copy_json(allowed) for name, allowed in self.superseded_fields.items()}))
         if not set(self.defaults) <= set(self.request_fields):
             raise ValueError("defaults must name request fields")
         if self.timeout_seconds <= 0 or self.max_request_bytes <= 0 or self.max_response_bytes <= 0:
@@ -897,9 +916,21 @@ _OPERATION_LIST = (
             "top_p": FieldSpec("float", minimum=0, maximum=1),
             "stop": FieldSpec("list[str]", max_length=4, item=FieldSpec("str", min_length=1, max_length=64)),
             "seed": FieldSpec("int", minimum=-(2 ** 31), maximum=2 ** 31 - 1),
-            "response_format": FieldSpec("object", fields={"type": FieldSpec("str", required=True, choices=("text",))}),
+            # The judge asks for JSON replies; a JSON schema is the caller's own
+            # bounded object, never interpreted by the Arena.
+            "response_format": FieldSpec(
+                "object",
+                fields={
+                    "type": FieldSpec("str", required=True, choices=("text", "json_object", "json_schema")),
+                    "json_schema": FieldSpec("object"),
+                },
+            ),
+            # The judge's three-stage verifier asks for reasoning tokens; they
+            # are completion tokens under the same output cap.
+            "include_reasoning": FieldSpec("bool"),
         },
         fixed_params={"stream": False, "provider": dict(OPENROUTER_STRICT_PROVIDER_POLICY)},
+        superseded_fields={"provider": {"data_collection": "deny", "zdr": True, "allow_fallbacks": False}},
         # Absent output caps default to the server cap so cost stays bounded.
         defaults={"max_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
         timeout_seconds=120,
@@ -985,6 +1016,7 @@ def operation_document(operation: Operation) -> Dict[str, Any]:
         "outbound_path": operation.outbound_path,
         "deepline_tool": operation.deepline_tool,
         "response_transform": operation.response_transform,
+        "superseded_fields": {name: dict(allowed) for name, allowed in operation.superseded_fields.items()},
         "credential": {
             "location": operation.credential.location,
             "name": operation.credential.name,
@@ -1015,6 +1047,16 @@ def operation_table_document() -> Dict[str, Any]:
 
 
 OPERATION_TABLE_HASH = contracts.document_hash(operation_table_document())
+
+# Every host the table matches or sends to. The trusted-scorer shim refuses to
+# turn a request for one of these into a page fetch: a provider is reached only
+# through its own closed operation.
+PROVIDER_HOSTS = frozenset(
+    host.lower()
+    for operation in OPERATIONS.values()
+    for host in (operation.host, operation.outbound_host)
+    if host
+)
 CALL_QUOTA_HASH = contracts.document_hash(contracts.call_quota_document())
 
 
@@ -1186,6 +1228,24 @@ def _validate_object(
     return out
 
 
+def _drop_superseded_fields(operation: Operation, parameters: Mapping[str, Any]) -> Dict[str, Any]:
+    """Accept a superseded field only as a subset of the table's value, then drop it."""
+
+    if not operation.superseded_fields:
+        return dict(parameters)
+    remaining = dict(parameters)
+    for name, allowed in operation.superseded_fields.items():
+        if name not in remaining:
+            continue
+        value = remaining.pop(name)
+        if not isinstance(value, Mapping) or not value:
+            raise OperationRequestError("invalid_request")
+        for key, item in value.items():
+            if not isinstance(key, str) or key not in allowed or allowed[key] != item or type(allowed[key]) is not type(item):
+                raise OperationRequestError("invalid_request")
+    return remaining
+
+
 def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, Any]:
     """Validate and normalize ``parameters`` for one operation.
 
@@ -1204,6 +1264,7 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
         raise OperationRequestError("invalid_request") from exc
     if len(contracts.canonical_json(parameters).encode("utf-8")) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
+    parameters = _drop_superseded_fields(operation, parameters)
     normalized = _validate_object(operation.request_fields, parameters, "$", forbidden=operation.forbidden_names)
     for name, default in operation.defaults.items():
         if name not in normalized:
@@ -1583,7 +1644,6 @@ __all__ = [
     "operation_document",
     "operation_table_document",
     "outbound_target",
-    "price_list_document",
     "sanitize_response",
     "validate_https_url",
     "validate_operation_request",

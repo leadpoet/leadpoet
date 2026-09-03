@@ -136,21 +136,6 @@ def _max_challengers_from_environment() -> int:
     return value
 
 
-def _audit_percent_from_environment() -> int:
-    """LAB_ARENA_AUDIT_PERCENT: share of scoring work items a second validator scores again (default 10)."""
-
-    raw = os.environ.get("LAB_ARENA_AUDIT_PERCENT", "").strip()
-    if not raw:
-        return 10
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ServiceError("LAB_ARENA_AUDIT_PERCENT must be an integer", 500) from None
-    if value < 0 or value > 100:
-        raise ServiceError("LAB_ARENA_AUDIT_PERCENT must be between 0 and 100", 500)
-    return value
-
-
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -174,7 +159,6 @@ def build_service_from_environment(mode: str):
         repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40),
         max_challengers=_max_challengers_from_environment(),
         scorer_image_digest=_required("LAB_ARENA_SCORER_IMAGE_DIGEST"),
-        audit_percent=_audit_percent_from_environment(),
     )
 
     def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:

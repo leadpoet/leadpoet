@@ -1727,7 +1727,10 @@ BEGIN
   END IF;
   SELECT * INTO v_reservation FROM public.lab_arena_ledger
   WHERE call_identity = p_call_identity AND entry_kind = 'reservation';
-  IF p_actual_microusd > v_reservation.amount_microusd THEN
+  -- OpenRouter reservations bound the key capacity, so a settlement may not
+  -- exceed them. Other providers reserve no amount and settle at whatever the
+  -- provider reported (or zero), which is informational.
+  IF v_reservation.provider = 'openrouter' AND p_actual_microusd > v_reservation.amount_microusd THEN
     RAISE EXCEPTION 'lab_arena_settlement_exceeds_reservation' USING ERRCODE = '23514';
   END IF;
   INSERT INTO public.lab_arena_ledger (

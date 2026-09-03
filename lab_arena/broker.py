@@ -248,11 +248,27 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 
 
 
+def deepline_cost_microusd(body: bytes) -> int:
+    """``billing.cost_usd`` from a Deepline execute envelope as micro-USD, else 0."""
+
+    try:
+        document = json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return 0
+    billing = document.get("billing") if isinstance(document, Mapping) else None
+    value = billing.get("cost_usd") if isinstance(billing, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or value != value or value in (float("inf"),):
+        return 0
+    return int(value * 1_000_000)
+
+
 def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tuple[str, Dict[str, str]]:
     """Place the credential exactly where the operation table says."""
 
     placement = outbound.credential
     headers: Dict[str, str] = {"accept": "application/json, text/html;q=0.9, */*;q=0.1", "user-agent": "leadpoet-lab-arena-broker/1"}
+    for name, value in getattr(outbound, "headers", {}).items():
+        headers[str(name).lower()] = str(value)
     if outbound.content_type:
         headers["content-type"] = outbound.content_type
     if placement.location == "header":
@@ -559,7 +575,7 @@ class Broker:
             secret = ""
             del secret
 
-        sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(operation_id, response.status, response.headers, response.body)
+        sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(operation_id, response.status, response.headers, response.body, parameters=normalized)
         if operation.provider == "openrouter":
             actual: Optional[int] = None
             if 200 <= response.status < 300:
@@ -569,8 +585,11 @@ class Broker:
                     actual = None
             # Missing, malformed, stale, or excessive usage retains the full reservation.
             actual = amount if actual is None or actual > amount else actual
+        elif operation.provider == "deepline" and 200 <= response.status < 300:
+            # Deepline reports the charge in its envelope; record it, floor-rounded.
+            actual = deepline_cost_microusd(response.body)
         else:
-            actual = 0  # miner-billed providers: the Arena records the call, not a price
+            actual = 0  # miner-billed providers without a reported charge: the Arena records the call, not a price
         terminal = _terminal_response_document(sanitized_status, sanitized_headers, sanitized_body)
         payload = dict(summary, outcome="settled", status=sanitized_status, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
         settled = self._terminal_with_event(

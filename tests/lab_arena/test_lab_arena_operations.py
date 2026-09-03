@@ -138,7 +138,8 @@ def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
     for tool in ops.DEEPLINE_TOOLS:
         outbound = ops.build_outbound_request("deepline.execute", {"tool": tool, "payload": {"query": "x"}})
         assert outbound.url == "https://code.deepline.com/api/v2/integrations/%s/execute" % tool
-        assert json.loads(outbound.body) == {"payload": {"query": "x"}}  # the path field never enters the body
+        assert json.loads(outbound.body) == {"provider": ops.DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": {"query": "x"}}  # the path field names the tool, never a body key
+        assert dict(outbound.headers) == {"x-deepline-execute-response-intent": "raw"}
     reject("deepline.execute", {"tool": "exa_search/../admin", "payload": {}}, "invalid_field")
     reject("deepline.execute", {"tool": "unknown_tool", "payload": {}}, "invalid_field")
     reject("deepline.execute", {"payload": {"query": "x"}}, "missing_field")
@@ -554,7 +555,10 @@ def test_outbound_target_is_constant_under_every_field_mutation(operation_id):
         assert outbound.target == baseline
         if operation.method == "POST":
             document = json.loads(outbound.body.decode("utf-8"))
-            assert set(document) <= (set(operation.request_fields) - set(operation.path_fields)) | set(operation.fixed_params)
+            if operation.body_wrapper == "deepline_execute":
+                assert set(document) == {"provider", "operation", "payload"} and document["operation"] == parameters["tool"]
+            else:
+                assert set(document) <= (set(operation.request_fields) - set(operation.path_fields)) | set(operation.fixed_params)
             for fixed_name, fixed_value in operation.fixed_params.items():
                 assert document[fixed_name] == fixed_value
         else:

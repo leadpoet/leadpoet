@@ -102,6 +102,19 @@ Deepline calls are limited to the tools exa_answer, exa_company_search, exa_cont
 their payloads are Deepline's own schemas and pass through unchanged apart
 from size bounds and a credential-name scan.
 
+Deepline contract, pinned from live calls on 2026-09-02: the broker sends
+`POST https://code.deepline.com/api/v2/integrations/<tool>/execute` with the
+miner's bearer key, the header `x-deepline-execute-response-intent: raw`, and
+the body `{"provider": "exa", "operation": "<tool>", "payload": {...}}`, exactly
+as Deepline's own client does. The reply is
+`{"job_id", "status", "result": {"data": <raw provider response>}, "billing": {"credits_charged", "cost_usd"}}`
+and the broker records `cost_usd` as the settled amount. `text.maxCharacters`
+is honored and `ids` aliases `urls`. Exa attaches `entities` (people with
+employers and education) to search and contents results; the broker drops
+person entities before a model or the ledger sees them, except for
+`exa_people_search`, whose purpose is people. Fixtures from the live calls
+live in `tests/lab_arena/fixtures/deepline/`.
+
 ## 6. Daily round
 
 1. The driver creates and advances rounds by wall clock; the admin CLI is

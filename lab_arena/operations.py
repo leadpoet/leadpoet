@@ -32,7 +32,7 @@ import datetime as _datetime
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -47,6 +47,8 @@ FUNDING_SOURCES = ("miner_key",)
 METHODS = ("GET", "POST")
 PARAMETER_LOCATIONS = ("body", "query")
 RESPONSE_SANITIZERS = ("json", "text")
+BODY_WRAPPERS = ("", "deepline_execute")
+RESPONSE_SCRUBS = ("", "deepline_person_entities")
 FIELD_KINDS = ("str", "int", "float", "bool", "list[str]", "list[object]", "object")
 FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 
@@ -294,6 +296,12 @@ class Operation:
     # Request fields substituted into the path (one ``{name}`` placeholder
     # each); they must be closed-choice strings so the path stays enumerable.
     path_fields: Tuple[str, ...] = ()
+    # Constant headers the broker adds to the outbound request (never from the model).
+    outbound_headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # Named body transform applied after validation; "" sends the fields as-is.
+    body_wrapper: str = ""
+    # Named response scrub applied after sanitization; "" passes the body through.
+    response_scrub: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS or self.method not in METHODS:
@@ -307,6 +315,14 @@ class Operation:
         residual = re.sub(r"\{[a-z_]+\}", "", self.path)
         if "{" in residual or "}" in residual:
             raise ValueError("path placeholders must all be declared path fields")
+        if self.body_wrapper not in BODY_WRAPPERS:
+            raise ValueError("operation body wrapper is invalid")
+        if self.response_scrub not in RESPONSE_SCRUBS:
+            raise ValueError("operation response scrub is invalid")
+        for name, value in self.outbound_headers.items():
+            if _normalize_name(name) in {_normalize_name(h) for h in CREDENTIAL_HEADERS} or not isinstance(value, str):
+                raise ValueError("outbound headers may not carry credentials")
+        object.__setattr__(self, "outbound_headers", MappingProxyType(dict(self.outbound_headers)))
         if self.parameter_location not in PARAMETER_LOCATIONS:
             raise ValueError("operation parameter location is invalid")
         if self.method == "GET" and self.parameter_location != "query":
@@ -396,6 +412,24 @@ _DEEPLINE_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Be
 # the Exa-backed search, contents, answer, people, and company tools plus the
 # public company search. Deepline owns each tool's payload schema.
 DEEPLINE_TOOLS = ("exa_answer", "exa_company_search", "exa_contents", "exa_people_search", "exa_search", "free_simple_company_search")
+# Deepline's execute body names the upstream provider of each tool; pinned
+# from the official client (deepline_core 0.3.20) and the tool contracts.
+DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
+    "exa_answer": "exa",
+    "exa_company_search": "exa",
+    "exa_contents": "exa",
+    "exa_people_search": "exa",
+    "exa_search": "exa",
+    "free_simple_company_search": "deepline_native",
+})
+# Asks Deepline for the provider's raw response under result.data instead of a
+# normalized view; captured from the official client and verified live.
+DEEPLINE_EXECUTE_HEADERS: Mapping[str, str] = MappingProxyType({"x-deepline-execute-response-intent": "raw"})
+# Exa attaches extracted ``entities`` (people with employers and education) to
+# search and contents results. Nothing in the judge reads them, so the broker
+# drops person entities before a model or the ledger sees them; the people
+# search tool exists to return people and is exempt.
+DEEPLINE_PERSON_ENTITY_TOOLS = frozenset({"exa_people_search"})
 
 _OPERATION_LIST = (
     Operation(
@@ -463,6 +497,9 @@ _OPERATION_LIST = (
         funding_source="miner_key",
         credential=_DEEPLINE_CREDENTIAL,
         path_fields=("tool",),
+        outbound_headers=DEEPLINE_EXECUTE_HEADERS,
+        body_wrapper="deepline_execute",
+        response_scrub="deepline_person_entities",
     ),
     Operation(
         operation_id="openrouter.chat",
@@ -569,6 +606,10 @@ def operation_document(operation: Operation) -> Dict[str, Any]:
         "response_sanitizer": operation.response_sanitizer,
         "funding_source": operation.funding_source,
         "path_fields": list(operation.path_fields),
+        "outbound_headers": dict(operation.outbound_headers),
+        "body_wrapper": operation.body_wrapper,
+        "response_scrub": operation.response_scrub,
+        "response_scrub_exempt_tools": sorted(DEEPLINE_PERSON_ENTITY_TOOLS) if operation.response_scrub else [],
         "credential": {
             "location": operation.credential.location,
             "name": operation.credential.name,
@@ -963,6 +1004,7 @@ class OutboundRequest:
     body: bytes
     content_type: Optional[str]
     credential: CredentialPlacement
+    headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def outbound_target(operation_id: str, parameters: Any) -> OutboundTarget:
@@ -997,13 +1039,23 @@ def build_outbound_request(operation_id: str, parameters: Any) -> OutboundReques
     if operation.parameter_location == "body":
         document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
+        document = _wrap_body(operation, normalized, document)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-        return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential)
+        return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}
     for name, value in operation.fixed_params.items():
         query[name] = _query_value(value)
     ordered = MappingProxyType({key: query[key] for key in sorted(query)})
-    return OutboundRequest(target, base_url + "?" + urlencode(ordered), ordered, b"", None, operation.credential)
+    return OutboundRequest(target, base_url + "?" + urlencode(ordered), ordered, b"", None, operation.credential, operation.outbound_headers)
+
+
+def _wrap_body(operation: Operation, normalized: Mapping[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the operation's named body transform (table data, never model data)."""
+
+    if operation.body_wrapper == "deepline_execute":
+        tool = str(normalized["tool"])
+        return {"provider": DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": document["payload"]}
+    return document
 
 
 # ---------------------------------------------------------------------------
@@ -1033,11 +1085,28 @@ def _provider_content_type(headers: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def scrub_person_entities(value: Any) -> Any:
+    """Drop ``entities`` items whose ``type`` is ``person`` at any depth; everything else is unchanged."""
+
+    if isinstance(value, Mapping):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "entities" and isinstance(item, list):
+                out[key] = [scrub_person_entities(entry) for entry in item if not (isinstance(entry, Mapping) and str(entry.get("type") or "").lower() == "person")]
+            else:
+                out[key] = scrub_person_entities(item)
+        return out
+    if isinstance(value, list):
+        return [scrub_person_entities(item) for item in value]
+    return value
+
+
 def sanitize_response(
     operation_id: str,
     status: Any,
     headers: Optional[Mapping[str, Any]],
     body: Any,
+    parameters: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[int, Dict[str, str], bytes]:
     """Return the model-visible ``(status, headers, body)`` for a provider reply.
 
@@ -1074,6 +1143,13 @@ def sanitize_response(
             raise OperationResponseError("invalid_response") from exc
         if not isinstance(parsed, (dict, list)):
             raise OperationResponseError("invalid_response")
+        if operation.response_scrub == "deepline_person_entities":
+            tool = str((parameters or {}).get("tool") or "")
+            if tool not in DEEPLINE_PERSON_ENTITY_TOOLS:
+                scrubbed = scrub_person_entities(parsed)
+                if scrubbed != parsed:  # bodies without person entities pass through byte-for-byte
+                    parsed = scrubbed
+                    raw = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         content_type = "application/json"
     else:
         if len(raw) > operation.max_response_bytes:
@@ -1099,6 +1175,8 @@ __all__ = [
     "OPERATION_TABLE_HASH",
     "CALL_QUOTA_HASH",
     "DEEPLINE_TOOLS",
+    "DEEPLINE_TOOL_PROVIDERS",
+    "DEEPLINE_EXECUTE_HEADERS",
     "PAYLOAD_FORBIDDEN_FIELD_NAMES",
     "OPERATION_TABLE_SCHEMA_VERSION",
     "Operation",
@@ -1107,7 +1185,8 @@ __all__ = [
     "OperationResponseError",
     "OutboundRequest",
     "OutboundTarget",
-    "PRICE_LIST_SCHEMA_VERSION",
+    "scrub_person_entities",
+    "DEEPLINE_PERSON_ENTITY_TOOLS",
     "build_outbound_request",
     "check_request_headers",
     "field_spec_document",

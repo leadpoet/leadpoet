@@ -102,7 +102,9 @@ class FakeLedgerStore:
             call = self.calls[call_identity]
             if call["kind"] != "dispatch":
                 return self._view(call)
-            assert actual_microusd <= call["amount"]
+            # Mirrors the migration: only the capacity-tracked OpenRouter reservation bounds the settlement.
+            if call.get("provider") == "openrouter":
+                assert actual_microusd <= call["amount"]
             # One transaction: the event check happens before any state changes.
             if event is not None:
                 self._append(event)
@@ -110,7 +112,7 @@ class FakeLedgerStore:
                 self.openrouter_capacity += call["amount"]  # outstanding released
                 self.openrouter_capacity -= actual_microusd
             call.update({"kind": "settlement", "terminal": terminal_response, "actual": actual_microusd})
-            return {"status": "settled", "idempotent": False, "actual_microusd": actual_microusd, "released_microusd": call["amount"] - actual_microusd, "terminal_response": terminal_response, "event_cursor": self.run["event_cursor"], "event_head_hash": self.run["event_head_hash"]}
+            return {"status": "settled", "idempotent": False, "actual_microusd": actual_microusd, "released_microusd": max(0, call["amount"] - actual_microusd), "terminal_response": terminal_response, "event_cursor": self.run["event_cursor"], "event_head_hash": self.run["event_head_hash"]}
 
     def mark_uncertain(self, *, run_id, lease_token_hash, call_identity, call_doc, event, lease_ttl_seconds):
         with self.lock:
@@ -174,10 +176,28 @@ def test_deepline_call_reserves_dispatches_sends_with_the_miners_key_and_settles
     sent = transport.sent[0]
     assert sent["url"] == "https://code.deepline.com/api/v2/integrations/exa_search/execute" and sent["method"] == "POST"
     assert sent["headers"]["authorization"] == "Bearer " + DL_KEY and "x-api-key" not in sent["headers"]
-    assert json.loads(sent["body"]) == {"payload": {"query": "fintech"}}
+    # The body and header pinned from Deepline's official client (test_lab_arena_deepline_contract).
+    assert json.loads(sent["body"]) == {"provider": "exa", "operation": "exa_search", "payload": {"query": "fintech"}}
+    assert sent["headers"]["x-deepline-execute-response-intent"] == "raw"
     assert store.calls[call["call_identity"]]["provider"] == "deepline"
     assert store.events[0]["event_type"] == "provider_call" and store.events[0]["payload"]["actual_microusd"] == 0
     assert contracts.verify_event_chain(store.events) == store.run["event_head_hash"]
+
+
+def test_deepline_reported_billing_becomes_the_settled_amount_and_person_entities_are_dropped():
+    envelope = {
+        "job_id": "iad1::x", "status": "completed",
+        "result": {"data": {"requestId": "r", "results": [{"id": "u", "url": "https://a.example", "text": "t", "entities": [{"type": "person", "properties": {"name": "Jane Roe"}}]}]}},
+        "billing": {"credits_charged": 0.02, "cost_usd": 0.002},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_contents", "payload": {"urls": ["https://a.example"]}}, action_sequence=0, timeout_ms=5000)
+    assert result.status == 200 and b"Jane Roe" not in result.body
+    assert json.loads(result.body)["result"]["data"]["results"][0]["entities"] == []
+    call = result.call
+    assert call["reserved_microusd"] == 0 and call["actual_microusd"] == 2000 and call["outcome"] == "settled"
+    assert store.calls[call["call_identity"]]["actual"] == 2000
+    assert json.loads(transport.sent[0]["body"])["operation"] == "exa_contents"
 
 
 def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_response():

@@ -987,7 +987,9 @@ async def _llm_reverify_company(
             ),
             (
                 "industry_matches: independently find the company's industry and "
-                f"test it against {icp.industry!r}."
+                f"test it against {icp.industry!r}. Use semantic parent and "
+                "subindustry fit, not exact label equality. The observed industry "
+                "must still be proved by the cited source."
             ),
             (
                 "geography_matches: independently find the company's headquarters "
@@ -1005,7 +1007,13 @@ async def _llm_reverify_company(
         checks.append(
             f'stage_matches: is this company\'s funding/ownership stage consistent with '
             f'"{getattr(icp, "company_stage", "")}" (verify from funding announcements, '
-            f'investor pages)? Answer false ONLY if you are confident it is a different stage.')
+            f'investor pages)? Return observed_company_stage as exactly one of Seed, '
+            f'Series A, Series B, Series C+, Private Equity, or Public. Series C+ '
+            f'includes Series C and later venture rounds but excludes private-equity '
+            f'ownership and public companies. Private Equity means a private-equity '
+            f'or private-markets sponsor is the current majority or controlling owner. '
+            f'Public means the company itself has publicly listed shares. Answer false '
+            f'ONLY if you are confident it is a different stage.')
     # The model receipt is audit-only. Its model-authored observed text,
     # citation path/query, and quote must never enter the independent judge's
     # prompt or telemetry request body.

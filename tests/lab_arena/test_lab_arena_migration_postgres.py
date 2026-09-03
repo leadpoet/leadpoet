@@ -847,3 +847,27 @@ def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_r
     closed = store.close_scoring(round_id, 1)
     assert closed["status"] == "cancelled" and closed["incomplete_assignments"] == 20
     assert store.get_round(round_id)["cancel_reason"] == "capacity:scoring1:20"
+
+
+def test_service_role_statements_locks_and_idle_transactions_are_bounded(superuser, store):
+    """The service role carries per-request limits so an Arena burst cannot hold a shared instance.
+
+    The heaviest single statement, cancelling a round at the challenger cap with
+    every stage-one run open, must finish well inside the statement bound.
+    """
+
+    import time
+
+    with superuser.cursor() as cursor:
+        cursor.execute("SELECT rolconfig FROM pg_roles WHERE rolname = 'lab_arena_service'")
+        settings = set(cursor.fetchone()[0] or [])
+    assert {"statement_timeout=30s", "lock_timeout=5s", "idle_in_transaction_session_timeout=60s"} <= settings, settings
+    round_id = "arena-2026-11-30"
+    open_round(store, round_id, participants=contracts.MAX_CHALLENGERS, prefix="cap")
+    assert len(store.list_runs(round_id, stage=1, status="pending")) == 20 * contracts.MAX_CHALLENGERS
+    started = time.monotonic()
+    cancelled = store.cancel_round(round_id, "capacity:test")
+    seconds = time.monotonic() - started
+    assert cancelled["status"] == "cancelled", cancelled
+    assert seconds < 10.0, "cancel at the challenger cap took %.1fs" % seconds
+    assert all(run["status"] == "failed" and run["terminal_cause"] == "stage_closed" for run in store.list_runs(round_id, stage=1))

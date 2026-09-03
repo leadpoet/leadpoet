@@ -82,3 +82,34 @@ def test_cancel_accepts_only_published_rules(capsys):
     assert code == 0 and service.cancelled == [] and json.loads(out)["would_cancel"]["status"] == "stage1"
     code, out, _ = run(["cancel", "--round", "arena-2026-09-02", "--reason", "runner_capacity"], service, capsys)
     assert code == 0 and service.cancelled == [("arena-2026-09-02", "runner_capacity")]
+
+
+class IdleService(FakeService):
+    """No round is open or running; the operator may create the next one."""
+
+    def __init__(self):
+        super().__init__()
+        self.store = FakeStore({"round_id": "arena-2026-09-02", "status": "published"})
+        self.created = []
+
+    def current_round(self):
+        return None
+
+    def create_round(self, cutoff):
+        self.created.append(cutoff)
+        return {"round_id": "arena-%s" % cutoff.strftime("%Y-%m-%d"), "schedule": {"submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")}}
+
+
+def test_create_makes_the_round_for_a_cutoff_and_refuses_open_rounds_and_existing_dates(capsys):
+    service = IdleService()
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-05T00:00:00Z", "--dry-run"]), service) == 0
+    assert json.loads(capsys.readouterr().out)["would_create"] == "arena-2026-09-05" and not service.created
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-05T00:00:00Z"]), service) == 0
+    assert json.loads(capsys.readouterr().out)["created"] == "arena-2026-09-05" and len(service.created) == 1
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-02T00:00:00Z"]), service) == 3  # that date's round exists
+    assert "already exists" in capsys.readouterr().err
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-05"]), service) == 2  # not a UTC instant
+    capsys.readouterr()
+    busy = FakeService(status="stage1")
+    assert ADMIN["run"](ADMIN["build_parser"]().parse_args(["create", "--cutoff", "2026-09-06T00:00:00Z"]), busy) == 3
+    assert "already open or running" in capsys.readouterr().err

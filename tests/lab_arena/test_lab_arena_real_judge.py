@@ -311,3 +311,52 @@ def test_real_judge_is_reproducible_on_identical_responses(tmp_path):
     assert first_hashes == second_hashes, (len(first_hashes), len(second_hashes))
     redacted = [[verify.redact_breakdown(b) for b in result["output"]["breakdowns"]] for result in (first, second)]
     assert contracts.document_hash(redacted[0]) == contracts.document_hash(redacted[1]), (redacted[0], redacted[1])
+
+
+def ledger_entries_from(result: Mapping[str, Any], responses: Mapping[str, Tuple[int, Dict[str, str], bytes]]) -> List[Dict[str, Any]]:
+    """Ledger rows shaped like the broker's, one settled call per recorded frame."""
+
+    import base64
+
+    entries = []
+    for index, frame in enumerate(result["frames"]):
+        identity = contracts.document_hash(["ledger", index, frame["request_hash"]])
+        status, headers, body = responses[frame["request_hash"]]
+        entries.append({"entry_id": 2 * index + 1, "entry_kind": "reservation", "call_identity": identity, "entry_doc": {"request_hash": frame["request_hash"]}})
+        entries.append({"entry_id": 2 * index + 2, "entry_kind": "settlement", "call_identity": identity, "entry_doc": {"request_hash": frame["request_hash"]},
+                        "terminal_response": {"status": status, "headers": dict(headers), "body_b64": base64.b64encode(body).decode()}})
+    return entries
+
+
+def test_arena_replay_from_the_ledger_reproduces_the_real_judge(tmp_path):
+    """The Arena's replay (recorded responses only, no provider) reproduces the validator's real-judge scoring."""
+
+    document = scoring_input()
+    recorded: Dict[str, Tuple[int, Dict[str, str], bytes]] = {}
+    original_respond = globals()["respond"]
+
+    def recording_respond(operation_id, normalized):
+        reply = original_respond(operation_id, normalized)
+        recorded[contracts.document_hash(normalized)] = reply
+        return reply
+
+    globals()["respond"] = recording_respond
+    try:
+        validator = run_real_judge(tmp_path, document)
+    finally:
+        globals()["respond"] = original_respond
+    assert validator["exit_code"] == 0 and "breakdowns" in (validator["output"] or {}), describe(validator)
+    entries = ledger_entries_from(validator, recorded)
+    replayed, report = replay_module.replay_work_item(input_document=document, ledger_entries=entries, work_dir=tmp_path, entry_command=replay_module.default_entry_command())
+    assert report["misses"] == [], report
+    assert report["served"] == len(validator["frames"]) and report["recorded"] == len(recorded)
+    assert "breakdowns" in replayed
+    redacted = [[verify.redact_breakdown(b) for b in output["breakdowns"]] for output in (validator["output"], replayed)]
+    assert contracts.document_hash(redacted[0]) == contracts.document_hash(redacted[1])
+    # A ledger without the judge's model replies cannot reproduce the scoring: the judge fails
+    # closed on the refusals, and the Arena rejects a scoring whose replay ends in a failure document.
+    chat_hashes = {frame["request_hash"] for frame in validator["frames"] if frame["operation_id"] == "openrouter.chat"}
+    assert chat_hashes
+    partial = [entry for entry in entries if entry["entry_doc"]["request_hash"] not in chat_hashes]
+    output, short = replay_module.replay_work_item(input_document=document, ledger_entries=partial, work_dir=tmp_path, entry_command=replay_module.default_entry_command())
+    assert short["misses"] and "failure" in output, (short, output)

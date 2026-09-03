@@ -121,6 +121,21 @@ def banned_hotkeys_from_environment() -> List[str]:
     return [str(item) for item in document]
 
 
+def _daily_cutoff_hour_from_environment() -> Optional[int]:
+    """LAB_ARENA_DAILY_CUTOFF_UTC: the UTC hour of each day's cutoff (0..23); unset leaves round creation to the operator."""
+
+    raw = os.environ.get("LAB_ARENA_DAILY_CUTOFF_UTC", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError("LAB_ARENA_DAILY_CUTOFF_UTC must be an integer hour", 500) from None
+    if value < 0 or value > 23:
+        raise ServiceError("LAB_ARENA_DAILY_CUTOFF_UTC must be between 0 and 23", 500)
+    return value
+
+
 def _max_challengers_from_environment() -> int:
     """LAB_ARENA_MAX_CHALLENGERS: the admitted challenger ceiling per round, 1..MAX_CHALLENGERS."""
 
@@ -158,6 +173,7 @@ def build_service_from_environment(mode: str):
         base_image_digest=os.environ.get("LAB_ARENA_BASE_IMAGE_DIGEST", "sha256:" + "0" * 64),
         repository_commit=os.environ.get("LAB_ARENA_REPOSITORY_COMMIT", "0" * 40),
         max_challengers=_max_challengers_from_environment(),
+        daily_cutoff_hour_utc=_daily_cutoff_hour_from_environment(),
         scorer_image_digest=_required("LAB_ARENA_SCORER_IMAGE_DIGEST"),
     )
 

@@ -6,11 +6,22 @@ Arena never touches enclave, validator, or weight code paths.
 
 ## 1. Database
 
-1. Apply `scripts/178-lab-arena-v1.sql` once to the hosted Supabase project
-   with an owner connection. It is idempotent and creates the
+1. Apply `scripts/178-lab-arena-v1.sql` once, with an owner connection, to
+   the PostgreSQL the Arena will use. It is idempotent and creates the
    `lab_arena_owner` and `lab_arena_service` roles, six `lab_arena_*` tables,
    append-only and write-once triggers, RLS, and the SECURITY DEFINER
    service functions. Existing tables and roles are never altered.
+   Give the Arena its own Supabase project (or database) for the live
+   trial: nothing in `lab_arena` reads a gateway table, and a round at the
+   challenger cap writes on the order of half a million ledger, event, and
+   run rows inside its stage windows. If the Arena must share the gateway's
+   instance, the migration bounds the service role (`statement_timeout` 30 s,
+   `lock_timeout` 5 s, `idle_in_transaction_session_timeout` 60 s, applied
+   by PostgREST to the impersonated role on every request), keep
+   `LAB_ARENA_SCORING_WORKERS` and the runner slot ceiling at the sized
+   values, and watch the gateway's database-route latency during the first
+   rounds; a rise there while a no-database route stays flat is contention
+   on the shared instance.
 2. Mint a PostgREST JWT for role `lab_arena_service` (the role is NOLOGIN;
    the JWT carries `role=lab_arena_service`). Store it only in the Arena
    host's secret store. Runners never receive it.
@@ -60,6 +71,26 @@ section 19 step 9) and is not enabled by this service.
 Start: `python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791`.
 The driver thread advances the current round once per `--tick-seconds`; the
 API and the driver share one process and one service role.
+
+### Daily rounds
+
+V1 runs one round at a time: runner-facing handlers resolve the newest
+round that is not published or cancelled, so the next round is created only
+after the previous one ends. Set `LAB_ARENA_DAILY_CUTOFF_UTC=<hour>` and the
+service driver creates the next round itself whenever no round is open or
+running: its cutoff is the next occurrence of that UTC hour at least six
+hours ahead (the submission window), and a date whose round already exists
+moves to the next day, because a round id is its cutoff date. Leave the
+variable unset to create rounds by hand:
+
+```bash
+python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
+```
+
+The command refuses while a round is open or running and when that date's
+round exists. A day's cycle is the submission window plus the stage minutes
+in the round configuration, so with a six-hour window and the default stage
+minutes a round publishes well inside the day it is named for.
 
 ## 4. Runner environment
 
@@ -161,6 +192,18 @@ digest, and give every validator the same image through the registry the
 runner already pulls miner images from. There is no committed build recipe
 for the judge image yet; until one lands, the image is an operator artifact
 and its digest must be recorded with the round configuration that pins it.
+The image must hold, on the same pinned Python base as miner images:
+`/model/scorer_entrypoint.py` (this repository's `lab_arena/scorer_entrypoint.py`;
+the runner starts `python3 /model/scorer_entrypoint.py` with the input and
+output directories and the worker socket mounted exactly as for a model);
+the packages `lab_arena`, `research_lab`, `qualification`, `gateway`, and
+`leadpoet_verifier` importable at their repository paths, with their
+dependencies from `requirements.txt`; a `sitecustomize.py` on the import
+path that runs `from lab_arena import shim; shim.install()`; user 65534; no
+network at build or run time beyond the wheel install. Prove a candidate
+image before pinning it by running `tests/lab_arena/test_lab_arena_real_judge.py`
+inside it against the test's fake provider socket: the same 30 matched calls
+and the same redacted breakdowns as on the host.
 
 ### How the judge reaches the web
 

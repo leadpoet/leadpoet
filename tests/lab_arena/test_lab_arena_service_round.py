@@ -281,6 +281,7 @@ class Harness:
         self.challengers = challengers
         self.max_challengers = contracts.MAX_CHALLENGERS
         self.replay_command = None  # a replay entry command switches replay verification on
+        self.daily_cutoff_hour_utc = None  # set to enable automatic daily round creation
         self.refused_hotkeys: set = set()  # miners whose provider key the provider now rejects
         self.api_factory = None  # runners talk to the service in-process unless a test supplies an API client
         self.github = FakeGitHub()
@@ -304,7 +305,7 @@ class Harness:
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
             generation_provider=TapeProvider(load_tape("clean_run.json")), price_table_source=lambda models: price_table(models), banned_hotkeys_source=lambda: [],
             broker_factory=broker_factory, scorer_factory=lambda policy: deterministic_scorer,
-            defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers, scorer_image_digest=SCORER_IMAGE_DIGEST),
+            defaults=svc.RoundDefaults(floor_runner_hotkeys=(self.runner_keys[0],), repository_commit="a" * 40, all_participants_run_stage_2=False, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc, scorer_image_digest=SCORER_IMAGE_DIGEST),
             clock=self.clock, scoring_workers=4, replay_verification=self.replay_command is not None, replay_entry_command=self.replay_command, replay_work_dir=str(self.tmp),
             model_release_client=mr.GitHubClient(MODEL_REPO, MODEL_TOKEN, http_client=httpx.Client(transport=httpx.MockTransport(self.github.handler))),
         )
@@ -1186,8 +1187,33 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     client.post, client.get = counted_post, counted_get
     harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
     service = harness.service
-    participants = _start_round(harness, day=13, epoch=30400)
+    harness.chain.epoch = 30400
+    configuration = service.create_round(datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc))
+    harness.round_id = configuration["round_id"]
     round_id = harness.round_id
+    # One challenger arrives the way a miner does: the signed envelope in a header, the package as the body.
+    miner = keypair("svc-miner-Http-A")
+    archive = package_bytes("Http-A")
+    envelope = contracts.build_signed_request(scope=contracts.SCOPE_SUBMISSION, round_id=round_id, hotkey=miner.ss58_address, body={"package_hash": contracts.hash_bytes(archive), "consent": {"source_publication": True, "public_rerun": True}}, timestamp=int(harness.clock().timestamp()), sign_message=lambda m: miner.sign(m.encode()).hex())
+    uploaded = original_post("http://localhost/arena/v1/submissions", content=archive, headers={"content-type": "application/gzip", "x-lab-arena-envelope": json.dumps(envelope)})
+    assert uploaded.status_code == 200 and uploaded.json()["status"] == "uploaded", uploaded.text
+    submission_id = uploaded.json()["submission_id"]
+    status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
+    assert status.status_code == 200 and status.json()["status"] == "uploaded"
+    digest = "sha256:" + hashlib.sha256(b"image-Http-A").hexdigest()
+    harness.flavors[digest] = "Http-A"
+    accepted = service.accept_built_submission(round_id, submission_id, image_digest=digest, source_tree_hash=uploaded.json()["source_tree_hash"], scan_result={"mode": "raise", "findings": 0}, screening_result={"accepted": True})
+    assert accepted["status"] == "ok", accepted
+    harness.fund_and_register(miner.ss58_address)
+    assert original_get("http://localhost/arena/v1/submissions/%s" % submission_id).json()["image_digest"] == digest
+    harness.submit("Http-B", round_id)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    assert service.advance_round(round_id)["status"] == "ok"
+    for participant in service.store.get_round(round_id)["participants"]:
+        harness.flavors.setdefault(participant["image_digest"], "King")
+    participants = len(service.store.get_round(round_id)["participants"])
+    # Two challengers, plus the reigning king when an earlier test in this database published one.
+    assert participants == 2 + (1 if service.latest_published_round() else 0), participants
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.advance_until("stage1_scored", runners=2)
     harness.clock.advance_to(harness.schedule()["stage_2_start"])
@@ -1199,3 +1225,35 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert not InProcessApi.errors
     public = client.get("/arena/v1/rounds/%s" % round_id)
     assert public.status_code == 200 and public.json()["status"] == "published"
+
+
+def test_daily_rounds_are_created_only_when_no_round_is_open_and_skip_dates_that_exist(connect, tmp_path):
+    """The driver's round creation: opt-in, one round at a time, idempotent, next day when a date's round exists."""
+
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    service = harness.service
+    reason = sorted(svc.CANCEL_REASONS.values())[0]
+    # Earlier tests in this database may have left a round mid-stage: one round at a time means
+    # "existing" until it ends, so end them, then start from a quiet Arena in December.
+    while service.current_round() is not None:
+        service.cancel(service.current_round()["round_id"], reason)
+    harness.clock.advance_to("2026-12-01T12:00:00Z")
+    assert service.ensure_daily_round()["status"] == "disabled"  # no cutoff hour: the operator creates rounds
+    harness.daily_cutoff_hour_utc = 0
+    harness.service = harness.build_service()
+    service = harness.service
+    # 12:00 UTC on 2026-12-01 with a six-hour window: the next midnight is 2026-12-02.
+    created = service.ensure_daily_round()
+    assert created["status"] == "created" and created["round_id"] == "arena-2026-12-02" and created["cutoff"] == "2026-12-02T00:00:00Z"
+    assert service.ensure_daily_round() == {"status": "existing", "round_id": "arena-2026-12-02", "round_status": "open"}
+    assert service.store.get_round("arena-2026-12-02")["configuration_doc"]["schedule"]["submission_cutoff"] == "2026-12-02T00:00:00Z"
+    # The window rule: at 20:00 UTC, midnight is under six hours away, so the round is the day after.
+    harness.clock.advance_to("2026-12-01T20:00:00Z")
+    service.cancel("arena-2026-12-02", reason)
+    assert service.store.get_round("arena-2026-12-02")["status"] == "cancelled"
+    following = service.ensure_daily_round()
+    assert following["status"] == "created" and following["round_id"] == "arena-2026-12-03"
+    # A date whose round already exists is skipped even inside the window.
+    service.cancel("arena-2026-12-03", reason)
+    harness.clock.advance_to("2026-12-01T12:00:00Z")
+    assert service.ensure_daily_round()["round_id"] == "arena-2026-12-04"

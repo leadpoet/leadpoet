@@ -165,6 +165,11 @@ class RoundDefaults:
     repository_commit: str = "0" * 40
     max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     scorer_image_digest: str = "sha256:" + "0" * 64  # the Arena-built judge image validators run for scoring assignments
+    # Automatic daily rounds: the UTC hour of each day's submission cutoff, or
+    # None to leave round creation to the operator (``lab_arena_admin.py create``).
+    daily_cutoff_hour_utc: Optional[int] = None
+    # A new round's cutoff lies at least this far ahead so miners can submit.
+    min_submission_hours: int = 6
 
 
 @dataclass
@@ -417,6 +422,39 @@ class ArenaService:
         if result.get("status") not in ("created", "existing"):
             raise ServiceError("round_create_failed", 500)
         return configuration
+
+    def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Create the next daily round when no round is open or running.
+
+        V1 runs one round at a time: runner-facing handlers resolve the newest
+        round that is not published or cancelled, so the next round is created
+        only after the previous one ends. Its cutoff is the next configured
+        UTC hour at least ``min_submission_hours`` ahead; a date whose round
+        already exists (published or cancelled that day) moves to the next
+        day, because a round id is its cutoff date. Idempotent: a second call
+        finds the round it created.
+        """
+
+        defaults = self._config.defaults
+        current = self.current_round()
+        if current is not None:
+            return {"status": "existing", "round_id": current["round_id"], "round_status": current["status"]}
+        if defaults.daily_cutoff_hour_utc is None:
+            return {"status": "disabled"}
+        hour = int(defaults.daily_cutoff_hour_utc)
+        if not 0 <= hour <= 23:
+            raise ServiceError("daily_cutoff_hour_invalid", 500)
+        moment = (now or self.now()).astimezone(timezone.utc)
+        earliest = moment + timedelta(hours=max(0, int(defaults.min_submission_hours)))
+        cutoff = earliest.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if cutoff < earliest:
+            cutoff += timedelta(days=1)
+        for _ in range(14):
+            if self._store.get_round(round_id_for_cutoff(cutoff)) is None:
+                created = self.create_round(cutoff)
+                return {"status": "created", "round_id": created["round_id"], "cutoff": _iso(cutoff)}
+            cutoff += timedelta(days=1)
+        raise ServiceError("daily_round_dates_exhausted", 500)
 
     def current_round(self) -> Optional[Dict[str, Any]]:
         # Scan ids and statuses only; a full row can be large at hundreds of participants.

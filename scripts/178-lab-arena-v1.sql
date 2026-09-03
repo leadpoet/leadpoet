@@ -52,6 +52,17 @@ BEGIN
   -- asserted above by catalog readback rather than written.
   ALTER ROLE lab_arena_owner WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
   ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+  -- The service role shares its PostgreSQL instance with the gateway when the
+  -- Arena is not given its own database. Every Arena statement runs as this
+  -- role (PostgREST applies impersonated-role settings per request), so its
+  -- statements, lock waits, and idle transactions are bounded: an Arena burst
+  -- can never hold the gateway's rows or connections for long.
+  -- A stage transition at the challenger cap moves about five thousand rows
+  -- in one statement (measured near one second); thirty seconds bounds a
+  -- runaway statement with headroom for that.
+  ALTER ROLE lab_arena_service SET statement_timeout = '30s';
+  ALTER ROLE lab_arena_service SET lock_timeout = '5s';
+  ALTER ROLE lab_arena_service SET idle_in_transaction_session_timeout = '60s';
 
   -- The service role is a member of nothing except what PostgREST needs.
   FOR membership IN

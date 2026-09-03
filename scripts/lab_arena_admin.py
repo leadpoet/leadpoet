@@ -32,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--round", required=True)
     advance.add_argument("--expect-status", default=None, help="refuse unless the round is in this status")
     advance.add_argument("--dry-run", action="store_true")
+    create = commands.add_parser("create", help="create the round whose submission cutoff is the given UTC instant")
+    create.add_argument("--cutoff", required=True, help="ISO 8601 UTC instant, e.g. 2026-09-05T00:00:00Z")
+    create.add_argument("--dry-run", action="store_true")
     cancel = commands.add_parser("cancel", help="cancel a round for an objective section 17 rule")
     cancel.add_argument("--round", required=True)
     cancel.add_argument("--reason", required=True)
@@ -47,6 +50,29 @@ def public_view(row):
 def run(args, service) -> int:
     from lab_arena.service import CANCEL_REASONS, ServiceError
 
+    if args.command == "create":
+        from datetime import datetime, timezone
+
+        from lab_arena.service import round_id_for_cutoff
+
+        try:
+            cutoff = datetime.strptime(args.cutoff, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            print("cutoff must look like 2026-09-05T00:00:00Z", file=sys.stderr)
+            return 2
+        current = service.current_round()
+        if current is not None:
+            print("a round is already open or running: %s (%s)" % (current["round_id"], current["status"]), file=sys.stderr)
+            return 3
+        if service.store.get_round(round_id_for_cutoff(cutoff)) is not None:
+            print("round %s already exists" % round_id_for_cutoff(cutoff), file=sys.stderr)
+            return 3
+        if args.dry_run:
+            print(json.dumps({"dry_run": True, "would_create": round_id_for_cutoff(cutoff), "cutoff": args.cutoff}, indent=2, sort_keys=True))
+            return 0
+        created = service.create_round(cutoff)
+        print(json.dumps({"created": created["round_id"], "schedule": created.get("schedule")}, indent=2, sort_keys=True, default=str))
+        return 0
     if args.command == "status":
         current = service.current_round()
         latest = service.latest_published_round()

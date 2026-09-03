@@ -112,3 +112,21 @@ def test_credential_registrar_rejects_bad_envelopes_and_records_good_ones():
     tampered["ciphertext_b64"] = tampered["ciphertext_b64"][:-4] + "AAAA"
     with pytest.raises(ServiceError):
         register(tampered)
+
+
+@pytest.mark.parametrize("raw, expected", [("", None), ("0", 0), ("23", 23)])
+def test_daily_cutoff_hour_is_read_from_the_environment(monkeypatch, raw, expected):
+    from lab_arena import wiring
+
+    monkeypatch.setenv("LAB_ARENA_DAILY_CUTOFF_UTC", raw)
+    assert wiring._daily_cutoff_hour_from_environment() == expected
+
+
+@pytest.mark.parametrize("raw", ["24", "-1", "noon"])
+def test_daily_cutoff_hour_rejects_values_outside_the_day(monkeypatch, raw):
+    from lab_arena import wiring
+    from lab_arena.service import ServiceError
+
+    monkeypatch.setenv("LAB_ARENA_DAILY_CUTOFF_UTC", raw)
+    with pytest.raises(ServiceError):
+        wiring._daily_cutoff_hour_from_environment()

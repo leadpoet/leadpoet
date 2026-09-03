@@ -30,6 +30,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def drive_once(service) -> str:
+    """One driver tick: advance the current round if there is one.
+
+    Every failure, including one while looking the round up, is contained and
+    reported by exception type only (never a secret or a payload): the next
+    tick retries, and the driver thread never dies while the process serves.
+    """
+
+    try:
+        current = service.current_round()
+    except Exception as exc:
+        return "failed current_round: %s" % type(exc).__name__
+    if current is None:
+        # No round is open or running: create the next daily round if the
+        # service is configured to, otherwise wait for the operator.
+        try:
+            ensured = service.ensure_daily_round()
+        except Exception as exc:
+            return "failed ensure_daily_round: %s" % type(exc).__name__
+        if ensured.get("status") == "created":
+            return "created %s" % ensured.get("round_id")
+        return "idle"
+    try:
+        service.advance_round(current["round_id"])
+    except Exception as exc:
+        return "failed advance_round: %s" % type(exc).__name__
+    return "advanced"
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     mode = os.environ.get("LAB_ARENA_MODE", "off").strip().lower()
@@ -47,12 +76,9 @@ def main(argv=None) -> int:
 
     def driver() -> None:
         while not stop.is_set():
-            current = service.current_round()
-            if current is not None:
-                try:
-                    service.advance_round(current["round_id"])
-                except Exception as exc:  # the next tick retries; the failure is logged without secrets
-                    print("advance_round failed:", type(exc).__name__, file=sys.stderr)
+            outcome = drive_once(service)
+            if outcome.startswith("failed"):
+                print("driver tick", outcome, file=sys.stderr)
             stop.wait(max(5, int(args.tick_seconds)))
 
     threading.Thread(target=driver, name="lab-arena-driver", daemon=True).start()

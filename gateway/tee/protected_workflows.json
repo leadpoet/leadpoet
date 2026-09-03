@@ -717,7 +717,7 @@
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
     {
-      "ast_sha256": "sha256:21146e46679ecbb28c88b62b6562fd633862da4fec0f27b5dc7dba3eb1f964b2",
+      "ast_sha256": "sha256:9d71cc73042b4cda61551af751f4fdc3cf6a36f3346f9ca320173279def1c747",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
@@ -1012,12 +1012,12 @@
       "symbol": "AppendOnlyOfficialBaselineAuthority.transition_repository_for_unit"
     },
     {
-      "ast_sha256": "sha256:0a95aca20c8d42067e431e4822bee1c2d2392cfc8055aab5db63daf04200cacf",
+      "ast_sha256": "sha256:21928df0010c632611184742226ebc76e89478e42683a4a9297fddad131c6911",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge"
     },
     {
-      "ast_sha256": "sha256:9df0a085581e01b9faf099aff077ee3a1fcf4f69dc45949ed598d4e937db156a",
+      "ast_sha256": "sha256:50ffa933aad3737dd1cb43aae30a67ca201272d62da43dfa69e339bbd36b3ef9",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge.execute_prepared"
     },
@@ -1027,7 +1027,7 @@
       "symbol": "GatewayLocalProtectedActionBridge.prepare"
     },
     {
-      "ast_sha256": "sha256:0f205e5cfb769d560316f4399bef1115d142f429e39d0ef951697b4f4dc0a82e",
+      "ast_sha256": "sha256:cbf437ea6d98c7f16121d9d58c3d27edcdc4d3df725e9415445c19ae2fe6ac78",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge.reconcile"
     },
@@ -1077,7 +1077,7 @@
       "symbol": "PROTECTED_ACTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:b9922ab60cc51c9804ab14cca8ddf1d8a4c9f4b04ae13436140d870eb8aadaaf",
+      "ast_sha256": "sha256:30a72a575e5686a9f3a6cb7310e12e8f7cc8b15497da5ecee2b788f1d3c38fc8",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher"
     },
@@ -1397,7 +1397,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:951c832a607574bc78afd0534de1ac371ce17c0415166bdb7c9939ef4c70a366",
+      "ast_sha256": "sha256:81977f6e20eb3a01db63eef7617cdbb4eacbee6d30682a9e9810a0ce285f069f",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -7227,7 +7227,7 @@
       "symbol": "_decision_from_observed_employee_size"
     },
     {
-      "ast_sha256": "sha256:9f67a345d632ddce0fd73b7ae37a0368160311092f64edabbefa24e43a677074",
+      "ast_sha256": "sha256:5774b0732f24d11f655d0e61c6cc2301b7f5d17a855711d3740bd10af7fcc2b9",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -8827,7 +8827,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:55c05d8b9da128b9263c9751cd541c03ca9cb362b863d8b4f81977bce04ab03c",
-  "protected_source_commit": "f5dc153f681be75c80aaf8fa4b57e7bdfbfe1494",
+  "manifest_hash": "sha256:7d6ed38135f8701ff867677e092dd4c39515ca4376b814a88c4bebd93f7ddf20",
+  "protected_source_commit": "913ccee3eefca4fc503f5fd622c381af09e2fb74",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

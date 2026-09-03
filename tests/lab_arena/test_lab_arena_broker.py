@@ -206,7 +206,7 @@ def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_respons
     assert result.status == 200
     sent = transport.sent[0]
     assert "api_key=" + DOG_KEY in sent["url"] and sent["url"].startswith("https://api.scrapingdog.com/scrape?")
-    assert "premium=false" in sent["url"]
+    assert "premium=" not in sent["url"]  # the judge's premium tiers are declared fields, no longer pinned off
     assert DOG_KEY not in result.body.decode() and DOG_KEY not in json.dumps(result.call)
     assert result.call["reserved_microusd"] == 0 and store.calls[result.call["call_identity"]]["provider"] == "scrapingdog"
 

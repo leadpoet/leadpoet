@@ -36,7 +36,14 @@ ELIGIBILITY_MAX_EPOCHS = 45
 # fixed call quota per provider, per ICP attempt, instead of a money ceiling.
 MINER_KEY_PROVIDERS = ("scrapingdog", "deepline", "openrouter")
 CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
-CALL_QUOTA_SCHEMA_VERSION = "lab_arena.call_quotas.v1"
+# Judge calls made while scoring one work item (one output on one ICP), also
+# on the scored miner's keys: verification scrapes, corroboration searches,
+# and the three-stage judge for up to five companies.
+SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 60, "deepline": 40, "openrouter": 60}
+CALL_QUOTA_SCHEMA_VERSION = "lab_arena.call_quotas.v2"
+# Assignment kinds: a validator either executes a miner's model on one ICP or
+# scores one output on one ICP with the Arena judge.
+ASSIGNMENT_KINDS = ("execute", "score")
 ICP_WALL_CLOCK_SECONDS = 300
 LEASE_TTL_SECONDS = 420
 
@@ -686,6 +693,7 @@ def call_quota_document() -> Dict[str, Any]:
         "schema_version": CALL_QUOTA_SCHEMA_VERSION,
         "providers": list(MINER_KEY_PROVIDERS),
         "per_icp_attempt": {provider: int(CALL_QUOTAS_PER_ICP[provider]) for provider in MINER_KEY_PROVIDERS},
+        "per_scoring_work_item": {provider: int(SCORING_CALL_QUOTAS_PER_WORK_ITEM[provider]) for provider in MINER_KEY_PROVIDERS},
         "stage_multiplier": MAX_ATTEMPTS_PER_ASSIGNMENT,
     }
 

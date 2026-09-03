@@ -334,6 +334,7 @@ class RunContext:
     miner_hotkey: str
     submission_id: str
     stage: int
+    kind: str = "execute"  # "execute" runs a miner model; "score" runs the Arena judge on a miner's output
 
 
 @dataclass(frozen=True)
@@ -392,6 +393,7 @@ class Broker:
         key_for: Callable[[str, str], RuntimeKeyHandle],
         price_table: Mapping[str, Any],
         allowed_models: Sequence[str],
+        judge_models: Sequence[str] = (),
         transport: ProviderTransport,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
@@ -402,7 +404,10 @@ class Broker:
         self._key_for = key_for
         self._price_table = validate_price_table(price_table)
         self._allowed_models = tuple(str(model) for model in allowed_models)
-        for model in self._allowed_models:
+        # Judge models are what scoring runs may call; they are pinned by the
+        # signed scorer policy and priced from the same table.
+        self._judge_models = tuple(str(model) for model in judge_models)
+        for model in self._allowed_models + self._judge_models:
             if model not in self._price_table["models"]:
                 raise ArenaContractError("allowed model %s is missing from the pinned price table" % model)
         self._transport = transport
@@ -418,9 +423,10 @@ class Broker:
     def _timestamp(self) -> str:
         return self._clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _openrouter_parameters(self, parameters: Mapping[str, Any]) -> Tuple[Dict[str, Any], int]:
+    def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute") -> Tuple[Dict[str, Any], int]:
         model = str(parameters.get("model") or "")
-        if model not in self._allowed_models:
+        allowed = self._judge_models if kind == "score" else self._allowed_models
+        if model not in allowed:
             raise BrokerError("model_not_allowed")
         requested = parameters.get("max_tokens")
         cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
@@ -481,7 +487,7 @@ class Broker:
             if operation.provider == "openrouter":
                 # OpenRouter reports a key limit: the price-table bound reserves
                 # against the remaining capacity observed at preflight.
-                normalized, max_output_tokens = self._openrouter_parameters(normalized)
+                normalized, max_output_tokens = self._openrouter_parameters(normalized, kind=getattr(context, "kind", "execute"))
                 amount = max_openrouter_cost_microusd(self._price_table, normalized["model"], normalized, max_output_tokens=max_output_tokens)
             else:
                 # Other providers bill the miner's own account; the Arena bounds

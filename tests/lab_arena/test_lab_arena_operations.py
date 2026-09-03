@@ -22,7 +22,22 @@ VALID = {
         "tool": "exa_search",
         "payload": {"query": "fintech startups in berlin", "type": "fast", "numResults": 5, "includeDomains": ["Example.com"]},
     },
-    "scrapingdog.scrape": {"url": "https://example.com/jobs?page=2", "dynamic": True},
+    "scrapingdog.scrape": {"url": "https://example.com/jobs?page=2", "dynamic": True, "wait": 5000, "premium": True, "stealth_mode": True},
+    "scrapingdog.x_post": {"tweetId": "1234567890"},
+    "scrapingdog.x_profile": {"profileId": "acme"},
+    "scrapingdog.profile": {"type": "company", "id": "acme-inc"},
+    "scrapingdog.profile_post": {"id": "7123456789"},
+    "scrapingdog.linkedinjobs": {"job_id": "4012345678"},
+    "scrapingdog.jobs": {"job_id": "abc123"},
+    "scrapingdog.indeed": {"url": "https://www.indeed.com/viewjob?jk=1"},
+    "scrapingdog.instagram_profile": {"username": "acme"},
+    "scrapingdog.tiktok_profile": {"username": "acme"},
+    "scrapingdog.youtube_video": {"v": "dQw4w9WgXcQ"},
+    "scrapingdog.youtube_transcripts": {"v": "dQw4w9WgXcQ"},
+    "scrapingdog.youtube_channel": {"channel_id": "UC123"},
+    "scrapingdog.youtube_search": {"search_query": "acme funding"},
+    "exa.search": {"query": "acme series b", "type": "auto", "numResults": 5, "contents": {"highlights": {"query": "series b", "maxCharacters": 400}}},
+    "exa.contents": {"ids": ["https://example.com/news"], "text": {"maxCharacters": 12000}, "maxAgeHours": 0},
     "scrapingdog.google": {"query": "acme corp", "country": "gb"},
     "openrouter.chat": {
         "model": "openai/gpt-4o-mini",
@@ -106,13 +121,16 @@ def reject(operation_id: str, parameters, code=None):
 
 
 def test_table_is_closed_and_every_operation_is_miner_billed():
-    assert set(ops.OPERATIONS) == {"deepline.execute", "scrapingdog.scrape", "scrapingdog.google", "openrouter.chat"}
+    judge_scrapingdog = {"scrapingdog.x_post", "scrapingdog.x_profile", "scrapingdog.profile", "scrapingdog.profile_post", "scrapingdog.linkedinjobs", "scrapingdog.jobs", "scrapingdog.indeed", "scrapingdog.instagram_profile", "scrapingdog.tiktok_profile", "scrapingdog.youtube_video", "scrapingdog.youtube_transcripts", "scrapingdog.youtube_channel", "scrapingdog.youtube_search"}
+    assert set(ops.OPERATIONS) == {"deepline.execute", "exa.search", "exa.contents", "scrapingdog.scrape", "scrapingdog.google", "openrouter.chat"} | judge_scrapingdog
     assert ops.PROVIDERS == contracts.MINER_KEY_PROVIDERS == ("scrapingdog", "deepline", "openrouter")
     assert ops.FUNDING_SOURCES == ("miner_key",)
     for operation_id, operation in ops.OPERATIONS.items():
         assert operation.operation_id == operation_id
         assert operation.provider in ops.PROVIDERS
-        assert operation.host in ("code.deepline.com", "api.scrapingdog.com", "openrouter.ai")
+        assert operation.host in ("code.deepline.com", "api.exa.ai", "api.scrapingdog.com", "openrouter.ai")
+        if operation.host == "api.exa.ai":
+            assert operation.provider == "deepline" and operation.outbound_host == "code.deepline.com" and operation.deepline_tool in ops.DEEPLINE_TOOLS
         assert operation.method in ops.METHODS
         assert operation.funding_source == "miner_key"
         # A price-determining parameter is never model-controllable.
@@ -126,7 +144,7 @@ def test_table_is_closed_and_every_operation_is_miner_billed():
     assert deepline.path == "/api/v2/integrations/{tool}/execute" and deepline.path_fields == ("tool",)
     assert deepline.request_fields["tool"].choices == ops.DEEPLINE_TOOLS and deepline.request_fields["payload"].fields is None
     assert deepline.credential.location == "header" and deepline.credential.scheme == "Bearer"
-    assert ops.OPERATIONS["scrapingdog.scrape"].fixed_params == {"premium": False}
+    assert ops.OPERATIONS["scrapingdog.scrape"].fixed_params == {}  # the judge's premium tiers are the miner's own spend
     assert ops.OPERATIONS["scrapingdog.google"].fixed_params == {"results": 10}
     chat = ops.OPERATIONS["openrouter.chat"].fixed_params
     assert chat["stream"] is False
@@ -289,7 +307,7 @@ def test_query_string_on_post_operation_is_rejected():
     "query,code",
     [
         ("url=https%3A%2F%2Fexample.com%2F&api_key=abc", "forbidden_field"),
-        ("url=https%3A%2F%2Fexample.com%2F&premium=true", "unknown_field"),
+        ("url=https%3A%2F%2Fexample.com%2F&render=true", "unknown_field"),
         ("url=https%3A%2F%2Fexample.com%2F&url=https%3A%2F%2Fevil.example%2F", "invalid_query"),
         ("url", "invalid_query"),
         ("url=https%3A%2F%2Fexample.com%2F&dynamic=maybe", "invalid_field"),
@@ -392,7 +410,7 @@ def test_forbidden_fields_are_refused_on_every_operation(operation_id, name):
 @pytest.mark.parametrize("operation_id", sorted(ops.OPERATIONS))
 def test_unknown_fields_are_refused_on_every_operation(operation_id):
     parameters = dict(VALID[operation_id])
-    parameters["numResults"] = 100
+    parameters["not_a_declared_field"] = 100
     reject(operation_id, parameters, "unknown_field")
 
 
@@ -535,10 +553,11 @@ def _mutations(operation: ops.Operation):
 def test_outbound_target_is_constant_under_every_field_mutation(operation_id):
     operation = ops.OPERATIONS[operation_id]
     baseline = ops.outbound_target(operation_id, VALID[operation_id])
-    rendered_path = operation.path
+    rendered_path = operation.outbound_path or operation.path
     for field_name in operation.path_fields:
         rendered_path = rendered_path.replace("{%s}" % field_name, VALID[operation_id][field_name])
-    assert baseline == ops.OutboundTarget(operation.method, "https", operation.host, 443, rendered_path)
+    expected_host = operation.outbound_host or operation.host
+    assert baseline == ops.OutboundTarget(operation.method, "https", expected_host, 443, rendered_path)
     exercised = 0
     for name, value in _mutations(operation):
         parameters = dict(VALID[operation_id])
@@ -551,12 +570,14 @@ def test_outbound_target_is_constant_under_every_field_mutation(operation_id):
         exercised += 1
         assert target == baseline
         outbound = ops.build_outbound_request(operation_id, parameters)
-        assert outbound.url.startswith("https://%s%s" % (operation.host, rendered_path))
+        assert outbound.url.startswith("https://%s%s" % (expected_host, rendered_path))
         assert outbound.target == baseline
         if operation.method == "POST":
             document = json.loads(outbound.body.decode("utf-8"))
             if operation.body_wrapper == "deepline_execute":
                 assert set(document) == {"provider", "operation", "payload"} and document["operation"] == parameters["tool"]
+            elif operation.body_wrapper == "deepline_exa_compat":
+                assert set(document) == {"provider", "operation", "payload"} and document["operation"] == operation.deepline_tool
             else:
                 assert set(document) <= (set(operation.request_fields) - set(operation.path_fields)) | set(operation.fixed_params)
             for fixed_name, fixed_value in operation.fixed_params.items():
@@ -583,7 +604,7 @@ def test_outbound_request_carries_no_credential_and_fixed_params_win(operation_i
 
 def test_scrapingdog_scrape_query_is_url_encoded_and_credential_free():
     outbound = ops.build_outbound_request("scrapingdog.scrape", {"url": "https://example.com/a?b=1&c=2"})
-    assert outbound.url == "https://api.scrapingdog.com/scrape?dynamic=false&premium=false&url=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2"
+    assert outbound.url == "https://api.scrapingdog.com/scrape?dynamic=false&url=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2"
 
 
 # ---------------------------------------------------------------------------

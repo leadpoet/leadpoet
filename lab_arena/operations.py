@@ -47,9 +47,10 @@ FUNDING_SOURCES = ("miner_key",)
 METHODS = ("GET", "POST")
 PARAMETER_LOCATIONS = ("body", "query")
 RESPONSE_SANITIZERS = ("json", "text")
-BODY_WRAPPERS = ("", "deepline_execute")
+BODY_WRAPPERS = ("", "deepline_execute", "deepline_exa_compat")
+RESPONSE_TRANSFORMS = ("", "deepline_unwrap")
 RESPONSE_SCRUBS = ("", "deepline_person_entities")
-FIELD_KINDS = ("str", "int", "float", "bool", "list[str]", "list[object]", "object")
+FIELD_KINDS = ("str", "int", "float", "bool", "list[str]", "list[object]", "object", "any")
 FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
@@ -302,6 +303,13 @@ class Operation:
     body_wrapper: str = ""
     # Named response scrub applied after sanitization; "" passes the body through.
     response_scrub: str = ""
+    # Compatibility routes match one host and path but are sent elsewhere.
+    outbound_host: str = ""
+    outbound_path: str = ""
+    # For Deepline-backed routes: the fixed tool the request becomes.
+    deepline_tool: str = ""
+    # Named reply transform applied before the scrub; "" keeps the provider body.
+    response_transform: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS or self.method not in METHODS:
@@ -319,6 +327,16 @@ class Operation:
             raise ValueError("operation body wrapper is invalid")
         if self.response_scrub not in RESPONSE_SCRUBS:
             raise ValueError("operation response scrub is invalid")
+        if self.response_transform not in RESPONSE_TRANSFORMS:
+            raise ValueError("operation response transform is invalid")
+        if self.outbound_host and not _is_dns_hostname(self.outbound_host):
+            raise ValueError("operation outbound host is invalid")
+        if self.outbound_path and (not self.outbound_path.startswith("/") or "?" in self.outbound_path or "#" in self.outbound_path or "{" in self.outbound_path):
+            raise ValueError("operation outbound path is invalid")
+        if self.deepline_tool and self.deepline_tool not in DEEPLINE_TOOLS:
+            raise ValueError("operation deepline tool is invalid")
+        if self.body_wrapper == "deepline_exa_compat" and (not self.deepline_tool or not self.outbound_path):
+            raise ValueError("Exa compatibility routes need a Deepline tool and outbound path")
         for name, value in self.outbound_headers.items():
             if _normalize_name(name) in {_normalize_name(h) for h in CREDENTIAL_HEADERS} or not isinstance(value, str):
                 raise ValueError("outbound headers may not carry credentials")
@@ -442,8 +460,13 @@ _OPERATION_LIST = (
         request_fields={
             "url": FieldSpec("str", required=True, min_length=8, max_length=2000, format="https_url"),
             "dynamic": FieldSpec("bool"),
+            # The judge's escalation tiers (dynamic render, premium stealth);
+            # every tier is billed to the miner's own Scrapingdog account.
+            "wait": FieldSpec("int", minimum=0, maximum=15000),
+            "premium": FieldSpec("bool"),
+            "stealth_mode": FieldSpec("bool"),
         },
-        fixed_params={"premium": False},
+        fixed_params={},
         defaults={"dynamic": False},
         timeout_seconds=60,
         max_request_bytes=4_096,
@@ -473,6 +496,354 @@ _OPERATION_LIST = (
         response_sanitizer="json",
         funding_source="miner_key",
         credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.x_post",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/x/post",
+        parameter_location="query",
+        request_fields={
+            "tweetId": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.x_profile",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/x/profile",
+        parameter_location="query",
+        request_fields={
+            "profileId": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.profile",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/profile",
+        parameter_location="query",
+        request_fields={
+            "type": FieldSpec("str", required=True, choices=("company", "profile")),
+            "id": FieldSpec("str", required=True, min_length=1, max_length=200),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.profile_post",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/profile/post",
+        parameter_location="query",
+        request_fields={
+            "id": FieldSpec("str", required=True, min_length=1, max_length=200),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.linkedinjobs",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/linkedinjobs",
+        parameter_location="query",
+        request_fields={
+            "job_id": FieldSpec("str", required=True, min_length=1, max_length=32),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.jobs",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/jobs",
+        parameter_location="query",
+        request_fields={
+            "job_id": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.indeed",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/indeed",
+        parameter_location="query",
+        request_fields={
+            "url": FieldSpec("str", required=True, min_length=8, max_length=2000, format="https_url"),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.instagram_profile",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/instagram/profile",
+        parameter_location="query",
+        request_fields={
+            "username": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.tiktok_profile",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/tiktok/profile",
+        parameter_location="query",
+        request_fields={
+            "username": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.youtube_video",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/youtube/video",
+        parameter_location="query",
+        request_fields={
+            "v": FieldSpec("str", required=True, min_length=1, max_length=32),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.youtube_transcripts",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/youtube/transcripts",
+        parameter_location="query",
+        request_fields={
+            "v": FieldSpec("str", required=True, min_length=1, max_length=32),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.youtube_channel",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/youtube/channel",
+        parameter_location="query",
+        request_fields={
+            "channel_id": FieldSpec("str", required=True, min_length=1, max_length=64),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="scrapingdog.youtube_search",
+        provider="scrapingdog",
+        method="GET",
+        host="api.scrapingdog.com",
+        path="/youtube/search",
+        parameter_location="query",
+        request_fields={
+            "search_query": FieldSpec("str", required=True, min_length=1, max_length=500),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=45,
+        max_request_bytes=4_096,
+        max_response_bytes=2097152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="text",
+        funding_source="miner_key",
+        credential=_SCRAPINGDOG_CREDENTIAL,
+    ),
+    # Exa compatibility: matched on api.exa.ai so Exa-shaped clients (the Lab
+    # judge, Exa SDKs) work unchanged, sent to Deepline's exa_search on the miner's
+    # Deepline key, and answered with the raw Exa reply unwrapped from the envelope.
+    Operation(
+        operation_id="exa.search",
+        provider="deepline",
+        method="POST",
+        host="api.exa.ai",
+        path="/search",
+        parameter_location="body",
+        request_fields={
+            "query": FieldSpec("str", required=True, min_length=1, max_length=2000),
+            "additionalQueries": FieldSpec("list[str]", max_length=10, item=FieldSpec("str", min_length=1, max_length=2000)),
+            "type": FieldSpec("str", choices=("auto", "fast", "deep", "neural", "instant", "keyword")),
+            "category": FieldSpec("str", choices=("company", "people", "news", "research paper", "tweet", "personal site", "financial report", "pdf", "github", "linkedin profile")),
+            "numResults": FieldSpec("int", minimum=1, maximum=100),
+            "includeDomains": FieldSpec("list[str]", max_length=100, item=FieldSpec("str", min_length=1, max_length=253)),
+            "excludeDomains": FieldSpec("list[str]", max_length=100, item=FieldSpec("str", min_length=1, max_length=253)),
+            "startCrawlDate": FieldSpec("str", max_length=40),
+            "endCrawlDate": FieldSpec("str", max_length=40),
+            "startPublishedDate": FieldSpec("str", max_length=40),
+            "endPublishedDate": FieldSpec("str", max_length=40),
+            "includeText": FieldSpec("list[str]", max_length=5, item=FieldSpec("str", min_length=1, max_length=200)),
+            "excludeText": FieldSpec("list[str]", max_length=5, item=FieldSpec("str", min_length=1, max_length=200)),
+            "userLocation": FieldSpec("str", min_length=2, max_length=2),
+            "contents": FieldSpec("any"),
+            "context": FieldSpec("any"),
+            "moderation": FieldSpec("bool"),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=60,
+        max_request_bytes=65_536,
+        max_response_bytes=2_097_152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="json",
+        funding_source="miner_key",
+        credential=_DEEPLINE_CREDENTIAL,
+        outbound_headers=DEEPLINE_EXECUTE_HEADERS,
+        body_wrapper="deepline_exa_compat",
+        response_scrub="deepline_person_entities",
+        outbound_host="code.deepline.com",
+        outbound_path="/api/v2/integrations/exa_search/execute",
+        deepline_tool="exa_search",
+        response_transform="deepline_unwrap",
+    ),
+    # Exa compatibility: matched on api.exa.ai so Exa-shaped clients (the Lab
+    # judge, Exa SDKs) work unchanged, sent to Deepline's exa_contents on the miner's
+    # Deepline key, and answered with the raw Exa reply unwrapped from the envelope.
+    Operation(
+        operation_id="exa.contents",
+        provider="deepline",
+        method="POST",
+        host="api.exa.ai",
+        path="/contents",
+        parameter_location="body",
+        request_fields={
+            "ids": FieldSpec("list[str]", max_length=100, item=FieldSpec("str", min_length=1, max_length=2000)),
+            "urls": FieldSpec("list[str]", max_length=100, item=FieldSpec("str", min_length=1, max_length=2000)),
+            "text": FieldSpec("any"),
+            "highlights": FieldSpec("any"),
+            "summary": FieldSpec("any"),
+            "livecrawl": FieldSpec("str", choices=("never", "fallback", "preferred", "always")),
+            "livecrawlTimeout": FieldSpec("int", minimum=0, maximum=120000),
+            "maxAgeHours": FieldSpec("int", minimum=0, maximum=100000),
+            "subpages": FieldSpec("int", minimum=0, maximum=10),
+            "subpageTarget": FieldSpec("any"),
+            "extras": FieldSpec("any"),
+            "context": FieldSpec("any"),
+        },
+        fixed_params={},
+        defaults={},
+        timeout_seconds=60,
+        max_request_bytes=65_536,
+        max_response_bytes=2_097_152,
+        cost_rule=MINER_BILLED_COST_RULE,
+        response_sanitizer="json",
+        funding_source="miner_key",
+        credential=_DEEPLINE_CREDENTIAL,
+        outbound_headers=DEEPLINE_EXECUTE_HEADERS,
+        body_wrapper="deepline_exa_compat",
+        response_scrub="deepline_person_entities",
+        outbound_host="code.deepline.com",
+        outbound_path="/api/v2/integrations/exa_contents/execute",
+        deepline_tool="exa_contents",
+        response_transform="deepline_unwrap",
     ),
     Operation(
         operation_id="deepline.execute",
@@ -610,6 +981,10 @@ def operation_document(operation: Operation) -> Dict[str, Any]:
         "body_wrapper": operation.body_wrapper,
         "response_scrub": operation.response_scrub,
         "response_scrub_exempt_tools": sorted(DEEPLINE_PERSON_ENTITY_TOOLS) if operation.response_scrub else [],
+        "outbound_host": operation.outbound_host,
+        "outbound_path": operation.outbound_path,
+        "deepline_tool": operation.deepline_tool,
+        "response_transform": operation.response_transform,
         "credential": {
             "location": operation.credential.location,
             "name": operation.credential.name,
@@ -747,6 +1122,8 @@ def _validate_field(spec: FieldSpec, value: Any, path: str) -> Any:
         if spec.fields is None:
             return _validate_opaque_object(value, path)
         return _validate_object(spec.fields, value, path)
+    if kind == "any":
+        return _validate_opaque_object({"value": value}, path)["value"]
     raise OperationRequestError("invalid_field", path)
 
 
@@ -1012,7 +1389,7 @@ def outbound_target(operation_id: str, parameters: Any) -> OutboundTarget:
 
     operation = _operation(operation_id)
     normalized = validate_operation_request(operation_id, parameters)
-    return OutboundTarget(operation.method, "https", operation.host, 443, _render_path(operation, normalized))
+    return OutboundTarget(operation.method, "https", operation.outbound_host or operation.host, 443, operation.outbound_path or _render_path(operation, normalized))
 
 
 def _query_value(value: Any) -> str:
@@ -1033,9 +1410,10 @@ def build_outbound_request(operation_id: str, parameters: Any) -> OutboundReques
 
     operation = _operation(operation_id)
     normalized = validate_operation_request(operation_id, parameters)
-    path = _render_path(operation, normalized)
-    target = OutboundTarget(operation.method, "https", operation.host, 443, path)
-    base_url = "https://%s%s" % (operation.host, path)
+    path = operation.outbound_path or _render_path(operation, normalized)
+    host = operation.outbound_host or operation.host
+    target = OutboundTarget(operation.method, "https", host, 443, path)
+    base_url = "https://%s%s" % (host, path)
     if operation.parameter_location == "body":
         document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
@@ -1055,6 +1433,10 @@ def _wrap_body(operation: Operation, normalized: Mapping[str, Any], document: Di
     if operation.body_wrapper == "deepline_execute":
         tool = str(normalized["tool"])
         return {"provider": DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": document["payload"]}
+    if operation.body_wrapper == "deepline_exa_compat":
+        # The validated Exa request is the Deepline payload as-is: Deepline's
+        # Exa tools accept Exa's own field names (``ids`` included).
+        return {"provider": DEEPLINE_TOOL_PROVIDERS[operation.deepline_tool], "operation": operation.deepline_tool, "payload": document}
     return document
 
 
@@ -1143,8 +1525,15 @@ def sanitize_response(
             raise OperationResponseError("invalid_response") from exc
         if not isinstance(parsed, (dict, list)):
             raise OperationResponseError("invalid_response")
+        if operation.response_transform == "deepline_unwrap" and isinstance(parsed, dict):
+            # A completed Deepline envelope becomes the provider's own reply so
+            # Exa-shaped clients read it unchanged; anything else passes through.
+            inner = parsed.get("result")
+            if parsed.get("status") == "completed" and isinstance(inner, dict) and isinstance(inner.get("data"), (dict, list)):
+                parsed = inner["data"]
+                raw = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         if operation.response_scrub == "deepline_person_entities":
-            tool = str((parameters or {}).get("tool") or "")
+            tool = operation.deepline_tool or str((parameters or {}).get("tool") or "")
             if tool not in DEEPLINE_PERSON_ENTITY_TOOLS:
                 scrubbed = scrub_person_entities(parsed)
                 if scrubbed != parsed:  # bodies without person entities pass through byte-for-byte

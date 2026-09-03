@@ -47,7 +47,7 @@ from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.error
 import urllib.request
 import urllib.response
@@ -287,11 +287,36 @@ def execute(
 ) -> Tuple[int, Dict[str, str], bytes]:
     """Match, validate, and dispatch one client request."""
 
+    if trusted_scorer_mode():
+        url, headers = strip_caller_credentials(url, headers)
     try:
         operation_id, parameters = operations.match_request(method, url, body, headers)
     except operations.OperationError as exc:
         raise ShimRequestError(exc.code) from None
     return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+
+
+TRUSTED_SCORER_ENV = "LAB_ARENA_SHIM_TRUSTED_SCORER"
+_CREDENTIAL_QUERY_NAMES = frozenset({"api_key", "apikey", "x-api-key", "key", "token", "access_token"})
+
+
+def trusted_scorer_mode() -> bool:
+    """Set only by the Arena-built scorer image: the Lab judge always attaches
+    its own placeholder credentials, which the broker replaces with the miner's
+    real key. Miner models never run in this mode; their credentials are refused."""
+
+    return str(os.environ.get(TRUSTED_SCORER_ENV) or "").strip() == "1"
+
+
+def strip_caller_credentials(url: str, headers: Mapping[str, Any]) -> Tuple[str, Dict[str, str]]:
+    """Drop credential headers and credential query parameters from a trusted caller's request."""
+
+    kept = {str(name): str(value) for name, value in (headers or {}).items() if str(name).strip().lower() not in operations.CREDENTIAL_HEADERS}
+    parts = urlsplit(str(url))
+    if parts.query:
+        pairs = [(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True) if name.lower() not in _CREDENTIAL_QUERY_NAMES]
+        url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs), parts.fragment))
+    return url, kept
 
 
 def _timeout_ms(value: Any) -> int:
@@ -644,6 +669,9 @@ __all__ = [
     "ShimRequestError",
     "ShimTransportError",
     "WORKER_SOCKET_ENV",
+    "TRUSTED_SCORER_ENV",
+    "trusted_scorer_mode",
+    "strip_caller_credentials",
     "build_operation_frame",
     "decode_operation_frame",
     "dispatch",

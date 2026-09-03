@@ -33,6 +33,8 @@ _SECRET_KEY_RE = re.compile(
     r"(?:api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)",
     re.IGNORECASE,
 )
+_CANONICAL_SOURCE_DOMAIN_FIELD = "canonical_source_domain"
+_LEGACY_CANONICAL_URL_HOST_FIELD = "canonical_url_host"
 
 
 class SourceAddExecutionPlanError(ValueError):
@@ -79,14 +81,14 @@ def _public_domain(value: Any) -> str:
         or domain.endswith((".local", ".localhost", ".internal", ".example"))
     ):
         raise SourceAddExecutionPlanError(
-            "SOURCE_ADD response canonical_url_host is invalid"
+            "SOURCE_ADD response canonical source domain is invalid"
         )
     try:
         ipaddress.ip_address(domain)
     except ValueError:
         return domain
     raise SourceAddExecutionPlanError(
-        "SOURCE_ADD response canonical_url_host must not be an IP address"
+        "SOURCE_ADD response canonical source domain must not be an IP address"
     )
 
 
@@ -207,23 +209,34 @@ def normalize_source_add_execution_plan(
         seen_query_keys.add(folded)
         query[key] = value_text
 
-    projection = _exact_mapping(
-        plan["response_projection"],
-        field_name="SOURCE_ADD response projection",
-        fields=frozenset(
-            {
-                "kind",
-                "category",
-                "object_field",
-                "identity_field",
-                "expected_identity",
-                "canonical_url_field",
-                "canonical_url_host",
-                "canonical_url_path_prefix",
-                "excerpt_fields",
-            }
-        ),
-    )
+    raw_projection = plan["response_projection"]
+    projection_fields = {
+        "kind",
+        "category",
+        "object_field",
+        "identity_field",
+        "expected_identity",
+        "canonical_url_field",
+        "canonical_url_path_prefix",
+        "excerpt_fields",
+    }
+    if not isinstance(raw_projection, Mapping):
+        raise SourceAddExecutionPlanError(
+            "SOURCE_ADD response projection fields differ from the contract"
+        )
+    domain_fields = {
+        _CANONICAL_SOURCE_DOMAIN_FIELD,
+        _LEGACY_CANONICAL_URL_HOST_FIELD,
+    } & set(raw_projection)
+    if (
+        len(domain_fields) != 1
+        or set(raw_projection) != projection_fields | domain_fields
+    ):
+        raise SourceAddExecutionPlanError(
+            "SOURCE_ADD response projection fields differ from the contract"
+        )
+    projection = dict(raw_projection)
+    source_domain = _public_domain(projection[next(iter(domain_fields))])
     category = str(projection["category"] or "").strip().upper()
     categories = tuple(
         str(item or "").strip().upper() for item in intent_categories
@@ -286,9 +299,10 @@ def normalize_source_add_execution_plan(
             "identity_field": identity_field,
             "expected_identity": expected_identity,
             "canonical_url_field": canonical_url_field,
-            "canonical_url_host": _public_domain(
-                projection["canonical_url_host"]
-            ),
+            # This is a public citation-domain constraint, not the provider's
+            # private transport host. Canonicalize the legacy input name so
+            # model release metadata retains its strict host-binding ban.
+            _CANONICAL_SOURCE_DOMAIN_FIELD: source_domain,
             "canonical_url_path_prefix": path_prefix,
             "excerpt_fields": list(excerpt_fields),
         },

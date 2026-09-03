@@ -60,6 +60,7 @@ CURRENT_BLOCK = 8_700_040
 LAST_EPOCH_BLOCK = 8_700_000
 TEMPO = 360
 SUBNET_EPOCH_INDEX = 24_166
+RUNTIME_SPEC_VERSION = 452
 CUTOVER_BLOCK = 8_670_636
 CUTOVER_BLOCK_HASH = (
     "0x25c2109c70fb3502a9c20fd3b04c1db3f0a18d968e73b42da9f1a47770a5e106"
@@ -600,7 +601,7 @@ def _local_chain_signing_profile() -> dict[str, Any]:
     return select_chain_signing_profile(
         measured,
         runtime_version={
-            "specVersion": 440,
+            "specVersion": RUNTIME_SPEC_VERSION,
             "transactionVersion": 1,
         },
         genesis_hash=GENESIS_HASH.removeprefix("0x"),
@@ -914,7 +915,7 @@ class _LocalSubstrate:
                 "specName": "node-subtensor",
                 "implName": "node-subtensor",
                 "authoringVersion": 1,
-                "specVersion": 440,
+                "specVersion": RUNTIME_SPEC_VERSION,
                 "implVersion": 0,
                 "apis": [],
                 "transactionVersion": 1,
@@ -1922,7 +1923,7 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
             "specName": "node-subtensor",
             "implName": "node-subtensor",
             "authoringVersion": 1,
-            "specVersion": 452,
+            "specVersion": RUNTIME_SPEC_VERSION,
             "implVersion": 0,
             "apis": [],
             "transactionVersion": 1,

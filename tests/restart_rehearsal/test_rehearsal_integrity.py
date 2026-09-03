@@ -2462,6 +2462,11 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
     tmp_path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        Path(__file__).resolve().parents[2],
+    )
     monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
     monkeypatch.setattr(
         rehearsal_sitecustomize, "EVENT_PATH", tmp_path / "events.jsonl"
@@ -2492,7 +2497,14 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
             archive=False,
         )
     )
-    assert response["result"]["specVersion"] == 440
+    assert (
+        response["result"]["specVersion"]
+        == rehearsal_sitecustomize.RUNTIME_SPEC_VERSION
+    )
+    assert (
+        rehearsal_sitecustomize._local_chain_signing_profile()["spec_version"]
+        == response["result"]["specVersion"]
+    )
     assert response["result"]["transactionVersion"] == 1
 
     request["params"] = [
@@ -2506,7 +2518,10 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
             archive=True,
         )
     )
-    assert response["result"]["specVersion"] == 440
+    assert (
+        response["result"]["specVersion"]
+        == rehearsal_sitecustomize.RUNTIME_SPEC_VERSION
+    )
 
     with pytest.raises(ValueError, match="unknown RPC"):
         rehearsal_sitecustomize._local_chain_rpc(
@@ -2838,7 +2853,9 @@ def test_validator_enclave_chain_tls_boundary_runs_real_signing_reads(
 
     assert result["runtime_block"] == rehearsal_sitecustomize.CURRENT_BLOCK
     assert result["finalized_block"] == rehearsal_sitecustomize.CURRENT_BLOCK
-    assert result["spec_version"] == 440
+    assert result["spec_version"] == (
+        rehearsal_sitecustomize.RUNTIME_SPEC_VERSION
+    )
     assert result["transaction_version"] == 1
     assert result["genesis_hash"] == (
         rehearsal_sitecustomize.GENESIS_HASH.removeprefix("0x")

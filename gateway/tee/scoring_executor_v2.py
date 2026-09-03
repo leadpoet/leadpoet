@@ -288,7 +288,14 @@ class ScoringExecutorV2:
                 qualification_executor or QualificationExecutorV2(
                     epoch_checker=QualificationEpochGuardV2(
                         self._transport,
-                        epoch_authority=self._execution_config["epoch_authority"],
+                        epoch_authority={
+                            "mode": self._execution_config["epoch_authority"][
+                                "mode"
+                            ],
+                            "cutover": self._execution_config["epoch_authority"][
+                                "cutover"
+                            ],
+                        },
                         netuid=self._execution_config["deployment"]["netuid"],
                     )
                 )

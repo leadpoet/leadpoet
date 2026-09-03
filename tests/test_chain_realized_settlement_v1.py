@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from gateway.research_lab import v2_authority
 from gateway.research_lab import champion_settlement_v2 as settlement
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.chain_source_v2 import (
+    last_update_storage_key,
+    reveal_period_epochs_storage_key,
+    weights_storage_key,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -150,6 +158,52 @@ def _observation(*, epoch_id: int = 101) -> dict[str, object]:
             }
         ),
     }
+
+
+def _observation_v2(
+    *,
+    revealed_bundle_hash: str | None = None,
+    reveal_proof: dict[str, object] | None = None,
+) -> dict[str, object]:
+    observation = _observation()
+    observation["schema_version"] = (
+        settlement.CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2
+    )
+    observation.pop("active_source_epoch_id")
+    observation["last_update_official_subnet_epoch_id"] = 101
+    observation["latest_commit_source_epoch_id"] = 101
+    observation["epoch_start_block"] = 1_000
+    observation["epoch_start_block_hash"] = "%064x" % 1_000
+    observation["reveal_window_start_block"] = 1_000
+    observation["reveal_window_start_block_hash"] = "%064x" % 1_000
+    observation["scheduled_reveal_subnet_epoch_id"] = 100
+    observation["scheduled_reveal_source_epoch_id"] = 100
+    observation["revealed_bundle_hash"] = revealed_bundle_hash
+    observation["reveal_proof"] = reveal_proof
+    observation["subnet_reveal_period_epochs"] = 1
+    observation["weights_storage_key"] = weights_storage_key(
+        netuid=71, validator_uid=0
+    )
+    observation["last_update_storage_key"] = last_update_storage_key(
+        netuid=71
+    )
+    observation["reveal_period_storage_key"] = (
+        reveal_period_epochs_storage_key(netuid=71)
+    )
+    observation["reveal_period_storage_override"] = None
+    observation["reveal_period_metadata_hash"] = (
+        "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+    )
+    observation["reveal_period_runtime_spec_version"] = 452
+    profile = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    observation["chain_signing_profile"] = profile
+    observation["chain_signing_profile_hash"] = sha256_json(profile)
+    return observation
 
 
 @pytest.mark.asyncio
@@ -496,3 +550,158 @@ async def test_post_cutover_host_never_queries_legacy_full_authority(
             "bundle_hash": HASH_B,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_v2_host_selects_only_event_proved_exact_bundle(
+    monkeypatch,
+):
+    observation = _observation_v2(
+        revealed_bundle_hash=HASH_B,
+        reveal_proof={"bundle_hash": HASH_B},
+    )
+    observation_hash = sha256_json(observation)
+    full_row = {"compact": True}
+    candidate = {
+        "bundle_hash": HASH_B,
+        "finalization_receipt_hash": HASH_C,
+    }
+    table_calls = []
+    measured_payloads = []
+
+    class StopAfterAuthoritySelection(RuntimeError):
+        pass
+
+    async def execute(**kwargs):
+        if kwargs["operation"] == v2_authority.OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1:
+            receipt = {
+                "receipt_hash": HASH,
+                "role": "gateway_coordinator",
+                "purpose": v2_authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+                "status": "succeeded",
+                "epoch_id": 101,
+                "output_root": observation_hash,
+            }
+            return {
+                "result": observation,
+                "execution_receipt": receipt,
+                "execution_receipt_graph": {
+                    "root_receipt_hash": HASH,
+                    "receipts": [receipt],
+                },
+            }
+        measured_payloads.append(dict(kwargs["payload"]))
+        raise StopAfterAuthoritySelection
+
+    async def select_candidates(table, **kwargs):
+        table_calls.append((table, kwargs))
+        if (
+            table == settlement.COMPACT_WEIGHT_AUTHORITY_TABLE_V2
+            and kwargs.get("limit") == 2
+        ):
+            return [full_row]
+        raise AssertionError(kwargs)
+
+    async def load_graph(root):
+        return {"root_receipt_hash": root, "receipts": []}
+
+    async def load_attempt_history(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_weight_observation_v1",
+        lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        settlement,
+        "select_compact_chain_realized_bundle_candidate_v2",
+        lambda rows, **_kwargs: candidate if rows == [full_row] else None,
+    )
+
+    with pytest.raises(StopAfterAuthoritySelection):
+        await v2_authority.settle_chain_realized_epoch_v1(
+            epoch_id=101,
+            netuid=71,
+            execute=execute,
+            load_attempt_history=load_attempt_history,
+            select_candidates=select_candidates,
+            load_graph=load_graph,
+        )
+
+    assert [kwargs.get("limit") for _table, kwargs in table_calls] == [2]
+    assert table_calls[0][1]["filters"] == (
+        ("netuid", 71),
+        ("bundle_hash", HASH_B),
+        ("authority_stage", "finalized"),
+    )
+    assert measured_payloads[0]["bundle_hash"] == HASH_B
+    assert measured_payloads[0]["authority_mode"] == "finalized_bundle"
+
+
+@pytest.mark.asyncio
+async def test_v2_host_does_not_use_legacy_vector_without_reveal_proof(
+    monkeypatch,
+):
+    observation = _observation_v2()
+    observation_hash = sha256_json(observation)
+    table_calls = []
+    measured_payloads = []
+
+    class StopAfterAuthoritySelection(RuntimeError):
+        pass
+
+    async def execute(**kwargs):
+        if kwargs["operation"] == v2_authority.OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1:
+            receipt = {
+                "receipt_hash": HASH,
+                "role": "gateway_coordinator",
+                "purpose": v2_authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+                "status": "succeeded",
+                "epoch_id": 101,
+                "output_root": observation_hash,
+            }
+            return {
+                "result": observation,
+                "execution_receipt": receipt,
+                "execution_receipt_graph": {
+                    "root_receipt_hash": HASH,
+                    "receipts": [receipt],
+                },
+            }
+        measured_payloads.append(dict(kwargs["payload"]))
+        raise StopAfterAuthoritySelection
+
+    async def select_candidates(table, **kwargs):
+        table_calls.append((table, kwargs))
+        raise AssertionError((table, kwargs))
+
+    async def load_graph(root):
+        return {"root_receipt_hash": root, "receipts": []}
+
+    async def load_attempt_history(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(StopAfterAuthoritySelection):
+        await v2_authority.settle_chain_realized_epoch_v1(
+            epoch_id=101,
+            netuid=71,
+            execute=execute,
+            load_attempt_history=load_attempt_history,
+            select_candidates=select_candidates,
+            load_graph=load_graph,
+        )
+
+    assert table_calls == []
+    assert measured_payloads[0]["bundle_hash"] is None
+    assert measured_payloads[0]["authority_mode"] == "unattributed"

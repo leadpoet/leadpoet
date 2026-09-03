@@ -1,15 +1,32 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from gateway.tee import coordinator_chain_realized_settlement_v1 as authority
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.chain_source_v2 import (
+    last_update_storage_key,
+    reveal_period_epochs_storage_key,
+    weights_storage_key,
+)
 
 
 HASH_A = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
 HASH_C = "sha256:" + "c" * 64
+
+
+def _chain_signing_profile():
+    return json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
 
 
 class _Reader:
@@ -63,6 +80,39 @@ def _chain_state():
     }
 
 
+def _chain_state_v2():
+    state = _chain_state()
+    state.pop("active_source_epoch_id")
+    profile = _chain_signing_profile()
+    state.update(
+        {
+            "weights_storage_key": weights_storage_key(
+                netuid=71, validator_uid=0
+            ),
+            "last_update_storage_key": last_update_storage_key(netuid=71),
+            "latest_commit_source_epoch_id": 100,
+            "epoch_start_block": 1_000,
+            "epoch_start_block_hash": "%064x" % 1_000,
+            "reveal_window_start_block": 1_000,
+            "reveal_window_start_block_hash": "%064x" % 1_000,
+            "scheduled_reveal_subnet_epoch_id": 100,
+            "scheduled_reveal_source_epoch_id": 100,
+            "subnet_reveal_period_epochs": 1,
+            "reveal_period_storage_key": reveal_period_epochs_storage_key(
+                netuid=71
+            ),
+            "reveal_period_storage_override": None,
+            "reveal_period_metadata_hash": (
+                "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+            ),
+            "reveal_period_runtime_spec_version": 452,
+            "chain_signing_profile": profile,
+            "chain_signing_profile_hash": sha256_json(profile),
+        }
+    )
+    return state
+
+
 def _observation():
     state = _chain_state()
     close_header = state.pop("close_header")
@@ -72,6 +122,26 @@ def _observation():
         "epoch_id": 101,
         **state,
         "close_state_root": close_header["state_root"],
+        "weights_vector_hash": sha256_json(
+            {
+                "uids": [item[0] for item in state["weights"]],
+                "weights_u16": [item[1] for item in state["weights"]],
+            }
+        ),
+    }
+
+
+def _observation_v2():
+    state = _chain_state_v2()
+    close_header = state.pop("close_header")
+    return {
+        "schema_version": authority.CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
+        "netuid": 71,
+        "epoch_id": 101,
+        **state,
+        "close_state_root": close_header["state_root"],
+        "revealed_bundle_hash": None,
+        "reveal_proof": None,
         "weights_vector_hash": sha256_json(
             {
                 "uids": [item[0] for item in state["weights"]],
@@ -116,7 +186,7 @@ def test_observation_uses_latest_finalized_primary_identity(monkeypatch):
             ],
         }
     )
-    chain = _Chain(_chain_state())
+    chain = _Chain(_chain_state_v2())
     monkeypatch.setattr(
         authority,
         "_preliminary_finalized_bundle_authority_v1",
@@ -138,7 +208,7 @@ def test_observation_uses_latest_finalized_primary_identity(monkeypatch):
         context=_context(),
     )
 
-    assert observed == _observation()
+    assert observed == _observation_v2()
     assert chain.calls[0]["validator_hotkey"] == "validator-hotkey"
     assert reader.calls[0]["policy_id"] == (
         "latest_compact_finalized_authority_summaries"
@@ -742,6 +812,7 @@ def test_compact_authority_verifier_uses_exact_binding_endpoint(monkeypatch):
         chain_source=_Chain(_chain_state()),
         expected_lineage_id=HASH_A,
         expected_chain="wss://entrypoint-finney.opentensor.ai:443",
+        chain_signing_profile=_chain_signing_profile(),
         boot_verifier=lambda *_args, **_kwargs: None,
     )
 
@@ -771,7 +842,7 @@ def test_compact_authority_verifier_uses_exact_binding_endpoint(monkeypatch):
     assert observed["expected_chain"] == (
         "wss://entrypoint-finney.opentensor.ai:443"
     )
-    assert observed["chain_signing_profile"] is None
+    assert observed["chain_signing_profile"] == _chain_signing_profile()
     assert callable(observed["boot_verifier"])
 
 

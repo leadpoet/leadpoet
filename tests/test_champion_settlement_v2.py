@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import copy
 from decimal import Decimal
+import json
+from pathlib import Path
 import threading
 
 import pytest
@@ -10,6 +12,24 @@ import pytest
 from gateway.research_lab import champion_settlement_v2 as settlement
 from gateway.research_lab import attested_v2_store, store
 from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import select_chain_signing_profile
+from leadpoet_canonical.chain_source_v2 import (
+    last_update_storage_key,
+    reveal_period_epochs_storage_key,
+    weights_storage_key,
+)
+
+
+CHAIN_HASH = "sha256:" + "a" * 64
+
+
+def _chain_signing_profile() -> dict:
+    return json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
 
 
 def _allocation(*, paid: float = 5.0) -> dict:
@@ -586,8 +606,10 @@ def _chain_observation(
         "validator_uid": 0,
         "metagraph_hotkeys": hotkeys,
         "weights": weights,
-        "weights_storage_key": "0x1234",
-        "last_update_storage_key": "0x5678",
+        "weights_storage_key": weights_storage_key(
+            netuid=71, validator_uid=0
+        ),
+        "last_update_storage_key": last_update_storage_key(netuid=71),
         "last_update_block": 1_000,
         "last_update_block_hash": "c" * 64,
         "last_update_official_subnet_epoch_id": source_epoch_id,
@@ -598,6 +620,270 @@ def _chain_observation(
                 "weights_u16": [item[1] for item in weights],
             }
         ),
+    }
+
+
+def _chain_observation_v2(
+    *,
+    epoch_id: int = 102,
+    latest_commit_source_epoch_id: int = 102,
+    last_update_official_epoch_id: int = 102,
+    scheduled_reveal_source_epoch_id: int | None = 101,
+    scheduled_reveal_subnet_epoch_id: int | None = 101,
+    reveal_runtime_spec_version: int = 452,
+    reveal_storage_override: int | None = None,
+    reveal_metadata_hash: str | None = (
+        "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+    ),
+    weights: list[list[int]] | None = None,
+    reveal_proof: dict | None = None,
+) -> dict:
+    profile = _chain_signing_profile()
+    vector = weights or [[0, 65_535], [7, 3_449]]
+    hotkeys = ["validator-hotkey"] + [
+        "unused-%d" % uid for uid in range(1, 7)
+    ] + ["miner-hotkey"]
+    close_block = 1_719
+    return {
+        "schema_version": settlement.CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V2,
+        "netuid": 71,
+        "epoch_id": epoch_id,
+        "official_subnet_epoch_id": epoch_id,
+        "cutover_mapping_hash": CHAIN_HASH,
+        "close_block": close_block,
+        "close_block_hash": "%064x" % close_block,
+        "close_state_root": "b" * 64,
+        "next_epoch_block": close_block + 1,
+        "next_epoch_block_hash": "%064x" % (close_block + 1),
+        "validator_hotkey": "validator-hotkey",
+        "validator_uid": 0,
+        "metagraph_hotkeys": hotkeys,
+        "weights": vector,
+        "weights_storage_key": weights_storage_key(
+            netuid=71, validator_uid=0
+        ),
+        "last_update_storage_key": last_update_storage_key(netuid=71),
+        "last_update_block": 1_700,
+        "last_update_block_hash": "c" * 64,
+        "last_update_official_subnet_epoch_id": (
+            last_update_official_epoch_id
+        ),
+        "latest_commit_source_epoch_id": latest_commit_source_epoch_id,
+        "epoch_start_block": 1_360,
+        "epoch_start_block_hash": "%064x" % 1_360,
+        "reveal_window_start_block": 1_360,
+        "reveal_window_start_block_hash": "%064x" % 1_360,
+        "scheduled_reveal_subnet_epoch_id": scheduled_reveal_subnet_epoch_id,
+        "scheduled_reveal_source_epoch_id": scheduled_reveal_source_epoch_id,
+        "revealed_bundle_hash": (
+            reveal_proof["bundle_hash"] if reveal_proof is not None else None
+        ),
+        "reveal_proof": reveal_proof,
+        "subnet_reveal_period_epochs": 1,
+        "reveal_period_storage_key": reveal_period_epochs_storage_key(
+            netuid=71
+        ),
+        "reveal_period_storage_override": reveal_storage_override,
+        "reveal_period_metadata_hash": reveal_metadata_hash,
+        "reveal_period_runtime_spec_version": reveal_runtime_spec_version,
+        "chain_signing_profile": profile,
+        "chain_signing_profile_hash": sha256_json(profile),
+        "weights_vector_hash": sha256_json(
+            {
+                "uids": [item[0] for item in vector],
+                "weights_u16": [item[1] for item in vector],
+            }
+        ),
+    }
+
+
+def _timelocked_reveal_proof(
+    *,
+    bundle_digit: str = "1",
+    source_epoch_id: int = 101,
+    subnet_epoch_index: int = 101,
+    weights: list[list[int]] | None = None,
+) -> dict:
+    vector = weights or [[0, 65_535], [7, 3_449]]
+    vector_hash = sha256_json(
+        {
+            "uids": [item[0] for item in vector],
+            "weights_u16": [item[1] for item in vector],
+        }
+    )
+    body = {
+        "schema_version": (
+            settlement.CHAIN_TIMELOCKED_REVEAL_PROOF_SCHEMA_VERSION_V2
+        ),
+        "bundle_hash": "sha256:" + bundle_digit * 64,
+        "source_epoch_id": source_epoch_id,
+        "source_official_subnet_epoch_id": subnet_epoch_index,
+        "netuid": 71,
+        "validator_hotkey": "validator-hotkey",
+        "validator_hotkey_public_key": "d" * 64,
+        "validator_uid": 0,
+        "commitment_hash": "sha256:" + "c" * 64,
+        "reveal_round": 0,
+        "commit_storage_key": settlement.timelocked_weight_commits_storage_key(
+            netuid=71,
+            subnet_epoch_index=subnet_epoch_index,
+        ),
+        "commit_finalized_block": 1_600 + source_epoch_id,
+        "commit_finalized_block_hash": "d" * 64,
+        "commit_state_transition_hash": "sha256:" + "e" * 64,
+        "reveal_window_start_block": 1_360,
+        "reveal_window_start_block_hash": "%064x" % 1_360,
+        "pre_reveal_block": 1_709,
+        "pre_reveal_block_hash": "1" * 64,
+        "pre_reveal_state_root": "2" * 64,
+        "pre_reveal_commit_entry_hash": "sha256:" + "e" * 64,
+        "reveal_block": 1_710,
+        "reveal_block_hash": "3" * 64,
+        "reveal_parent_block_hash": "1" * 64,
+        "reveal_state_root": "4" * 64,
+        "reveal_commit_entry_absent": True,
+        "reveal_runtime_spec_version": 452,
+        "reveal_runtime_transaction_version": 1,
+        "reveal_runtime_code_hash": "5" * 64,
+        "reveal_metadata_hash": (
+            "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        ),
+        "reveal_period_epochs": 1,
+        "system_events_storage_key": settlement.system_events_storage_key(),
+        "system_event_count_storage_key": (
+            settlement.system_event_count_storage_key()
+        ),
+        "event_witness": {
+            "schema_version": "leadpoet.timelocked_weights_reveal_proof.v2",
+            "profile_sha256": "sha256:" + "6" * 64,
+            "events_sha256": "sha256:" + "7" * 64,
+            "event_count": 3,
+            "weights_set_record_index": 1,
+            "weights_set_record_sha256": "sha256:" + "8" * 64,
+            "reveal_record_index": 2,
+            "reveal_record_sha256": "sha256:" + "9" * 64,
+            "netuid": 71,
+            "uid": 0,
+            "account_id_hex": "d" * 64,
+            "phase": "Initialization",
+            "runtime_event_index": 7,
+            "weights_set_event_index": 5,
+            "timelocked_weights_revealed_event_index": 109,
+        },
+        "weights_storage_key": weights_storage_key(
+            netuid=71,
+            validator_uid=0,
+        ),
+        "revealed_weights": vector,
+        "revealed_weights_vector_hash": vector_hash,
+    }
+    return {**body, "proof_hash": sha256_json(body)}
+
+
+def test_chain_observation_rejects_unreviewed_runtime_metadata():
+    observation = _chain_observation_v2(
+        reveal_runtime_spec_version=440,
+        reveal_storage_override=1,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="reveal authority is invalid",
+    ):
+        settlement.validate_chain_weight_observation_v1(observation)
+
+
+def test_chain_observation_accepts_metadata_bound_reveal_default():
+    observation = _chain_observation_v2(
+        reveal_runtime_spec_version=452,
+        reveal_storage_override=None,
+        reveal_metadata_hash=(
+            "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        ),
+    )
+
+    assert (
+        settlement.validate_chain_weight_observation_v1(observation)
+        == observation
+    )
+
+
+def test_chain_observation_rejects_window_before_official_transition():
+    observation = _chain_observation_v2()
+    observation["reveal_window_start_block"] -= 1
+    observation["reveal_window_start_block_hash"] = "f" * 64
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="reveal authority is invalid",
+    ):
+        settlement.validate_chain_weight_observation_v1(observation)
+
+
+def test_chain_observation_rejects_wrong_reveal_storage_key():
+    observation = _chain_observation_v2()
+    observation["reveal_period_storage_key"] = "0x" + "0" * 64
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="chain weight observation identities are invalid",
+    ):
+        settlement.validate_chain_weight_observation_v1(observation)
+
+
+def test_chain_observation_rejects_runtime_before_profile_minimum():
+    observation = _chain_observation_v2(reveal_runtime_spec_version=436)
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="reveal authority is invalid",
+    ):
+        settlement.validate_chain_weight_observation_v1(observation)
+
+
+def _compact_candidate(
+    *,
+    epoch_id: int,
+    subnet_epoch_index: int | None = None,
+    weights: list[list[int]] | None = None,
+    bundle_digit: str = "1",
+) -> dict:
+    profile_manifest = _chain_signing_profile()
+    selected_profile = select_chain_signing_profile(
+        profile_manifest,
+        runtime_version={"specVersion": 452, "transactionVersion": 1},
+        genesis_hash=profile_manifest["genesis_hash"],
+    )
+    vector = weights or [[0, 65_535], [7, 3_449]]
+    return {
+        "bundle_hash": "sha256:" + bundle_digit * 64,
+        "finalization_receipt_hash": "sha256:" + bundle_digit * 64,
+        "netuid": 71,
+        "epoch_id": epoch_id,
+        "validator_hotkey": "validator-hotkey",
+        "uids": [item[0] for item in vector],
+        "weights_u16": [item[1] for item in vector],
+        "subnet_epoch_index": (
+            epoch_id if subnet_epoch_index is None else subnet_epoch_index
+        ),
+        "finalized_block": 1_600 + epoch_id,
+        "finalized_block_hash": "d" * 64,
+        "state_transition_hash": "sha256:" + "e" * 64,
+        "cutover_mapping_hash": CHAIN_HASH,
+        "chain_signing_profile_hash": sha256_json(selected_profile),
+        "runtime_spec_version": 452,
+        "extrinsic_authorization": {
+            "netuid": 71,
+            "epoch_id": epoch_id,
+            "subnet_epoch_index": (
+                epoch_id if subnet_epoch_index is None else subnet_epoch_index
+            ),
+            "validator_hotkey": "validator-hotkey",
+            "hotkey_public_key": "d" * 64,
+            "commitment_hex": "f" * 64,
+            "commitment_hash": "sha256:" + "c" * 64,
+            "reveal_round": 0,
+        },
     }
 
 
@@ -723,6 +1009,171 @@ def test_chain_realized_bundle_selection_requires_exact_finalized_source(
         )
 
 
+def test_legacy_selector_does_not_attribute_v2_observation(monkeypatch):
+    observation = _chain_observation_v2()
+    authority, _verified = _chain_package_authority()
+    exact = {
+        **authority,
+        "netuid": 71,
+        "epoch_id": 101,
+        "validator_hotkey": "validator-hotkey",
+        "uids": [0, 7],
+        "weights_u16": [65_535, 3_449],
+    }
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_finalized_bundle_authority_v1",
+        lambda row: dict(row),
+    )
+
+    assert (
+        settlement.select_chain_realized_bundle_candidate_v1(
+            [exact],
+            observation=observation,
+        )
+        is None
+    )
+
+
+def test_legacy_reveal_selection_fails_closed_when_truncated(monkeypatch):
+    exact = {
+        "bundle_hash": "sha256:" + "f" * 64,
+        "finalization_receipt_hash": "sha256:" + "e" * 64,
+        "netuid": 71,
+        "epoch_id": 1,
+        "validator_hotkey": "validator-hotkey",
+        "uids": [0, 7],
+        "weights_u16": [65_535, 4_000],
+        "finalized_block": 1,
+    }
+    rows = [
+        {
+            **exact,
+            "bundle_hash": "sha256:" + ("%064x" % index),
+            "epoch_id": 101 - index,
+            "finalized_block": 101 - index,
+        }
+        for index in range(101)
+    ]
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_finalized_bundle_authority_v1",
+        lambda row: dict(row),
+    )
+
+    assert (
+        settlement.select_chain_realized_bundle_candidate_v1(
+            rows,
+            observation=_chain_observation_v2(),
+        )
+        is None
+    )
+
+
+def test_compact_reveal_selection_uses_prior_revealed_epoch(monkeypatch):
+    observation = _chain_observation_v2(
+        reveal_proof=_timelocked_reveal_proof(bundle_digit="1")
+    )
+    revealed = _compact_candidate(epoch_id=101, bundle_digit="1")
+    current_commit = _compact_candidate(
+        epoch_id=102,
+        weights=[[0, 65_535], [7, 4_000]],
+        bundle_digit="2",
+    )
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_compact_finalized_bundle_authority_v2",
+        lambda row: dict(row),
+    )
+
+    selected = settlement.select_compact_chain_realized_bundle_candidate_v2(
+        [current_commit, revealed],
+        observation=observation,
+    )
+
+    assert selected["epoch_id"] == 101
+    assert selected["bundle_hash"] == revealed["bundle_hash"]
+
+
+def test_compact_reveal_selection_rejects_repeated_unchanged_vector(monkeypatch):
+    observation = _chain_observation_v2(
+        reveal_proof=_timelocked_reveal_proof(bundle_digit="2")
+    )
+    latest = _compact_candidate(epoch_id=101, bundle_digit="2")
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_compact_finalized_bundle_authority_v2",
+        lambda row: dict(row),
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="ambiguous compact bundle authority",
+    ):
+        settlement.select_compact_chain_realized_bundle_candidate_v2(
+            [latest, dict(latest)],
+            observation=observation,
+        )
+
+
+def test_compact_reveal_selection_handles_missed_current_commit(monkeypatch):
+    observation = _chain_observation_v2(
+        latest_commit_source_epoch_id=101,
+        last_update_official_epoch_id=101,
+        reveal_proof=_timelocked_reveal_proof(bundle_digit="2"),
+    )
+    latest = _compact_candidate(epoch_id=101, bundle_digit="2")
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_compact_finalized_bundle_authority_v2",
+        lambda row: dict(row),
+    )
+
+    selected = settlement.select_compact_chain_realized_bundle_candidate_v2(
+        [latest],
+        observation=observation,
+    )
+
+    assert selected["epoch_id"] == 101
+
+
+def test_compact_reveal_selection_rejects_vector_and_profile_mismatch(
+    monkeypatch,
+):
+    observation = _chain_observation_v2(
+        reveal_proof=_timelocked_reveal_proof(bundle_digit="1")
+    )
+    wrong_vector = _compact_candidate(
+        epoch_id=101,
+        weights=[[0, 65_535], [7, 4_000]],
+    )
+    wrong_profile = {
+        **_compact_candidate(epoch_id=101),
+        "chain_signing_profile_hash": "sha256:" + "f" * 64,
+    }
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_compact_finalized_bundle_authority_v2",
+        lambda row: dict(row),
+    )
+
+    assert (
+        settlement.select_compact_chain_realized_bundle_candidate_v2(
+            [wrong_vector],
+            observation=observation,
+        )
+        is None
+    )
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="signing profile differs",
+    ):
+        settlement.select_compact_chain_realized_bundle_candidate_v2(
+            [wrong_profile],
+            observation=observation,
+        )
+
+
 def test_chain_realized_stale_vector_credits_each_epoch_exactly(
     monkeypatch,
 ):
@@ -750,6 +1201,123 @@ def test_chain_realized_stale_vector_credits_each_epoch_exactly(
         assert credit["epoch_id"] == epoch_id
         assert credit["credited_alpha_percent"] == "4.999710077699"
         assert credit["attribution_doc"]["source_bundle_epoch_id"] == 100
+
+
+def test_v2_chain_settlement_summaries_round_trip_raw_block_hashes(
+    monkeypatch,
+):
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
+    proof = _timelocked_reveal_proof(bundle_digit="1")
+    observation = _chain_observation_v2(reveal_proof=proof)
+    authority, verified = _chain_package_authority(
+        source_epoch_id=101,
+        allocations=[],
+    )
+    allocation = authority["bundle_doc"]["weight_snapshot"][
+        "calculation_snapshot"
+    ]["research_lab_allocation_doc"]
+    allocation["source_add_allocations"] = [
+        {
+            "source_id": "source_add_reward:test",
+            "miner_hotkey": "miner-hotkey",
+            "uid": 7,
+            "paid_alpha_percent": 0.2,
+            "base_desired_alpha_percent": 0.2,
+        }
+    ]
+    allocation["allocation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in allocation.items()
+            if key != "allocation_hash"
+        }
+    )
+    authority["finalized_block"] = proof["commit_finalized_block"]
+    authority["finalized_block_hash"] = proof["commit_finalized_block_hash"]
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+    attributed = settlement.build_chain_realized_settlement_package_v1(
+        observation=observation,
+        authority=authority,
+    )
+    unattributed = settlement.build_unattributed_chain_realized_settlement_package_v2(
+        observation=_chain_observation_v2(),
+    )
+
+    for index, package in enumerate((attributed, unattributed), start=7):
+        settlement_doc = package["settlement_doc"]
+        settlement_hash = package["settlement_hash"]
+        receipt_hash = "sha256:" + str(index) * 64
+        rows = settlement.validate_chain_realized_epoch_settlements_v1(
+            [
+                {
+                    "netuid": 71,
+                    "epoch_id": 102,
+                    "schema_version": settlement_doc["schema_version"],
+                    "settlement_hash": settlement_hash,
+                    "settlement_receipt_hash": receipt_hash,
+                    "settlement_doc": settlement_doc,
+                }
+            ],
+            receipt_graphs={
+                receipt_hash: _minimal_receipt_graph(
+                    receipt_hash,
+                    purpose=(
+                        settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1
+                    ),
+                    output_root=settlement_hash,
+                )
+            },
+        )
+
+        assert rows[0]["settlement_hash"] == settlement_hash
+
+    assert attributed["credits"][0]["credit_doc"]["obligation_kind"] == (
+        "source_add"
+    )
+
+
+def test_v2_chain_settlement_rejects_prefixed_window_block_hash(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
+    package = settlement.build_unattributed_chain_realized_settlement_package_v2(
+        observation=_chain_observation_v2(),
+    )
+    settlement_doc = copy.deepcopy(package["settlement_doc"])
+    summary = settlement_doc["observation_summary"]
+    summary["reveal_window_start_block_hash"] = (
+        "sha256:" + summary["reveal_window_start_block_hash"]
+    )
+    settlement_hash = sha256_json(settlement_doc)
+    receipt_hash = "sha256:" + "9" * 64
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="observation summary is invalid",
+    ):
+        settlement.validate_chain_realized_epoch_settlements_v1(
+            [
+                {
+                    "netuid": 71,
+                    "epoch_id": 102,
+                    "schema_version": settlement_doc["schema_version"],
+                    "settlement_hash": settlement_hash,
+                    "settlement_receipt_hash": receipt_hash,
+                    "settlement_doc": settlement_doc,
+                }
+            ],
+            receipt_graphs={
+                receipt_hash: _minimal_receipt_graph(
+                    receipt_hash,
+                    purpose=(
+                        settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1
+                    ),
+                    output_root=settlement_hash,
+                )
+            },
+        )
 
 
 def test_chain_realized_lifetime_policy_credits_actual_attribution(

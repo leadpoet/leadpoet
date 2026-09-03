@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import json
+import logging
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
@@ -14,16 +15,24 @@ from Leadpoet.utils.subnet_epoch import (
 )
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    select_chain_signing_profile,
+    validate_chain_signing_profile,
+)
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_FINALIZATION_EPOCH_BLOCKS,
+    CHAIN_SUBTENSOR_MAX_TEMPO,
     CHAIN_ENDPOINT_HOST,
     CHAIN_RPC_METHOD,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
     decode_last_update_storage,
+    decode_reveal_period_epochs_storage,
+    decode_runtime_metadata_commitment,
     decode_subnet_epoch_storage,
+    decode_timelocked_weight_commits,
     decode_weights_storage,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
@@ -32,8 +41,22 @@ from leadpoet_canonical.chain_source_v2 import (
     normalize_raw_hash,
     parse_finalized_header,
     parse_json_rpc_response,
+    parse_runtime_version,
+    reveal_period_epochs_storage_key,
+    resolve_reveal_period_metadata_default_v2,
+    ss58_encode_account_id,
     subnet_epoch_storage_key,
+    system_event_count_storage_key,
+    system_events_storage_key,
+    timelocked_weight_commits_storage_key,
     weights_storage_key,
+)
+from leadpoet_canonical.subtensor_events_v2 import (
+    RUNTIME_CODE_STORAGE_KEY,
+    SubtensorEventsV2Error,
+    load_subtensor_events_profile_v2,
+    prove_timelocked_weights_reveal_v2,
+    validate_subtensor_events_profile_v2,
 )
 
 
@@ -47,6 +70,7 @@ ALPHA_PRICE_RUNTIME_METHOD = "SwapRuntimeApi_current_alpha_price"
 ALPHA_PRICE_TIMEOUT_MS = 8_000
 ALPHA_PRICE_MAX_ATTEMPTS = 3
 ALPHA_PRICE_RETRY_BACKOFF_SECONDS = (0.25, 0.5)
+logger = logging.getLogger(__name__)
 
 
 class CoordinatorChainSourceV2Error(RuntimeError):
@@ -83,7 +107,10 @@ class CoordinatorChainSourceV2:
                 "coordinator epoch authority is unavailable"
             )
         authority = dict(epoch_authority)
-        if set(authority) != {"mode", "cutover"}:
+        if set(authority) not in (
+            {"mode", "cutover"},
+            {"mode", "cutover", "chain_signing_profile"},
+        ):
             raise CoordinatorChainSourceV2Error(
                 "coordinator epoch authority fields are invalid"
             )
@@ -99,6 +126,27 @@ class CoordinatorChainSourceV2:
             raise CoordinatorChainSourceV2Error(
                 "coordinator stateful epoch cutover is invalid"
             ) from exc
+        profile = authority.get("chain_signing_profile")
+        try:
+            self._chain_signing_profile = (
+                validate_chain_signing_profile(profile)
+                if profile is not None
+                else None
+            )
+        except Exception as exc:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator chain signing profile is invalid"
+            ) from exc
+        if self._chain_signing_profile is not None:
+            cutover_genesis = str(
+                self._epoch_cutover.network_genesis_hash
+            ).lower().removeprefix("0x")
+            if cutover_genesis != str(
+                self._chain_signing_profile["genesis_hash"]
+            ).lower():
+                raise CoordinatorChainSourceV2Error(
+                    "coordinator epoch and signing genesis differ"
+                )
         for provider_id in ("bittensor_chain", "coingecko"):
             if not self._retry_policy_hashes.get(provider_id):
                 raise CoordinatorChainSourceV2Error(
@@ -616,11 +664,13 @@ class CoordinatorChainSourceV2:
         """Read the active validator vector at one exact stateful epoch close."""
 
         cutover = self._epoch_cutover
+        chain_signing_profile = self._chain_signing_profile
         normalized_netuid = int(netuid)
         normalized_epoch = int(epoch_id)
         normalized_hotkey = str(validator_hotkey or "")
         if (
             cutover is None
+            or chain_signing_profile is None
             or cutover.netuid != normalized_netuid
             or normalized_epoch < cutover.first_settlement_epoch_id
             or not normalized_hotkey
@@ -708,6 +758,78 @@ class CoordinatorChainSourceV2:
                 ) from exc
             return observed_hash, observed_index
 
+        def epoch_transition_at(
+            target_index: int,
+            high_bound: int,
+            operation: str,
+        ) -> tuple[int, str]:
+            """Find the first exact block of one official subnet epoch."""
+
+            low_bound = cutover.cutover_block - 1
+            prior_hash, prior_index = epoch_index_at(
+                low_bound,
+                "%s-low" % operation,
+            )
+            boundary_hash, boundary_index = epoch_index_at(
+                high_bound,
+                "%s-high" % operation,
+            )
+            if (
+                int(target_index) < cutover.first_subnet_epoch_index
+                or prior_index >= int(target_index)
+                or boundary_index < int(target_index)
+            ):
+                raise CoordinatorChainSourceV2Error(
+                    "stateful epoch transition search bounds are invalid"
+                )
+            while high_bound - low_bound > 1:
+                midpoint = low_bound + ((high_bound - low_bound) // 2)
+                midpoint_hash, midpoint_index = epoch_index_at(
+                    midpoint,
+                    "%s-search-%d" % (operation, midpoint),
+                )
+                if midpoint_index >= int(target_index):
+                    high_bound = midpoint
+                    boundary_hash = midpoint_hash
+                    boundary_index = midpoint_index
+                else:
+                    low_bound = midpoint
+                    prior_hash = midpoint_hash
+                    prior_index = midpoint_index
+            if boundary_index != int(target_index):
+                boundary_hash, boundary_index = epoch_index_at(
+                    high_bound,
+                    "%s-boundary" % operation,
+                )
+            if low_bound != high_bound - 1:
+                prior_hash, prior_index = epoch_index_at(
+                    high_bound - 1,
+                    "%s-prior" % operation,
+                )
+            if (
+                boundary_index != int(target_index)
+                or prior_index + 1 != int(target_index)
+                or high_bound < cutover.cutover_block
+            ):
+                raise CoordinatorChainSourceV2Error(
+                    "stateful epoch transition is inconsistent"
+                )
+            transition_header = parse_finalized_header(
+                archive_call(
+                    "chain_getHeader",
+                    ("0x" + boundary_hash,),
+                    "%s-header" % operation,
+                )
+            )
+            if (
+                int(transition_header["block"]) != high_bound
+                or transition_header["parent_hash"] != prior_hash
+            ):
+                raise CoordinatorChainSourceV2Error(
+                    "stateful epoch transition header is inconsistent"
+                )
+            return high_bound, boundary_hash
+
         finalized_hash = normalize_raw_hash(
             live_call(
                 "chain_getFinalizedHead",
@@ -794,6 +916,14 @@ class CoordinatorChainSourceV2:
                 "stateful epoch close headers are inconsistent"
             )
 
+        epoch_start_block, epoch_start_hash = epoch_transition_at(
+            official_epoch,
+            close_block,
+            "epoch-start",
+        )
+        reveal_window_start_block = epoch_start_block
+        reveal_window_start_hash = epoch_start_hash
+
         metagraph = decode_selective_metagraph_result(
             archive_call(
                 "state_call",
@@ -870,23 +1000,113 @@ class CoordinatorChainSourceV2:
             "last-update",
         )
         try:
-            active_source_epoch_id = cutover.settlement_epoch_id(
+            latest_commit_source_epoch_id = cutover.settlement_epoch_id(
                 last_update_official_epoch
             )
         except SubnetEpochError as exc:
             raise CoordinatorChainSourceV2Error(
                 "stateful epoch validator LastUpdate predates the cutover"
             ) from exc
-        if active_source_epoch_id > normalized_epoch:
+        if latest_commit_source_epoch_id > normalized_epoch:
             raise CoordinatorChainSourceV2Error(
-                "stateful epoch active source epoch is in the future"
+                "stateful epoch latest commit source is in the future"
             )
+        reveal_period_key = reveal_period_epochs_storage_key(
+            netuid=normalized_netuid
+        )
+        try:
+            reveal_period_override = decode_reveal_period_epochs_storage(
+                archive_call(
+                    "state_getStorage",
+                    (reveal_period_key, "0x" + close_hash),
+                    "close-reveal-period",
+                )
+            )
+            close_runtime = parse_runtime_version(
+                archive_call(
+                    "state_getRuntimeVersion",
+                    ("0x" + close_hash,),
+                    "close-runtime-version",
+                )
+            )
+        except ChainSourceV2Error as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch reveal-period authority is invalid"
+            ) from exc
+        try:
+            selected_profile = select_chain_signing_profile(
+                chain_signing_profile,
+                runtime_version={
+                    "specVersion": int(close_runtime["spec_version"]),
+                    "transactionVersion": int(
+                        close_runtime["transaction_version"]
+                    ),
+                },
+                genesis_hash=str(chain_signing_profile["genesis_hash"]),
+            )
+        except ValueError as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch reveal-period runtime is not explicitly supported"
+            ) from exc
+        configured_reveal_period = int(
+            selected_profile["subnet_reveal_period_epochs"]
+        )
+        try:
+            metadata_commitment = decode_runtime_metadata_commitment(
+                archive_call(
+                    "state_getMetadata",
+                    ("0x" + close_hash,),
+                    "close-runtime-metadata",
+                )
+            )
+            reviewed_reveal_period_default = (
+                resolve_reveal_period_metadata_default_v2(
+                    genesis_hash=chain_signing_profile["genesis_hash"],
+                    runtime_spec_version=close_runtime["spec_version"],
+                    runtime_transaction_version=close_runtime[
+                        "transaction_version"
+                    ],
+                    metadata_hash=metadata_commitment["metadata_hash"],
+                )
+            )
+        except ChainSourceV2Error as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch reveal-period metadata is invalid"
+            ) from exc
+        reveal_period_metadata_hash = metadata_commitment["metadata_hash"]
+        reveal_period_epochs = (
+            int(reviewed_reveal_period_default)
+            if reveal_period_override is None
+            else int(reveal_period_override)
+        )
+        if reveal_period_epochs != configured_reveal_period:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch reveal period differs from the measured profile"
+            )
+        scheduled_reveal_official_epoch = None
+        scheduled_reveal_source_epoch_id = None
+        if official_epoch - reveal_period_epochs >= 0:
+            scheduled_reveal_official_epoch = (
+                official_epoch - reveal_period_epochs
+            )
+            try:
+                scheduled_reveal_source_epoch_id = (
+                    cutover.settlement_epoch_id(
+                        scheduled_reveal_official_epoch
+                    )
+                )
+            except SubnetEpochError:
+                scheduled_reveal_source_epoch_id = None
         return {
             "schema_version": "leadpoet.stateful_epoch_close_weights.v1",
             "netuid": normalized_netuid,
             "epoch_id": normalized_epoch,
             "official_subnet_epoch_id": official_epoch,
             "cutover_mapping_hash": str(cutover.mapping_hash),
+            "epoch_start_block": epoch_start_block,
+            "epoch_start_block_hash": epoch_start_hash,
+            "reveal_window_start_block": reveal_window_start_block,
+            "reveal_window_start_block_hash": reveal_window_start_hash,
             "close_block": close_block,
             "close_block_hash": close_hash,
             "close_header": close_header,
@@ -899,14 +1119,487 @@ class CoordinatorChainSourceV2:
             "metagraph_hotkeys": list(metagraph["hotkeys"]),
             "weights_storage_key": storage_key,
             "last_update_storage_key": last_update_key,
+            "reveal_period_storage_key": reveal_period_key,
+            "reveal_period_storage_override": reveal_period_override,
+            "reveal_period_metadata_hash": reveal_period_metadata_hash,
+            "reveal_period_runtime_spec_version": int(
+                close_runtime["spec_version"]
+            ),
             "last_update_block": last_update_block,
             "last_update_block_hash": last_update_hash,
             "last_update_official_subnet_epoch_id": (
                 last_update_official_epoch
             ),
-            "active_source_epoch_id": active_source_epoch_id,
+            "latest_commit_source_epoch_id": latest_commit_source_epoch_id,
+            "scheduled_reveal_subnet_epoch_id": (
+                scheduled_reveal_official_epoch
+            ),
+            "scheduled_reveal_source_epoch_id": (
+                scheduled_reveal_source_epoch_id
+            ),
+            "subnet_reveal_period_epochs": reveal_period_epochs,
+            "chain_signing_profile": dict(chain_signing_profile),
+            "chain_signing_profile_hash": sha256_json(
+                chain_signing_profile
+            ),
             "weights": [[int(uid), int(weight)] for uid, weight in weights],
         }
+
+    def read_timelocked_reveal_proof(
+        self,
+        *,
+        chain_state: Mapping[str, Any],
+        authority: Mapping[str, Any],
+        context: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Prove one finalized commit was successfully revealed on chain.
+
+        The exact commit tuple is monotonic after its finalized inclusion: it
+        remains in the source-epoch queue while a missing pulse is retried and
+        becomes absent when processing finishes. The first absent post-state is
+        authoritative only when that block has the exact successful reveal
+        event and exact resulting vector.
+        """
+
+        request_id = 400
+        proof_scope = sha256_json(
+            {"bundle_hash": str(authority.get("bundle_hash") or "")}
+        )[-16:]
+
+        def archive_call(
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            nonlocal request_id
+            request_id += 1
+            return self._archive_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                logical_operation_id=(
+                    "%s:chain-reveal-proof:%s:%s"
+                    % (context.job_id, proof_scope, operation)
+                ),
+                context=context,
+            )
+
+        hash_cache: dict[int, str] = {}
+
+        def block_hash(block: int, operation: str) -> str:
+            normalized_block = int(block)
+            cached = hash_cache.get(normalized_block)
+            if cached is not None:
+                return cached
+            observed = normalize_raw_hash(
+                archive_call(
+                    "chain_getBlockHash",
+                    (normalized_block,),
+                    operation,
+                ),
+                "timelocked reveal block hash",
+            )
+            hash_cache[normalized_block] = observed
+            return observed
+
+        def commits_at(
+            block: int,
+            *,
+            storage_key: str,
+            operation: str,
+        ) -> tuple[str, Sequence[Dict[str, Any]]]:
+            observed_hash = block_hash(block, "%s-hash" % operation)
+            commits = decode_timelocked_weight_commits(
+                archive_call(
+                    "state_getStorage",
+                    (storage_key, "0x" + observed_hash),
+                    "%s-state" % operation,
+                )
+            )
+            return observed_hash, commits
+
+        try:
+            netuid = int(chain_state["netuid"])
+            close_block = int(chain_state["close_block"])
+            close_hash = str(chain_state["close_block_hash"])
+            reveal_window_start_block = int(
+                chain_state["reveal_window_start_block"]
+            )
+            reveal_window_start_hash = str(
+                chain_state["reveal_window_start_block_hash"]
+            )
+            scheduled_source_epoch = chain_state[
+                "scheduled_reveal_source_epoch_id"
+            ]
+            scheduled_subnet_epoch = chain_state[
+                "scheduled_reveal_subnet_epoch_id"
+            ]
+            if (
+                scheduled_source_epoch is None
+                or scheduled_subnet_epoch is None
+            ):
+                return None
+            scheduled_source_epoch = int(scheduled_source_epoch)
+            scheduled_subnet_epoch = int(scheduled_subnet_epoch)
+            authorization = authority["extrinsic_authorization"]
+            if not isinstance(authorization, Mapping):
+                return None
+            final_block = int(authority["finalized_block"])
+            final_block_hash = str(authority["finalized_block_hash"])
+            public_key = str(authorization["hotkey_public_key"])
+            commitment_hex = str(authorization["commitment_hex"])
+            commitment_hash = str(authorization["commitment_hash"])
+            reveal_round = int(authorization["reveal_round"])
+            expected_weights = [
+                [int(uid), int(weight)]
+                for uid, weight in zip(
+                    authority["uids"], authority["weights_u16"]
+                )
+            ]
+            if (
+                int(authority["netuid"]) != netuid
+                or int(authority["epoch_id"]) != scheduled_source_epoch
+                or int(authority["subnet_epoch_index"])
+                != scheduled_subnet_epoch
+                or authority["validator_hotkey"]
+                != chain_state["validator_hotkey"]
+                or int(authorization["netuid"]) != netuid
+                or int(authorization["epoch_id"]) != scheduled_source_epoch
+                or int(authorization["subnet_epoch_index"])
+                != scheduled_subnet_epoch
+                or authorization["validator_hotkey"]
+                != chain_state["validator_hotkey"]
+                or ss58_encode_account_id(bytes.fromhex(public_key))
+                != chain_state["validator_hotkey"]
+                or sha256_bytes(bytes.fromhex(commitment_hex))
+                != commitment_hash
+                or expected_weights != chain_state["weights"]
+                or final_block < 0
+                or final_block >= close_block
+                or close_block - max(final_block, reveal_window_start_block)
+                > CHAIN_SUBTENSOR_MAX_TEMPO * 4
+            ):
+                return None
+            actual_window_start_hash = block_hash(
+                reveal_window_start_block,
+                "window-start",
+            )
+            actual_close_hash = block_hash(close_block, "close")
+            actual_final_hash = block_hash(final_block, "commit-finalized")
+            if (
+                actual_window_start_hash != reveal_window_start_hash
+                or actual_close_hash != close_hash
+                or actual_final_hash != final_block_hash
+            ):
+                return None
+            commit_storage_key = timelocked_weight_commits_storage_key(
+                netuid=netuid,
+                subnet_epoch_index=scheduled_subnet_epoch,
+            )
+            _commit_hash, finalized_commits = commits_at(
+                final_block,
+                storage_key=commit_storage_key,
+                operation="commit-finalized",
+            )
+            final_matches = [
+                item
+                for item in finalized_commits
+                if item.get("hotkey_public_key") == public_key
+                and item.get("commitment_hex") == commitment_hex
+                and int(item.get("reveal_round", -1)) == reveal_round
+                and sha256_json(item) == authority["state_transition_hash"]
+            ]
+            if len(final_matches) != 1:
+                return None
+            exact_entry = dict(final_matches[0])
+            _close_hash, close_commits = commits_at(
+                close_block,
+                storage_key=commit_storage_key,
+                operation="close",
+            )
+            if exact_entry in close_commits:
+                return None
+
+            low = final_block
+            high = close_block
+            while high - low > 1:
+                midpoint = low + ((high - low) // 2)
+                _mid_hash, midpoint_commits = commits_at(
+                    midpoint,
+                    storage_key=commit_storage_key,
+                    operation="search-%d" % midpoint,
+                )
+                if exact_entry in midpoint_commits:
+                    low = midpoint
+                else:
+                    high = midpoint
+            reveal_block = high
+            pre_reveal_block = reveal_block - 1
+            if reveal_block < max(
+                reveal_window_start_block,
+                final_block + 1,
+            ):
+                return None
+            pre_reveal_hash, pre_reveal_commits = commits_at(
+                pre_reveal_block,
+                storage_key=commit_storage_key,
+                operation="pre-reveal",
+            )
+            reveal_hash, reveal_commits = commits_at(
+                reveal_block,
+                storage_key=commit_storage_key,
+                operation="reveal",
+            )
+            pre_target_entries = [
+                item
+                for item in pre_reveal_commits
+                if item.get("hotkey_public_key") == public_key
+            ]
+            reveal_target_entries = [
+                item
+                for item in reveal_commits
+                if item.get("hotkey_public_key") == public_key
+            ]
+            if pre_target_entries != [exact_entry] or reveal_target_entries:
+                return None
+            pre_header = parse_finalized_header(
+                archive_call(
+                    "chain_getHeader",
+                    ("0x" + pre_reveal_hash,),
+                    "pre-reveal-header",
+                )
+            )
+            reveal_header = parse_finalized_header(
+                archive_call(
+                    "chain_getHeader",
+                    ("0x" + reveal_hash,),
+                    "reveal-header",
+                )
+            )
+            if (
+                int(pre_header["block"]) != pre_reveal_block
+                or int(reveal_header["block"]) != reveal_block
+                or reveal_header["parent_hash"] != pre_reveal_hash
+            ):
+                return None
+
+            reveal_runtime = parse_runtime_version(
+                archive_call(
+                    "state_getRuntimeVersion",
+                    ("0x" + pre_reveal_hash,),
+                    "pre-reveal-runtime",
+                )
+            )
+            selected_profile = select_chain_signing_profile(
+                self._chain_signing_profile,
+                runtime_version={
+                    "specVersion": int(reveal_runtime["spec_version"]),
+                    "transactionVersion": int(
+                        reveal_runtime["transaction_version"]
+                    ),
+                },
+                genesis_hash=str(
+                    self._chain_signing_profile["genesis_hash"]
+                ),
+            )
+            metadata_value = archive_call(
+                "state_getMetadata",
+                ("0x" + pre_reveal_hash,),
+                "pre-reveal-metadata",
+            )
+            if not isinstance(metadata_value, str) or not metadata_value.startswith(
+                "0x"
+            ):
+                return None
+            metadata_raw = bytes.fromhex(metadata_value[2:])
+            metadata_commitment = decode_runtime_metadata_commitment(
+                metadata_value
+            )
+            runtime_code_hash = normalize_raw_hash(
+                archive_call(
+                    "state_getStorageHash",
+                    (RUNTIME_CODE_STORAGE_KEY, "0x" + pre_reveal_hash),
+                    "pre-reveal-runtime-code-hash",
+                ),
+                "pre-reveal runtime code hash",
+            )
+            event_profile = validate_subtensor_events_profile_v2(
+                load_subtensor_events_profile_v2(),
+                genesis_hash=self._chain_signing_profile["genesis_hash"],
+                spec_version=reveal_runtime["spec_version"],
+                transaction_version=reveal_runtime["transaction_version"],
+                metadata_raw=metadata_raw,
+                runtime_code_hash="0x" + runtime_code_hash,
+            )
+            reveal_period_key = reveal_period_epochs_storage_key(netuid=netuid)
+            reveal_period_override = decode_reveal_period_epochs_storage(
+                archive_call(
+                    "state_getStorage",
+                    (reveal_period_key, "0x" + pre_reveal_hash),
+                    "pre-reveal-period",
+                )
+            )
+            reviewed_default = resolve_reveal_period_metadata_default_v2(
+                genesis_hash=self._chain_signing_profile["genesis_hash"],
+                runtime_spec_version=reveal_runtime["spec_version"],
+                runtime_transaction_version=reveal_runtime[
+                    "transaction_version"
+                ],
+                metadata_hash=metadata_commitment["metadata_hash"],
+            )
+            reveal_period = (
+                reviewed_default
+                if reveal_period_override is None
+                else int(reveal_period_override)
+            )
+            if (
+                int(reveal_period)
+                != int(selected_profile["subnet_reveal_period_epochs"])
+                or int(chain_state["official_subnet_epoch_id"])
+                - int(reveal_period)
+                != scheduled_subnet_epoch
+                or int(chain_state["subnet_reveal_period_epochs"])
+                != int(reveal_period)
+            ):
+                return None
+
+            reveal_metagraph = decode_selective_metagraph_result(
+                archive_call(
+                    "state_call",
+                    (
+                        CHAIN_RPC_METHOD,
+                        encode_selective_metagraph_params(netuid=netuid),
+                        "0x" + reveal_hash,
+                    ),
+                    "reveal-metagraph",
+                )
+            )
+            if (
+                int(reveal_metagraph["netuid"]) != netuid
+                or int(reveal_metagraph["block"]) != reveal_block
+            ):
+                return None
+            matching_uids = [
+                uid
+                for uid, hotkey in enumerate(reveal_metagraph["hotkeys"])
+                if hotkey == chain_state["validator_hotkey"]
+            ]
+            if matching_uids != [int(chain_state["validator_uid"])]:
+                return None
+            validator_uid = matching_uids[0]
+            reveal_weights_key = weights_storage_key(
+                netuid=netuid,
+                validator_uid=validator_uid,
+            )
+            revealed_weights = [
+                [int(uid), int(weight)]
+                for uid, weight in decode_weights_storage(
+                    archive_call(
+                        "state_getStorage",
+                        (reveal_weights_key, "0x" + reveal_hash),
+                        "reveal-weights",
+                    )
+                )
+            ]
+            if revealed_weights != expected_weights:
+                return None
+            events_value = archive_call(
+                "state_getStorage",
+                (system_events_storage_key(), "0x" + reveal_hash),
+                "reveal-events",
+            )
+            event_count_value = archive_call(
+                "state_getStorage",
+                (system_event_count_storage_key(), "0x" + reveal_hash),
+                "reveal-event-count",
+            )
+            if (
+                not isinstance(events_value, str)
+                or not events_value.startswith("0x")
+                or not isinstance(event_count_value, str)
+                or not event_count_value.startswith("0x")
+            ):
+                return None
+            event_witness = prove_timelocked_weights_reveal_v2(
+                bytes.fromhex(events_value[2:]),
+                profile=event_profile,
+                event_count_raw=bytes.fromhex(event_count_value[2:]),
+                expected_netuid=netuid,
+                expected_uid=validator_uid,
+                expected_account_id_hex=public_key,
+            )
+            revealed_vector_hash = sha256_json(
+                {
+                    "uids": [item[0] for item in revealed_weights],
+                    "weights_u16": [item[1] for item in revealed_weights],
+                }
+            )
+            proof_body = {
+                "schema_version": (
+                    "leadpoet.chain_realized_timelocked_reveal_proof.v2"
+                ),
+                "bundle_hash": str(authority["bundle_hash"]),
+                "source_epoch_id": scheduled_source_epoch,
+                "source_official_subnet_epoch_id": scheduled_subnet_epoch,
+                "netuid": netuid,
+                "validator_hotkey": str(chain_state["validator_hotkey"]),
+                "validator_hotkey_public_key": public_key,
+                "validator_uid": validator_uid,
+                "commitment_hash": commitment_hash,
+                "reveal_round": reveal_round,
+                "commit_storage_key": commit_storage_key,
+                "commit_finalized_block": final_block,
+                "commit_finalized_block_hash": final_block_hash,
+                "commit_state_transition_hash": str(
+                    authority["state_transition_hash"]
+                ),
+                "reveal_window_start_block": reveal_window_start_block,
+                "reveal_window_start_block_hash": reveal_window_start_hash,
+                "pre_reveal_block": pre_reveal_block,
+                "pre_reveal_block_hash": pre_reveal_hash,
+                "pre_reveal_state_root": str(pre_header["state_root"]),
+                "pre_reveal_commit_entry_hash": sha256_json(exact_entry),
+                "reveal_block": reveal_block,
+                "reveal_block_hash": reveal_hash,
+                "reveal_parent_block_hash": str(
+                    reveal_header["parent_hash"]
+                ),
+                "reveal_state_root": str(reveal_header["state_root"]),
+                "reveal_commit_entry_absent": True,
+                "reveal_runtime_spec_version": int(
+                    reveal_runtime["spec_version"]
+                ),
+                "reveal_runtime_transaction_version": int(
+                    reveal_runtime["transaction_version"]
+                ),
+                "reveal_runtime_code_hash": runtime_code_hash,
+                "reveal_metadata_hash": str(
+                    metadata_commitment["metadata_hash"]
+                ),
+                "reveal_period_epochs": int(reveal_period),
+                "system_events_storage_key": system_events_storage_key(),
+                "system_event_count_storage_key": (
+                    system_event_count_storage_key()
+                ),
+                "event_witness": dict(event_witness),
+                "weights_storage_key": reveal_weights_key,
+                "revealed_weights": revealed_weights,
+                "revealed_weights_vector_hash": revealed_vector_hash,
+            }
+            return {
+                **proof_body,
+                "proof_hash": sha256_json(proof_body),
+            }
+        except (
+            ChainSourceV2Error,
+            SubtensorEventsV2Error,
+            ValueError,
+        ) as exc:
+            logger.warning(
+                "timelocked reveal proof is unavailable: %s",
+                exc.__class__.__name__,
+            )
+            return None
 
     def _chain_call(
         self,

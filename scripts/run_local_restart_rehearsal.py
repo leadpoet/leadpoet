@@ -87,6 +87,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/contract_adapter.py",
     "tests/restart_rehearsal/fixture_contract.py",
     "tests/restart_rehearsal/fixtures/production_shaped_v2.json",
+    "tests/restart_rehearsal/fixtures/subtensor_metadata_spec452_parent8984915.scale.gz",
     "tests/restart_rehearsal/dev_snapshot_boundary/sitecustomize.py",
     "tests/restart_rehearsal/dev_snapshot_workflow.py",
     "tests/restart_rehearsal/dynamic_rebenchmark_n_minus_one.py",

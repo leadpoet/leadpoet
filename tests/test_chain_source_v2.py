@@ -12,6 +12,7 @@ from leadpoet_canonical.chain_source_v2 import (
     ChainSourceV2Error,
     chain_source_policy_hash,
     decode_last_update_storage,
+    decode_runtime_metadata_commitment,
     decode_weights_storage,
     decode_timelocked_weight_commits,
     decode_selective_metagraph_result,
@@ -20,6 +21,7 @@ from leadpoet_canonical.chain_source_v2 import (
     last_update_storage_key,
     parse_finalized_header,
     parse_json_rpc_response,
+    resolve_reveal_period_metadata_default_v2,
     ss58_encode_account_id,
     timelocked_weight_commits_storage_key,
     validate_arweave_checkpoint_event,
@@ -33,6 +35,59 @@ OWNER_ACCOUNT = bytes.fromhex(
 SECOND_ACCOUNT = bytes.fromhex(
     "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383"
 )
+
+
+def test_runtime_metadata_commitment_and_reviewed_reveal_default():
+    commitment = decode_runtime_metadata_commitment("0x" + b"meta\x0e".hex())
+    assert commitment == {
+        "metadata_hash": sha256_bytes(b"meta\x0e"),
+        "metadata_version": 14,
+        "metadata_bytes": 5,
+    }
+    assert resolve_reveal_period_metadata_default_v2(
+        genesis_hash=(
+            "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        ),
+        runtime_spec_version=452,
+        runtime_transaction_version=1,
+        metadata_hash=(
+            "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        ),
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("genesis_hash", "0" * 64),
+        ("runtime_spec_version", 453),
+        ("runtime_transaction_version", 2),
+        ("metadata_hash", "sha256:" + "0" * 64),
+    ),
+)
+def test_reviewed_reveal_default_rejects_unknown_runtime(field, value):
+    arguments = {
+        "genesis_hash": (
+            "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        ),
+        "runtime_spec_version": 452,
+        "runtime_transaction_version": 1,
+        "metadata_hash": (
+            "sha256:79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        ),
+    }
+    arguments[field] = value
+    with pytest.raises(ChainSourceV2Error, match="not reviewed"):
+        resolve_reveal_period_metadata_default_v2(**arguments)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (None, "meta0e", "0x00", "0x" + (b"meta\x0d").hex()),
+)
+def test_runtime_metadata_commitment_rejects_invalid_shape(metadata):
+    with pytest.raises(ChainSourceV2Error, match="runtime metadata"):
+        decode_runtime_metadata_commitment(metadata)
 
 
 def _selective_fixture(*, last_field: int = 76) -> bytes:

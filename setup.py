@@ -150,6 +150,7 @@ setup(
             "leadpoet_industry_taxonomy.json",
             "identity/public_suffix_list.dat",
         ],
+        "leadpoet_canonical": ["subtensor_events_profile_v2.json"],
         "research_lab": ["engine_program.md", "fixtures/*.json"],
     },
     include_package_data=True,

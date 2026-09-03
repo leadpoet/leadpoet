@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import re
 from typing import Any, Dict, Mapping, Optional
 
@@ -36,6 +37,9 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
     validate_production_parity_boundary_v2,
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    validate_chain_signing_profile,
+)
 from research_lab.eval.private_runtime import (
     INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES,
     INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES,
@@ -54,7 +58,7 @@ from research_lab.eval.snapshot_store import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v7"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v8"
 _CONFIG_FIELD_NAMES_HASH = (
     "sha256:881723154093057108b3eefdff043f0f9e5509b727d8eed3a8f9d539615f943b"
 )
@@ -273,10 +277,30 @@ def _normalized_environment(value: Mapping[str, Any]) -> Dict[str, Optional[str]
     return normalized
 
 
+def _default_chain_signing_profile() -> Dict[str, Any]:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "validator_tee"
+        / "enclave"
+        / "chain_signing_profile_v2.json"
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return validate_chain_signing_profile(value)
+    except (OSError, ValueError) as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab chain signing profile is unavailable"
+        ) from exc
+
+
 def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Validate the non-secret epoch authority committed into the enclave."""
 
-    if not isinstance(value, Mapping) or set(value) != {"mode", "cutover"}:
+    if not isinstance(value, Mapping) or set(value) != {
+        "mode",
+        "cutover",
+        "chain_signing_profile",
+    }:
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch authority fields are invalid"
         )
@@ -292,7 +316,27 @@ def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch cutover is invalid"
         ) from exc
-    return {"mode": "stateful_v1", "cutover": cutover.to_dict()}
+    try:
+        chain_signing_profile = validate_chain_signing_profile(
+            value.get("chain_signing_profile")
+        )
+    except Exception as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab chain signing profile is invalid"
+        ) from exc
+    cutover_genesis = str(cutover.network_genesis_hash).lower().removeprefix(
+        "0x"
+    )
+    profile_genesis = str(chain_signing_profile["genesis_hash"]).lower()
+    if cutover_genesis != profile_genesis:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab epoch and signing genesis differ"
+        )
+    return {
+        "mode": "stateful_v1",
+        "cutover": cutover.to_dict(),
+        "chain_signing_profile": chain_signing_profile,
+    }
 
 
 def build_research_lab_execution_config(
@@ -301,6 +345,7 @@ def build_research_lab_execution_config(
     environment: Optional[Mapping[str, Any]] = None,
     network: Optional[str] = None,
     netuid: Optional[int] = None,
+    chain_signing_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     resolved = config or ResearchLabGatewayConfig.from_env()
     values = {
@@ -355,7 +400,15 @@ def build_research_lab_execution_config(
             name for name in MODEL_CREDENTIAL_ENV_NAMES if name in source_environment
         ),
         "epoch_authority": _normalized_epoch_authority(
-            {"mode": "stateful_v1", "cutover": epoch_cutover}
+            {
+                "mode": "stateful_v1",
+                "cutover": epoch_cutover,
+                "chain_signing_profile": (
+                    dict(chain_signing_profile)
+                    if chain_signing_profile is not None
+                    else _default_chain_signing_profile()
+                ),
+            }
         ),
         "behavior_environment": _normalized_environment(
             {
@@ -433,15 +486,24 @@ def validate_research_lab_execution_config(value: Mapping[str, Any]) -> Dict[str
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab production-parity boundary is invalid"
         ) from exc
+    epoch_authority = _normalized_epoch_authority(
+        value.get("epoch_authority")
+    )
+    if epoch_authority["chain_signing_profile"]["network"] != network:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab chain signing profile targets another network"
+        )
+    if int(epoch_authority["cutover"]["netuid"]) != int(netuid):
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab epoch authority targets another netuid"
+        )
     normalized = {
         "schema_version": SCHEMA_VERSION,
         "deployment": {"network": network, "netuid": netuid},
         "fields": _normalized_fields(value.get("fields")),
         "host_only_secret_fields": sorted(HOST_ONLY_SECRET_FIELDS),
         "credential_environment_names": list(credential_names),
-        "epoch_authority": _normalized_epoch_authority(
-            value.get("epoch_authority")
-        ),
+        "epoch_authority": epoch_authority,
         "behavior_environment": normalized_environment,
     }
     # Canonicalization also rejects unsupported object types and NaN values.

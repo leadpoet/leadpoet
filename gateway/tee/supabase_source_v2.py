@@ -524,10 +524,14 @@ QUERY_POLICIES = {
             "authority_hash,publication_receipt_hash,"
             "compact_finalization_hash,finalization_receipt_hash,authority_doc"
         ),
-        parameter_names=("netuid", "source_epoch_id", "validator_hotkey"),
+        parameter_names=(
+            "netuid",
+            "source_epoch_id",
+            "validator_hotkey",
+        ),
         max_pages=1,
         order="bundle_hash.asc",
-        limit=2,
+        limit=11,
     ),
     "legacy_finalized_allocation_migrations": SupabaseQueryV2(
         policy_id="legacy_finalized_allocation_migrations",

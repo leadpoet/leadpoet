@@ -14,6 +14,7 @@ import builtins
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import gzip
 import hashlib
 import http.client
 import importlib
@@ -59,6 +60,7 @@ CURRENT_BLOCK = 8_700_040
 LAST_EPOCH_BLOCK = 8_700_000
 TEMPO = 360
 SUBNET_EPOCH_INDEX = 24_166
+RUNTIME_SPEC_VERSION = 452
 CUTOVER_BLOCK = 8_670_636
 CUTOVER_BLOCK_HASH = (
     "0x25c2109c70fb3502a9c20fd3b04c1db3f0a18d968e73b42da9f1a47770a5e106"
@@ -599,7 +601,7 @@ def _local_chain_signing_profile() -> dict[str, Any]:
     return select_chain_signing_profile(
         measured,
         runtime_version={
-            "specVersion": 440,
+            "specVersion": RUNTIME_SPEC_VERSION,
             "transactionVersion": 1,
         },
         genesis_hash=GENESIS_HASH.removeprefix("0x"),
@@ -913,7 +915,7 @@ class _LocalSubstrate:
                 "specName": "node-subtensor",
                 "implName": "node-subtensor",
                 "authoringVersion": 1,
-                "specVersion": 440,
+                "specVersion": RUNTIME_SPEC_VERSION,
                 "implVersion": 0,
                 "apis": [],
                 "transactionVersion": 1,
@@ -1852,6 +1854,7 @@ def _selective_metagraph_fixture(
 def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
     from leadpoet_canonical.chain_source_v2 import (
         last_update_storage_key,
+        reveal_period_epochs_storage_key,
         subnet_epoch_storage_key,
         weights_storage_key,
     )
@@ -1870,6 +1873,21 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
     params = request["params"]
     current_hash = _block_hash(CURRENT_BLOCK)
     predecessor_hash = _block_hash(CUTOVER_BLOCK - 1)
+
+    def runtime_metadata() -> bytes:
+        raw = gzip.decompress(
+            (
+                SOURCE_ROOT
+                / "tests/restart_rehearsal/fixtures/subtensor_metadata_spec452_parent8984915.scale.gz"
+            ).read_bytes()
+        )
+        if (
+            len(raw) != 334_487
+            or hashlib.sha256(raw).hexdigest()
+            != "79fc9235a87651a0cd5b93856d4b5696ffb8a0bd26c6f30a1f1402ac8aaad195"
+        ):
+            raise ValueError("local runtime metadata fixture differs")
+        return raw
 
     if method == "chain_getFinalizedHead" and params == []:
         result: Any = current_hash
@@ -1895,17 +1913,41 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
             "extrinsicsRoot": _block_hash(block + 2),
             "digest": {"logs": []},
         }
-    elif method == "state_getRuntimeVersion" and params == [current_hash]:
+    elif (
+        method == "state_getRuntimeVersion"
+        and len(params) == 1
+        and (params == [current_hash] or archive)
+    ):
+        _block_number(str(params[0]))
         result = {
             "specName": "node-subtensor",
             "implName": "node-subtensor",
             "authoringVersion": 1,
-            "specVersion": 440,
+            "specVersion": RUNTIME_SPEC_VERSION,
             "implVersion": 0,
             "apis": [],
             "transactionVersion": 1,
             "stateVersion": 1,
         }
+    elif method == "state_getMetadata" and len(params) == 1 and archive:
+        _block_number(str(params[0]))
+        result = "0x" + runtime_metadata().hex()
+    elif method == "state_getStorageHash" and len(params) == 2 and archive:
+        from leadpoet_canonical.subtensor_events_v2 import (
+            RUNTIME_CODE_STORAGE_KEY,
+        )
+
+        storage_key, at_hash = map(str, params)
+        _block_number(at_hash)
+        if storage_key != RUNTIME_CODE_STORAGE_KEY:
+            raise ValueError("local runtime code storage key differs")
+        profile = json.loads(
+            (
+                SOURCE_ROOT
+                / "leadpoet_canonical/subtensor_events_profile_v2.json"
+            ).read_text(encoding="utf-8")
+        )
+        result = profile["runtime_code_storage_hash"]
     elif method == "state_call" and len(params) == 3:
         runtime_method = str(params[0])
         at_hash = str(params[2])
@@ -1940,6 +1982,7 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
         )
         weight_key = weights_storage_key(netuid=71, validator_uid=0)
         update_key = last_update_storage_key(netuid=71)
+        reveal_period_key = reveal_period_epochs_storage_key(netuid=71)
         if storage_key == subnet_epoch_key:
             result = "0x" + _subnet_epoch_index_at(block).to_bytes(
                 8, "little"
@@ -1959,6 +2002,8 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
                 + last_update.to_bytes(8, "little")
                 + last_update.to_bytes(8, "little")
             ).hex()
+        elif storage_key == reveal_period_key:
+            result = "0x" + (1).to_bytes(8, "little").hex()
         else:
             names = (
                 "Tempo",
@@ -1975,7 +2020,13 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
             if len(matching) != 1:
                 raise ValueError("local chain storage key is unknown")
             name = matching[0]
-            if at_hash == CUTOVER_BLOCK_HASH:
+            if name == "LastEpochBlock" and archive:
+                values = {
+                    "LastEpochBlock": _subnet_epoch_state_at(block)[
+                        "LastEpochBlock"
+                    ],
+                }
+            elif at_hash == CUTOVER_BLOCK_HASH:
                 values = {
                     "LastEpochBlock": CUTOVER_BLOCK,
                 }

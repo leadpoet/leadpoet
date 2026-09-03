@@ -92,7 +92,7 @@ Choose **Submit API Source** in the miner menu. You only need to provide the API
 
 - The source/API name and source kind.
 - Its HTTPS API base URL and public documentation URL.
-- The authentication type and rate-limit notes.
+- The authentication type (`none`, API key, or bearer token) and rate-limit notes.
 - At least one working endpoint example: `GET` or `POST`, a relative path, what it does, and an example query or JSON body.
 
 Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.

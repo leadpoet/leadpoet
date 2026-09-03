@@ -1022,7 +1022,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:dc6beef78b65fc928e3ea1dacc032da37bb437ea4cbe94d0794d97fdfdb9fdf3",
-  "protected_source_commit": "1766ab6ed365945dba813391e37f8eff97aeb93e",
+  "manifest_hash": "sha256:2cb82fcd494b01333b968a01b8ac0b120482a1febfca91c13e7e48352a6769c5",
+  "protected_source_commit": "4f5f22a93477bc8c58895906f404e01bc306fcd0",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

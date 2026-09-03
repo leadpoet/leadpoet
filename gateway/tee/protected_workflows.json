@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "34156be00fbc86a19c473329bb8dc28f70df69bb",
+  "baseline_commit": "b52963d25090c5be57e21c0a7f90e679219fe449",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -97,7 +97,7 @@
       "symbol": "require_worker_authority_after_liveness"
     },
     {
-      "ast_sha256": "sha256:3e76ff2fb413d0a9779cf9bf56777908084eca03de44587fd09baa46ac7f6147",
+      "ast_sha256": "sha256:d4fe414133acde1f7772c992c0a7c325307df9dd507c51540678584fb5bf9861",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
     },
@@ -687,7 +687,7 @@
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
     {
-      "ast_sha256": "sha256:a5970a88eb195eb326158816214b73676653205660d60da3c43dbeeea9a28f0a",
+      "ast_sha256": "sha256:0426332d64a4112f0c26bbc1adae35a8c0003d414715c412173f3cf3deba0a61",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
@@ -3217,7 +3217,7 @@
       "symbol": "_load_release_manifest"
     },
     {
-      "ast_sha256": "sha256:2d67d2a3a55adcea9c3a6547173689889dc428af1153ea516b74c78cc0ea712f",
+      "ast_sha256": "sha256:b7fdee40654363e2252a4212abb7ddb456fc82e2ad145ceb8f2e6dfe91b0072a",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_select_active_graphs"
     },
@@ -3382,7 +3382,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:333f0197eaca8c9083546700fde08d548c65134a843e56909eeae50988bd17b7",
+      "ast_sha256": "sha256:0f490afaaf2282514e96f9667580912842ed7384e68160b61376e509253166d3",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -5127,7 +5127,7 @@
       "symbol": "_FALLBACK_CONTEXTS"
     },
     {
-      "ast_sha256": "sha256:96c4f03ab46ab383b7a0b2b61c5d6194bb337d5e3bf28fcf253b66db34a39a03",
+      "ast_sha256": "sha256:bbfdeab3353a61a255b8af241f8ad72122675f982408fb214e1969c9e4a8b5ee",
       "path": "gateway/tee/prepare_active_release_lineage_v2.py",
       "symbol": "__module__"
     },
@@ -5142,12 +5142,17 @@
       "symbol": "_fetch_exact_release_lineage_v2"
     },
     {
+      "ast_sha256": "sha256:5f57dd7436a1fa02708117cab9adf79edb0fbd026a6d9c65436e4b88e74aa586",
+      "path": "gateway/tee/prepare_active_release_lineage_v2.py",
+      "symbol": "_load_active_source_add_graphs_v2"
+    },
+    {
       "ast_sha256": "sha256:07debc12dabe4d77bea9a0b8c04a901dc9616b4b5c6c00b8c64ee80c39fd37d2",
       "path": "gateway/tee/prepare_active_release_lineage_v2.py",
       "symbol": "main"
     },
     {
-      "ast_sha256": "sha256:0a6a1119ac7a129f11d109ac468f3f85de639abf909ca9c73dc92300f9b03f54",
+      "ast_sha256": "sha256:7208dcb25e1be5e9d563534c54424d2a7df653c597729dc43a68353d254fa365",
       "path": "gateway/tee/prepare_active_release_lineage_v2.py",
       "symbol": "prepare_gateway_final_active_lineage_v2"
     },
@@ -7022,6 +7027,11 @@
       "symbol": "_allocate_source_add"
     },
     {
+      "ast_sha256": "sha256:5b1110afa70945f3ae48c2d3a2c9f1fb1b640e1e2fdd27879500881ca96cc573",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_canonical_source_add_created_at"
+    },
+    {
       "ast_sha256": "sha256:ff2a7f25d2190d2ffbe96c88b6ff527756546ea781c7f058e7fae89cd48ae139",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_champion_desired_alpha_percent"
@@ -8697,7 +8707,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:06f981cd58d9916bfb2ab7157594c680e9cf9efe70541c7bd0638752095bc627",
-  "protected_source_commit": "34156be00fbc86a19c473329bb8dc28f70df69bb",
+  "manifest_hash": "sha256:002e059a14c604c6d72679c8794f856f745b2032ae5000b796875d4c41fcb8f5",
+  "protected_source_commit": "b52963d25090c5be57e21c0a7f90e679219fe449",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

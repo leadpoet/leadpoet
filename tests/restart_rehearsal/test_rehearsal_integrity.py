@@ -9235,6 +9235,7 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
 
     assert "prepare_validator_initial_active_lineage_v2(" in script
     assert "prepare_gateway_final_active_lineage_v2(" in script
+    assert "load_source_add_graphs=no_active_graphs" in script
     assert "validate_active_release_requirements_v2(conflicting)" in script
     assert "running_channel[\"gateway_release_manifest\"]" in script
     assert '"leadpoet-validator-main" in containers' in script

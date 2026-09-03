@@ -1189,6 +1189,7 @@ class AttestedReplayDevEvaluatorV2:
         from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
         from gateway.research_lab.model_authority_v2 import (
             AttestedPrivateModelRunnerV2,
+            QualificationOutcomeIncompleteV2Error,
         )
         from leadpoet_canonical.attested_v2 import sha256_json
         from research_lab.eval import DockerPrivateModelSpec
@@ -1283,34 +1284,39 @@ class AttestedReplayDevEvaluatorV2:
                     parent_graphs=self._parent_graphs,
                     execute=execute,
                 )
-                await runner.run_with_provider_evidence(
-                    canonical_icp,
-                    {
-                        "mode": "candidate_hybrid_discovery",
-                        "evaluation_epoch": self._epoch_id,
-                        "dev_eval": True,
-                        "run_label": str(candidate.node_id or ""),
-                        "dev_item_number": item_index + 1,
-                        "cohort_hash": cohort_hash,
-                        "snapshot_manifest_hash": str(
+                try:
+                    await runner.run_with_provider_evidence(
+                        canonical_icp,
+                        {
+                            "mode": "candidate_hybrid_discovery",
+                            "evaluation_epoch": self._epoch_id,
+                            "dev_eval": True,
+                            "run_label": str(candidate.node_id or ""),
+                            "dev_item_number": item_index + 1,
+                            "cohort_hash": cohort_hash,
+                            "snapshot_manifest_hash": str(
+                                manifest.get("manifest_hash") or ""
+                            ),
+                            "miss_policy": MISS_POLICY_STRICT,
+                        },
+                        provider_evidence_cache=current_cache,
+                        provider_evidence_mode="record",
+                        cache_parent_graphs=((current_graph,) if current_graph else ()),
+                        provider_snapshot_bundle=snapshot_bundle,
+                        provider_snapshot_tree_hash=str(
+                            snapshot_bundle["source_tree_hash"]
+                        ),
+                        provider_snapshot_manifest_hash=str(
                             manifest.get("manifest_hash") or ""
                         ),
-                        "miss_policy": MISS_POLICY_STRICT,
-                    },
-                    provider_evidence_cache=current_cache,
-                    provider_evidence_mode="record",
-                    cache_parent_graphs=((current_graph,) if current_graph else ()),
-                    provider_snapshot_bundle=snapshot_bundle,
-                    provider_snapshot_tree_hash=str(
-                        snapshot_bundle["source_tree_hash"]
-                    ),
-                    provider_snapshot_manifest_hash=str(
-                        manifest.get("manifest_hash") or ""
-                    ),
-                    provider_cost_scope=scope,
-                    provider_cost_cap_microusd=remaining_cost_microusd,
-                    provider_call_cap=remaining_provider_calls,
-                )
+                        provider_cost_scope=scope,
+                        provider_cost_cap_microusd=remaining_cost_microusd,
+                        provider_call_cap=remaining_provider_calls,
+                    )
+                except QualificationOutcomeIncompleteV2Error:
+                    # Discovery consumes the retained evidence, not the semantic
+                    # result. Strict replay below classifies the candidate.
+                    pass
                 generated = runner.generated_provider_evidence_cache(cache_ref)
                 authorities = runner.attested_authorities()
                 summary = runner.provider_evidence_summary(cache_ref)

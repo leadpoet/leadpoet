@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from leadpoet_verifier.economics import allocate_research_lab_epoch
+from leadpoet_verifier.economics import (
+    _canonical_source_add_created_at,
+    allocate_research_lab_epoch,
+)
 from research_lab.canonical import sha256_json
 from research_lab.source_add_rewards import (
     REWARD_KIND_SOURCE_ACCEPTANCE,
@@ -215,6 +218,60 @@ class TestAllocationRails:
             "remaining_alpha_percent": total_due,
             "reward_kind": row["reward_kind"],
         }
+
+    @pytest.mark.parametrize(
+        ("timestamp", "expected"),
+        [
+            ("2026-09-02T22:57:50.9+00:00", "2026-09-02T22:57:50.900000Z"),
+            ("2026-09-02T22:57:50.92+00:00", "2026-09-02T22:57:50.920000Z"),
+            ("2026-09-02T22:57:50.926+00:00", "2026-09-02T22:57:50.926000Z"),
+            ("2026-09-02T22:57:50.9266+00:00", "2026-09-02T22:57:50.926600Z"),
+            ("2026-09-02T22:57:50.92667+00:00", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-02T22:57:50.926670Z", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-02T22:57:50.926670999Z", "2026-09-02T22:57:50.926670Z"),
+            ("2026-09-03T04:27:50.92667+05:30", "2026-09-02T22:57:50.926670Z"),
+        ],
+    )
+    def test_source_add_fifo_timestamp_is_python39_safe(self, timestamp, expected):
+        assert _canonical_source_add_created_at(timestamp) == expected
+
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-09-02 22:57:50.92667+00:00",
+            "2026-09-02T22:57:50.92667",
+            "2026-09-02T22:57:50.92667z",
+            "2026-09-02T22:57:50,92667Z",
+            "2026-09-02T22:57:50.92667+0000",
+            "2026-09-02T22:57:50.92667-00:00",
+            "2026-09-02T22:57:50.1234567890Z",
+            "2026-02-30T22:57:50.92667Z",
+            "2026-09-02T24:00:00Z",
+            "2026-09-02T22:57:50.92667+24:00",
+        ],
+    )
+    def test_source_add_fifo_timestamp_rejects_malformed_values(self, timestamp):
+        with pytest.raises(ValueError, match="source add created_at is invalid"):
+            _canonical_source_add_created_at(timestamp)
+
+    def test_first_live_source_add_allocation_accepts_postgrest_fraction_width(self):
+        source = create_leg1_reward(
+            adapter_id="adapter:production-timestamp",
+            miner_ref="miner:owner",
+            start_epoch=100,
+        )
+        obligation = self._source_obligation(source)
+        obligation["created_at"] = "2026-09-02T22:57:50.92667+00:00"
+
+        allocation = allocate_research_lab_epoch(
+            100,
+            self.POLICY,
+            [],
+            [],
+            active_source_add_obligations=[obligation],
+        )
+
+        assert allocation["source_add_alpha_percent"] == pytest.approx(0.2)
 
     def test_source_rewards_are_first_class_and_fixed_size(self):
         leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
@@ -628,6 +685,7 @@ class TestAllocationRails:
     async def test_gateway_bundle_keeps_source_obligations_out_of_champion_inputs(self, monkeypatch):
         from gateway.research_lab import allocations as gateway_allocations
 
+        _disable_durable_allocation_retry(monkeypatch, gateway_allocations)
         source = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:a", start_epoch=100)
         source_obligation = self._source_obligation(source)
         monkeypatch.setattr(
@@ -669,6 +727,7 @@ class TestAllocationRails:
     async def test_gateway_bundle_without_source_preserves_legacy_input_shape(self, monkeypatch):
         from gateway.research_lab import allocations as gateway_allocations
 
+        _disable_durable_allocation_retry(monkeypatch, gateway_allocations)
         authority = _allocation_authority_outcome(
             epoch=105,
             netuid=71,
@@ -710,6 +769,7 @@ async def test_gateway_allocation_coalesces_only_overlapping_authority_builds(
 ):
     from gateway.research_lab import allocations as gateway_allocations
 
+    _disable_durable_allocation_retry(monkeypatch, gateway_allocations)
     policy = {
         "policy_id": "research_lab_reimbursement_policy_v1",
         "lab_cap_alpha_percent": 30.0,
@@ -768,6 +828,7 @@ async def test_gateway_allocation_coalesces_only_overlapping_authority_builds(
 async def test_gateway_allocation_retries_after_shared_build_failure(monkeypatch):
     from gateway.research_lab import allocations as gateway_allocations
 
+    _disable_durable_allocation_retry(monkeypatch, gateway_allocations)
     policy = {
         "policy_id": "research_lab_reimbursement_policy_v1",
         "lab_cap_alpha_percent": 30.0,
@@ -811,6 +872,112 @@ async def test_gateway_allocation_retries_after_shared_build_failure(monkeypatch
 
     assert calls == 2
     assert bundle["epoch"] == 106
+
+
+@pytest.mark.asyncio
+async def test_gateway_allocation_resumes_after_durable_failed_generation(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations as gateway_allocations
+
+    selected_sequences = []
+
+    async def durable_generation(**_kwargs):
+        return 1
+
+    async def build(**kwargs):
+        selected_sequences.append(kwargs["allocation_sequence"])
+        return {"status": "matched"}
+
+    monkeypatch.setattr(
+        gateway_allocations,
+        "_load_durable_allocation_retry_generation",
+        durable_generation,
+    )
+    monkeypatch.setattr(gateway_allocations, "build_allocation_v2", build)
+
+    result = await gateway_allocations._build_allocation_v2_singleflight(
+        epoch_id=24940,
+        netuid=71,
+        policy={"policy_id": "durable-retry"},
+    )
+
+    assert result == {"status": "matched"}
+    assert selected_sequences == [1]
+
+
+@pytest.mark.asyncio
+async def test_durable_allocation_retry_uses_failed_receipt_sequence(monkeypatch):
+    from gateway.research_lab import allocations as gateway_allocations
+
+    commit = "a" * 40
+    observed = {}
+
+    async def load(table, **kwargs):
+        observed["table"] = table
+        observed.update(kwargs)
+        return [
+            {
+                "sequence": 0,
+                "receipt_status": "failed",
+                "failure_code": "execution_valueerror",
+                "job_id": "scoring-v2:research-lab-allocation:job-0",
+                "commit_sha": commit,
+                "epoch_id": 24940,
+                "purpose": "research_lab.allocation.v2",
+                "role": "gateway_coordinator",
+            }
+        ]
+
+    monkeypatch.setattr(gateway_allocations, "_active_gateway_commit", lambda: commit)
+    monkeypatch.setattr(gateway_allocations, "select_many", load)
+
+    generation = await gateway_allocations._load_durable_allocation_retry_generation(
+        epoch_id=24940,
+    )
+
+    assert generation == 1
+    assert observed["table"] == "research_lab_attested_execution_receipts_v2"
+    assert ("receipt_status", "failed") in observed["filters"]
+    assert ("commit_sha", commit) in observed["filters"]
+    assert "receipt_doc" not in observed["columns"]
+
+
+@pytest.mark.asyncio
+async def test_durable_allocation_retry_exhaustion_fails_closed(monkeypatch):
+    from gateway.research_lab import allocations as gateway_allocations
+
+    commit = "b" * 40
+
+    async def load(_table, **_kwargs):
+        return [
+            {
+                "sequence": 7,
+                "receipt_status": "failed",
+                "failure_code": "execution_valueerror",
+                "job_id": "scoring-v2:research-lab-allocation:job-7",
+                "commit_sha": commit,
+                "epoch_id": 24941,
+                "purpose": "research_lab.allocation.v2",
+                "role": "gateway_coordinator",
+            }
+        ]
+
+    monkeypatch.setattr(gateway_allocations, "_active_gateway_commit", lambda: commit)
+    monkeypatch.setattr(gateway_allocations, "select_many", load)
+
+    with pytest.raises(RuntimeError, match="retry generations are exhausted"):
+        await gateway_allocations._load_durable_allocation_retry_generation(
+            epoch_id=24941,
+        )
+
+
+def _disable_durable_allocation_retry(monkeypatch, gateway_allocations):
+    monkeypatch.setattr(
+        gateway_allocations,
+        "_load_durable_allocation_retry_generation",
+        lambda **_kwargs: _async_value(0),
+    )
 
 
 async def _async_value(value):

@@ -140,6 +140,33 @@ def test_frontier_is_canonical_and_binds_every_checkpoint():
     )
 
 
+def test_coordinator_canonicalizes_fifo_ordered_source_add_rewards():
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+    )
+
+    later_id = _source_add_row(status="active", alpha_percent=0.2)
+    later_id["reward_ref"] = "source_add_reward:fca534a2e276213a"
+    earlier_id = _source_add_row(status="active", alpha_percent=0.2)
+    earlier_id["reward_ref"] = "source_add_reward:109de568f747a6a8"
+
+    frontier = object.__new__(
+        CoordinatorAllocationSourceV2
+    )._build_settlement_frontier(
+        epoch=24942,
+        netuid=71,
+        champion_rows=[],
+        source_add_rows=[later_id, earlier_id],
+        history=[],
+        predecessor=None,
+    )
+
+    assert [
+        checkpoint["source_id"]
+        for checkpoint in frontier["reward_checkpoints"]
+    ] == [earlier_id["reward_ref"], later_id["reward_ref"]]
+
+
 def test_frontier_successor_rejects_rewind_fork_and_tampering():
     predecessor = build_allocation_settlement_frontier_v2(
         mode="legacy_full_history_bootstrap",

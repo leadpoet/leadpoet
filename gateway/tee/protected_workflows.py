@@ -1595,6 +1595,7 @@ PROTECTED_SYMBOLS = {
         "_champion_total_due_alpha_percent",
         "_champion_paid_alpha_percent_to_date",
         "_champion_remaining_alpha_percent",
+        "_canonical_source_add_created_at",
     ),
     "gateway/tee/coordinator_reward_source_v2.py": (
         "CoordinatorRewardSourceV2",
@@ -1649,6 +1650,7 @@ PROTECTED_SYMBOLS = {
         "PrepareActiveReleaseLineageV2Error",
         "_atomic_json_documents",
         "_fetch_exact_release_lineage_v2",
+        "_load_active_source_add_graphs_v2",
         "prepare_validator_initial_active_lineage_v2",
         "prepare_gateway_final_active_lineage_v2",
         "prepare_validator_final_active_lineage_v2",

@@ -479,63 +479,33 @@ helper. If the helper is unavailable, synchronize the canonical checkout with
 
 ## Research Lab and sourcing boundaries
 
-### Single model runner parity (non-negotiable)
+### Sourcing architecture simplicity (non-negotiable)
 
-Leadpoet Site production, local champion/parity execution, and the Research Lab
-champion lane must execute the same model-owned runner from one immutable
-`leadpoet/Sourcing_model` release. "Same" requires all of the following:
+The Research Lab sourcing-model overhaul is an agent-bundle competition. A
+miner may choose or modify any model, harness, prompts, dependencies, routing,
+and internal orchestration. Start from the smallest interoperable boundary:
 
-- The source commit, model artifact digest, dependency-lock hash, runtime/base
-  image digest, consumer-contract hash, routing catalog/policy/profile hashes,
-  feature-schema hash, verifier identity, tool-binding manifest hashes, and LLM
-  configuration identity are exact matches.
-- All three paths use the same model-owned start, continuation, action,
-  completion, result, and canonical-receipt contracts. The model alone owns ICP
-  normalization; candidate, intent, and contact routing; provider order;
-  budgets, retries, and stop conditions; evidence parsing; and qualification
-  decisions.
-- Hosts own only credentials, network calls, queues, leases, provider rate
-  limits, durable storage, actual cost/latency reporting, health, and
-  deployment. A host must not add a route, reorder tools, reinterpret evidence,
-  select an alternate verifier, or make a qualification decision.
-- A legacy `run_icp()`, direct Exa segmented executor, Site-owned intent
-  router, or consumer-specific verifier cannot satisfy champion or parity
-  execution. An external verifier is allowed only when every path uses the
-  same immutable verifier artifact and digest bound into the release identity.
-- The same normalized input, evaluation date, capability contract, and recorded
-  provider responses must produce byte-identical model action sequences,
-  provider request fingerprints, evidence admission/rejection decisions, final
-  results, and canonical model receipts. Host receipts may differ only for
-  host-owned operational facts.
-- A local working-tree run or Research Lab challenger may use a different model
-  only when it is clearly labeled non-champion and non-parity. Challenger
-  results must never be mixed with champion parity results. The
-  `leadpoet-lab` branch artifact is challenger-only until its exact release is
-  promoted to `main`, pinned by Site, and selected as the shared champion.
-- Any change that could make Site, local, and Lab behavior differ must start in
-  `Sourcing_model`, update the versioned consumer contract and deterministic
-  cross-consumer replay fixtures, and update both thin host adapters in the
-  same reviewed release.
-- Every consumer must fail startup or activation when a required identity,
-  binding, protocol member, or parity proof is missing or different. Never
-  fall back silently to a legacy or consumer-owned execution path.
+- One documented callable entrypoint whose name is fixed by the competition.
+- One stable, validated input schema and output schema.
+- Access to the organizer-approved provider APIs, with credentials supplied by
+  the host rather than embedded in submissions.
+- Simple externally enforced time, cost, and API limits needed for a comparable
+  benchmark.
+- The benchmark result is the authority for model quality.
 
-- This repository owns Research Lab consumption, benchmarking, fulfillment
-  infrastructure, gateway, and validator runtimes. `leadpoet/Sourcing_model`
-  owns model semantics and industry taxonomy.
-- Research Lab champion and local parity execution consume the exact signed
-  immutable artifact selected by Site production. The branch-specific
-  `research-lab/sourcing-model/branches/leadpoet-lab/current.json` artifact is
-  challenger-only until that exact release is promoted to `main`, pinned by
-  Site, and selected as the shared champion. Verify repository, commit,
-  signature, image digest, and lineage for both lanes, and never substitute
-  one lane for the other.
-- Model-quality fixes belong in `Sourcing_model`; consumers may bind
-  credentials and transport but may not reinterpret model-owned plans.
-- Preserve exactly one official candidate entering paid scoring. Keep
-  development/inner-loop scores isolated from promotion, rewards, payments,
-  allocation, emissions, and weights unless the production contract explicitly
-  advances the selected candidate.
+Do not require Git commit or repository identity, GitHub attestation, source or
+artifact digests, dependency/runtime/manifest/corpus hashes, canonical
+receipts, byte-identical replay, cross-consumer action parity, or commit-bound
+promotion as admission, scoring, or activation gates. A new commit must not
+trigger re-attestation or invalidate an otherwise compatible bundle. Do not
+rebuild equivalent layers under different names.
+
+When implementing this overhaul, prefer removing the old sourcing identity and
+attestation plumbing over preserving it through compatibility layers.
+Reintroduce an excluded verification mechanism only after a new explicit user
+request names it. This override applies to the `Sourcing_model` and Research
+Lab agent-bundle path; it does not independently relax validator, chain-signing,
+or weight-submission safety outside that path.
 
 ## Routine handoff
 

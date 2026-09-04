@@ -284,12 +284,17 @@ def test_concurrent_publications_produce_one_result(store, superuser, connect):
     assert store.create_round(round_id, round_config(round_id, [hotkey("pub-runner")]))["status"] == "created"
     with superuser.cursor() as cursor:
         cursor.execute("UPDATE public.lab_arena_rounds SET status = 'scored', stage1_scoring_plan_hash = %s WHERE round_id = %s", (sha("p1"), round_id))
-    basis = {"reward_basis_hash": sha("basis"), "result_bundle_hash": sha("bundle"), "king_outcome": "crowned", "effective_reward_epoch": 100}
+    signature = {"algorithm": "ECDSA_SHA_256", "public_key_hash": sha("arena-key"), "signature_b64": "AA=="}
+    basis = {"reward_basis_hash": sha("basis"), "result_bundle_hash": sha("bundle"), "king_outcome": "crowned", "effective_reward_epoch": 100, "signature": signature}
+    signing_key = {"schema_version": "leadpoet.lab_arena.signing_key.v1", "algorithm": "ECDSA_SHA_256", "key_spec": "ECC_NIST_P256", "public_key_der_b64": "AA==", "public_key_hash": sha("arena-key")}
     patch = {
         "result_bundle_hash": sha("bundle"), "publication_doc": {"result_bundle_hash": sha("bundle")},
         "king_outcome": "crowned", "king_hotkey": hotkey("king"), "king_start_epoch": 100,
-        "effective_reward_epoch": 100, "reward_basis_hash": sha("basis"), "reward_basis_doc": basis,
+        "effective_reward_epoch": 100, "reward_basis_hash": sha("basis"), "reward_basis_doc": basis, "signing_key_doc": signing_key,
     }
+    # The key that signed the basis must be the key the patch stores with it.
+    with pytest.raises(ArenaStoreError):
+        store.transition_round(round_id, "scored", "published", dict(patch, signing_key_doc=dict(signing_key, public_key_hash=sha("other-key"))))
     results = []
 
     def publish():
@@ -313,6 +318,26 @@ def test_concurrent_publications_produce_one_result(store, superuser, connect):
         ):
             with pytest.raises(Exception, match="immutable"):
                 cursor.execute(statement, (round_id,))
+    # The weight path reads the signed basis and its key through the view with service_role,
+    # which stays locked out of the Arena tables themselves.
+    with superuser.cursor() as cursor:
+        cursor.execute("SET ROLE service_role")
+        cursor.execute(
+            "SELECT round_id, reward_basis_hash, signing_key_doc ->> 'public_key_hash', reward_basis_doc ->> 'king_outcome' "
+            "FROM public.lab_arena_reward_basis_v1 WHERE effective_reward_epoch <= %s ORDER BY effective_reward_epoch DESC LIMIT 1",
+            (100,),
+        )
+        assert cursor.fetchone() == (round_id, sha("basis"), sha("arena-key"), "crowned")
+        cursor.execute("SELECT count(*) FROM public.lab_arena_reward_basis_v1 WHERE effective_reward_epoch <= 99")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("RESET ROLE")
+    with superuser.cursor() as cursor:
+        cursor.execute("SET ROLE service_role")
+        with pytest.raises(Exception, match="permission denied"):
+            cursor.execute("SELECT count(*) FROM public.lab_arena_rounds")
+    superuser.rollback()
+    with superuser.cursor() as cursor:
+        cursor.execute("RESET ROLE")  # SET ROLE outlives the rolled-back transaction
     # A second published round cannot reuse the effective reward epoch.
     other = "arena-2026-09-03-pub"
     assert store.create_round(other, round_config(other, [hotkey("pub-runner")]))["status"] == "created"
@@ -787,7 +812,7 @@ def _scoring_items(executed):
     return items
 
 
-def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(store):
+def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(store, superuser):
     round_id = "arena-2026-09-02-sc"
     runners, parts = open_round(store, round_id, participants=2, runners=2, prefix="sc")
     executor, scorer = runners
@@ -830,23 +855,11 @@ def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(st
     assert store.close_scoring(round_id, 1)["status"] == "existing"
     score_runs = store.list_runs(round_id, stage=1, kind="score")
     assert len(score_runs) == 60 and {run["runner_hotkey"] for run in score_runs} == {executor, scorer}
-    # Replay rejection: two accepted scorings the Arena could not reproduce fail and reopen the window for their second attempts.
-    accepted = sorted(run["run_id"] for run in score_runs if run["status"] == "accepted")
-    rejected = store.reject_scorings(round_id, 1, accepted[:2])
-    assert rejected["status"] == "reopened" and rejected["rejected"] == 2 and rejected["exhausted"] == 0 and store.get_round(round_id)["status"] == "stage1_scoring"
-    retries = [run for run in store.list_runs(round_id, stage=1, kind="score") if run["status"] == "pending"]
-    assert len(retries) == 2 and all(run["attempt"] == 2 and run["stage_generation"] == rejected["stage_generation"] for run in retries)
-    assert all(run["terminal_cause"] == "replay_rejected" for run in store.list_runs(round_id, stage=1, kind="score") if run["run_id"] in accepted[:2])
-    assert store.reject_scorings(round_id, 1, accepted[:2])["status"] == "stale"  # only a judged round rejects
-    for retry in retries:
-        r, t, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
-        assert r["status"] == "leased" and r["attempt"] == 2
-        assert _complete_accepted(store, r["run_id"], hash_lease_token(t), r["run_id"])["status"] == "accepted"
-    assert store.close_scoring(round_id, 1)["round_status"] == "stage1_judged"
-    # A second rejection of the same item has no attempt left: the round cancels rather than zeroing the miner.
-    second = sorted(run["run_id"] for run in store.list_runs(round_id, stage=1, kind="score") if run["status"] == "accepted" and run["attempt"] == 2)
-    exhausted = store.reject_scorings(round_id, 1, second[:1])
-    assert exhausted["status"] == "cancelled" and exhausted["exhausted"] == 1 and store.get_round(round_id)["cancel_reason"] == "capacity:replay1:1"
+    # A judged round is terminal for its scorings: an accepted scoring is never rewritten (the replay reports after publication).
+    with superuser.cursor() as cursor:
+        with pytest.raises(Exception, match="immutable"):
+            cursor.execute("UPDATE public.lab_arena_runs SET status = 'failed', terminal_cause = 'judge_error' WHERE run_id = %s", (score_runs[0]["run_id"],))
+    superuser.rollback()
 
 
 def test_scoring_window_with_an_unjudged_item_cancels_and_expiry_retries_score_runs(store, superuser):

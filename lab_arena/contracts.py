@@ -27,7 +27,7 @@ BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 RUNNER_SLOT_CEILING = 8
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
-LAB_ARENA_POOL_PERCENT = 25
+LAB_ARENA_POOL_PERCENT = 25  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
 # The pool is a share of total emissions, not of what remains after the other
 # allocations (owner decision, 2026-09-03).
 LAB_ARENA_POOL_BASIS = "total_emissions"
@@ -132,7 +132,7 @@ ROUND_TRANSITIONS = {
     "stage1": ("stage1_closed", "cancelled"),
     "stage1_closed": ("stage1_scoring", "cancelled"),
     "stage1_scoring": ("stage1_judged", "cancelled"),
-    "stage1_judged": ("scored", "stage1_scoring", "cancelled"),
+    "stage1_judged": ("scored", "cancelled"),
     "scored": ("published", "cancelled"),
     "published": (),
     "cancelled": (),
@@ -156,8 +156,6 @@ TERMINAL_CAUSES = (
     "judge_error",
     "judge_timeout",
     "judge_key_refused",
-    # The Arena could not reproduce the scoring from its recorded judge responses.
-    "replay_rejected",
 )
 # Causes that the miner caused. A crash, timeout, or invalid output still
 # gets one confirmation attempt (another validator when there is one); a
@@ -167,7 +165,7 @@ MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
 )
 SCORE_TERMINAL_CAUSES = ("accepted", "judge_error", "judge_timeout", "judge_key_refused")
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
-INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected", "judge_error", "judge_timeout", "replay_rejected"})
+INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "receipt_rejected", "judge_error", "judge_timeout"})
 
 PROVIDER_CALL_STATES = ("reserved", "dispatched", "settled", "uncertain", "recovered", "refused")
 LEDGER_ENTRY_KINDS = (
@@ -760,14 +758,15 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if tuple(config["generator"]["batch_sizes"]) != GENERATION_BATCH_SIZES:
         raise ArenaContractError("generation batch sizes are fixed public constants")
     rewards = config["reward_constants"]
+    # ``pool_percent`` is the one adjustable reward setting (LAB_ARENA_POOL_PERCENT,
+    # 0..100 by the field bounds); the decay, week length, and window are fixed.
     if (
-        rewards["pool_percent"] != LAB_ARENA_POOL_PERCENT
-        or rewards["pool_basis"] != LAB_ARENA_POOL_BASIS
+        rewards["pool_basis"] != LAB_ARENA_POOL_BASIS
         or tuple(rewards["king_pool_share_percent_by_week"]) != KING_POOL_SHARE_PERCENT_BY_WEEK
         or rewards["epochs_per_reward_week"] != EPOCHS_PER_REWARD_WEEK
         or rewards["eligibility_max_epochs"] != ELIGIBILITY_MAX_EPOCHS
     ):
-        raise ArenaContractError("reward constants are fixed public constants")
+        raise ArenaContractError("reward decay constants are fixed public constants")
     if not set(config["floor_runner_hotkeys"]) <= set(config["runner_allowlist"]):
         raise ArenaContractError("floor runners must be on the runner allowlist")
     if len(set(config["runner_allowlist"])) != len(config["runner_allowlist"]):

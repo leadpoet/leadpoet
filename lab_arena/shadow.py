@@ -82,7 +82,6 @@ def shadow_report(*, round_row: Mapping[str, Any], public_bundle: Mapping[str, A
             # scored miner's keys and replayed by the Arena from the recorded responses.
             "work_items": int(entry.get("work_items") or 0),
             "key_refused_items": len(entry.get("key_refused_items") or []),
-            "replay_mismatches": sum(1 for item in (entry.get("replays") or []) if isinstance(item, dict) and item.get("outcome") == "mismatch"),
         }
         window = (_parse(schedule["stage_1_scoring_close"]) - _parse(schedule["stage_1_close"])).total_seconds()
         scoring["fraction_of_window"] = (scoring["seconds"] / window) if window > 0 else None

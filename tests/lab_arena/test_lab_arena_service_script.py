@@ -38,6 +38,14 @@ class FakeService:
             raise self._release_error
         return self._release
 
+    replay = {"status": "disabled"}
+    replay_error = None
+
+    def replay_pending(self):
+        if self.replay_error is not None:
+            raise self.replay_error
+        return self.replay
+
     def ensure_daily_round(self):
         self.ensured += 1
         if self._ensure_error is not None:
@@ -97,6 +105,19 @@ def test_a_tick_releases_the_published_king_model_after_the_round_stops_being_cu
     outcome = script.drive_once(failing)
     assert outcome == "advanced arena-2026-09-03; failed release_pending: RuntimeError" and failing.advanced == ["arena-2026-09-03"]
     assert "token" not in outcome
+
+
+def test_a_tick_advances_the_post_publication_replay_report_one_chunk_at_a_time(script):
+    """The replay report is a driver step after release: progress and completion are visible, failures contained."""
+
+    service = FakeService(current={"round_id": "arena-2026-09-03"})
+    service.replay = {"status": "progress", "round_id": "arena-2026-09-02", "chunk": 2, "chunks": 9}
+    assert script.drive_once(service) == "advanced arena-2026-09-03; replay progress arena-2026-09-02"
+    service.replay = {"status": "reported", "round_id": "arena-2026-09-02"}
+    assert script.drive_once(service) == "advanced arena-2026-09-03; replay reported arena-2026-09-02"
+    service.replay_error = RuntimeError("ledger token never printed")
+    outcome = script.drive_once(service)
+    assert outcome == "advanced arena-2026-09-03; failed replay_pending: RuntimeError" and "token" not in outcome
 
 
 def test_a_tick_without_a_round_is_idle_unless_it_creates_the_next_daily_round(script):

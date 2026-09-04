@@ -185,7 +185,8 @@ def test_round_configuration_pins_public_constants_and_hashes():
         lambda d: d["call_quotas"].update(scrapingdog=1),
         lambda d: d.update(call_quota_hash=c.document_hash("other")),
         lambda d: d.update(miner_key_providers=["scrapingdog"]),
-        lambda d: d["reward_constants"].update(pool_percent=30),
+        lambda d: d["reward_constants"].update(epochs_per_reward_week=141),
+        lambda d: d["reward_constants"].update(pool_basis="fulfillment_residual"),
         lambda d: d["generator"].update(batch_sizes=[15, 15]),
         lambda d: d.update(floor_runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address]),
         lambda d: d["schedule"].update(stage_1_scoring_close="2026-09-02T00:00:00Z"),
@@ -196,6 +197,10 @@ def test_round_configuration_pins_public_constants_and_hashes():
         mutate(document)
         with pytest.raises(c.ArenaContractError):
             c.finalize_round_configuration(document)
+    # The pool percent is the one adjustable reward setting: any whole percent validates.
+    adjustable = base_round_configuration()
+    adjustable["reward_constants"]["pool_percent"] = 5
+    assert c.validate_round_configuration(c.finalize_round_configuration(adjustable))["reward_constants"]["pool_percent"] == 5
     tampered = dict(config, mode="live")
     with pytest.raises(c.ArenaContractError):
         c.validate_round_configuration(tampered)

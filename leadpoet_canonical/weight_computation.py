@@ -266,8 +266,27 @@ def _add_weight(uid_weights: Dict[int, float], uid: int, weight: float) -> None:
     uid_weights[uid] += weight
 
 
+# A snapshot may carry the signed Lab Arena reward basis its champion triple
+# was derived from (labarena.md 13.4). Absent, the champion slot keeps its
+# legacy meaning and every byte of the snapshot and the weights is unchanged.
+LAB_ARENA_REWARD_BASIS_FIELD = "lab_arena_reward_basis"
+
+
+def _check_lab_arena_champion_triple(snapshot: Mapping[str, Any]) -> None:
+    """With a reward basis present, the champion triple must be exactly what it implies."""
+
+    if LAB_ARENA_REWARD_BASIS_FIELD not in snapshot:
+        return
+    from leadpoet_canonical.lab_arena_rewards import LabArenaRewardError, check_snapshot_champion_triple
+
+    try:
+        check_snapshot_champion_triple(snapshot)
+    except LabArenaRewardError as exc:
+        raise WeightComputationError("lab_arena_reward_basis: %s" % exc) from exc
+
+
 def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, Mapping) or set(snapshot) != _SNAPSHOT_FIELDS:
+    if not isinstance(snapshot, Mapping) or set(snapshot) - {LAB_ARENA_REWARD_BASIS_FIELD} != _SNAPSHOT_FIELDS:
         raise WeightComputationError("weight snapshot fields do not match the canonical schema")
     if snapshot.get("schema_version") != WEIGHT_SNAPSHOT_SCHEMA_VERSION:
         raise WeightComputationError("unsupported weight snapshot schema")
@@ -309,6 +328,7 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     )
     champion_uid_value = snapshot.get("champion_uid")
     champion_uid = None if champion_uid_value is None else _int(champion_uid_value, "champion_uid")
+    _check_lab_arena_champion_triple(snapshot)
     leaderboard_share = _non_negative_float(snapshot["leaderboard_bonus_share"], "leaderboard_bonus_share")
     fulfillment_pool_share = max(0.0, 1.0 - research_lab_share - champion_share - leaderboard_share)
     max_sourcing_share = max(

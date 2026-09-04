@@ -137,6 +137,21 @@ def _daily_cutoff_hour_from_environment() -> Optional[int]:
     return value
 
 
+def _pool_percent_from_environment() -> int:
+    """The king's pool as a percent of total emissions: LAB_ARENA_POOL_PERCENT, default 25, integer 0..100."""
+
+    raw = os.environ.get("LAB_ARENA_POOL_PERCENT", "").strip()
+    if not raw:
+        return int(contracts.LAB_ARENA_POOL_PERCENT)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ServiceError("LAB_ARENA_POOL_PERCENT must be an integer percent", 500) from exc
+    if not 0 <= value <= 100:
+        raise ServiceError("LAB_ARENA_POOL_PERCENT must be within 0..100", 500)
+    return value
+
+
 def _max_challengers_from_environment() -> int:
     """LAB_ARENA_MAX_CHALLENGERS: the admitted challenger ceiling per round, 1..MAX_CHALLENGERS."""
 
@@ -230,6 +245,7 @@ def build_service_from_environment(mode: str):
         image_rules=image_rules,
         registry_repository=repository,
         public_registry_repository=os.environ.get("LAB_ARENA_PUBLIC_REGISTRY_REPOSITORY", "").strip(),
+        pool_percent=_pool_percent_from_environment(),
     )
 
     def key_for(miner_hotkey: str, provider: str) -> credentials.RuntimeKeyHandle:
@@ -272,6 +288,7 @@ def build_service_from_environment(mode: str):
         # Replay recomputation of every accepted scoring assignment stays on in production.
         replay_verification=os.environ.get("LAB_ARENA_REPLAY_VERIFICATION", "1").strip() != "0",
         replay_work_dir=os.environ.get("LAB_ARENA_REPLAY_WORK_DIR") or None,
+        replay_items_per_tick=int(os.environ.get("LAB_ARENA_REPLAY_ITEMS_PER_TICK", "50")),
     )
     service = ArenaService(config)
     recipient = credentials.recipient_document(decryptor.public_key_der)

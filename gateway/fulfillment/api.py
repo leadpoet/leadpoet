@@ -1961,6 +1961,75 @@ async def get_banned_hotkeys():
 
 
 # ---------------------------------------------------------------
+# GET /fulfillment/lab-arena-reward-basis — the Lab Arena king's signed basis
+# ---------------------------------------------------------------
+LAB_ARENA_REWARD_BASIS_VIEW = "lab_arena_reward_basis_v1"
+LAB_ARENA_REWARD_BASIS_COLUMNS = "round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc"
+
+
+def _collect_lab_arena_reward_basis_sync(epoch: int) -> dict:
+    """The governing Lab Arena reward basis for one weight epoch (labarena.md 13.4).
+
+    The newest published round whose effective reward epoch is at most
+    ``epoch``, read from the durable signed-columns view: the Arena host is
+    never on the weight path. ``reward_basis`` is ``None`` when no round has
+    published yet; an incoherent row fails the request instead.
+    """
+
+    supabase = _get_supabase()
+    page = (
+        supabase.table(LAB_ARENA_REWARD_BASIS_VIEW)
+        .select(LAB_ARENA_REWARD_BASIS_COLUMNS)
+        .lte("effective_reward_epoch", int(epoch))
+        .order("effective_reward_epoch", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = list(page.data or [])
+    if not rows:
+        return {"epoch": int(epoch), "round_id": None, "reward_basis_hash": None, "reward_basis": None, "signing_key": None, "lookup_ok": True}
+    row = rows[0]
+    basis = row.get("reward_basis_doc")
+    signing_key = row.get("signing_key_doc")
+    if (
+        not isinstance(basis, dict)
+        or not isinstance(signing_key, dict)
+        or basis.get("reward_basis_hash") != row.get("reward_basis_hash")
+        or basis.get("effective_reward_epoch") != row.get("effective_reward_epoch")
+        or int(row.get("effective_reward_epoch")) > int(epoch)
+    ):
+        raise RuntimeError("lab arena reward basis row is incoherent")
+    return {
+        "epoch": int(epoch),
+        "round_id": row.get("round_id"),
+        "reward_basis_hash": row.get("reward_basis_hash"),
+        "reward_basis": basis,
+        "signing_key": signing_key,
+        "lookup_ok": True,
+    }
+
+
+@fulfillment_router.get("/lab-arena-reward-basis")
+async def get_lab_arena_reward_basis(epoch: int):
+    """Return the governing Lab Arena reward basis the validator proposes the king's share from."""
+
+    if epoch < 0:
+        raise HTTPException(status_code=400, detail="epoch must be a non-negative integer")
+    try:
+        return await run_db(_collect_lab_arena_reward_basis_sync, int(epoch))
+    except Exception as exc:
+        logger.error(
+            "fulfillment_lab_arena_reward_basis_read_failed type=%s error=%s",
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative Lab Arena reward basis is unavailable",
+        ) from exc
+
+
+# ---------------------------------------------------------------
 # GET /fulfillment/leaderboard  — top fulfillment miners (rolling window)
 # ---------------------------------------------------------------
 def _rolling_epoch_window_start(epochs: int = 140) -> datetime:

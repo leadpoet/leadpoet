@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from typing import Any, Dict, Mapping
 
@@ -15,6 +16,7 @@ from leadpoet_canonical.attested_v2 import (
 from leadpoet_canonical.hotkey_authority_v2 import (
     DISABLED_LEADERBOARD_WINDOW_V1,
 )
+from leadpoet_canonical import lab_arena_rewards
 from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
     gateway_weight_input_value_documents_v2,
@@ -346,7 +348,96 @@ class CoordinatorWeightSourceV2:
             raise CoordinatorWeightSourceV2Error(
                 "persisted Research Lab allocation differs from enclave output"
             )
+        if category == "champions":
+            return self._champion_document(proposed, calculation, context)
         return dict(proposed)
+
+    def _champion_document(
+        self,
+        proposed: Mapping[str, Any],
+        calculation: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> Dict[str, Any]:
+        """Re-derive the champion triple from the measured reward-basis row (labarena.md 13.4).
+
+        Without a reward basis the legacy champion slot must be empty. With
+        one, the governing row the database holds for this epoch must be the
+        basis the snapshot names, its signature must verify against the Arena
+        key pinned by ``LAB_ARENA_SIGNING_PUBLIC_KEY_HASH``, and the triple must
+        be what the shared kernel derives from it on the snapshot's metagraph.
+        A newer governing row than the one proposed is reported as such so the
+        next proposal can pick it up; every other mismatch is a hard failure.
+        """
+
+        value = dict(proposed["value"])
+        if "lab_arena_reward_basis" not in value:
+            if (
+                float(value["champion_share"]) != 0.0
+                or float(value["effective_champion_share"]) != 0.0
+                or value["champion_uid"] is not None
+            ):
+                raise CoordinatorWeightSourceV2Error(
+                    "champions source names no reward basis for a nonzero champion share"
+                )
+            return dict(proposed)
+        proposed_basis = value["lab_arena_reward_basis"]
+        rows = self._read(
+            "lab_arena_reward_basis", {"epoch_id": context.epoch_id}, context
+        )
+        if len(rows) != 1:
+            raise CoordinatorWeightSourceV2Error(
+                "champions governing reward basis is unavailable"
+            )
+        row = rows[0]
+        try:
+            pinned = lab_arena_rewards.signing_key_hash_from_environment(os.environ)
+            measured = lab_arena_rewards.validate_reward_basis(
+                row.get("reward_basis_doc")
+            )
+            if (
+                measured.get("reward_basis_hash") != row.get("reward_basis_hash")
+                or int(measured["effective_reward_epoch"]) != int(row.get("effective_reward_epoch"))
+                or int(measured["effective_reward_epoch"]) > int(context.epoch_id)
+            ):
+                raise lab_arena_rewards.LabArenaRewardError(
+                    "reward basis row columns differ from the signed document"
+                )
+            key_der = lab_arena_rewards.signing_key_from_document(
+                row.get("signing_key_doc"), pinned
+            )
+            lab_arena_rewards.verify_reward_basis_signature(
+                measured, public_key_der=key_der, expected_public_key_hash=pinned
+            )
+            values = lab_arena_rewards.champion_values(
+                measured, int(context.epoch_id), list(calculation["metagraph_hotkeys"])
+            )
+        except lab_arena_rewards.LabArenaRewardError as exc:
+            raise CoordinatorWeightSourceV2Error(
+                "champions reward basis is invalid: %s" % exc
+            ) from exc
+        if not _same(measured, proposed_basis):
+            proposed_epoch = (
+                proposed_basis.get("effective_reward_epoch")
+                if isinstance(proposed_basis, Mapping)
+                else None
+            )
+            if isinstance(proposed_epoch, int) and int(measured["effective_reward_epoch"]) > proposed_epoch:
+                raise CoordinatorWeightSourceV2Error(
+                    "champions governing reward basis is newer than the calculation snapshot"
+                )
+            raise CoordinatorWeightSourceV2Error(
+                "champions reward basis differs from the measured governing row"
+            )
+        return {
+            **{key: proposed[key] for key in proposed if key != "value"},
+            "value": {
+                **value,
+                "champion_share": values["champion_share"],
+                "effective_champion_share": values["effective_champion_share"],
+                "champion_uid": values["champion_uid"],
+                "lab_arena_reward_basis": measured,
+            },
+        }
 
     def _ban_document(
         self,

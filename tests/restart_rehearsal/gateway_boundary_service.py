@@ -62,6 +62,7 @@ RUNTIME_TABLES = frozenset(
         "research_lab_source_add_reward_current",
         "research_lab_stateful_subnet_epoch_cutover_state_v1",
         "research_lab_stateful_subnet_epoch_cutovers_v1",
+        "lab_arena_reward_basis_v1",
         "transparency_log",
         "validation_evidence_private",
     }
@@ -665,6 +666,7 @@ def _migration_schema_contract(
             "175-research-lab-source-add-provenance-leg1.sql",
             "176-research-lab-source-add-provenance-origin-repair.sql",
             "177-research-lab-source-add-provenance-authority-acl.sql",
+            "178-lab-arena-v1.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (

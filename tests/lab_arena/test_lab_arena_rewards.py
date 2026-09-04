@@ -391,7 +391,11 @@ def test_reward_basis_document_binds_constants_and_hashes():
 
 _PY37_BUILTIN_GENERICS = {"list", "dict", "set", "frozenset", "tuple", "type"}
 _POST_37_NAMES = {"removeprefix", "removesuffix", "cached_property", "Literal", "Final", "Protocol", "TypedDict", "prod"}
-_ALLOWED_IMPORT_MODULES = {"__future__", "math", "fractions", "typing", "lab_arena.contracts"}
+_ALLOWED_IMPORT_MODULES = {
+    "__future__", "base64", "hashlib", "math", "fractions", "typing", "leadpoet_canonical.attested_v2",
+    # Signature verification only, imported lazily inside the verify function.
+    "cryptography.exceptions", "cryptography.hazmat.primitives", "cryptography.hazmat.primitives.asymmetric",
+}
 
 
 def _annotation_has_union(annotation: ast.AST) -> bool:
@@ -399,7 +403,11 @@ def _annotation_has_union(annotation: ast.AST) -> bool:
 
 
 def test_reward_kernel_is_python_37_syntax_and_stdlib_only():
-    path = os.path.join(os.path.dirname(rewards.__file__), "rewards.py")
+    """The kernel lives in leadpoet_canonical (the validator enclave image copies it) and must stay Python 3.7."""
+
+    from leadpoet_canonical import lab_arena_rewards as canonical_rewards
+
+    path = os.path.join(os.path.dirname(canonical_rewards.__file__), "lab_arena_rewards.py")
     with open(path, "r", encoding="utf-8") as handle:
         source = handle.read()
     assert ":=" not in source

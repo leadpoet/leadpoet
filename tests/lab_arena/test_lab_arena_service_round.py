@@ -739,7 +739,7 @@ def test_shadow_round_runs_every_participant_through_all_thirty_icps_and_reports
     assert report["winner_submission_id"] or report["king_submission_id"]
     assert report["execution_timings"]["count"] == 30 * len(participants)
     assert report["scoring"]["judge_executions"] >= 1 and report["scoring"]["work_items"] == 30 * len(participants)
-    assert report["scoring"]["replay_mismatches"] == 0 and report["scoring"]["key_refused_items"] == 0
+    assert "replay_mismatches" not in report["scoring"] and report["scoring"]["key_refused_items"] == 0
     assert set(report["stage_completion"]) == {"window_seconds", "used_seconds", "fraction_of_window", "inside_eighty_percent"}
     assert report["passes_capacity_gate"] is True
     final = json.loads(harness.objects.get(service.store.get_round(round_id)["final_scores_ref"]).decode())
@@ -951,12 +951,12 @@ open(os.environ["LAB_ARENA_OUTPUT_PATH"], "w").write(json.dumps(scoring.build_sc
 """
 
 
-def test_one_validator_scores_its_own_executions_and_unreproducible_scorings_are_rescored(connect, tmp_path):
-    """One validator executes and scores everything; the replay is the only check.
+def test_one_validator_scores_its_own_executions_and_the_replay_report_flags_what_it_cannot_reproduce(connect, tmp_path):
+    """One validator executes and scores everything; the replay reports after publication.
 
-    The replay entry command first fails to reproduce anything, so every scoring
-    is rejected and the round returns to the scoring window for second attempts;
-    once the replay reproduces the deterministic judge the round scores and publishes.
+    The replay entry command cannot reproduce anything. The round still scores
+    and publishes on the validator's numbers, and the signed public replay
+    report then lists every scoring of that validator as not reproducible.
     """
 
     import sys
@@ -986,24 +986,34 @@ def test_one_validator_scores_its_own_executions_and_unreproducible_scorings_are
     harness.run_stage_with_runners(1)  # the single validator scores the outputs it executed itself
     assert all(run["status"] == "accepted" and run["runner_hotkey"] == harness.runner_keys[0] for run in service.store.list_runs(round_id, stage=1, kind="score"))
     assert service.advance_round(round_id)["status"] == "closed" and harness.status() == "stage1_judged"
-    # The replay cannot reproduce any scoring: all are rejected and re-opened for a second attempt.
-    rescoring = service.advance_round(round_id)
-    assert rescoring["status"] == "rescoring" and rescoring["rejected"] == 30 * participants and harness.status() == "stage1_scoring"
-    runs = service.store.list_runs(round_id, stage=1, kind="score")
-    assert sum(1 for run in runs if run["terminal_cause"] == "replay_rejected") == 30 * participants
-    assert sum(1 for run in runs if run["status"] == "pending" and run["attempt"] == 2) == 30 * participants
-    rejections = [p for p in harness.objects_root.rglob("stage1_rejections_*.json")]
-    assert rejections and json.loads(rejections[0].read_text())["replays"][0]["outcome"] == "rejected"
-    # With a replay that reproduces the deterministic judge, the second attempts are accepted.
-    script.write_text(REPLAY_SCRIPT)
-    harness.advance_until("scored", runners=1)
+    # The validator's numbers are the round's numbers: no gate, no second attempt.
+    scored = service.advance_round(round_id)
+    assert scored["status"] == "ok" and harness.status() == "scored" and scored["judge_executions"] == 30 * participants
     timing = json.loads(harness.objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode())
-    assert timing["judge_executions"] == 30 * participants and timing["replay_mismatches"] == 0 and all(entry["outcome"] == "match" for entry in timing["replays"])
+    assert timing["judge_executions"] == 30 * participants and "replays" not in timing
+    assert all(run["status"] == "accepted" for run in service.store.list_runs(round_id, stage=1, kind="score"))
     # Every accepted execution row carries the per-ICP score the bundle gave it (the results route reads it).
     scored_runs = [run for run in service.store.list_runs(round_id, stage=1, kind="execute") if run["status"] == "accepted"]
     assert scored_runs and all(run["per_icp_score"] is not None for run in scored_runs), [run["per_icp_score"] for run in scored_runs[:3]]
     harness.advance_until("published", runners=1)
     assert service.store.get_round(round_id)["king_outcome"] in ("crowned", "defended")
+    # The replay report runs after publication, one chunk per driver tick, and is signed and public.
+    harness.service = svc.ArenaService(svc.ServiceConfig(**{**harness.service.config.__dict__, "replay_items_per_tick": 25}))
+    service = harness.service
+    outcomes = []
+    for _ in range(20):
+        outcome = service.replay_pending()
+        outcomes.append(outcome["status"])
+        if outcome["status"] == "reported":
+            break
+    assert outcomes[:-1] and all(status == "progress" for status in outcomes[:-1]) and outcomes[-1] == "reported"
+    report = json.loads(harness.objects.get("arena/%s/public/replay_report.json" % round_id).decode())
+    signing.verify_document_signature(report, hash_field="report_hash", public_key_der=harness.signer.public_key_der, expected_public_key_hash=harness.signer.public_key_hash)
+    assert report["work_items"] == report["replayed"] == 30 * participants
+    assert report["per_validator"] == {harness.runner_keys[0]: {"match": 0, "mismatch": 0, "rejected": 30 * participants}}
+    assert len(report["flagged"]) == 30 * participants and all(entry["outcome"] == "rejected" for entry in report["flagged"])
+    assert service.replay_pending() == {"status": "reported", "round_id": round_id}
+    assert service.public_round(round_id)["replay_report"]["report_hash"] == report["report_hash"]
 
 
 # ---------------------------------------------------------------------------
@@ -1082,8 +1092,13 @@ def _run_stage_one_to_scoring(harness: Harness, participants: int, *, runners: i
     assert service.advance_round(harness.round_id)["assignments"] == 30 * participants and harness.status() == "stage1_scoring"
 
 
-def test_cheating_validator_scores_are_replaced_by_the_replay_and_flagged(connect, tmp_path):
-    """A validator that reports inflated numbers changes nothing: the replayed numbers stand."""
+def test_cheating_validator_numbers_stand_for_the_round_and_the_replay_report_flags_the_validator(connect, tmp_path):
+    """A validator that reports inflated numbers is flagged by the post-publication replay, not overruled.
+
+    Its numbers stand for that one round and the operator removes the
+    validator; acceptable only while Leadpoet runs every validator (runbook
+    section 6 records the exit criterion).
+    """
 
     import sys
 
@@ -1102,14 +1117,16 @@ def test_cheating_validator_scores_are_replaced_by_the_replay_and_flagged(connec
     assert service.advance_round(round_id)["status"] == "closed" and harness.status() == "stage1_judged"
     scored = service.advance_round(round_id)
     assert harness.status() == "scored", scored
-    assert scored["replay_mismatches"] == 30 * participants
-    timing = json.loads(harness.objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode())
-    assert timing["replay_mismatches"] == 30 * participants and all(entry["outcome"] == "mismatch" for entry in timing["replays"])
-    assert {entry["runner"] for entry in timing["replays"]} == {harness.runner_keys[0]}
     bundle = json.loads(harness.objects.get(service.store.get_round(round_id)["final_scores_ref"]).decode())
     reported = [row["final_score"] for row in bundle["rows"][0]["breakdowns"]]
-    assert reported and all(30.0 <= value < 90.0 for value in reported), reported  # the deterministic judge, not 99.0
-    assert all(0.0 < score < 99.0 for score in bundle["submission_scores"].values()), bundle["submission_scores"]
+    assert reported and all(value == 99.0 for value in reported), reported  # the validator's numbers stand for the round
+    harness.advance_until("published", runners=1)
+    for _ in range(20):
+        if service.replay_pending()["status"] == "reported":
+            break
+    report = json.loads(harness.objects.get("arena/%s/public/replay_report.json" % round_id).decode())
+    assert report["per_validator"] == {harness.runner_keys[0]: {"match": 0, "mismatch": 30 * participants, "rejected": 0}}
+    assert {entry["runner"] for entry in report["flagged"]} == {harness.runner_keys[0]} and all(entry["outcome"] == "mismatch" for entry in report["flagged"])
 
 
 def test_a_miner_whose_key_the_provider_rejects_mid_round_scores_zero_without_cancelling(connect, tmp_path):

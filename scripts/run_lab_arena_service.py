@@ -52,7 +52,14 @@ def drive_once(service) -> str:
     except Exception as exc:
         return "%s; failed release_pending: %s" % (outcome, type(exc).__name__)
     if release.get("status") == "ok" and release.get("round_id"):
-        return "%s; released %s" % (outcome, release["round_id"])
+        outcome = "%s; released %s" % (outcome, release["round_id"])
+    # The post-publication replay report advances one chunk per tick.
+    try:
+        replay = service.replay_pending()
+    except Exception as exc:
+        return "%s; failed replay_pending: %s" % (outcome, type(exc).__name__)
+    if replay.get("status") in ("progress", "reported") and replay.get("round_id"):
+        return "%s; replay %s %s" % (outcome, replay["status"], replay["round_id"])
     return outcome
 
 

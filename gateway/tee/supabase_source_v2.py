@@ -96,6 +96,18 @@ QUERY_POLICIES = {
         parameter_names=("window_start", "window_end"),
         max_pages=50,
     ),
+    # The governing Lab Arena reward basis for one weight epoch (labarena.md
+    # 13.4): the newest published round whose effective epoch is at most the
+    # weight epoch, read from the signed-columns view with the service role.
+    "lab_arena_reward_basis": SupabaseQueryV2(
+        policy_id="lab_arena_reward_basis",
+        table="lab_arena_reward_basis_v1",
+        select="round_id,effective_reward_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc",
+        parameter_names=("epoch_id",),
+        max_pages=1,
+        order="effective_reward_epoch.desc",
+        limit=1,
+    ),
     "research_lab_allocation_current": SupabaseQueryV2(
         policy_id="research_lab_allocation_current",
         table="research_lab_emission_allocation_current",
@@ -830,6 +842,9 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("computed_at", "gte.%s" % window_start),
             ("computed_at", "lte.%s" % window_end),
         )
+    if policy.policy_id == "lab_arena_reward_basis":
+        epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
+        return (("effective_reward_epoch", "lte.%d" % epoch_id),)
     if policy.policy_id == "research_lab_allocation_current":
         return (
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),

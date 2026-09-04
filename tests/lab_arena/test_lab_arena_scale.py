@@ -79,7 +79,12 @@ def test_round_at_the_challenger_cap_scores_every_participant_and_publishes(conn
     timing = json.loads(harness.objects.get("arena/%s/timing/stage1_scoring.json" % round_id).decode())
     assert timing["judge_executions"] == 30 * CHALLENGERS and timing["work_items"] == 30 * CHALLENGERS
     if REPLAY:
-        assert timing["replay_mismatches"] == 0 and len(timing["replays"]) == 30 * CHALLENGERS
+        # The replay is a post-publication report: drive it to completion and check every scoring reproduced.
+        for _ in range(10_000):
+            if timed("replay_chunk", lambda: service.replay_pending())["status"] == "reported":
+                break
+        report = json.loads(harness.objects.get("arena/%s/public/replay_report.json" % round_id).decode())
+        assert report["replayed"] == 30 * CHALLENGERS and not report["flagged"], report["per_validator"]
     report = {"challengers": CHALLENGERS, "runs_stage1": 30 * CHALLENGERS, "replay": REPLAY, "timings_seconds": timings}
     (tmp_path / "scale_report.json").write_text(json.dumps(report, indent=2))
     print("\nSCALE REPORT " + json.dumps(report))

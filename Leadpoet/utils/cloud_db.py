@@ -2713,6 +2713,49 @@ def gateway_get_fulfillment_leaderboard_snapshot(
     )
 
 
+def gateway_get_lab_arena_reward_basis(wallet: bt.Wallet, epoch: int) -> Dict[str, Any]:
+    """Fetch the governing Lab Arena reward basis for one weight epoch, with the key that signed it.
+
+    The validator verifies the signature itself against the Arena key hash it
+    pins, so this read only has to be complete and coherent: an incomplete
+    response is an error, never an empty king.
+    """
+
+    last_err: Optional[Exception] = None
+    backoffs = [1, 3]
+    for attempt in range(len(backoffs) + 1):
+        try:
+            response = requests.get(
+                f"{GATEWAY_URL}/fulfillment/lab-arena-reward-basis",
+                params={"epoch": int(epoch)},
+                timeout=45,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if (
+                not isinstance(data, dict)
+                or data.get("lookup_ok") is not True
+                or data.get("epoch") != int(epoch)
+                or not (data.get("reward_basis") is None or isinstance(data.get("reward_basis"), dict))
+                or not (data.get("signing_key") is None or isinstance(data.get("signing_key"), dict))
+                or (data.get("reward_basis") is None) != (data.get("signing_key") is None)
+            ):
+                raise RuntimeError("gateway lab arena reward basis response is incomplete")
+            return data
+        except Exception as e:
+            last_err = e
+            if attempt < len(backoffs):
+                delay = backoffs[attempt]
+                bt.logging.warning(
+                    f"gateway_get_lab_arena_reward_basis attempt {attempt + 1} failed "
+                    f"({type(e).__name__}: {e}); retrying in {delay}s"
+                )
+                time.sleep(delay)
+    raise RuntimeError(
+        f"gateway_get_lab_arena_reward_basis failed after {len(backoffs) + 1} attempts: {last_err}"
+    )
+
+
 def gateway_get_banned_hotkeys_snapshot(wallet: bt.Wallet) -> Dict[str, Any]:
     """Fetch the complete gateway-owned ban snapshot for weight calculation."""
 

@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_rounds (
   effective_reward_epoch BIGINT CHECK (effective_reward_epoch IS NULL OR effective_reward_epoch >= 0),
   reward_basis_hash TEXT CHECK (reward_basis_hash IS NULL OR reward_basis_hash ~ '^sha256:[0-9a-f]{64}$'),
   reward_basis_doc JSONB,
+  -- The Arena signing-key document that signed the basis, stored with it so the
+  -- weight path verifies the signature from the durable row alone.
+  signing_key_doc JSONB,
   cancel_reason TEXT,
   published_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
@@ -257,7 +260,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_runs (
   terminal_cause TEXT CHECK (terminal_cause IS NULL OR terminal_cause IN (
     'accepted', 'model_timeout', 'invalid_output', 'budget_exhausted', 'model_error',
     'lease_expired', 'worker_lost', 'receipt_rejected', 'preflight_failed', 'stage_closed',
-    'judge_error', 'judge_timeout', 'judge_key_refused', 'replay_rejected')),
+    'judge_error', 'judge_timeout', 'judge_key_refused')),
   terminal_doc JSONB,
   per_icp_score NUMERIC(12, 6),
   score_ref TEXT,
@@ -468,15 +471,10 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'lab_arena_runs rows are never deleted' USING ERRCODE = '42501';
   END IF;
-  -- One explicit exception to terminal immutability: the gateway may fail an
-  -- accepted score run as replay_rejected when its replay of the recorded
-  -- provider responses cannot reproduce the reported scoring. The validator's
-  -- receipt, output, event chain, and lease columns stay exactly as delivered,
-  -- so the rejection is visible and re-checkable from the ledger.
+  -- Terminal attempts are immutable: the replay after publication reports on
+  -- an accepted scoring, it never rewrites it.
   IF OLD.status IN ('accepted', 'failed') AND (
-       ((NEW.status <> OLD.status OR NEW.terminal_cause IS DISTINCT FROM OLD.terminal_cause)
-        AND NOT (OLD.status = 'accepted' AND OLD.kind = 'score'
-                 AND NEW.status = 'failed' AND NEW.terminal_cause = 'replay_rejected'))
+       NEW.status <> OLD.status OR NEW.terminal_cause IS DISTINCT FROM OLD.terminal_cause
        OR NEW.receipt_doc IS DISTINCT FROM OLD.receipt_doc
        OR NEW.receipt_hash IS DISTINCT FROM OLD.receipt_hash
        OR NEW.output_hash IS DISTINCT FROM OLD.output_hash
@@ -943,7 +941,7 @@ BEGIN
     WHERE round_id = p_round_id;
   ELSIF p_expected_status = 'scored' AND p_next_status = 'published' THEN
     v_allowed := ARRAY['effective_reward_epoch', 'king_hotkey', 'king_outcome', 'king_start_epoch',
-                       'publication_doc', 'result_bundle_hash', 'reward_basis_doc', 'reward_basis_hash'];
+                       'publication_doc', 'result_bundle_hash', 'reward_basis_doc', 'reward_basis_hash', 'signing_key_doc'];
     IF NOT (v_keys @> v_allowed AND v_allowed @> v_keys)
        OR (v_patch ->> 'result_bundle_hash') !~ '^sha256:[0-9a-f]{64}$'
        OR (v_patch ->> 'reward_basis_hash') !~ '^sha256:[0-9a-f]{64}$'
@@ -954,7 +952,10 @@ BEGIN
        OR (v_patch -> 'reward_basis_doc' ->> 'result_bundle_hash') IS DISTINCT FROM (v_patch ->> 'result_bundle_hash')
        OR (v_patch -> 'reward_basis_doc' ->> 'king_outcome') IS DISTINCT FROM (v_patch ->> 'king_outcome')
        OR (v_patch -> 'reward_basis_doc' ->> 'effective_reward_epoch') IS DISTINCT FROM (v_patch ->> 'effective_reward_epoch')
-       OR (v_patch -> 'publication_doc' ->> 'result_bundle_hash') IS DISTINCT FROM (v_patch ->> 'result_bundle_hash') THEN
+       OR (v_patch -> 'publication_doc' ->> 'result_bundle_hash') IS DISTINCT FROM (v_patch ->> 'result_bundle_hash')
+       OR pg_catalog.jsonb_typeof(v_patch -> 'signing_key_doc') <> 'object'
+       OR (v_patch -> 'signing_key_doc' ->> 'public_key_hash') !~ '^sha256:[0-9a-f]{64}$'
+       OR (v_patch -> 'signing_key_doc' ->> 'public_key_hash') IS DISTINCT FROM (v_patch -> 'reward_basis_doc' -> 'signature' ->> 'public_key_hash') THEN
       RAISE EXCEPTION 'lab_arena_publication_invalid' USING ERRCODE = '22023';
     END IF;
     UPDATE public.lab_arena_rounds
@@ -967,6 +968,7 @@ BEGIN
         effective_reward_epoch = (v_patch ->> 'effective_reward_epoch')::BIGINT,
         reward_basis_hash = v_patch ->> 'reward_basis_hash',
         reward_basis_doc = v_patch -> 'reward_basis_doc',
+        signing_key_doc = v_patch -> 'signing_key_doc',
         published_at = pg_catalog.clock_timestamp()
     WHERE round_id = p_round_id;
   ELSE
@@ -2303,85 +2305,6 @@ $lab_arena_close_scoring$;
 ALTER FUNCTION public.lab_arena_close_scoring(TEXT, SMALLINT) OWNER TO lab_arena_owner;
 
 
--- Reject scorings the Arena could not reproduce from their recorded judge
--- responses: each named accepted score run fails as replay_rejected and gets
--- a second attempt; a run with no attempt left cancels the round (an
--- unreproducible scoring is never turned into a miner's zero). The round
--- returns to the scoring window at a new stage generation.
-CREATE OR REPLACE FUNCTION public.lab_arena_reject_scorings(
-  p_round_id TEXT,
-  p_stage SMALLINT,
-  p_run_ids TEXT[]
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-VOLATILE
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-AS $lab_arena_reject_scorings$
-DECLARE
-  v_round public.lab_arena_rounds;
-  v_run public.lab_arena_runs;
-  v_run_id TEXT;
-  v_generation BIGINT;
-  v_rejected INTEGER := 0;
-  v_exhausted INTEGER := 0;
-BEGIN
-  IF p_stage <> 1 OR p_run_ids IS NULL OR pg_catalog.array_length(p_run_ids, 1) IS NULL THEN
-    RAISE EXCEPTION 'lab_arena_reject_input_invalid' USING ERRCODE = '22023';
-  END IF;
-  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id = p_round_id FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
-  END IF;
-  IF v_round.status <> ('stage' || p_stage::TEXT || '_judged') THEN
-    RETURN pg_catalog.jsonb_build_object('status', 'stale', 'round_status', v_round.status);
-  END IF;
-  v_generation := v_round.stage_generation + 1;
-  FOREACH v_run_id IN ARRAY p_run_ids LOOP
-    SELECT * INTO v_run FROM public.lab_arena_runs
-    WHERE run_id = v_run_id AND round_id = p_round_id AND stage = p_stage AND kind = 'score' AND status = 'accepted'
-    FOR UPDATE;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'lab_arena_reject_run_invalid' USING ERRCODE = '22023';
-    END IF;
-    UPDATE public.lab_arena_runs
-    SET status = 'failed', terminal_cause = 'replay_rejected',
-        terminal_doc = pg_catalog.jsonb_build_object('rejected_at', pg_catalog.clock_timestamp(), 'previous_status', 'accepted',
-                                                     'rejected_at_stage_generation', v_round.stage_generation)
-    WHERE run_id = v_run.run_id;
-    v_rejected := v_rejected + 1;
-    IF v_run.attempt < 2 THEN
-      INSERT INTO public.lab_arena_runs (
-        run_id, assignment_id, round_id, submission_id, miner_hotkey, stage, icp_position, icp_hash,
-        attempt, status, lease_generation, stage_generation, kind, work_item_id, scored_run_id
-      ) VALUES (
-        v_run.assignment_id || ':' || (v_run.attempt + 1)::TEXT, v_run.assignment_id, v_run.round_id,
-        v_run.submission_id, v_run.miner_hotkey, v_run.stage, v_run.icp_position, v_run.icp_hash,
-        v_run.attempt + 1, 'pending', v_run.lease_generation, v_generation,
-        v_run.kind, v_run.work_item_id, v_run.scored_run_id
-      );
-    ELSE
-      v_exhausted := v_exhausted + 1;
-    END IF;
-  END LOOP;
-  IF v_exhausted > 0 THEN
-    UPDATE public.lab_arena_rounds
-    SET status = 'cancelled', status_generation = status_generation + 1, stage_generation = v_generation,
-        cancel_reason = 'capacity:replay' || p_stage::TEXT || ':' || v_exhausted::TEXT
-    WHERE round_id = p_round_id;
-    RETURN pg_catalog.jsonb_build_object('status', 'cancelled', 'round_status', 'cancelled',
-      'rejected', v_rejected, 'exhausted', v_exhausted, 'stage_generation', v_generation);
-  END IF;
-  UPDATE public.lab_arena_rounds
-  SET status = 'stage' || p_stage::TEXT || '_scoring', status_generation = status_generation + 1, stage_generation = v_generation
-  WHERE round_id = p_round_id;
-  RETURN pg_catalog.jsonb_build_object('status', 'reopened', 'round_status', 'stage' || p_stage::TEXT || '_scoring',
-    'rejected', v_rejected, 'exhausted', 0, 'stage_generation', v_generation);
-END;
-$lab_arena_reject_scorings$;
-ALTER FUNCTION public.lab_arena_reject_scorings(TEXT, SMALLINT, TEXT[]) OWNER TO lab_arena_owner;
-
 CREATE OR REPLACE FUNCTION public.lab_arena_cancel_round(p_round_id TEXT, p_reason TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -2557,7 +2480,6 @@ BEGIN
     'public.lab_arena_close_stage(TEXT, SMALLINT)',
     'public.lab_arena_open_scoring(TEXT, SMALLINT, JSONB)',
     'public.lab_arena_close_scoring(TEXT, SMALLINT)',
-    'public.lab_arena_reject_scorings(TEXT, SMALLINT, TEXT[])',
     'public.lab_arena_cancel_round(TEXT, TEXT)',
     'public.lab_arena_record_run_scores(TEXT, SMALLINT, JSONB)'
   ] LOOP
@@ -2606,6 +2528,39 @@ COMMENT ON TABLE public.lab_arena_ledger IS
   'Lab Arena V1 append-only money ledger: deposits, reservations, dispatch markers, settlements with terminal sanitized responses, uncertain marks, recoveries, refusals.';
 COMMENT ON FUNCTION public.lab_arena_whoami() IS
   'SECURITY INVOKER readback of the caller role and its catalog attributes; the service refuses to run unless the role is lab_arena_service without superuser or BYPASSRLS.';
+
+-- ---------------------------------------------------------------------------
+-- Reward basis for the weight path (labarena.md 13.4)
+-- ---------------------------------------------------------------------------
+-- The gateway coordinator and the gateway API read the signed reward basis of
+-- every published round through this view with the service-role credential;
+-- the Arena tables themselves stay closed to service_role. The view exposes
+-- only signed, public columns. It runs with its owner's rights, so the Arena
+-- host is never on the weight path: the durable row serves every reader.
+CREATE OR REPLACE VIEW public.lab_arena_reward_basis_v1 AS
+  SELECT round_id, effective_reward_epoch, reward_basis_hash, reward_basis_doc, signing_key_doc,
+         king_outcome, king_hotkey, king_start_epoch, published_at
+  FROM public.lab_arena_rounds
+  WHERE status = 'published' AND reward_basis_doc IS NOT NULL AND signing_key_doc IS NOT NULL;
+ALTER VIEW public.lab_arena_reward_basis_v1 OWNER TO lab_arena_owner;
+REVOKE ALL ON public.lab_arena_reward_basis_v1 FROM PUBLIC;
+GRANT SELECT ON public.lab_arena_reward_basis_v1 TO lab_arena_service;
+DO $lab_arena_reward_basis_acl$
+DECLARE
+  role_name TEXT;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE pg_catalog.format('REVOKE ALL ON public.lab_arena_reward_basis_v1 FROM %I', role_name);
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'service_role') THEN
+    EXECUTE 'GRANT SELECT ON public.lab_arena_reward_basis_v1 TO service_role';
+  END IF;
+END;
+$lab_arena_reward_basis_acl$;
+COMMENT ON VIEW public.lab_arena_reward_basis_v1 IS
+  'Lab Arena V1 signed reward basis of every published round with the key that signed it; the weight path reads it with service_role (labarena.md 13.4).';
 
 NOTIFY pgrst, 'reload schema';
 

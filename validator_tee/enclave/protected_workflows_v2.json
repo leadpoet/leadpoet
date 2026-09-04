@@ -492,6 +492,71 @@
       "symbol": "decrypt_kms_recipient_ciphertext"
     },
     {
+      "ast_sha256": "sha256:87089ca9a367c1cf38d0666663410c9a81f332f018c6a812a5d00b4074c49e4b",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_share_for_week"
+    },
+    {
+      "ast_sha256": "sha256:f82f58496cc8c1c10e5671d56e89bff1ca552f8c662d024a60ec457249438db3",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_uid_for_hotkey"
+    },
+    {
+      "ast_sha256": "sha256:b84338d026ad965eb2ee02b4407cb86526c70a874a1aabb1036d1c1443d01718",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_values"
+    },
+    {
+      "ast_sha256": "sha256:535735990f43ba20e12525d423ffc76751433eec1dce2e722dda607f1684b4e0",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "check_snapshot_champion_triple"
+    },
+    {
+      "ast_sha256": "sha256:beda3283580a90a922e4dd75fdbadc46ce4ff1738191931e7d2efe960a765c19",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "epoch_eligible"
+    },
+    {
+      "ast_sha256": "sha256:901cbe79b00a733e0a9bdba493c8caa8d52dafd5403386259bb78116bd24c046",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "governing_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:1bdc2e94fa1d19f9af0d7787bc2bea1834109aa0aa87c06e573b87c1a1e3d843",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "reward_week_index"
+    },
+    {
+      "ast_sha256": "sha256:8c02ed1e42042e0edaec0020a082a77d8e741cd9bdc576c2276a30a4983c6f94",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "rewards_enabled_from_environment"
+    },
+    {
+      "ast_sha256": "sha256:27f913bd6e37891fb44a7e95fc4e89bdd81798b775fa6b2e5267f8526883acac",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "signing_key_from_document"
+    },
+    {
+      "ast_sha256": "sha256:b40301508cf3f4bb10aa2a8edd4632c91e6cc3b86646b290154e95c26ed732ce",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "signing_key_hash_from_environment"
+    },
+    {
+      "ast_sha256": "sha256:03faa48bdfb37e34294de1e52df9b5f3f19ef2d69c1787723da01315504ecad2",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "validate_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:56e2b55fb865883ff8b29e8e3458ffec09cb9773b00957ea6b8baad4dfefd0e4",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "validate_reward_constants"
+    },
+    {
+      "ast_sha256": "sha256:b3669b6300ba1e97fe10356f1da57be53b7e9640701f92dde2bf4654430e3399",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "verify_reward_basis_signature"
+    },
+    {
       "ast_sha256": "sha256:6a593e822ba7f0d7d0d404167d0265dceaacf7da9563aa49013861e8e7205a29",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "PRODUCTION_CHAIN_ARCHIVE_HOST"
@@ -587,7 +652,12 @@
       "symbol": "weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:d3526d7096028e89fc35a4f965e3c2988e0015f355c4e658ce95c47c8aa8a6d1",
+      "ast_sha256": "sha256:af7981e49e6863b19aeb173be5fdd341d8e42728ae2023fff6f9c82925b29b2b",
+      "path": "leadpoet_canonical/weight_computation.py",
+      "symbol": "_check_lab_arena_champion_triple"
+    },
+    {
+      "ast_sha256": "sha256:0f7ef93cc845cf695262378cea7dfb600bb73f92df0eff6101b01dfecb443114",
       "path": "leadpoet_canonical/weight_computation.py",
       "symbol": "compute_final_weights"
     },
@@ -697,7 +767,7 @@
       "symbol": "Validator._set_weights_until_epoch_end"
     },
     {
-      "ast_sha256": "sha256:c86bc94ae685539cf1c6b9a3b8b0f8f6d217e4cc5d86e644b4405ed5ec20d431",
+      "ast_sha256": "sha256:88a905d72bd66d15db0971805db3c9c8c69994598658a03d3908f2dddfa4e0da",
       "path": "neurons/validator.py",
       "symbol": "Validator._submit_weights_at_epoch_end_locked"
     },
@@ -1022,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:2cb82fcd494b01333b968a01b8ac0b120482a1febfca91c13e7e48352a6769c5",
-  "protected_source_commit": "4f5f22a93477bc8c58895906f404e01bc306fcd0",
+  "manifest_hash": "sha256:a8e399208a5b380d028479108f16138b0266603917f5e6c8df728c808e5f34fa",
+  "protected_source_commit": "75e50129c770b37b738ba82eec57d5e4722a14fe",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

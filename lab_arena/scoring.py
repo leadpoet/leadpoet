@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -309,50 +308,6 @@ def score_work_item(
             raise ScoringError("scorer returned %d breakdowns for %d scored companies" % (len(breakdowns), len(scored_indexes)))
         return breakdowns
     raise ScoringError("work item %s could not be scored: %s: %s" % (item.get("work_item_id"), type(last_error).__name__ if last_error else "unknown", str(last_error or "")[:240]))
-
-
-@dataclass
-class ScoringResults:
-    breakdowns_by_item: Dict[str, List[Dict[str, Any]]]
-    judge_executions: int
-
-
-def run_scoring_plan(
-    plan: Mapping[str, Any],
-    *,
-    icps_by_position: Mapping[int, Mapping[str, Any]],
-    outputs_by_hash: Mapping[str, Sequence[Mapping[str, Any]]],
-    scorer: Scorer,
-    workers: int = 1,
-    existing: Optional[Mapping[str, Sequence[Mapping[str, Any]]]] = None,
-) -> ScoringResults:
-    """Score every work item exactly once (skipping items already scored).
-
-    Workers pull items concurrently; the store of results is keyed by work
-    item so a restart resumes from what was durably recorded.
-    """
-
-    validated = contracts.validate_scoring_plan(plan)
-    results: Dict[str, List[Dict[str, Any]]] = {key: [dict(row) for row in value] for key, value in (existing or {}).items()}
-    pending = [item for item in validated["work_items"] if item["work_item_id"] not in results]
-    executions = 0
-
-    def _score(item: Mapping[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
-        icp = icps_by_position[int(item["icp_position"])]
-        companies = outputs_by_hash[item["output_hash"]]
-        return item["work_item_id"], score_work_item(item, icp=icp, companies=companies, scorer=scorer)
-
-    if workers <= 1:
-        for item in pending:
-            key, breakdowns = _score(item)
-            results[key] = breakdowns
-            executions += 1
-    else:
-        with ThreadPoolExecutor(max_workers=int(workers)) as pool:
-            for key, breakdowns in pool.map(_score, pending):
-                results[key] = breakdowns
-                executions += 1
-    return ScoringResults(breakdowns_by_item=results, judge_executions=executions)
 
 
 # ---------------------------------------------------------------------------

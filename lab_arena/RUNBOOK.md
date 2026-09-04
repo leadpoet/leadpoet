@@ -81,8 +81,8 @@ public reference; unset, the bundle names the Arena reference), `AWS_REGION`.
 
 `LAB_ARENA_MODE` selects `off` (default: nothing starts, nothing is served),
 `shadow` (full rounds, publication marked shadow, no reward basis is
-governing), or `live`. The reward release itself is a separate step (plan
-section 19 step 9) and is not enabled by this service.
+governing), or `live`. Rewards on chain are section 10: they need the
+validator and gateway flags there, never the Arena mode alone.
 
 Start: `python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791`.
 The driver thread advances every active round (not published or cancelled),
@@ -255,28 +255,32 @@ receipt. When every assignment is terminal the window closes to
 `stage1_judged`; an assignment left unjudged for any reason other than the
 scored miner's own key cancels the round, exactly like an execution gap.
 
-The replay is the single integrity check. In the judged state the Arena runs
-the same judge entrypoint again, in a subprocess on the Arena host, against
-the responses the broker recorded for each scoring run; no provider is
-called. Reproduced with the same numbers: accepted. Reproduced with different
-numbers: the replayed numbers are scored and the validator is listed as a
-mismatch in the stage timing report. Not reproducible at all (judge requests
-with no recorded answer, a failed replay, an invalid output): the scoring is
-rejected as `replay_rejected`, the round returns to `stage1_scoring` for a
-second attempt of that item, and an item that fails twice cancels the round
-rather than becoming a miner's zero. A scoring the scored miner's own key or
-quota refused (`judge_key_refused`, decided by the worker from the refusals
-it recorded, or a provider 401/403 on a scoring run) is that miner's zero:
-the signed score bundle declares the work item under `refused_work_items`
-and every submission sharing that output gets a zero row with that cause,
-which the public verifier accepts only against that declaration. Two miners
-with byte-identical outputs share one work item, so a refusal on the first
-miner's keys also zeroes the second; identical outputs are rare enough that
-V1 accepts this. The rejected attempt keeps its receipt,
-output, and event chain unchanged in the ledger, so anyone can rerun the
-replay from the ledger and check the rejection; this is the one exception to
-terminal-attempt immutability, and it applies only to accepted score runs. `LAB_ARENA_REPLAY_VERIFICATION=0`
-disables the replay only for local rehearsal; production keeps it on.
+The validators' numbers are the round's numbers. A scoring the scored
+miner's own key or quota refused (`judge_key_refused`, decided by the worker
+from the refusals it recorded, or a provider 401/403 on a scoring run) is
+that miner's zero: the signed score bundle declares the work item under
+`refused_work_items` and every submission sharing that output gets a zero row
+with that cause, which the public verifier accepts only against that
+declaration. Two miners with byte-identical outputs share one work item, so a
+refusal on the first miner's keys also zeroes the second; identical outputs
+are rare enough that V1 accepts this.
+
+The replay is a report after publication, not a gate. Once a round publishes,
+each driver tick replays `LAB_ARENA_REPLAY_ITEMS_PER_TICK` (50) accepted
+scorings with `LAB_ARENA_SCORING_WORKERS` subprocesses: the same judge
+entrypoint runs again on the Arena host against the responses the broker
+recorded for that scoring run, no provider is called, and the score-bearing
+form of the breakdowns is compared. When every scoring is replayed the Arena
+signs one public report, `arena/<round>/public/replay_report.json` (also
+shown on `GET /rounds/{id}` as `replay_report`), with per-validator counts of
+scorings that reproduced (`match`), differed (`mismatch`), or could not be
+replayed (`rejected`), and the flagged items. A validator's wrong numbers
+therefore stand for that one round; the operator removes that validator from
+the allowlist before the next round. This is acceptable only while Leadpoet
+runs every validator. Exit criterion: before an external validator is
+admitted, the replay returns as a pre-publication gate, or a stake-and-slash
+design replaces it. `LAB_ARENA_REPLAY_VERIFICATION=0` disables the report
+only for local rehearsal; production keeps it on.
 
 Build and publish the judge image from this repository with
 `bash scripts/build_lab_arena_judge_image.sh <registry>/<repository>`. The
@@ -364,23 +368,17 @@ commit on the first release.
   90-minute scoring window holds at most `slots × 90 / minutes-per-item`
   items; at 7,710 items and a five-minute average, that needs about 430
   slots, or a longer window. A window that closes with items unjudged
-  cancels the round. The Arena's own replays run `LAB_ARENA_SCORING_WORKERS`
-  at a time inside the stage assembly. Measured on the test Mac, one replay
-  subprocess costs about 4 s before any judging, because the judge
-  entrypoint imports the evaluator and the qualification scoring package.
-  Size the workers as `7,710 × seconds-per-replay / workers` against the
-  time you can spend between the scoring window and publication: with 4 s
-  per replay, 16 workers need about 32 minutes and 32 workers about 16. The
-  assembly blocks the round until it finishes, so on a small host prefer
-  fewer challengers or move the replay after publication. Scores are written
-  in batches of 500 and scoring plans live in the object store, so round rows
-  stay small at any participant count. Rounds overlap, so the next round's
-  submission window costs no runner time while this one runs.
-- Scorer egress enforced with the nftables ruleset from
-  `lab_arena.egress.scorer_nftables_ruleset` on the scoring host.
+  cancels the round. The replay report runs after publication, one chunk of
+  `LAB_ARENA_REPLAY_ITEMS_PER_TICK` scorings per driver tick with
+  `LAB_ARENA_SCORING_WORKERS` subprocesses (about 4 s each on the test Mac,
+  because the judge entrypoint imports the evaluator), so it never delays a
+  round: at 7,710 items, 50 per tick and 16 workers finish in about eight
+  hours of ticks. Scores are written in batches of 500 and scoring plans live
+  in the object store, so round rows stay small at any participant count.
+  Rounds overlap, so the next round's submission window costs no runner time
+  while this one runs.
 - Runner floor sized from the shadow timing reports before the pilot.
-- Paid pilot, then the reward release (plan section 19 step 9), which is the
-  first change to files outside `lab_arena/`, `scripts/`, and `tests/`.
+- Paid pilot with rewards enabled (section 10).
 
 ## 9. What a validator may assert
 
@@ -394,7 +392,9 @@ commit on the first release.
   evidence: a ledger refusal of a reservation or a settlement whose provider
   status the broker saw as 401 or 403 (`lab_arena.service.refusal_evidenced`).
   Nothing the runner writes counts.
-- Accepted scorings are checked by the replay alone (section 6).
+- Accepted scorings stand as delivered; the post-publication replay report
+  (section 6) is how a validator's wrong numbers are found, and the operator
+  removes that validator. The report is signed and public.
 - A model that keeps calling after its quota is refused costs the Arena at
   most `MAX_REFUSED_FRAMES` round trips per run; the worker then answers
   its frames locally.
@@ -414,7 +414,61 @@ python3 scripts/lab_arena_verify.py --round arena-2026-09-05 \
     --bucket-url https://bucket.example [--api https://arena.example]
 ```
 
-## 10. Invariants to re-check after any change
+## 10. Rewards on chain
+
+The king's weight is the existing champion slot of the canonical weight
+computation, filled from the Arena's signed reward basis (plan section 13).
+One kernel, `leadpoet_canonical/lab_arena_rewards.py`, derives the champion
+triple from a basis; the Arena imports it back, the validator proposes with
+it, the gateway coordinator re-derives with it, and the canonical weight
+computation refuses a snapshot whose triple differs from the basis it names.
+
+Pieces, all in this repository:
+
+- Migration `178` stores the Arena signing-key document with every published
+  basis and exposes the signed columns through the view
+  `lab_arena_reward_basis_v1`, readable with `service_role`; the Arena tables
+  stay closed to it.
+- The gateway serves the governing row for a weight epoch at
+  `GET /fulfillment/lab-arena-reward-basis?epoch=<n>` (the newest published
+  round whose effective reward epoch is at most `n`, or `null` before the
+  first publication). The Arena host is never on the weight path.
+- The validator (`neurons/validator.py`) reads that row when
+  `LAB_ARENA_REWARDS_ENABLED=1`, verifies the signature against
+  `LAB_ARENA_SIGNING_PUBLIC_KEY_HASH`, derives the triple on its metagraph,
+  and carries the basis in its calculation snapshot. Any failure refuses
+  weight publication: an unreachable or invalid basis is never an empty king.
+- The gateway coordinator measures the same row through the query policy
+  `lab_arena_reward_basis`, verifies the signature against the same pinned
+  hash (set `LAB_ARENA_SIGNING_PUBLIC_KEY_HASH` in both gateway environment
+  documents), re-derives the triple, and requires equality; without a basis in
+  the proposal it requires an empty champion slot. A governing row newer than
+  the proposal is reported as such and the next proposal picks it up.
+- With the flag off every snapshot, input document, and weight bundle is
+  byte-identical to before.
+
+The pool is `LAB_ARENA_POOL_PERCENT` of total emissions (default 25, any whole
+percent 0..100) in week one, then 80, 60, 40, and 20 percent of that, from
+the king's start epoch; a defended king keeps its start epoch, a new king
+restarts the decay. The percent is announced in every round configuration
+and carried by every reward basis, so a change applies from the next round
+the Arena creates and never rewrites a published basis; validators need no
+change to follow it. The pinned signing-key hash is
+`python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key_hash"])' <<< "$(curl -s https://arena.example/arena/v1/signing-key)"`.
+
+Order of operations: apply migration 178 (or its view part on an Arena
+database that already has the tables), publish at least one round in live
+mode, set `LAB_ARENA_SIGNING_PUBLIC_KEY_HASH` on the gateway and the primary
+validator, restart the gateway on the attested release that carries this
+code (the validator enclave image copies `leadpoet_canonical/` and
+`neurons/validator.py`, so this is an attestation-changing release: rebuild
+the validator image, allowlist its PCR0, and rebuild both protected-workflow
+manifests with `python3 -m gateway.tee.protected_workflows --root . --write`
+and `python3 -m validator_tee.host.protected_workflows_v2 --root . --write`),
+then set `LAB_ARENA_REWARDS_ENABLED=1` on the primary validator. Audit
+validators copy the canonical bundle unchanged.
+
+## 11. Invariants to re-check after any change
 
 - `python3 -m pytest tests/lab_arena -q`: the boundary tests prove no
   Arena module imports `gateway.tee` or `gateway.db`, no measured package

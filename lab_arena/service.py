@@ -28,6 +28,7 @@ from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+REPLAY_REPORT_SCHEMA_VERSION = "leadpoet.lab_arena.replay_report.v1"
 # One stage of 30 ICPs for every participant: 257 participants x 30 ICPs x 5
 # minutes is 38,550 sandbox-minutes, about 160 slots inside 80 percent of a
 # 300-minute window.
@@ -181,6 +182,10 @@ class RoundDefaults:
     daily_cutoff_hour_utc: Optional[int] = None
     # A new round's cutoff lies at least this far ahead so miners can submit.
     min_submission_hours: int = 6
+    # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
+    # Announced in every round configuration and carried by every reward basis,
+    # so a change applies from the next round and never rewrites a published one.
+    pool_percent: int = contracts.LAB_ARENA_POOL_PERCENT
 
 
 @dataclass
@@ -208,6 +213,8 @@ class ServiceConfig:
     replay_verification: bool = True
     replay_entry_command: Optional[Sequence[str]] = None
     replay_work_dir: Optional[str] = None
+    # Post-publication replay report: accepted scorings replayed per driver tick.
+    replay_items_per_tick: int = 50
     model_release_client: Optional[Any] = None
     model_release_branch: str = model_release_module.DEFAULT_BRANCH
     # The registry client that resolves and mirrors submitted images (None
@@ -438,7 +445,7 @@ class ArenaService:
             "image_rules": defaults.image_rules.to_document(),
             "registry_repository": defaults.registry_repository,
             "publication_terms_hash": defaults.publication_terms_hash,
-            "reward_constants": rewards.reward_constants_document(),
+            "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
         configuration = self._sign(contracts.finalize_round_configuration(document), "configuration_hash")
         self._objects.put("arena/%s/price_table.json" % round_id, contracts.canonical_json(price_table).encode("utf-8"))
@@ -993,9 +1000,9 @@ class ArenaService:
     def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         """Assemble the stage bundle from validator-scored work items.
 
-        Every accepted scoring is replayed first. A scoring the replay cannot
-        reproduce is rejected and re-scored: the round returns to the scoring
-        window for the rejected items' second attempts.
+        The validators' verified breakdowns are the round's numbers. The replay
+        of every accepted scoring runs after publication as a signed public
+        report (``replay_pending``), never as a gate on the round.
         """
 
         round_row = self._round(round_id)
@@ -1008,10 +1015,7 @@ class ArenaService:
         scoring_started = _iso(self.now())
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         refused: List[str] = []
-        replay_report: List[Dict[str, Any]] = []
-        rejected: List[str] = []
         judge_executions = 0
-        to_replay: List[Tuple[str, Dict[str, Any], Mapping[str, Any], Sequence[Mapping[str, Any]], List[Dict[str, Any]]]] = []
         for item in plan["work_items"]:
             work_item_id = item["work_item_id"]
             run = chosen.get(work_item_id)
@@ -1024,50 +1028,18 @@ class ArenaService:
                     raise scoring.ScoringError("work item %s was not judged" % work_item_id)
                 refused.append(work_item_id)  # the scored miner's own key refused the judge: a declared zero row
                 continue
-            breakdowns = self._verified_breakdowns(run, icp=icp, companies=companies)
+            breakdowns_by_item[work_item_id] = self._verified_breakdowns(run, icp=icp, companies=companies)
             judge_executions += 1
-            if self._config.replay_verification:
-                to_replay.append((work_item_id, run, icp, companies, breakdowns))
-                continue
-            breakdowns_by_item[work_item_id] = breakdowns
-        if to_replay:
-            # Each replay is a subprocess; run them a few at a time (the same
-            # knob that sized the Arena's own judging) and keep plan order.
-            from concurrent.futures import ThreadPoolExecutor
-
-            def replay_one(entry):
-                work_item_id, run, icp, companies, breakdowns = entry
-                report: List[Dict[str, Any]] = []
-                replayed = self._replayed_breakdowns(run, icp=icp, companies=companies, reported=breakdowns, report=report)
-                return work_item_id, run["run_id"], replayed, report
-
-            workers = max(1, int(self._config.scoring_workers))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-arena-replay") as pool:
-                results = list(pool.map(replay_one, to_replay))
-            for work_item_id, run_id, replayed, report in results:
-                replay_report.extend(report)
-                if replayed is None:
-                    rejected.append(run_id)
-                    continue
-                breakdowns_by_item[work_item_id] = replayed
         timing_ref = "arena/%s/timing/stage%d_scoring.json" % (round_id, stage)
-        if rejected:
-            result = self._store.reject_scorings(round_id, stage, rejected)
-            self._objects.put(
-                "arena/%s/timing/stage%d_rejections_%d.json" % (round_id, stage, int(result.get("stage_generation") or 0)),
-                contracts.canonical_json({"stage": stage, "at": _iso(self.now()), "rejected": rejected, "replays": replay_report, "result": result}).encode("utf-8"),
-            )
-            return {"status": "rescoring" if result.get("status") == "reopened" else result.get("status"), "round_status": result.get("round_status"), "rejected": len(rejected), "exhausted": result.get("exhausted")}
         ref = "arena/%s/scores/stage%d.json" % (round_id, stage)
         bundle = self._put_signed(
             ref,
             scoring.build_score_bundle(plan=plan, policy=self._scorer_policy, icps_by_position=dict(enumerate(icps)), outputs_by_hash=outputs, breakdowns_by_item=breakdowns_by_item, refused_items={item: "judge_key_refused" for item in refused}),
             "bundle_hash",
         )
-        mismatches = sum(1 for entry in replay_report if entry.get("outcome") == "mismatch")
         self._objects.put(
             timing_ref,
-            contracts.canonical_json({"stage": stage, "started_at": scoring_started, "finished_at": _iso(self.now()), "judge_executions": judge_executions, "work_items": len(plan["work_items"]), "key_refused_items": refused, "replays": replay_report, "replay_mismatches": mismatches}).encode("utf-8"),
+            contracts.canonical_json({"stage": stage, "started_at": scoring_started, "finished_at": _iso(self.now()), "judge_executions": judge_executions, "work_items": len(plan["work_items"]), "key_refused_items": refused}).encode("utf-8"),
         )
         runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         recorded = self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(bundle, runs, score_ref=ref))
@@ -1077,7 +1049,7 @@ class ArenaService:
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
         # The one stage's bundle is the final bundle: the round is scored.
         transition = self._store.transition_round(round_id, "stage1_judged", "scored", {"final_scores_ref": ref, "final_score_bundle_hash": bundle["bundle_hash"]})
-        return {"status": transition.get("status"), "bundle_hash": bundle["bundle_hash"], "judge_executions": judge_executions, "replay_mismatches": mismatches}
+        return {"status": transition.get("status"), "bundle_hash": bundle["bundle_hash"], "judge_executions": judge_executions}
 
     def _ranking_entries(self, round_row: Mapping[str, Any], bundle: Mapping[str, Any], score_key: str) -> List[Dict[str, Any]]:
         entries = []
@@ -1171,6 +1143,7 @@ class ArenaService:
             basis = self._sign(rewards.reward_basis_document(
                 round_id=round_id, configuration_hash=round_row["configuration_hash"], commitment_hash=round_row["commitment_hash"], result_bundle_hash=result_bundle_hash,
                 published_at=published_at, finalized_epoch=finalized_epoch, king_hotkey=king_hotkey, king_outcome=decision["outcome"], previous_king_start_epoch=previous_start,
+                reward_constants=configuration["reward_constants"],
             ), "reward_basis_hash")
         else:
             published_at = str(basis["published_at"])
@@ -1195,6 +1168,9 @@ class ArenaService:
             "effective_reward_epoch": effective_epoch,
             "reward_basis_hash": basis["reward_basis_hash"],
             "reward_basis_doc": basis,
+            # The key that signed the basis, served with it so the weight path can verify
+            # the signature against the hash it pins without reaching the Arena host.
+            "signing_key_doc": self.signing_key_document(),
         })
         return {"status": transition.get("status"), "result_bundle_hash": result_bundle_hash, "king_outcome": decision["outcome"], "king_hotkey": basis["king_hotkey"], "effective_reward_epoch": effective_epoch}
 
@@ -1678,6 +1654,88 @@ class ArenaService:
             return {"status": "released", "round_id": round_id}
         return dict(self.release_king_model(round_id), round_id=round_id)
 
+    @staticmethod
+    def _replay_chunk_ref(round_id: str, chunk: int) -> str:
+        return "arena/%s/replay/chunk_%04d.json" % (round_id, int(chunk))
+
+    def replay_report_ref(self, round_id: str) -> str:
+        return self.public_prefix(round_id) + "replay_report.json"
+
+    def replay_pending(self) -> Dict[str, Any]:
+        """Replay one chunk of the latest published round's accepted scorings; sign the report when done.
+
+        The replay is a post-publication report, not a gate (runbook section 6
+        as revised on 2026-09-03): every accepted scoring is rerun from the
+        judge responses the broker recorded, and one signed public report per
+        round lists, per validator, how many scorings reproduced, differed, or
+        could not be replayed. A validator's wrong numbers therefore stand for
+        one round and the operator removes that validator. That is acceptable
+        only while Leadpoet runs every validator; the gate must return, or a
+        stake-and-slash design replace it, before an external validator is
+        admitted. Chunks are written once each, so a restart resumes where the
+        last tick stopped and one tick never holds the driver for long.
+        """
+
+        if not self._config.replay_verification or not self._config.replay_entry_command:
+            return {"status": "disabled"}
+        latest = self.latest_published_round()
+        if latest is None:
+            return {"status": "idle"}
+        round_id = str(latest["round_id"])
+        report_ref = self.replay_report_ref(round_id)
+        if self._object_or_none(report_ref) is not None:
+            return {"status": "reported", "round_id": round_id}
+        round_row = self._round(round_id)
+        plan = self._load_scoring_plan(round_row, 1)
+        icps, _hashes = self.benchmark_icps(round_id)
+        outputs = self._outputs_by_hash(round_id, 1)
+        chosen = self._scoring_outputs(round_id, 1)
+        items = [(item, chosen.get(item["work_item_id"])) for item in plan["work_items"]]
+        items = [(item, run) for item, run in items if run is not None and run["status"] == "accepted"]
+        size = max(1, int(self._config.replay_items_per_tick))
+        chunk_count = (len(items) + size - 1) // size
+        entries: List[Dict[str, Any]] = []
+        next_chunk = 0
+        while next_chunk < chunk_count:
+            stored = self._object_or_none(self._replay_chunk_ref(round_id, next_chunk))
+            if stored is None:
+                break
+            entries.extend(json.loads(stored.decode("utf-8"))["replays"])
+            next_chunk += 1
+        if next_chunk < chunk_count:
+            chunk = items[next_chunk * size:(next_chunk + 1) * size]
+            from concurrent.futures import ThreadPoolExecutor
+
+            def replay_one(pair):
+                item, run = pair
+                icp = icps[int(item["icp_position"])]
+                companies = outputs[item["output_hash"]]
+                report: List[Dict[str, Any]] = []
+                reported = self._verified_breakdowns(run, icp=icp, companies=companies)
+                self._replayed_breakdowns(run, icp=icp, companies=companies, reported=reported, report=report)
+                return report
+
+            workers = max(1, int(self._config.scoring_workers))
+            chunk_entries: List[Dict[str, Any]] = []
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-arena-replay") as pool:
+                for report in pool.map(replay_one, chunk):
+                    chunk_entries.extend(report)
+            self._objects.put(self._replay_chunk_ref(round_id, next_chunk), contracts.canonical_json({"round_id": round_id, "chunk": next_chunk, "replays": chunk_entries}).encode("utf-8"))
+            entries.extend(chunk_entries)
+            next_chunk += 1
+            if next_chunk < chunk_count:
+                return {"status": "progress", "round_id": round_id, "chunk": next_chunk, "chunks": chunk_count}
+        per_validator: Dict[str, Dict[str, int]] = {}
+        for entry in entries:
+            counts = per_validator.setdefault(str(entry.get("runner") or ""), {"match": 0, "mismatch": 0, "rejected": 0})
+            counts[str(entry.get("outcome"))] = counts.get(str(entry.get("outcome")), 0) + 1
+        document = {
+            "schema_version": REPLAY_REPORT_SCHEMA_VERSION, "round_id": round_id, "stage": 1, "work_items": len(items), "replayed": len(entries),
+            "per_validator": per_validator, "flagged": [entry for entry in entries if entry.get("outcome") != "match"], "finished_at": _iso(self.now()),
+        }
+        report = self._put_signed(report_ref, contracts.hashed_document(document, "report_hash"), "report_hash")
+        return {"status": "reported", "round_id": round_id, "work_items": len(items), "report_hash": report["report_hash"]}
+
     def cancel(self, round_id: str, reason: str) -> Dict[str, Any]:
         if reason not in CANCEL_REASONS.values():
             raise ServiceError("cancel_reason_invalid", 400)
@@ -1736,6 +1794,8 @@ class ArenaService:
         release = self._object_or_none(self._model_release_ref(round_id))
         if release is not None:
             view["model_release"] = json.loads(release.decode("utf-8"))
+        replay_report = self._object_or_none(self.replay_report_ref(round_id))
+        view["replay_report"] = json.loads(replay_report.decode("utf-8")) if replay_report is not None else None
         if row["status"] == "published":
             bundle = json.loads(self._objects.get(row["publication_doc"]["result_bundle_ref"]).decode("utf-8"))
             view.update({"final_ranking": bundle.get("final_ranking"), "runner_fractions": bundle.get("runner_fractions"), "king_decision": bundle.get("king_decision")})

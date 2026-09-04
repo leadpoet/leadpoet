@@ -50,6 +50,25 @@ def fake_scorer(counter, delay=0.0, fail_first=0):
     return score
 
 
+def run_plan(plan, *, icps_by_position, outputs_by_hash, scorer, workers=1, existing=None):
+    """Score every work item once in the test (the Arena has no central scoring runner: validators judge)."""
+
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    validated = contracts.validate_scoring_plan(plan)
+    results = {key: [dict(row) for row in value] for key, value in (existing or {}).items()}
+    pending = [item for item in validated["work_items"] if item["work_item_id"] not in results]
+
+    def _score(item):
+        return item["work_item_id"], scoring.score_work_item(item, icp=icps_by_position[int(item["icp_position"])], companies=outputs_by_hash[item["output_hash"]], scorer=scorer)
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        for key, breakdowns in pool.map(_score, pending):
+            results[key] = breakdowns
+    return SimpleNamespace(breakdowns_by_item=results, judge_executions=len(pending))
+
+
 def runs_for(submissions, stage=1, *, outputs=None, causes=None):
     positions = range(0, 30)  # the one stage covers every benchmark slot
     rows = []
@@ -121,7 +140,7 @@ def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_break
     assert len(plan["work_items"]) == 480 and len({item["submission_id"] for item in plan["work_items"]}) == 16
     counter = {"executions": 0, "lock": threading.Lock()}
     companies = [company(i) for i in range(5)]
-    results = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter, delay=0.001), workers=8)
+    results = run_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter, delay=0.001), workers=8)
     assert results.judge_executions == 480 and counter["executions"] == 480
     bundle = scoring.build_score_bundle(plan=plan, policy=policy, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, breakdowns_by_item=results.breakdowns_by_item)
     assert len(bundle["rows"]) == 480
@@ -132,7 +151,7 @@ def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_break
     assert all("proof_quote" not in b for row in bundle["rows"] for b in row["breakdowns"])
     assert len(set(bundle["submission_scores"].values())) == 1
     # A restart resumes from durable results without re-executing the judge.
-    resumed = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter), workers=4, existing=results.breakdowns_by_item)
+    resumed = run_plan(plan, icps_by_position=_ICPS, outputs_by_hash={shared: companies}, scorer=fake_scorer(counter), workers=4, existing=results.breakdowns_by_item)
     assert resumed.judge_executions == 0 and counter["executions"] == 480
 
 
@@ -158,7 +177,7 @@ def test_one_stage_bundle_carries_thirty_icp_scores_and_run_records():
     companies = [company(1), company(2, "10,001+"), company(3)]  # the second is outside the buckets and is skipped
     runs = runs_for(["king", "c1"], outputs={(s, p): out1 for s in ("king", "c1") for p in range(30)}, causes={("c1", 4): "invalid_output"})
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, configuration_hash=contracts.document_hash("cfg"), commitment_hash=contracts.document_hash("cm"), scorer_policy_hash=policy["policy_hash"], runs=runs, icp_hashes_by_position=icp_hashes())
-    result = scoring.run_scoring_plan(plan, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, scorer=fake_scorer(counter))
+    result = run_plan(plan, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, scorer=fake_scorer(counter))
     bundle = scoring.build_score_bundle(plan=plan, policy=policy, icps_by_position=_ICPS, outputs_by_hash={out1: companies}, breakdowns_by_item=result.breakdowns_by_item)
     king_row = [row for row in bundle["rows"] if row["submission_id"] == "king"][0]
     assert king_row["scored_company_indexes"] == [0, 2] and king_row["skipped_company_indexes"] == [1]

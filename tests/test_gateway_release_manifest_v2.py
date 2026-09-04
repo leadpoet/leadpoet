@@ -65,7 +65,7 @@ def _release(rows=None):
 def test_release_requires_six_matching_builds_for_every_role():
     release = _release()
     assert validate_release_manifest(release) == release
-    assert release["verified_build_count"] == 18
+    assert release["verified_build_count"] == 6 * len(ROLE_SPECS)
     assert all(value["verified_build_count"] == 6 for value in release["roles"].values())
     expectation = role_expectation(release, "gateway_scoring")
     assert expectation["service_role"] == "gateway_scoring"
@@ -99,7 +99,10 @@ def test_release_commits_non_measured_eif_hashes_without_requiring_equality():
 
 def test_release_rejects_missing_or_duplicate_build_evidence():
     rows = _evidence()
-    with pytest.raises(ReleaseManifestV2Error, match="exactly 18"):
+    with pytest.raises(
+        ReleaseManifestV2Error,
+        match="exactly %s" % (6 * len(ROLE_SPECS)),
+    ):
         _release(rows[:-1])
     rows[-1] = copy.deepcopy(rows[-2])
     with pytest.raises(ReleaseManifestV2Error, match="duplicated"):

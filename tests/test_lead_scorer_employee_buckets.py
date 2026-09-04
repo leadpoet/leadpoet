@@ -264,7 +264,7 @@ class EmployeeSizeBucketTests(unittest.TestCase):
             product_service="test",
         )
         with mock.patch(
-            "research_lab.employee_buckets.normalize_observed_employee_count_bucket",
+            "qualification.employee_buckets.normalize_observed_employee_count_bucket",
             side_effect=RuntimeError("test-only projector fault"),
         ):
             with self.assertRaisesRegex(RuntimeError, "projector fault"):

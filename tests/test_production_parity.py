@@ -1034,6 +1034,7 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         assert parity_snapshot.file_sha256(
             ROOT / str(arena_migration["path"])
         ) == arena_migration["sha256"]
+
     sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
         "utf-8"
     )
@@ -1142,6 +1143,47 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         match="not bound to the latest candidate migration",
     ):
         parity_snapshot._schema_only_source_add_acl_sql(extended)
+
+
+def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypatch):
+    observed = {}
+
+    def fake_run_postgres(command, **kwargs):
+        observed["sql"] = command[-1]
+        value = {
+            "server_version_num": "150010",
+            "relation_count": 1,
+            "total_relation_bytes": 1,
+            "largest_relation_bytes": 1,
+            "capture_utc_timestamp": "2026-09-04T00:00:00+00:00",
+            "capture_utc_date": "2026-09-04",
+            "latest_completed_benchmark_date": None,
+            "current_day_rebenchmark_run_count": 0,
+            "current_day_benchmark_bundle_count": 0,
+            "weight_history_scope": None,
+            "source_role": {
+                "role_name": "readonly",
+                "transaction_read_only": True,
+                "superuser": False,
+                "bypass_rls": False,
+                "replication": False,
+                "table_write_capable": False,
+            },
+        }
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(value).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+    result = parity_snapshot._database_stats(
+        {"PGHOST": "db.production.example"},
+        postgres_image="postgres@sha256:" + "a" * 64,
+    )
+
+    assert "FROM public.lab_arena_rounds" not in observed["sql"]
+    assert result["latest_completed_benchmark_date"] is None
+    assert result["current_day_rebenchmark_run_count"] == 0
+    assert result["current_day_benchmark_bundle_count"] == 0
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(

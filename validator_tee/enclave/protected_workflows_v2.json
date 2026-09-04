@@ -732,7 +732,7 @@
       "symbol": "VERIFIED_BUNDLE_FALLBACK_BLOCK"
     },
     {
-      "ast_sha256": "sha256:c11ab6f1fdefbc6ffb89455a017c63bc0bdc032ff76f41dbc279229510ec8e53",
+      "ast_sha256": "sha256:f203875126de72b4eefb30523f83027ee1256efb756c50155ce371a151d3f698",
       "path": "neurons/validator.py",
       "symbol": "Validator.__init__"
     },
@@ -1092,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:2a63a5d459c63400e04db4e37abcc5d10222ee05594b786e96ec2267b2504208",
-  "protected_source_commit": "69aaf6cd03efdf6df06a5105fb656729a6244465",
+  "manifest_hash": "sha256:44f2ef6e950e72d3f5285ad806e7a99a55713dcbfc3d8bfe54c2dfcb66bf094e",
+  "protected_source_commit": "e68a3f3023cbef878f2d365c35d373fb2fc60dc0",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

@@ -155,7 +155,7 @@ def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path
     )
     archived = verify_archive_directory(Path(result["archive_path"]))
     assert archived["release_hash"] == release["release_hash"]
-    assert len(archived["files"]) == 14
+    assert len(archived["files"]) == 2 + 4 * len(ROLE_SPECS)
     assert result["retained_release_count"] == 1
 
 

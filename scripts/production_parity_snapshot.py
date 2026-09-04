@@ -1478,23 +1478,9 @@ SELECT json_build_object(
   'largest_relation_bytes', COALESCE(MAX(pg_total_relation_size(c.oid)), 0),
   'capture_utc_timestamp', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::text || '+00:00',
   'capture_utc_date', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text,
-  'latest_completed_benchmark_date', (
-    SELECT MAX(evaluation_date)::text
-    FROM public.lab_arena_rounds
-    WHERE status = 'published'
-  ),
-  'current_day_rebenchmark_run_count', (
-    SELECT COUNT(*)
-    FROM public.lab_arena_rounds
-    WHERE evaluation_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text
-      AND status <> 'cancelled'
-  ),
-  'current_day_benchmark_bundle_count', (
-    SELECT COUNT(*)
-    FROM public.lab_arena_rounds
-    WHERE evaluation_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text
-      AND status = 'published'
-  ),
+  'latest_completed_benchmark_date', NULL,
+  'current_day_rebenchmark_run_count', 0,
+  'current_day_benchmark_bundle_count', 0,
   'weight_history_scope', (
     SELECT json_build_object(
       'netuid', netuid,

@@ -342,6 +342,8 @@ def _controller_drift_checkout(tmp_path: Path) -> tuple[Path, bytes, bytes]:
 def test_exact_controller_checkout_drift_is_recovered(tmp_path: Path) -> None:
     repository, deployed, controller = _controller_drift_checkout(tmp_path)
 
+    repository.chmod(0o775)
+
     assert verifier._recover_exact_controller_checkout_drift(
         repo_root=repository,
         bundle={"payloads": {"gw_restart.sh": controller}},
@@ -349,6 +351,7 @@ def test_exact_controller_checkout_drift_is_recovered(tmp_path: Path) -> None:
     )
 
     assert (repository / "gw_restart.sh").read_bytes() == deployed
+    assert stat.S_IMODE(repository.stat().st_mode) == 0o700
     assert subprocess.check_output(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=repository,

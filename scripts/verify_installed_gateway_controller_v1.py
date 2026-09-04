@@ -680,7 +680,15 @@ def _recover_exact_controller_checkout_drift(
             "installed controller recovery payload is unavailable"
         )
     checkout_path = repository / "gw_restart.sh"
-    if _read_exact_file(checkout_path, expected_mode=0o700) != controller_payload:
+    checkout_parent = frozenset({repository})
+    if (
+        _read_exact_file(
+            checkout_path,
+            expected_mode=0o700,
+            allowed_group_writable_paths=checkout_parent,
+        )
+        != controller_payload
+    ):
         raise InstalledGatewayControllerError(
             "gateway Git checkout has unrecognized controller drift"
         )
@@ -694,7 +702,11 @@ def _recover_exact_controller_checkout_drift(
             "--untracked-files=all",
         )
         != "M gw_restart.sh"
-        or _read_exact_file(checkout_path, expected_mode=0o700)
+        or _read_exact_file(
+            checkout_path,
+            expected_mode=0o700,
+            allowed_group_writable_paths=checkout_parent,
+        )
         != controller_payload
     ):
         raise InstalledGatewayControllerError(

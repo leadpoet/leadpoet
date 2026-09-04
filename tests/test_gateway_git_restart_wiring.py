@@ -1365,6 +1365,118 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
     assert "candidate runtime did not durably bound active receipt ancestry" in script
 
 
+def test_gateway_restart_counts_only_exact_live_gateway_as_reclaimable(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_memory_ready_after_running_gateway_shutdown",
+    )
+    repo_root = tmp_path / "repo"
+    (repo_root / "gateway").mkdir(parents=True)
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "123"
+    process_root.mkdir(parents=True)
+    (process_root / "status").write_text(
+        f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
+        "VmRSS:\t12582912 kB\n",
+        encoding="utf-8",
+    )
+    (process_root / "stat").write_text(
+        "123 (python3) S " + " ".join(["1"] * 30) + "\n",
+        encoding="utf-8",
+    )
+    command_path = process_root / "cmdline"
+    command_path.write_bytes(
+        b"\0".join(
+            value.encode("utf-8")
+            for value in (sys.executable, "-u", "-m", "gateway.main", "")
+        )
+    )
+    (process_root / "cwd").symlink_to(repo_root)
+    report_path = tmp_path / "memory.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "available_memory_mib": 7000,
+                "minimum_available_memory_mib": 16384,
+                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
+                "status": "blocked",
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
+gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
+"""
+    arguments = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-reclaimable-memory-test",
+        sys.executable,
+        str(repo_root),
+        str(report_path),
+        "123",
+        str(proc_root),
+    ]
+
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "available_memory_mib": 7000,
+        "minimum_available_memory_mib": 16384,
+        "reclaimable_gateway_memory_mib": 12288,
+        "safety_margin_mib": 2048,
+        "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
+        "status": "ready_after_gateway_shutdown",
+    }
+
+    command_path.write_bytes(
+        b"\0".join(
+            value.encode("utf-8")
+            for value in (sys.executable, "-u", "-m", "gateway.other", "")
+        )
+    )
+    rejected = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert rejected.returncode != 0
+    assert "running gateway command differs" in rejected.stderr
+
+
+def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    pre_shutdown = script.index("wait_for_gateway_build_memory 1")
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    post_shutdown = script.index("wait_for_gateway_build_memory 0 10", shutdown)
+    activation = script.index(
+        'echo "Activating prepared gateway Git commit after process shutdown"'
+    )
+
+    assert pre_shutdown < shutdown < post_shutdown < activation
+    assert "gateway_memory_ready_after_running_gateway_shutdown" in script[
+        :shutdown
+    ]
+
+
 def test_gateway_active_release_selection_requires_paired_validator_authority(
     tmp_path: Path,
 ) -> None:

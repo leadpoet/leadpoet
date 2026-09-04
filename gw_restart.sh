@@ -52,6 +52,7 @@ GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
 GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
 GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
+GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
 GATEWAY_V2_HEALTH_MAX_ATTEMPTS="${GATEWAY_V2_HEALTH_MAX_ATTEMPTS:-120}"
 GATEWAY_V2_HEALTH_RETRY_SECONDS="${GATEWAY_V2_HEALTH_RETRY_SECONDS:-5}"
 GATEWAY_V2_HEALTH_DEADLINE_SECONDS="${GATEWAY_V2_HEALTH_DEADLINE_SECONDS:-600}"
@@ -1579,15 +1580,124 @@ on_gateway_restart_exit() {
   fi
 }
 
+gateway_memory_ready_after_running_gateway_shutdown() {
+  "$GATEWAY_PYTHON_BIN" - \
+    "$1" "$2" "$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    "$GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB" "${3:-/proc}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+report_path = Path(sys.argv[1])
+pid_text = sys.argv[2]
+repo_root = Path(sys.argv[3]).resolve()
+python_bin = Path(sys.argv[4]).resolve()
+safety_margin_mib = int(sys.argv[5])
+proc_root = Path(sys.argv[6])
+if not pid_text.isdigit() or int(pid_text) <= 1:
+    raise SystemExit("running gateway PID is invalid")
+
+report = json.loads(report_path.read_text(encoding="utf-8"))
+if (
+    not isinstance(report, dict)
+    or report.get("schema_version") != "leadpoet.gateway_host_memory_guard.v2"
+    or report.get("status") != "blocked"
+    or report.get("minimum_available_memory_mib") != 16384
+):
+    raise SystemExit("blocked gateway memory report is invalid")
+available_mib = report.get("available_memory_mib")
+if (
+    not isinstance(available_mib, int)
+    or isinstance(available_mib, bool)
+    or available_mib < 0
+):
+    raise SystemExit("available gateway memory is invalid")
+
+process_root = proc_root / pid_text
+
+
+def read_process():
+    status = (process_root / "status").read_text(encoding="utf-8")
+    stat_fields = (process_root / "stat").read_text(encoding="utf-8").split()
+    argv = tuple(
+        value.decode("utf-8", errors="strict")
+        for value in (process_root / "cmdline").read_bytes().split(b"\0")
+        if value
+    )
+    cwd = Path(os.readlink(process_root / "cwd")).resolve()
+    fields = {}
+    for line in status.splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key] = value.strip()
+    return {
+        "start_ticks": int(stat_fields[21]),
+        "uid": int(fields["Uid"].split()[0]),
+        "rss_kib": int(fields["VmRSS"].split()[0]),
+        "argv": argv,
+        "cwd": cwd,
+    }
+
+
+try:
+    first = read_process()
+    second = read_process()
+except (IndexError, KeyError, OSError, UnicodeError, ValueError) as exc:
+    raise SystemExit("running gateway process identity is unavailable") from exc
+if first != second:
+    raise SystemExit("running gateway process identity changed")
+if first["uid"] != os.getuid() or not first["argv"]:
+    raise SystemExit("running gateway process owner is invalid")
+if Path(first["argv"][0]).resolve() != python_bin:
+    raise SystemExit("running gateway interpreter differs")
+suffix = first["argv"][1:]
+if suffix == ("-u", "-m", "gateway.main"):
+    allowed_cwds = {repo_root, repo_root / "gateway"}
+elif suffix == ("-u", "main.py"):
+    allowed_cwds = {repo_root / "gateway"}
+else:
+    raise SystemExit("running gateway command differs")
+if first["cwd"] not in allowed_cwds:
+    raise SystemExit("running gateway working directory differs")
+
+reclaimable_mib = first["rss_kib"] // 1024
+required_mib = int(report["minimum_available_memory_mib"])
+if available_mib + reclaimable_mib < required_mib + safety_margin_mib:
+    raise SystemExit("gateway shutdown would not recover enough build memory")
+print(
+    json.dumps(
+        {
+            "available_memory_mib": available_mib,
+            "minimum_available_memory_mib": required_mib,
+            "reclaimable_gateway_memory_mib": reclaimable_mib,
+            "safety_margin_mib": safety_margin_mib,
+            "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
+            "status": "ready_after_gateway_shutdown",
+        },
+        sort_keys=True,
+    )
+)
+PY
+}
+
 wait_for_gateway_build_memory() {
+  local allow_running_gateway_reclaim="${1:-0}"
+  local max_attempts="${2:-300}"
   local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"
   local report
+  if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] \
+      || { [ "$allow_running_gateway_reclaim" != "0" ] \
+        && [ "$allow_running_gateway_reclaim" != "1" ]; }; then
+    echo "ERROR: gateway memory wait configuration is invalid" >&2
+    return 1
+  fi
   if [ ! -r "$guard" ]; then
     echo "ERROR: gateway host memory guard is unavailable: $guard" >&2
     return 1
   fi
   report="$(mktemp /tmp/gateway-memory-ready.XXXXXX.json)"
-  for attempt in $(seq 1 300); do
+  for attempt in $(seq 1 "$max_attempts"); do
     if python3 "$guard" \
         --cleanup-disposable-tests \
         --cleanup-stale-vsock-probes \
@@ -1596,13 +1706,19 @@ wait_for_gateway_build_memory() {
       rm -f "$report"
       return 0
     fi
+    if [ "$allow_running_gateway_reclaim" = "1" ] \
+        && gateway_memory_ready_after_running_gateway_shutdown \
+          "$report" "${PID:-}"; then
+      rm -f "$report"
+      return 0
+    fi
     if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
-      echo "Waiting for 16 GiB available memory before production shutdown (${attempt}/300)"
+      echo "Waiting for 16 GiB available memory (${attempt}/${max_attempts})"
       cat "$report"
     fi
     sleep 6
   done
-  echo "ERROR: gateway build memory did not recover within 30 minutes" >&2
+  echo "ERROR: gateway build memory did not recover within the bounded wait" >&2
   cat "$report" >&2
   rm -f "$report"
   return 1
@@ -3579,7 +3695,7 @@ PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
   --timeout-seconds 1800 \
   --interval-seconds 3
 wait_for_foreign_docker_builds
-wait_for_gateway_build_memory
+wait_for_gateway_build_memory 1
 record_gateway_restart_timing "pre_shutdown_checks_complete"
 
 if ! wait_for_paired_gateway_destructive_handoff; then
@@ -3636,6 +3752,12 @@ stop_local_stale_build_processes TERM
 sleep 3
 stop_local_stale_build_processes KILL
 sleep 2
+
+echo "Confirming real build memory after gateway shutdown"
+if ! wait_for_gateway_build_memory 0 10; then
+  echo "ERROR: gateway shutdown did not recover the required build memory" >&2
+  exit 1
+fi
 
 echo "Waiting for :8000 to free"
 for i in $(seq 1 25); do

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -23,6 +24,7 @@ from validator_tee.host.release_v2 import (
 
 
 COMMIT = "a" * 40
+HISTORICAL_CHANNEL_RELEASE = "f90b5eb3739eb3871a0d7bde0a3a1c41c62016ea"
 
 
 def _hash(character: str) -> str:
@@ -191,7 +193,7 @@ def test_auditor_accepts_inline_local_release_identity() -> None:
     assert {entry["verified_build_count"] for entry in cache["entries"]} == {1}
 
 
-def test_restart_scripts_do_not_wait_for_github_release() -> None:
+def test_restart_scripts_use_attested_channel_only_for_explicit_historical_release() -> None:
     root = Path(__file__).resolve().parents[1]
     gateway = (root / "gw_restart.sh").read_text(encoding="utf-8")
     validator = (root / "validator_restart.sh").read_text(encoding="utf-8")
@@ -201,8 +203,75 @@ def test_restart_scripts_do_not_wait_for_github_release() -> None:
 
     assert "Approved V2 release is not published yet" not in gateway
     assert "Approved V2 release is not published yet" not in validator
-    assert "--ensure" not in gateway
-    assert "--ensure" not in validator
+    assert gateway.count("--ensure") == 1
+    assert validator.count("--ensure") == 1
     assert "build_local_release_v2.sh" in gateway
     assert "build_local_release_v2.sh" in validator
-    assert "fetch_release_channel_v2" not in operator
+    assert '[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]' in gateway
+    assert '[ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]' in validator
+    assert "selected release has an incomplete or unsupported V2 release acquisition contract" in gateway
+    assert "selected release has an incomplete or unsupported V2 release acquisition contract" in validator
+    assert "fetch_release_channel_v2" in operator
+    assert "historical_topology_hash is not None" in operator
+    assert "active gateway release differs from immutable channel" in operator
+
+
+def test_real_historical_release_has_only_the_channel_capability() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    def exists(path: str) -> bool:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{HISTORICAL_CHANNEL_RELEASE}:{path}"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    assert not exists("gateway/tee/build_local_release_v2.sh")
+    assert not exists("gateway/tee/local_release_v2.py")
+    assert exists("gateway/tee/release_channel_v2.py")
+    topology_entry = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            HISTORICAL_CHANNEL_RELEASE,
+            "--",
+            "gateway/tee/topology.json",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert topology_entry == (
+        "100644 blob f79cf108e4a98ca950a0087d786958f92c5f691f"
+        "\tgateway/tee/topology.json"
+    )
+    historical_profiles = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{HISTORICAL_CHANNEL_RELEASE}:gateway/research_lab/provider_profiles_v2.py",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    historical_bootstrap = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{HISTORICAL_CHANNEL_RELEASE}:gateway/utils/tee_v2_bootstrap.py",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "def verify_required_worker_proxy_profiles_v2(" in historical_profiles
+    assert "def configured_scoring_worker_count(" not in historical_bootstrap
+    assert (root / "gateway/tee/build_local_release_v2.sh").is_file()
+    assert (root / "gateway/tee/local_release_v2.py").is_file()

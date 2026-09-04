@@ -8,6 +8,7 @@ import re
 from typing import Any, Callable, Dict, Mapping, Sequence
 
 from gateway.tee.release_manifest_v2 import (
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
     role_expectation,
     validate_release_manifest,
 )
@@ -38,11 +39,12 @@ class ReleaseLineageV2Error(RuntimeError):
     """A receipt ancestor is not bound to an approved V2 release."""
 
 
-def validate_compact_release_lineage_v2(
+def _validate_compact_release_lineage_v2(
     value: Mapping[str, Any],
     *,
     expected_current_commit: str | None = None,
     expected_current_gateway_release_hash: str | None = None,
+    expected_historical_topology_hash: str | None = None,
 ) -> Dict[str, Any]:
     """Validate the immutable compact release authority used inside enclaves."""
 
@@ -88,11 +90,21 @@ def validate_compact_release_lineage_v2(
             )
         roles = release.get("roles")
         observed_roles = set(roles) if isinstance(roles, Mapping) else set()
-        allowed_roles = (
-            {_APPROVED_RELEASE_ROLES}
-            if commit == current_commit
-            else {_APPROVED_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
-        )
+        if expected_historical_topology_hash is not None:
+            if (
+                expected_historical_topology_hash
+                != HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+            ):
+                raise ReleaseLineageV2Error(
+                    "historical release topology hash is unsupported"
+                )
+            allowed_roles = {_HISTORICAL_RELEASE_ROLES}
+        else:
+            allowed_roles = (
+                {_APPROVED_RELEASE_ROLES}
+                if commit == current_commit
+                else {_APPROVED_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
+            )
         if not isinstance(roles, Mapping) or frozenset(observed_roles) not in allowed_roles:
             raise ReleaseLineageV2Error(
                 "compact release lineage roles are incomplete"
@@ -176,14 +188,51 @@ def validate_compact_release_lineage_v2(
     return {**body, "lineage_hash": str(value["lineage_hash"])}
 
 
-def build_compact_release_lineage_boot_verifier_v2(
+def validate_compact_release_lineage_v2(
+    value: Mapping[str, Any],
+    *,
+    expected_current_commit: str | None = None,
+    expected_current_gateway_release_hash: str | None = None,
+) -> Dict[str, Any]:
+    """Validate the canonical current-topology compact lineage."""
+
+    return _validate_compact_release_lineage_v2(
+        value,
+        expected_current_commit=expected_current_commit,
+        expected_current_gateway_release_hash=(
+            expected_current_gateway_release_hash
+        ),
+    )
+
+
+def validate_historical_compact_release_lineage_v2(
+    value: Mapping[str, Any],
+    *,
+    expected_topology_hash: str,
+    expected_current_commit: str | None = None,
+    expected_current_gateway_release_hash: str | None = None,
+) -> Dict[str, Any]:
+    """Validate an all-three-role lineage for one exact historical target."""
+
+    return _validate_compact_release_lineage_v2(
+        value,
+        expected_current_commit=expected_current_commit,
+        expected_current_gateway_release_hash=(
+            expected_current_gateway_release_hash
+        ),
+        expected_historical_topology_hash=expected_topology_hash,
+    )
+
+
+def _build_compact_release_lineage_boot_verifier_v2(
     lineage: Mapping[str, Any],
     *,
+    lineage_validator: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     boot_verifier: Callable[..., Mapping[str, Any]] | None = None,
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
     """Build an exact-PCR verifier from one hash-bound compact lineage."""
 
-    normalized = validate_compact_release_lineage_v2(lineage)
+    normalized = lineage_validator(lineage)
     verify_nitro = boot_verifier or verify_boot_identity_nitro
 
     def verify(identity: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -217,6 +266,36 @@ def build_compact_release_lineage_boot_verifier_v2(
         )
 
     return verify
+
+
+def build_compact_release_lineage_boot_verifier_v2(
+    lineage: Mapping[str, Any],
+    *,
+    boot_verifier: Callable[..., Mapping[str, Any]] | None = None,
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    return _build_compact_release_lineage_boot_verifier_v2(
+        lineage,
+        lineage_validator=validate_compact_release_lineage_v2,
+        boot_verifier=boot_verifier,
+    )
+
+
+def build_historical_compact_release_lineage_boot_verifier_v2(
+    lineage: Mapping[str, Any],
+    *,
+    expected_topology_hash: str,
+    boot_verifier: Callable[..., Mapping[str, Any]] | None = None,
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    return _build_compact_release_lineage_boot_verifier_v2(
+        lineage,
+        lineage_validator=lambda value: (
+            validate_historical_compact_release_lineage_v2(
+                value,
+                expected_topology_hash=expected_topology_hash,
+            )
+        ),
+        boot_verifier=boot_verifier,
+    )
 
 
 def _checkpoint_issuer_boot_identity(

@@ -20,6 +20,9 @@ ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
+HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
+HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
+GATEWAY_HISTORICAL_TOPOLOGY_HASH=""
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
@@ -1787,8 +1790,19 @@ run_gateway_active_release_controller_module() {
 }
 
 prepare_gateway_active_release_lineage() {
-  local authority_commit fallback_context lineage_id running_gateway_manifest
+  local authority_commit counterpart_historical_topology_hash fallback_context
+  local lineage_id running_gateway_manifest
   local -a validator_authority_args=()
+  local -a topology_authority_args=()
+  counterpart_historical_topology_hash=""
+
+  if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ] \
+      && [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
+    counterpart_historical_topology_hash="$GATEWAY_HISTORICAL_TOPOLOGY_HASH"
+    topology_authority_args=(
+      --historical-topology-hash "$GATEWAY_HISTORICAL_TOPOLOGY_HASH"
+    )
+  fi
 
   if [ -n "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" ]; then
     if ! [[ "$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]] \
@@ -1886,6 +1900,7 @@ PY
         --lineage-id "$lineage_id" \
         --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
         --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+        "${topology_authority_args[@]}" \
         --requirements-output "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
         --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"
     ); then
@@ -1908,6 +1923,7 @@ PY
     if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${GATEWAY_RESTART_AUTHORITY_ROOT:-$GATEWAY_PREFLIGHT_TREE}" \
         "$GATEWAY_PYTHON_BIN" - \
           "$PREPARED_GATEWAY_SHA" \
+          "$counterpart_historical_topology_hash" \
           "$GATEWAY_COUNTERPART_RELEASE_LINEAGE" \
           "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" <<'PY'
 import json
@@ -1918,6 +1934,7 @@ import sys
 from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 
 expected = sys.argv[1]
+historical_topology_hash = sys.argv[2] or None
 max_document_bytes = 4 * 1024 * 1024
 
 
@@ -1948,13 +1965,22 @@ def load_bounded_json(path: str, label: str):
         raise SystemExit(f"{label} is not valid UTF-8 JSON") from exc
 
 
-counterpart = validate_compact_release_lineage_v2(
-    load_bounded_json(sys.argv[2], "component counterpart compact lineage"),
-    expected_current_commit=expected,
+validator = validate_compact_release_lineage_v2
+validator_kwargs = {"expected_current_commit": expected}
+if historical_topology_hash is not None:
+    from gateway.tee.release_lineage_v2 import (
+        validate_historical_compact_release_lineage_v2,
+    )
+
+    validator = validate_historical_compact_release_lineage_v2
+    validator_kwargs["expected_topology_hash"] = historical_topology_hash
+counterpart = validator(
+    load_bounded_json(sys.argv[3], "component counterpart compact lineage"),
+    **validator_kwargs,
 )
-selected = validate_compact_release_lineage_v2(
-    load_bounded_json(sys.argv[3], "selected compact lineage"),
-    expected_current_commit=expected,
+selected = validator(
+    load_bounded_json(sys.argv[4], "selected compact lineage"),
+    **validator_kwargs,
 )
 if counterpart != selected:
     raise SystemExit("component-only counterpart compact lineage differs")
@@ -3256,6 +3282,26 @@ PREPARED_GATEWAY_SHA="$(
     --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
+PREPARED_GATEWAY_TOPOLOGY_ENTRY="$(
+  git -C "$LEADPOET_REPO_ROOT" ls-tree \
+    "$PREPARED_GATEWAY_SHA" -- gateway/tee/topology.json
+)" || {
+  echo "ERROR: prepared gateway topology Git identity is unavailable" >&2
+  exit 1
+}
+if ! [[ "$PREPARED_GATEWAY_TOPOLOGY_ENTRY" =~ ^100644\ blob\ [0-9a-f]{40}$'\t'gateway/tee/topology.json$ ]]; then
+  echo "ERROR: prepared gateway topology is not one regular Git blob" >&2
+  exit 1
+fi
+PREPARED_GATEWAY_TOPOLOGY_BLOB="${PREPARED_GATEWAY_TOPOLOGY_ENTRY#100644 blob }"
+PREPARED_GATEWAY_TOPOLOGY_BLOB="${PREPARED_GATEWAY_TOPOLOGY_BLOB%%$'\t'*}"
+if [ "$PREPARED_GATEWAY_TOPOLOGY_BLOB" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB" ] \
+    && ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
+      "$PREPARED_GATEWAY_SHA:gateway/tee/build_local_release_v2.sh" 2>/dev/null \
+    && ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
+      "$PREPARED_GATEWAY_SHA:gateway/tee/local_release_v2.py" 2>/dev/null; then
+  GATEWAY_HISTORICAL_TOPOLOGY_HASH="$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH"
+fi
 if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
   echo "Validating exact-commit V2 rollback compatibility"
   python3 "$GATEWAY_EXACT_COMMIT_HELPER" \
@@ -3334,41 +3380,95 @@ if ! wait_for_gateway_offline_artifact_prepare; then
   exit 75
 fi
 
-echo "Building the exact local gateway and validator runtime identities"
-GATEWAY_DEPLOY_STAGE="local_release_build"
-export GATEWAY_DEPLOY_STAGE
 if ! follow_superseding_gateway_release; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
-if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
-    GATEWAY_V2_BUILD_WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}" \
-    VALIDATOR_V2_BUILD_WORK_ROOT="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}" \
-    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
-    bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh" \
-      --repository "$LEADPOET_REPO_ROOT" \
-      --revision "$PREPARED_GATEWAY_SHA" \
-      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-      --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
-  echo "ERROR: exact local runtime identity build failed" >&2
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
-export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
-export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
-export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
-if [ -e "$GATEWAY_V2_RELEASE_LINEAGE" ] \
-    || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
-  export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"
+GATEWAY_LOCAL_RELEASE_SCRIPT="$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh"
+GATEWAY_LOCAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/local_release_v2.py"
+GATEWAY_HISTORICAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_channel_v2.py"
+if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
+    && [ -r "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -L "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
+    && [ -f "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
+    && [ -r "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
+    && [ ! -L "$GATEWAY_LOCAL_RELEASE_MODULE" ]; then
+  echo "Building the exact local gateway and validator runtime identities"
+  GATEWAY_DEPLOY_STAGE="local_release_build"
+  export GATEWAY_DEPLOY_STAGE
+  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+      GATEWAY_V2_BUILD_WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}" \
+      VALIDATOR_V2_BUILD_WORK_ROOT="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}" \
+      GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+      VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+      bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh" \
+        --repository "$LEADPOET_REPO_ROOT" \
+        --revision "$PREPARED_GATEWAY_SHA" \
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+        --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
+    echo "ERROR: exact local runtime identity build failed" >&2
+    echo "Gateway remains running; production shutdown has not started." >&2
+    exit 75
+  fi
+  export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
+  export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
+  export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
+  if [ -e "$GATEWAY_V2_RELEASE_LINEAGE" ] \
+      || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
+    export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"
+  else
+    unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  fi
+  record_gateway_restart_timing "local_release_ready"
+elif [ ! -e "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -L "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -e "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
+    && [ ! -L "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
+    && [ -f "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
+    && [ -r "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
+    && [ ! -L "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
+    && [ "$GATEWAY_HISTORICAL_TOPOLOGY_HASH" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH" ] \
+    && [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then
+  echo "Acquiring the exact historical attested V2 release channel"
+  GATEWAY_DEPLOY_STAGE="historical_release_acquisition"
+  export GATEWAY_DEPLOY_STAGE
+  unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
+  unset LEADPOET_LOCAL_VALIDATOR_RELEASE LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  record_gateway_restart_timing "release_wait_started"
+  V2_RELEASE_READY=0
+  for attempt in $(seq 1 300); do
+    GATEWAY_RELEASE_ATTEMPTS_USED="$attempt"
+    if follow_superseding_gateway_release \
+        && run_prepared_gateway_module gateway.tee.release_channel_v2 \
+        --ensure \
+        --expected-commit "$PREPARED_GATEWAY_SHA" \
+        --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
+        --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+        --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
+      V2_RELEASE_READY=1
+      break
+    fi
+    echo "Exact historical V2 release is not published yet; waiting inside the valid restart invocation (${attempt}/300)"
+    sleep 12
+  done
+  if [ "$V2_RELEASE_READY" != "1" ]; then
+    echo "ERROR: exact historical attested V2 release is unavailable for $PREPARED_GATEWAY_SHA" >&2
+    echo "Gateway remains running; production shutdown has not started." >&2
+    exit 75
+  fi
+  record_gateway_restart_timing "release_ready"
+  record_gateway_restart_timing "historical_release_ready"
 else
-  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  echo "ERROR: selected release has an incomplete or unsupported V2 release acquisition contract" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
 fi
 if ! follow_superseding_gateway_release; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
-record_gateway_restart_timing "local_release_ready"
 
 echo "Preparing commit-bound KMS credential envelopes"
 GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
@@ -4008,7 +4108,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
   record_gateway_restart_timing "gateway_role_eifs_built"
   echo "Cleaning temporary role Docker images/layers before gateway relaunch"
-  for role in gateway_coordinator gateway_scoring; do
+  for role in gateway_autoresearch gateway_coordinator gateway_scoring; do
     sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
   done
   sudo docker builder prune -af 2>/dev/null || true

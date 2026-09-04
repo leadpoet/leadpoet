@@ -27,14 +27,20 @@ from gateway.tee.active_release_requirements_v2 import (
 from gateway.tee.release_channel_v2 import (
     DEFAULT_BUCKET,
     DEFAULT_PREFIX,
+    fetch_historical_release_lineage_v2,
     fetch_release_lineage_v2,
     git_ancestor_commits_v2,
 )
 from gateway.tee.release_lineage_v2 import (
     build_compact_release_lineage_boot_verifier_v2,
+    build_historical_compact_release_lineage_boot_verifier_v2,
     validate_compact_release_lineage_v2,
+    validate_historical_compact_release_lineage_v2,
 )
-from gateway.tee.release_manifest_v2 import validate_release_manifest
+from gateway.tee.release_manifest_v2 import (
+    validate_historical_release_manifest,
+    validate_release_manifest,
+)
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
@@ -316,6 +322,7 @@ def _fetch_exact_release_lineage_v2(
     repository: Path,
     bucket: str,
     prefix: str,
+    historical_topology_hash: str | None = None,
     s3_client: Any = None,
 ) -> Dict[str, Any]:
     candidate = _commit(candidate_commit_sha, "candidate commit")
@@ -338,18 +345,34 @@ def _fetch_exact_release_lineage_v2(
         set(required).issubset(set(allowed)),
         "required release is outside release authority Git ancestry",
     )
-    lineage = fetch_release_lineage_v2(
-        bucket=str(bucket),
-        current_commit=candidate,
-        prefix=str(prefix),
-        s3_client=s3_client,
-        allowed_commits=allowed,
-        required_commits=required,
-    )
-    normalized = validate_compact_release_lineage_v2(
-        lineage,
-        expected_current_commit=candidate,
-    )
+    if historical_topology_hash is None:
+        lineage = fetch_release_lineage_v2(
+            bucket=str(bucket),
+            current_commit=candidate,
+            prefix=str(prefix),
+            s3_client=s3_client,
+            allowed_commits=allowed,
+            required_commits=required,
+        )
+        normalized = validate_compact_release_lineage_v2(
+            lineage,
+            expected_current_commit=candidate,
+        )
+    else:
+        lineage = fetch_historical_release_lineage_v2(
+            bucket=str(bucket),
+            current_commit=candidate,
+            expected_topology_hash=historical_topology_hash,
+            prefix=str(prefix),
+            s3_client=s3_client,
+            allowed_commits=allowed,
+            required_commits=required,
+        )
+        normalized = validate_historical_compact_release_lineage_v2(
+            lineage,
+            expected_topology_hash=historical_topology_hash,
+            expected_current_commit=candidate,
+        )
     _require(
         sorted(normalized["releases"]) == required,
         "compact release lineage differs from required set",
@@ -369,8 +392,66 @@ def _structural_boot_verifier(identity: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _compact_boot_verifier(
     lineage: Mapping[str, Any],
+    *,
+    historical_topology_hash: str | None = None,
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    if historical_topology_hash is not None:
+        return build_historical_compact_release_lineage_boot_verifier_v2(
+            lineage,
+            expected_topology_hash=historical_topology_hash,
+        )
     return build_compact_release_lineage_boot_verifier_v2(lineage)
+
+
+def _selected_compact_boot_verifier(
+    lineage: Mapping[str, Any],
+    *,
+    historical_topology_hash: str | None,
+) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    if historical_topology_hash is None:
+        return _compact_boot_verifier(lineage)
+    return _compact_boot_verifier(
+        lineage,
+        historical_topology_hash=historical_topology_hash,
+    )
+
+
+def _validate_selected_gateway_release(
+    value: Mapping[str, Any],
+    *,
+    historical_topology_hash: str | None,
+) -> Dict[str, Any]:
+    if historical_topology_hash is not None:
+        return validate_historical_release_manifest(
+            value,
+            expected_topology_hash=historical_topology_hash,
+        )
+    return validate_release_manifest(value)
+
+
+def _validate_selected_lineage(
+    value: Mapping[str, Any],
+    *,
+    historical_topology_hash: str | None,
+    expected_current_commit: str,
+    expected_current_gateway_release_hash: str | None = None,
+) -> Dict[str, Any]:
+    if historical_topology_hash is not None:
+        return validate_historical_compact_release_lineage_v2(
+            value,
+            expected_topology_hash=historical_topology_hash,
+            expected_current_commit=expected_current_commit,
+            expected_current_gateway_release_hash=(
+                expected_current_gateway_release_hash
+            ),
+        )
+    return validate_compact_release_lineage_v2(
+        value,
+        expected_current_commit=expected_current_commit,
+        expected_current_gateway_release_hash=(
+            expected_current_gateway_release_hash
+        ),
+    )
 
 
 async def _load_active_source_add_graphs_v2(
@@ -670,6 +751,7 @@ def prepare_validator_initial_active_lineage_v2(
     expected_lineage_id: str,
     bucket: str = DEFAULT_BUCKET,
     prefix: str = DEFAULT_PREFIX,
+    historical_topology_hash: str | None = None,
     s3_client: Any = None,
 ) -> Dict[str, Any]:
     """Freeze validator recovery authority while the old validator runs."""
@@ -711,9 +793,13 @@ def prepare_validator_initial_active_lineage_v2(
         repository=Path(repository),
         bucket=bucket,
         prefix=prefix,
+        historical_topology_hash=historical_topology_hash,
         s3_client=s3_client,
     )
-    verifier = _compact_boot_verifier(lineage)
+    verifier = _selected_compact_boot_verifier(
+        lineage,
+        historical_topology_hash=historical_topology_hash,
+    )
     second = _journal_requirements(
         journal_loader(),
         expected_lineage_id=lineage_id,
@@ -761,6 +847,7 @@ async def prepare_gateway_final_active_lineage_v2(
     expected_lineage_id: str,
     bucket: str = DEFAULT_BUCKET,
     prefix: str = DEFAULT_PREFIX,
+    historical_topology_hash: str | None = None,
     s3_client: Any = None,
     load_allocation_graphs: Any = None,
     load_sourcing_graphs: Any = None,
@@ -786,7 +873,10 @@ async def prepare_gateway_final_active_lineage_v2(
         "active release netuid is invalid",
     )
     _require(isinstance(policy, Mapping), "active release policy is invalid")
-    release = validate_release_manifest(running_gateway_release_manifest)
+    release = _validate_selected_gateway_release(
+        running_gateway_release_manifest,
+        historical_topology_hash=historical_topology_hash,
+    )
     running_commit = _commit(release.get("commit_sha"), "running gateway commit")
     _require(
         (validator_requirements is None) != (fallback_lineage is None),
@@ -820,8 +910,9 @@ async def prepare_gateway_final_active_lineage_v2(
             fallback_context in _FALLBACK_CONTEXTS,
             "installed lineage fallback requires an explicit safe context",
         )
-        fallback = validate_compact_release_lineage_v2(
+        fallback = _validate_selected_lineage(
             fallback_lineage,
+            historical_topology_hash=historical_topology_hash,
             expected_current_commit=running_commit,
             expected_current_gateway_release_hash=release["release_hash"],
         )
@@ -862,9 +953,13 @@ async def prepare_gateway_final_active_lineage_v2(
         repository=Path(repository),
         bucket=bucket,
         prefix=prefix,
+        historical_topology_hash=historical_topology_hash,
         s3_client=s3_client,
     )
-    verifier = _compact_boot_verifier(lineage)
+    verifier = _selected_compact_boot_verifier(
+        lineage,
+        historical_topology_hash=historical_topology_hash,
+    )
     second_graphs = await _select_active_graphs(
         epoch_id=epoch_id,
         netuid=netuid,
@@ -908,6 +1003,7 @@ def prepare_validator_final_active_lineage_v2(
     expected_lineage_id: str,
     bucket: str = DEFAULT_BUCKET,
     prefix: str = DEFAULT_PREFIX,
+    historical_topology_hash: str | None = None,
     s3_client: Any = None,
 ) -> Dict[str, Any]:
     """Independently rebuild and install-check the gateway's final lineage."""
@@ -947,8 +1043,9 @@ def prepare_validator_final_active_lineage_v2(
         "final requirements omit validator transition authority",
     )
 
-    handed = validate_compact_release_lineage_v2(
+    handed = _validate_selected_lineage(
         handed_lineage,
+        historical_topology_hash=historical_topology_hash,
         expected_current_commit=candidate,
     )
     _require(
@@ -962,13 +1059,17 @@ def prepare_validator_final_active_lineage_v2(
         repository=Path(repository),
         bucket=bucket,
         prefix=prefix,
+        historical_topology_hash=historical_topology_hash,
         s3_client=s3_client,
     )
     _require(
         canonical_json(handed) == canonical_json(independent),
         "handed release lineage differs from independent readback",
     )
-    verifier = _compact_boot_verifier(independent)
+    verifier = _selected_compact_boot_verifier(
+        independent,
+        historical_topology_hash=historical_topology_hash,
+    )
     first_journal = _journal_requirements(
         journal_loader(),
         expected_lineage_id=lineage_id,
@@ -1035,6 +1136,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lineage-id", required=True)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
+    parser.add_argument("--historical-topology-hash")
     parser.add_argument("--running-validator-commit")
     parser.add_argument("--running-gateway-manifest", type=Path)
     gateway_authority = parser.add_mutually_exclusive_group()
@@ -1108,6 +1210,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_lineage_id=args.lineage_id,
             bucket=args.bucket,
             prefix=args.prefix,
+            historical_topology_hash=args.historical_topology_hash,
         )
         _atomic_json_documents(((args.requirements_output, prepared["requirements"]),))
     elif args.phase == "gateway-final":
@@ -1162,6 +1265,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expected_lineage_id=args.lineage_id,
                 bucket=args.bucket,
                 prefix=args.prefix,
+                historical_topology_hash=args.historical_topology_hash,
             )
         )
         _atomic_json_documents(
@@ -1203,6 +1307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             expected_lineage_id=args.lineage_id,
             bucket=args.bucket,
             prefix=args.prefix,
+            historical_topology_hash=args.historical_topology_hash,
         )
         _atomic_json_documents(
             (

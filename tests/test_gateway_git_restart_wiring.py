@@ -92,17 +92,25 @@ def test_unpinned_gateway_local_build_follows_new_main_before_shutdown() -> None
         'bash "$superseding_tree/gw_restart.sh"'
     )
 
-    release_start = script.index(
-        'echo "Building the exact local gateway and validator runtime identities"'
+    acquisition_start = script.index(
+        'if ! follow_superseding_gateway_release; then',
+        script.index('if ! wait_for_gateway_offline_artifact_prepare; then'),
     )
-    release_build = script[
-        release_start : script.index(
-            'record_gateway_restart_timing "local_release_ready"', release_start
-        )
-    ]
-    assert release_build.count("follow_superseding_gateway_release") == 2
+    acquisition_end = script.index(
+        'echo "Preparing commit-bound KMS credential envelopes"',
+        acquisition_start,
+    )
+    release_build = script[acquisition_start:acquisition_end]
+    assert release_build.count("follow_superseding_gateway_release") == 3
     assert release_build.index("follow_superseding_gateway_release") < (
         release_build.index("gateway/tee/build_local_release_v2.sh")
+    )
+    assert "Acquiring the exact historical attested V2 release channel" in release_build
+    assert '--expected-commit "$PREPARED_GATEWAY_SHA"' in release_build
+    assert '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"' in release_build
+    assert '--validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"' in release_build
+    assert release_build.index('[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]') < (
+        release_build.index("--ensure")
     )
     assert script.index("follow_superseding_gateway_release") < script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'

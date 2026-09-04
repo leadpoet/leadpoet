@@ -6,6 +6,9 @@ VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/valida
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
+HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
+HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
+VALIDATOR_HISTORICAL_TOPOLOGY_HASH=""
 # Interpreter for the long-lived validator process. The hydrated environment
 # can select the existing production venv without changing restart behavior.
 VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"
@@ -675,6 +678,26 @@ if [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ] \
   echo "       expected=$REQUESTED_COORDINATED_EXPECTED_COMMIT observed=$after_head" >&2
   exit 1
 fi
+VALIDATOR_DEPLOY_TOPOLOGY_ENTRY="$(
+  git -C "$VALIDATOR_ROOT" ls-tree \
+    "$after_head" -- gateway/tee/topology.json
+)" || {
+  echo "ERROR: validator target topology Git identity is unavailable" >&2
+  exit 1
+}
+if ! [[ "$VALIDATOR_DEPLOY_TOPOLOGY_ENTRY" =~ ^100644\ blob\ [0-9a-f]{40}$'\t'gateway/tee/topology.json$ ]]; then
+  echo "ERROR: validator target topology is not one regular Git blob" >&2
+  exit 1
+fi
+VALIDATOR_DEPLOY_TOPOLOGY_BLOB="${VALIDATOR_DEPLOY_TOPOLOGY_ENTRY#100644 blob }"
+VALIDATOR_DEPLOY_TOPOLOGY_BLOB="${VALIDATOR_DEPLOY_TOPOLOGY_BLOB%%$'\t'*}"
+if [ "$VALIDATOR_DEPLOY_TOPOLOGY_BLOB" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB" ] \
+    && ! git -C "$VALIDATOR_ROOT" cat-file -e \
+      "$after_head:gateway/tee/build_local_release_v2.sh" 2>/dev/null \
+    && ! git -C "$VALIDATOR_ROOT" cat-file -e \
+      "$after_head:gateway/tee/local_release_v2.py" 2>/dev/null; then
+  VALIDATOR_HISTORICAL_TOPOLOGY_HASH="$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH"
+fi
 current_restart_script="$(readlink -f "${BASH_SOURCE[0]}")"
 candidate_restart_script="$(readlink -f "$VALIDATOR_ROOT/validator_restart.sh")"
 restart_script_differs=0
@@ -748,6 +771,10 @@ if [ ! -r "$VALIDATOR_ACTIVE_RELEASE_PREPARER" ]; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 1
 fi
+VALIDATOR_LINEAGE_HISTORICAL_TOPOLOGY_HASH=""
+if [ -n "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" ]; then
+  VALIDATOR_LINEAGE_HISTORICAL_TOPOLOGY_HASH="$VALIDATOR_HISTORICAL_TOPOLOGY_HASH"
+fi
 if [ "$active_release_handoff_count" -eq 0 ]; then
   if [ ! -s "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" ] \
       || [ ! -s "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" ] \
@@ -763,6 +790,7 @@ if [ "$active_release_handoff_count" -eq 0 ]; then
       "$VALIDATOR_PYTHON_BIN" - \
         "$(git -C "$VALIDATOR_ROOT" rev-parse HEAD)" \
         "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
+        "$VALIDATOR_LINEAGE_HISTORICAL_TOPOLOGY_HASH" \
         "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
         "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" <<'PY'
 import json
@@ -776,6 +804,7 @@ from gateway.tee.active_release_requirements_v2 import (
 from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 
 expected_commit, expected_authority = sys.argv[1:3]
+historical_topology_hash = sys.argv[3] or None
 max_document_bytes = 4 * 1024 * 1024
 
 
@@ -805,12 +834,23 @@ def load_bounded_json(path: str, label: str):
 
 
 requirements = validate_active_release_requirements_v2(
-    load_bounded_json(sys.argv[3], "standalone validator requirements")
+    load_bounded_json(sys.argv[4], "standalone validator requirements")
 )
-lineage = validate_compact_release_lineage_v2(
-    load_bounded_json(sys.argv[4], "standalone validator lineage"),
-    expected_current_commit=expected_commit,
-)
+if historical_topology_hash is None:
+    lineage = validate_compact_release_lineage_v2(
+        load_bounded_json(sys.argv[5], "standalone validator lineage"),
+        expected_current_commit=expected_commit,
+    )
+else:
+    from gateway.tee.release_lineage_v2 import (
+        validate_historical_compact_release_lineage_v2,
+    )
+
+    lineage = validate_historical_compact_release_lineage_v2(
+        load_bounded_json(sys.argv[5], "standalone validator lineage"),
+        expected_topology_hash=historical_topology_hash,
+        expected_current_commit=expected_commit,
+    )
 if requirements["candidate_commit_sha"] != expected_commit:
     raise SystemExit("standalone validator active release candidate differs")
 if requirements["authority_commit_sha"] != expected_authority:
@@ -1200,48 +1240,105 @@ else
   VALIDATOR_USE_CAPTURED_RESTART_START=1
 fi
 
-echo "Preparing exact local build inputs before production shutdown"
-VALIDATOR_DEPLOY_STAGE="local_release_inputs"
-export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
-if ! bash "$VALIDATOR_ROOT/gateway/tee/prepare_offline_artifacts_v2.sh"; then
-  echo "ERROR: exact local build inputs are unavailable" >&2
-  echo "Validator remains running; production shutdown has not started." >&2
-  exit 75
-fi
 if ! follow_superseding_validator_release; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
+VALIDATOR_LOCAL_RELEASE_SCRIPT="$VALIDATOR_ROOT/gateway/tee/build_local_release_v2.sh"
+VALIDATOR_LOCAL_RELEASE_MODULE="$VALIDATOR_ROOT/gateway/tee/local_release_v2.py"
+VALIDATOR_HISTORICAL_RELEASE_MODULE="$VALIDATOR_ROOT/gateway/tee/release_channel_v2.py"
+if [ -f "$VALIDATOR_LOCAL_RELEASE_SCRIPT" ] \
+    && [ -r "$VALIDATOR_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -L "$VALIDATOR_LOCAL_RELEASE_SCRIPT" ] \
+    && [ -f "$VALIDATOR_LOCAL_RELEASE_MODULE" ] \
+    && [ -r "$VALIDATOR_LOCAL_RELEASE_MODULE" ] \
+    && [ ! -L "$VALIDATOR_LOCAL_RELEASE_MODULE" ]; then
+  echo "Preparing exact local build inputs before production shutdown"
+  VALIDATOR_DEPLOY_STAGE="local_release_inputs"
+  export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+  export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
+  if ! bash "$VALIDATOR_ROOT/gateway/tee/prepare_offline_artifacts_v2.sh"; then
+    echo "ERROR: exact local build inputs are unavailable" >&2
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 75
+  fi
+  if ! follow_superseding_validator_release; then
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 75
+  fi
 
-echo "Building the exact local gateway and validator runtime identities"
-VALIDATOR_DEPLOY_STAGE="local_release_build"
-if ! PYTHONPATH="$VALIDATOR_ROOT" \
-    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
-    bash "$VALIDATOR_ROOT/gateway/tee/build_local_release_v2.sh" \
-      --repository "$VALIDATOR_ROOT" \
-      --revision "$VALIDATOR_DEPLOY_SHA" \
-      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
-  echo "ERROR: exact local runtime identity build failed" >&2
+  echo "Building the exact local gateway and validator runtime identities"
+  VALIDATOR_DEPLOY_STAGE="local_release_build"
+  if ! PYTHONPATH="$VALIDATOR_ROOT" \
+      GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+      VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+      bash "$VALIDATOR_ROOT/gateway/tee/build_local_release_v2.sh" \
+        --repository "$VALIDATOR_ROOT" \
+        --revision "$VALIDATOR_DEPLOY_SHA" \
+        --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+        --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+    echo "ERROR: exact local runtime identity build failed" >&2
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 75
+  fi
+  export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$VALIDATOR_DEPLOY_SHA"
+  export LEADPOET_LOCAL_GATEWAY_RELEASE="$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"
+  export LEADPOET_LOCAL_VALIDATOR_RELEASE="$VALIDATOR_V2_RELEASE_MANIFEST"
+  if [ -e "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ] \
+      || [ -L "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
+    export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+  else
+    unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  fi
+  record_validator_restart_timing "local_release_ready"
+elif [ ! -e "$VALIDATOR_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -L "$VALIDATOR_LOCAL_RELEASE_SCRIPT" ] \
+    && [ ! -e "$VALIDATOR_LOCAL_RELEASE_MODULE" ] \
+    && [ ! -L "$VALIDATOR_LOCAL_RELEASE_MODULE" ] \
+    && [ -f "$VALIDATOR_HISTORICAL_RELEASE_MODULE" ] \
+    && [ -r "$VALIDATOR_HISTORICAL_RELEASE_MODULE" ] \
+    && [ ! -L "$VALIDATOR_HISTORICAL_RELEASE_MODULE" ] \
+    && [ "$VALIDATOR_HISTORICAL_TOPOLOGY_HASH" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH" ] \
+    && [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+    && [ "$VALIDATOR_DEPLOY_SHA" != "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" ]; then
+  echo "Acquiring the exact historical attested V2 release channel"
+  VALIDATOR_DEPLOY_STAGE="historical_release_acquisition"
+  unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
+  unset LEADPOET_LOCAL_VALIDATOR_RELEASE LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  VALIDATOR_V2_RELEASE_READY=0
+  for attempt in $(seq 1 300); do
+    VALIDATOR_RELEASE_ATTEMPTS_USED="$attempt"
+    if follow_superseding_validator_release \
+        && PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+        -m gateway.tee.release_channel_v2 \
+        --ensure \
+        --expected-commit "$VALIDATOR_DEPLOY_SHA" \
+        --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
+        --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
+        --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+        --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+      VALIDATOR_V2_RELEASE_READY=1
+      break
+    fi
+    echo "Exact historical V2 release is not published yet; waiting inside the valid validator restart invocation (${attempt}/300)"
+    sleep 12
+  done
+  if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]; then
+    echo "ERROR: exact historical attested V2 release is unavailable for $VALIDATOR_DEPLOY_SHA" >&2
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 75
+  fi
+  record_validator_restart_timing "release_ready"
+  record_validator_restart_timing "historical_release_ready"
+else
+  echo "ERROR: selected release has an incomplete or unsupported V2 release acquisition contract" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
-fi
-export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$VALIDATOR_DEPLOY_SHA"
-export LEADPOET_LOCAL_GATEWAY_RELEASE="$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"
-export LEADPOET_LOCAL_VALIDATOR_RELEASE="$VALIDATOR_V2_RELEASE_MANIFEST"
-if [ -e "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ] \
-    || [ -L "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
-  export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
-else
-  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
 fi
 if ! follow_superseding_validator_release; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
-record_validator_restart_timing "local_release_ready"
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
@@ -1311,13 +1408,21 @@ if [ -e "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ] \
 fi
 
 run_validator_active_release_phase() {
+  local -a topology_authority_args=()
+  if [ -n "$VALIDATOR_HISTORICAL_TOPOLOGY_HASH" ] \
+      && [ -n "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT" ]; then
+    topology_authority_args=(
+      --historical-topology-hash "$VALIDATOR_HISTORICAL_TOPOLOGY_HASH"
+    )
+  fi
   sudo env \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT" \
     AWS_REGION="$AWS_REGION" \
     AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
     "$VALIDATOR_PYTHON_BIN" \
-    -m gateway.tee.prepare_active_release_lineage_v2 "$@"
+    -m gateway.tee.prepare_active_release_lineage_v2 \
+    "${topology_authority_args[@]}" "$@"
 }
 
 echo "Preparing the running validator active release requirements"

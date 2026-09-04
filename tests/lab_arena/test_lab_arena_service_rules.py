@@ -34,9 +34,12 @@ def test_submission_requires_the_full_half_open_time_window(moment):
 
 
 def test_submission_inside_the_window_registers_normally():
+    documents = []
+
     class Store:
         @staticmethod
         def register_submission(*_args):
+            documents.append(_args[3])
             return {
                 "status": "registered",
                 "submission_id": _args[1],
@@ -55,20 +58,21 @@ def test_submission_inside_the_window_registers_normally():
             }
 
     hotkey = "5" + "A" * 47
-    digest = "sha256:" + "a" * 64
     service = object.__new__(ArenaService)
     service._store = Store()
     service._objects = Objects()
     service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
     service._config = SimpleNamespace(chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
     service._request_round = lambda *_args, **_kwargs: (
-        {"hotkey": hotkey, "body": {"source_sha256": digest, "source_size_bytes": 10, "consent": {"public_rerun": True}}},
+        {"hotkey": hotkey, "body": {"source_size_bytes": 10, "consent": {"public_rerun": True}}},
         {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule(), "baseline_hotkey": "5" + "Z" * 47}},
     )
     result = service.handle_submission_presign({})
     assert result["status"] == "upload_ready"
     assert result["submission_id"].startswith("sub-")
     assert result["source_ref"].endswith(result["submission_id"] + ".tar.gz")
+    assert "source_sha256" not in documents[0]
+    assert "source_cache_key" not in documents[0]
 
 
 def test_source_upload_target_is_write_once_and_size_bound():
@@ -368,7 +372,6 @@ def test_public_round_does_not_expose_source_transport_fields():
                 "miner_hotkey": "5" + "A" * 47,
                 "is_king": False,
                 "source_ref": "arena/private/source.tar.gz",
-                "source_sha256": "sha256:" + "a" * 64,
                 "source_size_bytes": 100,
             }
         ],
@@ -386,7 +389,6 @@ def test_public_round_does_not_expose_source_transport_fields():
 
 def test_public_views_never_serialize_source_or_private_runtime_fields():
     source_ref = "arena/private/source-secret.tar.gz"
-    source_sha256 = "sha256:" + "d" * 64
     hotkey = "5" + "A" * 47
     schedule = {"submission_cutoff": "2026-09-02T01:00:00Z"}
     raw_configuration = {
@@ -395,7 +397,6 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "runner_hotkeys": ["private-runner"],
         "scorer_image_reference": "private.example/scorer@sha256:" + "a" * 64,
         "source_ref": source_ref,
-        "source_sha256": source_sha256,
     }
     published = {
         "round_id": "arena-2026-09-02",
@@ -407,7 +408,6 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
                 "miner_hotkey": hotkey,
                 "is_king": False,
                 "source_ref": source_ref,
-                "source_sha256": source_sha256,
                 "source_size_bytes": 321,
             }
         ],
@@ -436,7 +436,6 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
                 "miner_hotkey": hotkey,
                 "is_king": False,
                 "source_ref": source_ref,
-                "source_sha256": source_sha256,
                 "source_size_bytes": 321,
             }
 
@@ -458,7 +457,6 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
     serialized = json.dumps([current, round_view, results], sort_keys=True)
     for private_value in (
         source_ref,
-        source_sha256,
         "source_size_bytes",
         "private-runner",
         "private.example/scorer",
@@ -484,7 +482,6 @@ def test_source_download_requires_the_active_execute_lease():
     submission = {
         "status": "frozen",
         "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
-        "source_sha256": "sha256:" + __import__("hashlib").sha256(payload).hexdigest(),
         "source_size_bytes": len(payload),
     }
     run = {
@@ -546,7 +543,6 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
         "round_id": "arena-2026-09-02",
         "miner_hotkey": configured,
         "source_ref": "arena/arena-2026-09-02/sources/baseline-2026-09-02.tar.gz",
-        "source_sha256": "sha256:" + "a" * 64,
         "source_size_bytes": 100,
         "status": "accepted",
         "is_king": True,
@@ -593,7 +589,6 @@ def test_each_new_day_uses_the_public_baseline_even_after_a_miner_won_yesterday(
         "round_id": "arena-2026-09-03",
         "miner_hotkey": baseline_hotkey,
         "source_ref": "arena/arena-2026-09-03/sources/baseline-2026-09-03.tar.gz",
-        "source_sha256": "sha256:" + "a" * 64,
         "source_size_bytes": 100,
         "status": "accepted",
         "is_king": True,
@@ -685,7 +680,6 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image()
         "submission_id": "sub-1",
         "miner_hotkey": "5" + "A" * 47,
         "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
-        "source_sha256": "sha256:" + "b" * 64,
         "source_size_bytes": 123,
         "is_king": False,
     }
@@ -733,20 +727,19 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image()
     assert (lease["image_digest"], lease["image_reference"]) == (digest, reference)
     assert {
         key: lease[key]
-        for key in ("source_ref", "source_sha256", "source_size_bytes")
+        for key in ("source_ref", "source_size_bytes")
     } == {
         key: participant[key]
-        for key in ("source_ref", "source_sha256", "source_size_bytes")
+        for key in ("source_ref", "source_size_bytes")
     }
 
 
-def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():
+def test_finalize_rejects_an_invalid_source_archive():
     row = {
         "submission_id": "sub-1",
         "round_id": "arena-2026-09-02",
         "miner_hotkey": "5" + "A" * 47,
         "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
-        "source_sha256": "sha256:" + "a" * 64,
         "source_size_bytes": 4,
         "status": "uploading",
     }
@@ -764,7 +757,6 @@ def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():
             "body": {
                 "submission_id": row["submission_id"],
                 "source_ref": row["source_ref"],
-                "source_sha256": row["source_sha256"],
                 "source_size_bytes": row["source_size_bytes"],
             },
         },
@@ -775,7 +767,7 @@ def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():
         },
     )
 
-    with pytest.raises(ServiceError, match="source_sha256_mismatch"):
+    with pytest.raises(ServiceError, match="source_archive_invalid"):
         service.handle_submission_finalize(row["submission_id"], {})
     assert updates == [
         (
@@ -783,7 +775,7 @@ def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():
             row["submission_id"],
             "uploading",
             "rejected",
-            {"rejection_rule": "source_sha256_mismatch"},
+            {"rejection_rule": "source_archive_invalid"},
         )
     ]
 

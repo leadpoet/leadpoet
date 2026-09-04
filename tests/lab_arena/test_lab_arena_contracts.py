@@ -220,9 +220,7 @@ def test_round_configuration_contains_only_plain_public_settings():
 
 
 def test_source_submission_contract_has_two_small_signed_steps():
-    digest = "sha256:" + "a" * 64
     presign = {
-        "source_sha256": digest,
         "source_size_bytes": 123,
         "consent": {"public_rerun": True},
     }
@@ -230,19 +228,26 @@ def test_source_submission_contract_has_two_small_signed_steps():
     finalize = {
         "submission_id": "sub-abc123",
         "source_ref": "arena/arena-2026-09-02/sources/sub-abc123.tar.gz",
-        "source_sha256": digest,
         "source_size_bytes": 123,
     }
     assert c.validate_submission_finalize_body(finalize) == finalize
     for bad in (
         dict(presign, consent={"public_rerun": False}),
         dict(presign, source_size_bytes=10 * 1024 * 1024 + 1),
+        dict(presign, source_sha256="sha256:" + "a" * 64),
+        dict(presign, source_cache_key="src-" + "a" * 32),
         dict(presign, image_reference="registry.example/agent:latest"),
     ):
         with pytest.raises(c.ArenaContractError):
             c.validate_submission_presign_body(bad)
-
-
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, source_sha256="sha256:" + "a" * 64)
+        )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, source_cache_key="src-" + "a" * 32)
+        )
 def test_run_result_reward_basis_and_scoring_plan_contracts():
     keypair = Keypair.create_from_uri("//Runner")
     run_result = {

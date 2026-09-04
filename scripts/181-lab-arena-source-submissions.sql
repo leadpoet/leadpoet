@@ -5,7 +5,6 @@ BEGIN;
 
 ALTER TABLE public.lab_arena_submissions
   ADD COLUMN IF NOT EXISTS source_ref TEXT,
-  ADD COLUMN IF NOT EXISTS source_sha256 TEXT,
   ADD COLUMN IF NOT EXISTS source_size_bytes BIGINT;
 
 -- Image uploads from the retired intake cannot enter the source competition.
@@ -31,11 +30,6 @@ ALTER TABLE public.lab_arena_submissions
     source_ref IS NULL
     OR source_ref ~ '^arena/arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(-[a-z0-9]{1,16})?/sources/[A-Za-z0-9._:-]{1,64}\.tar\.gz$'
   );
-ALTER TABLE public.lab_arena_submissions
-  DROP CONSTRAINT IF EXISTS lab_arena_submissions_source_sha256_check;
-ALTER TABLE public.lab_arena_submissions
-  ADD CONSTRAINT lab_arena_submissions_source_sha256_check
-  CHECK (source_sha256 IS NULL OR source_sha256 ~ '^sha256:[0-9a-f]{64}$');
 ALTER TABLE public.lab_arena_submissions
   DROP CONSTRAINT IF EXISTS lab_arena_submissions_source_size_bytes_check;
 ALTER TABLE public.lab_arena_submissions
@@ -74,7 +68,6 @@ BEGIN
   IF COALESCE(p_submission_id, '') !~ '^[A-Za-z0-9._:-]{1,64}$'
      OR pg_catalog.jsonb_typeof(p_doc) IS DISTINCT FROM 'object'
      OR p_doc ->> 'source_ref' IS DISTINCT FROM v_expected_ref
-     OR COALESCE(p_doc ->> 'source_sha256', '') !~ '^sha256:[0-9a-f]{64}$'
      OR COALESCE((p_doc ->> 'source_size_bytes')::BIGINT, 0) NOT BETWEEN 1 AND 10485760
      OR COALESCE((p_doc #>> '{consent,public_rerun}')::BOOLEAN, FALSE) IS NOT TRUE THEN
     RAISE EXCEPTION 'lab_arena_submission_input_invalid' USING ERRCODE = '22023';
@@ -102,8 +95,8 @@ BEGIN
     );
   END IF;
 
-  -- One active slot per miner and round. A retry for the same bytes reuses
-  -- that slot. The SHA is only an upload-integrity value.
+  -- One active slot per miner and round. A retry with the same bounded upload
+  -- size reuses that server-assigned submission.
   SELECT * INTO v_existing
   FROM public.lab_arena_submissions
   WHERE round_id = p_round_id
@@ -112,8 +105,7 @@ BEGIN
   ORDER BY created_at
   LIMIT 1;
   IF FOUND THEN
-    IF v_existing.source_sha256 = (p_doc ->> 'source_sha256')
-       AND v_existing.source_size_bytes = (p_doc ->> 'source_size_bytes')::BIGINT THEN
+    IF v_existing.source_size_bytes = (p_doc ->> 'source_size_bytes')::BIGINT THEN
       RETURN pg_catalog.jsonb_build_object(
         'status', 'existing',
         'submission_status', v_existing.status,
@@ -133,11 +125,11 @@ BEGIN
 
   INSERT INTO public.lab_arena_submissions (
     submission_id, round_id, miner_hotkey, status, is_king,
-    source_ref, source_sha256, source_size_bytes, consent, submission_doc
+    source_ref, source_size_bytes, consent, submission_doc
   ) VALUES (
     p_submission_id, p_round_id, p_miner_hotkey, 'uploading', v_is_baseline,
-    p_doc ->> 'source_ref', p_doc ->> 'source_sha256',
-    (p_doc ->> 'source_size_bytes')::BIGINT, p_doc -> 'consent', p_doc
+    p_doc ->> 'source_ref', (p_doc ->> 'source_size_bytes')::BIGINT,
+    p_doc -> 'consent', p_doc
   );
   RETURN pg_catalog.jsonb_build_object(
     'status', 'registered',
@@ -198,7 +190,6 @@ BEGIN
 
   IF p_expected_status = 'uploading' AND p_next_status = 'accepted' THEN
     IF v_submission.source_ref IS NULL
-       OR v_submission.source_sha256 IS NULL
        OR v_submission.source_size_bytes IS NULL
        OR (v_patch - 'is_king') <> '{}'::JSONB THEN
       RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';

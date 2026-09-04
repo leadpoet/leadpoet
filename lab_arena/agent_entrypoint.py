@@ -70,7 +70,22 @@ def run(
     document = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or not isinstance(document.get("icp"), dict):
         raise AgentContractError("ICP input is invalid")
-    result = _load_run_icp(source_dir)(dict(document["icp"]))
+    company_limit = document.get("company_limit", 5)
+    if (
+        isinstance(company_limit, bool)
+        or not isinstance(company_limit, int)
+        or not 1 <= company_limit <= 5
+    ):
+        raise AgentContractError("company_limit must be an integer from 1 through 5")
+    previous_limit = os.environ.get("LAB_ARENA_COMPANY_LIMIT")
+    os.environ["LAB_ARENA_COMPANY_LIMIT"] = str(company_limit)
+    try:
+        result = _load_run_icp(source_dir)(dict(document["icp"]))
+    finally:
+        if previous_limit is None:
+            os.environ.pop("LAB_ARENA_COMPANY_LIMIT", None)
+        else:
+            os.environ["LAB_ARENA_COMPANY_LIMIT"] = previous_limit
     if inspect.isawaitable(result):
         raise AgentContractError("harness.run_icp must be synchronous")
     if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):

@@ -226,7 +226,8 @@ def test_daily_migration_has_one_private_input_and_no_parallel_baseline_state():
 
 def test_source_intake_migration_has_one_active_slot_and_no_image_identity():
     assert "source_ref TEXT" in SOURCE_SQL
-    assert "source_sha256 TEXT" in SOURCE_SQL
+    assert "source_cache_key" not in SOURCE_SQL
+    assert "ADD COLUMN IF NOT EXISTS source_sha256" not in SOURCE_SQL
     assert "source_size_bytes BIGINT" in SOURCE_SQL
     assert "status IN ('uploading', 'accepted', 'frozen')" in SOURCE_SQL
     assert "lab_arena_submissions_one_active_per_miner_uq" in SOURCE_SQL
@@ -246,7 +247,8 @@ def test_source_execution_leases_source_and_removes_miner_image_columns():
     assert "NOTIFY pgrst, 'reload schema';" in SOURCE_EXECUTION_SQL
     assert "CREATE OR REPLACE FUNCTION public.lab_arena_claim_assignment(" in SOURCE_EXECUTION_SQL
     assert "'source_ref', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
-    assert "'source_sha256', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "source_cache_key" not in SOURCE_EXECUTION_SQL
+    assert "'source_sha256', CASE WHEN v_run.kind = 'execute'" not in SOURCE_EXECUTION_SQL
     assert "'source_size_bytes', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
     assert "'image_digest'," not in SOURCE_EXECUTION_SQL
     assert "source_submission.status = 'frozen'" in SOURCE_EXECUTION_SQL

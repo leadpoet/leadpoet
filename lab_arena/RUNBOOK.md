@@ -14,11 +14,12 @@ A miner submits one local source directory. The helper:
 4. uploads the archive; and
 5. signs a final request so the Arena can validate and accept the bytes.
 
-No Dockerfile, public registry, image tag, commit identity, receipt, or release
-manifest is part of miner admission. The archive SHA-256 value checks only
-that the uploaded bytes arrived unchanged. It is not a submission ID, model
-identity, ranking input, or activation gate. A miner can use any harness,
-model, prompts, packages, routing, or orchestration behind the one callable.
+No Dockerfile, public registry, image tag, commit identity, receipt, source
+digest, or release manifest is part of miner admission. The service validates
+the declared archive size and safe source structure, then uses its own
+submission ID for execution and recovery. The private source reference is
+write-once. A miner can use any harness, model, prompts, packages, routing, or
+orchestration behind the one callable.
 
 The source contract is `harness.run_icp(icp) -> list[dict]`. `harness.py` can
 define the function or re-export it from vendored source. The function must be

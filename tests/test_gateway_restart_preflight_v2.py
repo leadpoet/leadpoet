@@ -1234,7 +1234,6 @@ def test_required_supabase_v2_schema_covers_retained_and_arena_contracts() -> No
         "status",
         "is_king",
         "source_ref",
-        "source_sha256",
         "source_size_bytes",
         "submission_doc",
     } == relation_columns["lab_arena_submissions"]

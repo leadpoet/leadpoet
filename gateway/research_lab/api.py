@@ -1859,6 +1859,26 @@ async def _build_and_cache_attested_allocation(
         )
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (asyncio.TimeoutError, TimeoutError) as exc:
+        # A build that ran out of time is the one failure we can name from the
+        # outside: only the status code survives into request telemetry (the
+        # detail below reaches the caller, and the gateway log is not
+        # collected), so give the timeout its own code instead of folding it
+        # into the generic 500.
+        raise HTTPException(
+            status_code=504,
+            detail=f"Research Lab attested allocation timed out: {str(exc)[:200]}",
+        ) from exc
+    except RuntimeError as exc:
+        # The build path raises RuntimeError to REFUSE work it has decided not
+        # to attempt — today that is the durable retry ladder declining another
+        # generation. Nothing was built, so this is a temporary refusal rather
+        # than a server fault, and 503 keeps it separable from a build that
+        # tried and broke.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Research Lab attested allocation was refused: {str(exc)[:200]}",
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,

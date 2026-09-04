@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -3979,8 +3980,11 @@ def test_gateway_runtime_identity_uses_the_installed_local_nsm_boundary(
 
 
 def test_external_build_identities_match_the_production_image_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
     from validator_tee.host.docker_image_normalizer_v2 import (
         normalize_saved_image,
     )
@@ -4001,6 +4005,17 @@ def test_external_build_identities_match_the_production_image_normalizer(
         assert image_id == normalized_image_id(COMMIT, role)
         assert image_id not in observed
         observed.add(image_id)
+        images = {}
+        assert contract_adapter._docker_load(
+            normalized,
+            images,
+            {},
+        ) == [f"rehearsal:{role}"]
+        assert images[f"rehearsal:{role}"]["rootfs_layers"]
+        assert all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+            for layer in images[f"rehearsal:{role}"]["rootfs_layers"]
+        )
 
 
 def test_release_channel_uses_the_same_commit_bound_external_artifacts(

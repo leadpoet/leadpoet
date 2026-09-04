@@ -1149,15 +1149,31 @@ def _docker_load(
         if isinstance(config.get("config"), dict)
         else {}
     )
+    rootfs = config.get("rootfs")
+    rootfs_layers = (
+        rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    )
     commit = str(labels.get("org.leadpoet.rehearsal.commit") or "")
     role = str(labels.get("org.leadpoet.rehearsal.role") or "")
     image_id = "sha256:" + config_path.rsplit("/", 1)[-1]
     if (
         role not in ALL_ROLES
         or image_id != normalized_image_id(commit, role)
+        or not isinstance(rootfs_layers, list)
+        or not rootfs_layers
+        or any(
+            not isinstance(layer, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", layer) is None
+            for layer in rootfs_layers
+        )
     ):
         raise ValueError("Docker load image identity differs from build contract")
-    record = {"id": image_id, "commit": commit, "role": role}
+    record = {
+        "id": image_id,
+        "commit": commit,
+        "role": role,
+        "rootfs_layers": list(rootfs_layers),
+    }
     cache_tags = [
         tag for tag in tags if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(tag)
     ]
@@ -1466,6 +1482,15 @@ def command_docker(argv: list[str]) -> int:
                     output = json.dumps([record], sort_keys=True)
                 elif "org.opencontainers.image.revision" in template:
                     output = str(record.get("commit") or "")
+                elif template == "{{json .RootFS.Layers}}":
+                    layers = record.get("rootfs_layers")
+                    if not isinstance(layers, list) or not layers:
+                        return _fail(
+                            "docker",
+                            argv,
+                            "Docker image rootfs layers are unavailable",
+                        )
+                    output = json.dumps(layers, separators=(",", ":"))
                 elif ".Id" in template:
                     output = _image_record_id(record)
                 else:

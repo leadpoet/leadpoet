@@ -36,10 +36,11 @@ from gateway.tee.release_lineage_v2 import (
     build_historical_compact_release_lineage_boot_verifier_v2,
     validate_compact_release_lineage_v2,
     validate_historical_compact_release_lineage_v2,
+    validate_prior_compact_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     validate_historical_release_manifest,
-    validate_release_manifest,
+    validate_prior_release_manifest,
 )
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
@@ -426,7 +427,7 @@ def _validate_selected_gateway_release(
             value,
             expected_topology_hash=historical_topology_hash,
         )
-    return validate_release_manifest(value)
+    return validate_prior_release_manifest(value)
 
 
 def _validate_selected_lineage(
@@ -435,6 +436,7 @@ def _validate_selected_lineage(
     historical_topology_hash: str | None,
     expected_current_commit: str,
     expected_current_gateway_release_hash: str | None = None,
+    allow_historical_current: bool = False,
 ) -> Dict[str, Any]:
     if historical_topology_hash is not None:
         return validate_historical_compact_release_lineage_v2(
@@ -445,7 +447,12 @@ def _validate_selected_lineage(
                 expected_current_gateway_release_hash
             ),
         )
-    return validate_compact_release_lineage_v2(
+    validator = (
+        validate_prior_compact_release_lineage_v2
+        if allow_historical_current
+        else validate_compact_release_lineage_v2
+    )
+    return validator(
         value,
         expected_current_commit=expected_current_commit,
         expected_current_gateway_release_hash=(
@@ -915,6 +922,7 @@ async def prepare_gateway_final_active_lineage_v2(
             historical_topology_hash=historical_topology_hash,
             expected_current_commit=running_commit,
             expected_current_gateway_release_hash=release["release_hash"],
+            allow_historical_current=True,
         )
         validator_commits = sorted(fallback["releases"])
 

@@ -477,9 +477,9 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
 def validate_historical_release_manifest(
     value: Mapping[str, Any],
     *,
-    expected_topology_hash: str,
+    expected_topology_hash: str = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
 ) -> Dict[str, Any]:
-    """Validate the exact known three-role release after explicit selection."""
+    """Validate the exact known three-role release topology."""
 
     role_specs = historical_three_role_specs(
         expected_topology_hash=expected_topology_hash
@@ -491,13 +491,30 @@ def validate_historical_release_manifest(
     )
 
 
-def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
-    release = validate_release_manifest(manifest)
-    if role not in ROLE_SPECS:
+def validate_prior_release_manifest(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate a current or exact known historical lineage release."""
+
+    if (
+        isinstance(value, Mapping)
+        and value.get("topology_hash") == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    ):
+        return validate_historical_release_manifest(
+            value,
+            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        )
+    return validate_release_manifest(value)
+
+
+def _role_expectation(
+    release: Mapping[str, Any], role: str
+) -> Dict[str, str]:
+    if role not in release["roles"]:
         raise ReleaseManifestV2Error("unknown release role")
     summary = release["roles"][role]
     return {
-        "physical_role": role,
+        "physical_role": summary["physical_role"],
         "service_role": summary["service_role"],
         "commit_sha": summary["commit_sha"],
         "pcr0": summary["pcr0"],
@@ -506,6 +523,16 @@ def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
         "build_identity_hash": summary["build_identity_hash"],
         "release_hash": release["release_hash"],
     }
+
+
+def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
+    return _role_expectation(validate_release_manifest(manifest), role)
+
+
+def prior_role_expectation(
+    manifest: Mapping[str, Any], role: str
+) -> Dict[str, str]:
+    return _role_expectation(validate_prior_release_manifest(manifest), role)
 
 
 def historical_role_expectation(
@@ -518,19 +545,7 @@ def historical_role_expectation(
         manifest,
         expected_topology_hash=expected_topology_hash,
     )
-    if role not in release["roles"]:
-        raise ReleaseManifestV2Error("unknown historical release role")
-    summary = release["roles"][role]
-    return {
-        "physical_role": summary["physical_role"],
-        "service_role": summary["service_role"],
-        "commit_sha": summary["commit_sha"],
-        "pcr0": summary["pcr0"],
-        "build_manifest_hash": summary["execution_manifest_hash"],
-        "dependency_lock_hash": summary["dependency_lock_hash"],
-        "build_identity_hash": summary["build_identity_hash"],
-        "release_hash": release["release_hash"],
-    }
+    return _role_expectation(release, role)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

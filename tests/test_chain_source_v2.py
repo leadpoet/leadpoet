@@ -64,13 +64,23 @@ def test_runtime_metadata_commitment_and_reviewed_reveal_default():
             "sha256:99380e7d01eccc41ffa1304e782658c86b38ba9986acefa371e79ad367f76658"
         ),
     ) == 1
+    assert resolve_reveal_period_metadata_default_v2(
+        genesis_hash=(
+            "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        ),
+        runtime_spec_version=454,
+        runtime_transaction_version=1,
+        metadata_hash=(
+            "sha256:b592bafacd0f3cce1340a91f237f82a531968bd833cbd27339328c80ce92b1cf"
+        ),
+    ) == 1
 
 
 @pytest.mark.parametrize(
     "field,value",
     (
         ("genesis_hash", "0" * 64),
-        ("runtime_spec_version", 454),
+        ("runtime_spec_version", 455),
         ("runtime_transaction_version", 2),
         ("metadata_hash", "sha256:" + "0" * 64),
     ),

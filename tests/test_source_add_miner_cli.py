@@ -47,7 +47,7 @@ def _source_add_flow(result, monkeypatch):
 
     namespace = {
         "Optional": Optional,
-        "QUALIFICATION_GATEWAY_URL": "https://gateway.example.test",
+        "GATEWAY_URL": "https://gateway.example.test",
         "_get_research_lab_status": lambda _url: {"source_add": {"intake_enabled": True}},
         "source_add_submission_ready": lambda _status: True,
         "SOURCE_ADD_SOURCE_KINDS": ("web",),

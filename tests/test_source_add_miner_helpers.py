@@ -45,7 +45,7 @@ def test_miner_defaults_to_live_research_lab_gateway():
     ).read_text(encoding="utf-8")
 
     assert (
-        'QUALIFICATION_GATEWAY_URL = os.environ.get('
+        'GATEWAY_URL = os.environ.get('
         '"GATEWAY_URL", "https://gateway.subnet71.com")'
     ) in source
     assert "https://gateway.leadpoet.com" not in source

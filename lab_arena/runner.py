@@ -80,6 +80,10 @@ class RunnerError(RuntimeError):
     """A runner-side failure; the attempt fails closed."""
 
 
+class AgentDependencyError(RunnerError):
+    """The submitted dependency declaration cannot run in the Arena."""
+
+
 class SignatureFn(Protocol):
     def __call__(self, message: str) -> str: ...
 
@@ -422,13 +426,13 @@ def _validated_requirements(path: Path) -> List[str]:
     try:
         data = path.read_bytes()
     except OSError as exc:
-        raise RunnerError("requirements.txt is unreadable") from exc
+        raise AgentDependencyError("requirements.txt is unreadable") from exc
     if len(data) > MAX_REQUIREMENTS_BYTES:
-        raise RunnerError("requirements.txt exceeds the size limit")
+        raise AgentDependencyError("requirements.txt exceeds the size limit")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise RunnerError("requirements.txt must be UTF-8") from exc
+        raise AgentDependencyError("requirements.txt must be UTF-8") from exc
     requirements = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -437,12 +441,12 @@ def _validated_requirements(path: Path) -> List[str]:
         if " #" in line:
             line = line.split(" #", 1)[0].rstrip()
         if not REQUIREMENT_RE.fullmatch(line):
-            raise RunnerError(
+            raise AgentDependencyError(
                 "requirements.txt may contain only package names and version constraints"
             )
         requirements.append(line)
         if len(requirements) > MAX_REQUIREMENTS:
-            raise RunnerError("requirements.txt has too many packages")
+            raise AgentDependencyError("requirements.txt has too many packages")
     return requirements
 
 
@@ -490,9 +494,9 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RunnerError("binary dependency installation failed") from exc
+        raise AgentDependencyError("binary dependency installation failed") from exc
     if result.returncode != 0:
-        raise RunnerError("binary dependency installation failed")
+        raise AgentDependencyError("binary dependency installation failed")
 
 
 def _lock_down_dependency_tree(path: Path) -> None:
@@ -509,11 +513,11 @@ def _lock_down_dependency_tree(path: Path) -> None:
             except OSError as exc:
                 raise RunnerError("installed dependency is unreadable") from exc
             if not (stat.S_ISDIR(details.st_mode) or stat.S_ISREG(details.st_mode)):
-                raise RunnerError("installed dependency has an unsafe type")
+                raise AgentDependencyError("installed dependency has an unsafe type")
             count += 1
             total += int(details.st_size)
             if count > MAX_DEPENDENCY_FILES or total > MAX_DEPENDENCY_BYTES:
-                raise RunnerError("installed dependencies exceed the cache limit")
+                raise AgentDependencyError("installed dependencies exceed the cache limit")
             if stat.S_ISREG(details.st_mode):
                 os.chmod(candidate, 0o444)
     for directory in reversed(directories):
@@ -1164,6 +1168,11 @@ class AssignmentExecutor:
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
+        except AgentDependencyError:
+            if scoring_run:  # the trusted scorer has no submitted dependency tree
+                raise
+            terminal = "model_error"
+            output_document = None
         finally:
             server.stop()
             shutil.rmtree(run_dir, ignore_errors=True)

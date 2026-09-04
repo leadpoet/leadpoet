@@ -354,6 +354,36 @@ def test_binary_requirement_install_rejects_urls_options_and_source_builds(
     assert kwargs["timeout"] == rn.DEPENDENCY_INSTALL_TIMEOUT_SECONDS
 
 
+def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
+    tmp_path,
+):
+    payload = _source_archive_with_requirements("missing-package==1.0.0\n")
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    run_lease = lease()
+    run_lease.update(source_sha256=digest, source_size_bytes=len(payload))
+    api = FakeApi([run_lease])
+    api.source_payload = payload
+
+    def reject_dependency(_requirements, _target):
+        raise rn.AgentDependencyError("binary dependency installation failed")
+
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]})
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, sandbox)
+    config.source_cache = rn.SourceCache(
+        tmp_path / "failing-sources",
+        api.source,
+        dependency_installer=reject_dependency,
+    )
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert sandbox.specs == []
+    assert api.completions[0]["body"]["result"]["terminal_status"] == "model_error"
+    assert api.completions[0]["body"]["output"] is None
+
+
 def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():
     token = "a" * 64
 

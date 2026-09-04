@@ -4314,6 +4314,53 @@ class Validator(BaseValidatorNeuron):
                 "evaluation_verification": None,
             }
 
+    async def _research_lab_allocation_submission_window_open(self) -> bool:
+        """True when this epoch's on-chain weight submission window has opened.
+
+        Fails safe: any error resolving the epoch state reports the window as
+        OPEN, which selects the tighter fetch budget and leaves behaviour exactly
+        as it was before the preparation budget existed.
+        """
+
+        try:
+            epoch_state = await self._get_epoch_state_async()
+            return bool(epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK))
+        except Exception as exc:
+            bt.logging.warning(
+                "Cannot resolve epoch state for the allocation preparation "
+                f"budget; using the submission-window budget: {exc}"
+            )
+            return True
+
+    def _start_research_lab_allocation_preparation(
+        self,
+        epoch: int,
+    ) -> "asyncio.Task[dict]":
+        """Create the per-epoch guard task with the fetch budget it has room for.
+
+        Before the submission window opens there are ~60 blocks (~720s) of margin
+        and the gateway's cold attested-allocation build costs 67-100s, so the
+        90-second window budget cuts the preparation off for no reason. The
+        budget travels as a ContextVar because the fetch is issued inside
+        _research_lab_pre_weight_submission_guard, a protected weight-path
+        workflow whose AST is pinned; asyncio.create_task copies the current
+        context, so the value set here reaches that one task and nothing else.
+        """
+
+        from research_lab.validator_integration import (
+            ALLOCATION_PREPARATION_FETCH_BUDGET,
+            ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS,
+        )
+
+        async def guarded() -> dict:
+            if not await self._research_lab_allocation_submission_window_open():
+                ALLOCATION_PREPARATION_FETCH_BUDGET.set(
+                    ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS
+                )
+            return await self._research_lab_pre_weight_submission_guard(epoch)
+
+        return asyncio.create_task(guarded())
+
     async def _prepare_research_lab_allocation(
         self,
         current_epoch: int,
@@ -4326,9 +4373,7 @@ class Validator(BaseValidatorNeuron):
         tasks = getattr(self, "_research_lab_allocation_preparation_tasks", {})
         task = tasks.get(epoch)
         if task is None:
-            task = asyncio.create_task(
-                self._research_lab_pre_weight_submission_guard(epoch)
-            )
+            task = self._start_research_lab_allocation_preparation(epoch)
             # Retain only the current epoch so stale multi-megabyte handoffs do
             # not accumulate in a long-lived validator process.
             tasks = {epoch: task}

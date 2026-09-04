@@ -282,6 +282,7 @@ def execute(
 ) -> Tuple[int, Dict[str, str], bytes]:
     """Match, validate, and dispatch one client request."""
 
+    url = _normalize_local_provider_url(url)
     trusted = trusted_scorer_mode()
     if trusted:
         url, headers = strip_caller_credentials(url, headers)
@@ -297,6 +298,27 @@ def execute(
         return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
     _trace({"event": "matched", "method": str(method).upper(), "url": _trace_url(url), "operation_id": operation_id})
     return dispatch(operation_id, parameters, max(1, int(timeout_ms)))
+
+
+def _normalize_local_provider_url(url: str) -> str:
+    """Map a local HTTP transport URL to its brokered HTTPS provider URL.
+
+    Baseline bundles use ``http://`` as the semantic URL required by httpx's
+    Unix-socket transport. No request goes to that URL: this shim converts only
+    an exact closed provider host before operation matching, and the broker
+    builds the fixed HTTPS outbound request.
+    """
+
+    if not isinstance(url, str):
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "http" or host not in operations.PROVIDER_HOSTS:
+        return url
+    return urlunsplit(("https", parts.netloc, parts.path, parts.query, parts.fragment))
 
 
 PAGE_FETCH_OPERATION = "scrapingdog.scrape"

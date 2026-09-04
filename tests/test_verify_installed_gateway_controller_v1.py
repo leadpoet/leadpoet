@@ -309,6 +309,91 @@ def test_unknown_host_wrapper_still_fails_closed(
         )
 
 
+def _controller_drift_checkout(tmp_path: Path) -> tuple[Path, bytes, bytes]:
+    repository = tmp_path / "checkout"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "restart-test@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Restart Test"],
+        cwd=repository,
+        check=True,
+    )
+    deployed = b"#!/bin/bash\necho deployed\n"
+    controller = b"#!/bin/bash\necho current-controller\n"
+    restart = repository / "gw_restart.sh"
+    restart.write_bytes(deployed)
+    restart.chmod(0o755)
+    subprocess.run(["git", "add", "gw_restart.sh"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "deployed"],
+        cwd=repository,
+        check=True,
+    )
+    restart.write_bytes(controller)
+    restart.chmod(0o700)
+    return repository, deployed, controller
+
+
+def test_exact_controller_checkout_drift_is_recovered(tmp_path: Path) -> None:
+    repository, deployed, controller = _controller_drift_checkout(tmp_path)
+
+    assert verifier._recover_exact_controller_checkout_drift(
+        repo_root=repository,
+        bundle={"payloads": {"gw_restart.sh": controller}},
+        helper_arguments=["prepare"],
+    )
+
+    assert (repository / "gw_restart.sh").read_bytes() == deployed
+    assert subprocess.check_output(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repository,
+        text=True,
+    ).rstrip("\n") == ""
+
+
+def test_unrecognized_controller_checkout_drift_fails_closed(tmp_path: Path) -> None:
+    repository, _deployed, controller = _controller_drift_checkout(tmp_path)
+    (repository / "gw_restart.sh").write_bytes(b"#!/bin/bash\necho unknown\n")
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="unrecognized controller drift",
+    ):
+        verifier._recover_exact_controller_checkout_drift(
+            repo_root=repository,
+            bundle={"payloads": {"gw_restart.sh": controller}},
+            helper_arguments=["prepare"],
+        )
+
+    assert subprocess.check_output(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repository,
+        text=True,
+    ).rstrip("\n") == " M gw_restart.sh"
+
+
+def test_controller_checkout_recovery_preserves_any_extra_dirty_path(
+    tmp_path: Path,
+) -> None:
+    repository, _deployed, controller = _controller_drift_checkout(tmp_path)
+    extra = repository / "operator-note.txt"
+    extra.write_text("preserve\n", encoding="utf-8")
+
+    assert not verifier._recover_exact_controller_checkout_drift(
+        repo_root=repository,
+        bundle={"payloads": {"gw_restart.sh": controller}},
+        helper_arguments=["prepare"],
+    )
+
+    assert (repository / "gw_restart.sh").read_bytes() == controller
+    assert extra.read_text(encoding="utf-8") == "preserve\n"
+
+
 def test_real_controller_lineage_rejects_pre_floor_commit(
     tmp_path: Path,
 ) -> None:

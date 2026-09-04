@@ -126,7 +126,11 @@ def price_table_from_models_response(response: Mapping[str, Any], model_ids: Opt
         if not isinstance(item, Mapping):
             continue
         model_id = item.get("id")
-        if not isinstance(model_id, str) or (wanted is not None and model_id not in wanted):
+        if (
+            not isinstance(model_id, str)
+            or operations._MODEL_ID_RE.fullmatch(model_id) is None
+            or (wanted is not None and model_id not in wanted)
+        ):
             continue
         pricing = item.get("pricing")
         if not isinstance(pricing, Mapping) or pricing.get("prompt") is None or pricing.get("completion") is None:

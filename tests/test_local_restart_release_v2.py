@@ -206,3 +206,17 @@ def test_restart_scripts_do_not_wait_for_github_release() -> None:
     assert "build_local_release_v2.sh" in gateway
     assert "build_local_release_v2.sh" in validator
     assert "fetch_release_channel_v2" not in operator
+
+
+def test_local_release_builder_runs_modules_from_candidate_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "gateway/tee/build_local_release_v2.sh").read_text(
+        encoding="utf-8"
+    )
+
+    candidate_root = script.index('cd "$CANDIDATE_ROOT"')
+    gateway_builder = script.index(
+        "python3 -m validator_tee.host.gateway_pcr0_builder"
+    )
+    release_builder = script.index("python3 -m gateway.tee.local_release_v2")
+    assert candidate_root < gateway_builder < release_builder

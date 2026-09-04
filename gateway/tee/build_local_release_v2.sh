@@ -27,6 +27,7 @@ if [ -z "$REPOSITORY" ] || [ -z "$REVISION" ] \
   exit 2
 fi
 test "$(git -C "$REPOSITORY" rev-parse "$REVISION^{commit}")" = "$REVISION"
+cd "$CANDIDATE_ROOT"
 
 WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
 TEMPORARY_ROOT="$(mktemp -d /tmp/leadpoet-local-release.XXXXXX)"

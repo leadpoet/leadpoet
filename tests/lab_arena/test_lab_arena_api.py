@@ -171,10 +171,23 @@ def test_complete_route_accepts_the_shared_completion_size(client):
 
 def test_submission_routes_presign_and_finalize_one_source_upload(client):
     http, service = client
-    envelope = {"scope": contracts.SCOPE_SUBMISSION_PRESIGN, "body": {"source_sha256": "sha256:" + "a" * 64, "source_size_bytes": 100}}
+    envelope = {
+        "scope": contracts.SCOPE_SUBMISSION_PRESIGN,
+        "body": {
+            "source_size_bytes": 100,
+            "consent": {"public_rerun": True},
+        },
+    }
     response = http.post("/arena/v1/submissions/presign", content=json.dumps(envelope))
     assert response.status_code == 200 and service.calls["submission_presign"] == envelope
-    finalize = {"scope": contracts.SCOPE_SUBMISSION_FINALIZE, "body": {"submission_id": "sub-1"}}
+    finalize = {
+        "scope": contracts.SCOPE_SUBMISSION_FINALIZE,
+        "body": {
+            "submission_id": "sub-1",
+            "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+            "source_size_bytes": 100,
+        },
+    }
     response = http.post("/arena/v1/submissions/sub-1/finalize", content=json.dumps(finalize))
     assert response.status_code == 200
     assert service.calls["submission_finalize"] == ("sub-1", finalize)

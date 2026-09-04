@@ -484,7 +484,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "status",
             "is_king",
             "source_ref",
-            "source_sha256",
             "source_size_bytes",
             "submission_doc",
         ),

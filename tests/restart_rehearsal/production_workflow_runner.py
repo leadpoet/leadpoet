@@ -106,7 +106,6 @@ def _canonical(value: Any) -> bytes:
 
 
 
-
 def _run_workflow_stage(
     *,
     stage: str,
@@ -2085,8 +2084,6 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
 
 def _exercise_chain_settlement_state_space() -> dict[str, Any]:
     return asyncio.run(_exercise_chain_settlement_state_space_async())
-
-
 
 
 def _exercise_historical_metagraph_layouts() -> dict[str, Any]:

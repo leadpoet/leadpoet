@@ -72,10 +72,9 @@ def _round_config(round_id: str, *, cutoff: str) -> Dict[str, Any]:
     }
 
 
-def _source_doc(round_id: str, submission_id: str, seed: str) -> Dict[str, Any]:
+def _source_doc(round_id: str, submission_id: str) -> Dict[str, Any]:
     return {
         "source_ref": "arena/%s/sources/%s.tar.gz" % (round_id, submission_id),
-        "source_sha256": "sha256:" + seed * 64,
         "source_size_bytes": 123,
         "consent": {"public_rerun": True},
     }
@@ -88,11 +87,11 @@ def test_one_active_slot_reuses_a_matching_upload_reservation(store):
         round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")
     )["status"] == "created"
     first = store.register_submission(
-        round_id, "sub-first", miner, _source_doc(round_id, "sub-first", "a")
+        round_id, "sub-first", miner, _source_doc(round_id, "sub-first")
     )
     assert first["status"] == "registered"
     retry = store.register_submission(
-        round_id, "sub-retry", miner, _source_doc(round_id, "sub-retry", "a")
+        round_id, "sub-retry", miner, _source_doc(round_id, "sub-retry")
     )
     assert retry == {
         "status": "existing",
@@ -101,11 +100,13 @@ def test_one_active_slot_reuses_a_matching_upload_reservation(store):
         "source_ref": "arena/%s/sources/sub-first.tar.gz" % round_id,
     }
     with pytest.raises(ArenaStoreError, match="lab_arena_submission_conflict"):
+        conflict = _source_doc(round_id, "sub-other")
+        conflict["source_size_bytes"] = 124
         store.register_submission(
             round_id,
             "sub-other",
             miner,
-            _source_doc(round_id, "sub-other", "b"),
+            conflict,
         )
     assert store.update_submission(
         round_id, "sub-first", "uploading", "accepted"
@@ -121,10 +122,10 @@ def test_public_baseline_can_use_the_same_source_admission_after_cutoff(store):
         round_id,
         "sub-late",
         _hotkey("source-late-miner"),
-        _source_doc(round_id, "sub-late", "c"),
+        _source_doc(round_id, "sub-late"),
     )
     assert miner_result["status"] == "window_closed"
-    baseline_doc = _source_doc(round_id, "baseline-2001-01-01", "d")
+    baseline_doc = _source_doc(round_id, "baseline-2001-01-01")
     baseline_doc["is_king"] = True
     baseline = store.register_submission(
         round_id,
@@ -143,7 +144,7 @@ def test_claim_persists_source_for_execution_and_nulls_it_for_scoring(store, dat
     runner = _hotkey("source-runner")
     miner = _hotkey("source-claim-miner")
     submission_id = "sub-source-claim"
-    source = _source_doc(round_id, submission_id, "e")
+    source = _source_doc(round_id, submission_id)
     assert store.create_round(
         round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")
     )["status"] == "created"
@@ -189,10 +190,10 @@ def test_claim_persists_source_for_execution_and_nulls_it_for_scoring(store, dat
     assert execute["status"] == "leased" and execute["kind"] == "execute"
     assert {
         key: execute[key]
-        for key in ("source_ref", "source_sha256", "source_size_bytes")
+        for key in ("source_ref", "source_size_bytes")
     } == {
         key: source[key]
-        for key in ("source_ref", "source_sha256", "source_size_bytes")
+        for key in ("source_ref", "source_size_bytes")
     }
     assert "image_digest" not in execute
     replay = store.claim_assignment(
@@ -233,7 +234,6 @@ def test_claim_persists_source_for_execution_and_nulls_it_for_scoring(store, dat
     )
     assert score["status"] == "leased" and score["kind"] == "score"
     assert score["source_ref"] is None
-    assert score["source_sha256"] is None
     assert score["source_size_bytes"] is None
     assert "image_digest" not in score
 
@@ -244,6 +244,8 @@ def test_claim_persists_source_for_execution_and_nulls_it_for_scoring(store, dat
         "image_reference",
         "image_digest",
         "image_size_bytes",
+        "source_sha256",
+        "source_cache_key",
     }.intersection(row)
 
 
@@ -252,7 +254,7 @@ def test_configured_baseline_bypasses_only_the_coldkey_exclusion(store):
     runner = _hotkey("source-runner")
     baseline = _hotkey("source-baseline")
     submission_id = "baseline-2098-01-03-baseline"
-    source = _source_doc(round_id, submission_id, "9")
+    source = _source_doc(round_id, submission_id)
     source["is_king"] = True
     assert store.create_round(
         round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")

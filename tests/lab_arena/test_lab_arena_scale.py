@@ -53,7 +53,7 @@ def test_round_at_the_challenger_cap_scores_every_participant_and_publishes(conn
     participants = service.store.get_round(round_id)["participants"]
     assert len(participants) == CHALLENGERS + 1
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     opened = timed("stage1_open", lambda: service.advance_round(round_id))
     assert opened["assignments"] == contracts.STAGE_1_ICP_COUNT * (CHALLENGERS + 1)

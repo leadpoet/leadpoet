@@ -308,7 +308,6 @@ def test_fleet_probe_quarantines_failed_profile_after_all_destination_checks():
 
     verified = verify_worker_proxy_fleets_v2(
         {
-            "gateway_autoresearch": ("https://auto.example.com",),
             "gateway_scoring": (
                 "https://score.example.com",
                 "https://bad.example.com",
@@ -325,7 +324,6 @@ def test_fleet_probe_quarantines_failed_profile_after_all_destination_checks():
         ("code.deepline.com", 443),
     }
     for proxy in (
-        "https://auto.example.com",
         "https://score.example.com",
         "https://bad.example.com",
     ):
@@ -335,7 +333,6 @@ def test_fleet_probe_quarantines_failed_profile_after_all_destination_checks():
             if observed_proxy == proxy
         } == expected_destinations
     assert verified == {
-        "gateway_autoresearch": ("https://auto.example.com",),
         "gateway_scoring": ("https://score.example.com",),
     }
 
@@ -353,11 +350,10 @@ def test_fleet_probe_fails_closed_when_role_has_no_verified_profile():
             r"\(4/4 role probes failed\)"
         ),
     ):
-        verify_worker_proxy_fleets_v2(
-            {
-                "gateway_autoresearch": ("https://auto.example.com",),
-                "gateway_scoring": ("https://bad.example.com",),
-            },
+            verify_worker_proxy_fleets_v2(
+                {
+                    "gateway_scoring": ("https://bad.example.com",),
+                },
             max_workers=2,
             verify_proxy=verify,
         )

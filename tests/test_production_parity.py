@@ -54,7 +54,9 @@ from scripts.production_parity_snapshot import (
 )
 from scripts.run_production_parity_full_host import (
     FullParityError,
+    _arena_provider_keys,
     _builtwith_key_from_secret,
+    _clone_arena_service_role_key,
     _clone_service_role_key,
     _current_epoch_from_readiness,
     _dsn_from_secret,
@@ -1152,6 +1154,47 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         },
     ]
     parity_snapshot._schema_only_source_add_acl_sql(extended)
+
+
+def test_database_shape_capture_does_not_require_candidate_arena_tables(monkeypatch):
+    observed = {}
+
+    def fake_run_postgres(command, **kwargs):
+        observed["sql"] = command[-1]
+        value = {
+            "server_version_num": "150010",
+            "relation_count": 1,
+            "total_relation_bytes": 1,
+            "largest_relation_bytes": 1,
+            "capture_utc_timestamp": "2026-09-04T00:00:00+00:00",
+            "capture_utc_date": "2026-09-04",
+            "latest_completed_benchmark_date": None,
+            "current_day_rebenchmark_run_count": 0,
+            "current_day_benchmark_bundle_count": 0,
+            "weight_history_scope": None,
+            "source_role": {
+                "role_name": "readonly",
+                "transaction_read_only": True,
+                "superuser": False,
+                "bypass_rls": False,
+                "replication": False,
+                "table_write_capable": False,
+            },
+        }
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(value).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+    result = parity_snapshot._database_stats(
+        {"PGHOST": "db.production.example"},
+        postgres_image="postgres@sha256:" + "a" * 64,
+    )
+
+    assert "FROM public.lab_arena_rounds" not in observed["sql"]
+    assert result["latest_completed_benchmark_date"] is None
+    assert result["current_day_rebenchmark_run_count"] == 0
+    assert result["current_day_benchmark_bundle_count"] == 0
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
@@ -4030,6 +4073,13 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
                 "s3://production/signatures"
             ),
             "RESEARCH_LAB_SCORING_CACHE_DIR": "/production/scoring-cache",
+            "LAB_ARENA_MODE": "live",
+            "LAB_ARENA_SUPABASE_URL": (
+                "https://qplwoislplkcegvdmbim.supabase.co"
+            ),
+            "LAB_ARENA_SUPABASE_ANON_KEY": "production-anon-poison",
+            "LAB_ARENA_SERVICE_JWT": "production.arena.poison",
+            "LAB_ARENA_BUCKET": "production-arena-poison",
         },
         run_id="pp-1-1",
         candidate_sha=SHA,
@@ -4109,6 +4159,11 @@ def test_gateway_secret_keeps_real_reads_but_isolates_every_mutation():
     assert environment["GATEWAY_STATEFUL_CUTOVER_CEREMONY"] == "0"
     assert environment["GATEWAY_TEE_TOPOLOGY_MODE"] == "full"
     assert environment["LANGFUSE_ENABLED"] == "false"
+    assert environment["LAB_ARENA_MODE"] == "off"
+    assert environment["LAB_ARENA_SUPABASE_URL"] == ORIGIN
+    assert environment["LAB_ARENA_SUPABASE_ANON_KEY"].count(".") == 2
+    assert environment["LAB_ARENA_SERVICE_JWT"].count(".") == 2
+    assert environment["LAB_ARENA_BUCKET"] == artifact_bucket
     assert environment["AWS_S3_BUCKET"] == artifact_bucket
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_ENABLED"] == "false"
     assert environment["RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX"] == ""
@@ -4377,11 +4432,212 @@ def test_controller_dependency_closure_includes_runtime_identity_and_database_cl
         "bittensor",
         "boto3",
         "cryptography",
+        "fastapi",
         "httpx",
         "supabase",
+        "uvicorn[standard]",
     }
     assert "arweave-python-client>=1.0.19" in selected
     assert 'bittensor==10.5.0; python_version >= "3.10"' in selected
+
+
+def test_arena_rebenchmark_is_live_complete_and_precedes_weights():
+    source = inspect.getsource(full_host.run_full)
+    gateway = source.index('failure_stage = "gateway-health"')
+    arena = source.index("_run_arena_rebenchmark_path(")
+    weights = source.index('failure_stage = "weight-readiness"')
+    assert gateway < arena < weights
+    assert '"arena_rebenchmark": arena_rebenchmark' in source
+
+
+def test_arena_rebenchmark_accepts_existing_gateway_provider_key_names():
+    assert _arena_provider_keys(
+        {
+            "OPENROUTER_KEY": "openrouter-test",
+            "QUALIFICATION_SCRAPINGDOG_API_KEY": "scrapingdog-test",
+            "RESEARCH_LAB_V2_DEEPLINE_API_KEY": "deepline-test",
+        }
+    ) == {
+        "openrouter": "openrouter-test",
+        "scrapingdog": "scrapingdog-test",
+        "deepline": "deepline-test",
+    }
+
+
+def test_arena_rebenchmark_counts_only_public_https_and_successful_openrouter():
+    assert full_host._arena_https_evidence_urls(
+        {
+            "fit_evidence_urls": [
+                "https://evidence.example.com/news",
+                "http://evidence.example.com/plaintext",
+                "https://localhost/private",
+                "https://user@evidence.example.com/credential",
+            ],
+            "intent_signals": [{"url": "https://127.0.0.1/private"}],
+        }
+    ) == {"https://evidence.example.com/news"}
+    assert full_host._successful_openrouter_settlement_count(
+        [
+            {
+                "entry_kind": "settlement",
+                "provider": "openrouter",
+                "terminal_response": {"status": 200},
+            },
+            {
+                "entry_kind": "settlement",
+                "provider": "openrouter",
+                "terminal_response": {"status": 429},
+            },
+            {
+                "entry_kind": "settlement",
+                "provider": "deepline",
+                "terminal_response": {"status": 200},
+            },
+            {
+                "entry_kind": "dispatch",
+                "provider": "openrouter",
+                "terminal_response": {"status": 200},
+            },
+        ]
+    ) == 1
+
+
+def test_clone_postgrest_can_assume_the_candidate_arena_service_role():
+    source = inspect.getsource(fast_parity._DockerDatabase.start_postgrest)
+    assert "rolname = 'lab_arena_service'" in source
+    assert "GRANT lab_arena_service TO authenticator" in source
+
+
+def test_arena_rebenchmark_evidence_requires_every_icp_and_live_evidence():
+    bucket = "leadpoet-parity-493765492819-" + "f" * 16
+    evidence = {
+        "schema_version": (
+            "leadpoet.production_parity_arena_rebenchmark_evidence.v1"
+        ),
+        "candidate_sha": SHA,
+        "run_id": "pp-1-1",
+        "artifact_bucket": bucket,
+        "status": "passed",
+        "mode": "shadow",
+        "round_id": "arena-2026-09-04-abcdef123456",
+        "evaluation_date": "2026-09-04",
+        "daily_icp_set_id": 20260904,
+        "baseline_source_url": (
+            "https://github.com/leadpoet/pydantic-harness/"
+            "archive/refs/heads/main.tar.gz"
+        ),
+        "baseline_final_score": 72.5,
+        "icp_results": [
+            {
+                "icp_position": position,
+                "execute_accepted": True,
+                "score_accepted": True,
+                "company_count": 1,
+                "valid_company_with_https_evidence_count": 1,
+                "https_evidence_url_count": 1,
+                "successful_openrouter_execute_call_count": 1,
+                "successful_openrouter_score_settlement_count": 1,
+            }
+            for position in range(20)
+        ],
+        "counts": {
+            "configured_icp_count": 20,
+            "stage_1_icp_count": 10,
+            "stage_2_icp_count": 10,
+            "accepted_execute_runs": 20,
+            "accepted_score_runs": 20,
+            "scored_icp_count": 20,
+            "unique_icp_positions": 20,
+            "company_count": 20,
+            "evidence_url_count": 20,
+        },
+        "providers": {
+            "transport": "live-httpx",
+            "names": ["deepline", "openrouter", "scrapingdog"],
+            "settled_provider_call_count": 87,
+            "execute_settled_provider_call_count": 42,
+            "score_settled_provider_call_count": 45,
+            "successful_openrouter_execute_call_count": 20,
+            "successful_openrouter_score_settlement_count": 20,
+        },
+        "runtime": {
+            "runner": "lab_arena.runner.Runner",
+            "sandbox": "gvisor-runsc",
+            "api": "lab_arena.api.loopback-http",
+            "object_store": "s3",
+            "judge_image_materialization": "exact-candidate-local-docker",
+        },
+        "restart_recovery": {
+            "service_restarted": True,
+            "runner_restarted": True,
+            "resumed_round_status": "stage1",
+            "persisted_execute_runs": 10,
+        },
+        "publication_visible": True,
+        "public_benchmark_visible": True,
+        "public_results_visible": True,
+        "production_database_mutated": False,
+        "production_chain_mutated": False,
+    }
+    assert full_host._validate_arena_rebenchmark_evidence(
+        evidence,
+        candidate_sha=SHA,
+        run_id="pp-1-1",
+        artifact_bucket=bucket,
+    )["status"] == "passed"
+
+    broken_values = []
+    for section, key, value in (
+        ("counts", "stage_1_icp_count", 9),
+        ("counts", "accepted_execute_runs", 19),
+        ("counts", "accepted_score_runs", 19),
+        ("counts", "company_count", 0),
+        ("counts", "evidence_url_count", 0),
+        ("providers", "execute_settled_provider_call_count", 0),
+        ("providers", "score_settled_provider_call_count", 0),
+        ("providers", "successful_openrouter_execute_call_count", 19),
+        ("providers", "successful_openrouter_score_settlement_count", 19),
+        ("restart_recovery", "service_restarted", False),
+    ):
+        broken = json.loads(json.dumps(evidence))
+        broken[section][key] = value
+        broken_values.append(broken)
+    for broken in broken_values:
+        with pytest.raises(FullParityError, match="evidence is incomplete"):
+            full_host._validate_arena_rebenchmark_evidence(
+                broken,
+                candidate_sha=SHA,
+                run_id="pp-1-1",
+                artifact_bucket=bucket,
+            )
+
+    per_icp_broken_values = []
+    missing_position = json.loads(json.dumps(evidence))
+    missing_position["icp_results"].pop()
+    per_icp_broken_values.append(missing_position)
+    duplicate_position = json.loads(json.dumps(evidence))
+    duplicate_position["icp_results"][-1]["icp_position"] = 18
+    per_icp_broken_values.append(duplicate_position)
+    for key, value in (
+        ("execute_accepted", False),
+        ("score_accepted", False),
+        ("company_count", 0),
+        ("valid_company_with_https_evidence_count", 0),
+        ("https_evidence_url_count", 0),
+        ("successful_openrouter_execute_call_count", 0),
+        ("successful_openrouter_score_settlement_count", 0),
+    ):
+        broken = json.loads(json.dumps(evidence))
+        broken["icp_results"][7][key] = value
+        per_icp_broken_values.append(broken)
+    for broken in per_icp_broken_values:
+        with pytest.raises(FullParityError, match="evidence is incomplete"):
+            full_host._validate_arena_rebenchmark_evidence(
+                broken,
+                candidate_sha=SHA,
+                run_id="pp-1-1",
+                artifact_bucket=bucket,
+            )
 
 
 def test_full_runner_accepts_json_secret_and_strict_env_file(tmp_path: Path):
@@ -4630,6 +4886,14 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
         jwt_secret=jwt_secret,
     )
     assert token == environment["SUPABASE_SERVICE_ROLE_KEY"]
+    arena_token = _clone_arena_service_role_key(
+        environment,
+        candidate_sha=SHA,
+        run_id="parity-20260815",
+        supabase_origin=ORIGIN,
+        jwt_secret=jwt_secret,
+    )
+    assert arena_token == environment["LAB_ARENA_SERVICE_JWT"]
     with pytest.raises(FullParityError, match="credential is unavailable"):
         _clone_service_role_key(
             {**environment, "SUPABASE_SERVICE_ROLE_KEY": ""},
@@ -4653,6 +4917,19 @@ def test_full_clone_final_evidence_uses_run_scoped_gateway_token():
             run_id="parity-20260815",
             supabase_origin=ORIGIN,
             jwt_secret="x" * 48,
+        )
+    with pytest.raises(FullParityError, match="credential identity differs"):
+        _clone_arena_service_role_key(
+            {
+                **environment,
+                "LAB_ARENA_SERVICE_JWT": environment[
+                    "SUPABASE_SERVICE_ROLE_KEY"
+                ],
+            },
+            candidate_sha=SHA,
+            run_id="parity-20260815",
+            supabase_origin=ORIGIN,
+            jwt_secret=jwt_secret,
         )
 
 

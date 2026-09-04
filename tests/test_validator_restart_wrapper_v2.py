@@ -812,9 +812,83 @@ def test_exact_restart_preserves_newer_validator_restart_controller():
         in script
     )
     initial = script.index("--phase validator-initial")
-    assert 'PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT"' in script[
+    active_release_runner = script[
         script.index("run_validator_active_release_phase() {"):initial
     ]
+    assert (
+        'PYTHONPATH="$VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT"'
+        in active_release_runner
+    )
+    assert '"$VALIDATOR_ACTIVE_RELEASE_PREPARER"' in active_release_runner
+    assert "-m gateway.tee.prepare_active_release_lineage_v2" not in active_release_runner
+
+
+def test_active_release_phase_cannot_load_helper_from_historical_checkout(
+    tmp_path: Path,
+):
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("run_validator_active_release_phase() {")
+    end = script.index("\n}\n", start) + 3
+    function = script[start:end]
+
+    controller = tmp_path / "controller"
+    target = tmp_path / "target"
+    for root in (controller, target):
+        helper = root / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+        helper.parent.mkdir(parents=True)
+        (helper.parent.parent / "__init__.py").write_text("", encoding="utf-8")
+        (helper.parent / "__init__.py").write_text("", encoding="utf-8")
+    controller_helper = (
+        controller / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    )
+    controller_helper.write_text(
+        "import sys\n"
+        "print('controller-helper', *sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    target_helper = target / "gateway" / "tee" / "prepare_active_release_lineage_v2.py"
+    target_helper.write_text(
+        "raise SystemExit('historical checkout helper was selected')\n",
+        encoding="utf-8",
+    )
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sudo = bin_dir / "sudo"
+    sudo.write_text('#!/bin/bash\nexec "$@"\n', encoding="utf-8")
+    sudo.chmod(0o755)
+    historical_hash = "sha256:" + "a" * 64
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + function
+            + '\ncd "$TARGET_ROOT"\n'
+            + "run_validator_active_release_phase --phase validator-initial\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "TARGET_ROOT": str(target),
+            "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_CONTROLLER_ROOT": str(controller),
+            "VALIDATOR_ACTIVE_RELEASE_PREPARER": str(controller_helper),
+            "VALIDATOR_HISTORICAL_TOPOLOGY_HASH": historical_hash,
+            "VALIDATOR_PYTHON_BIN": sys.executable,
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
+        },
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "controller-helper" in result.stdout
+    assert f"--historical-topology-hash {historical_hash}" in result.stdout
+    assert "historical checkout helper was selected" not in result.stderr
 
 
 def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation():

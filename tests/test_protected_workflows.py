@@ -231,8 +231,6 @@ def test_scoring_receipt_failure_policy_is_protected():
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
     ]
-
-
 def test_ancestry_unknown_commit_recovery_is_protected():
     assert {
         "_ANCESTRY_CHECKPOINT_UNKNOWN_COMMIT_BACKOFF_SECONDS",

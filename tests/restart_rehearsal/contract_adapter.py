@@ -587,9 +587,6 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
-        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
-            "http://legacy-auto:legacy-password@legacy-proxy.example.com:6162"
-        ),
         "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
             "http://legacy-scoring:legacy-password@legacy-proxy.example.com:7421"
         ),
@@ -608,10 +605,6 @@ def _gateway_secret() -> dict[str, str]:
     ):
         values.update(
             {
-                "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
-                    "https://rehearsal-auto:rehearsal-auto-password@"
-                    "93.184.216.34:443"
-                ),
                 "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
                     "https://rehearsal-scoring:rehearsal-scoring-password@"
                     "93.184.216.34:443"
@@ -2533,7 +2526,6 @@ def _long_lived_process(key: str, argv: list[str]) -> int:
         pid=os.getpid(),
         implementation="internal_substitution",
         scope=_rehearsal_scope(),
-        environment_contract=environment_contract,
     )
 
     def stop(_signum: int, _frame: Any) -> None:
@@ -2562,7 +2554,6 @@ def _exec_long_lived_production_module(
         pid=os.getpid(),
         implementation="production_module",
         scope=_rehearsal_scope(),
-        environment_contract=environment_contract,
         **_source_identity(_module_source(module)),
     )
     current_python_path = os.environ.get("PYTHONPATH", "")

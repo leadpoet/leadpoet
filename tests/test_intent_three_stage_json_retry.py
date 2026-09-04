@@ -40,18 +40,12 @@ def _completion(content: str) -> dict:
 
 
 def _install_call_fakes(monkeypatch):
-    traces = []
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-a-secret")
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(
-        "research_lab.openrouter_telemetry.include_reasoning_default",
+        "qualification.scoring.openrouter_options.include_reasoning_default",
         lambda: False,
     )
-    monkeypatch.setattr(
-        "research_lab.openrouter_telemetry.record_openrouter_trace",
-        lambda **kwargs: traces.append(kwargs) or {"trace_ref": "trace:test"},
-    )
-    return traces
 
 
 async def _no_sleep(_seconds):
@@ -59,7 +53,7 @@ async def _no_sleep(_seconds):
 
 
 def test_malformed_content_retries_then_returns_valid_json(monkeypatch):
-    traces = _install_call_fakes(monkeypatch)
+    _install_call_fakes(monkeypatch)
     client = _Client(
         [
             _Response(_completion('{"signal_evaluations":[{"signal_status":"supported"}')),
@@ -72,7 +66,10 @@ def test_malformed_content_retries_then_returns_valid_json(monkeypatch):
     assert client.calls == 2
     assert result["answer"] == {"signal_evaluations": []}
     assert "_error" not in result
-    assert [trace["outcome"] for trace in traces] == ["response", "response"]
+    assert result["provider_usage"] == {
+        "reasoning_requested": False,
+        "reasoning_request_dropped": False,
+    }
 
 
 def test_malformed_content_exhaustion_returns_structured_error(monkeypatch):
@@ -83,13 +80,19 @@ def test_malformed_content_exhaustion_returns_structured_error(monkeypatch):
 
     assert client.calls == 3
     assert result["_error"] == "invalid_json_content"
-    assert result["provider_usage"] == {"trace_ref": "trace:test"}
+    assert result["provider_usage"] == {
+        "reasoning_requested": False,
+        "reasoning_request_dropped": False,
+    }
 
 
-def test_malformed_response_envelope_retries_without_leaking_body(monkeypatch):
+def test_malformed_response_envelope_retries_without_leaking_body(
+    monkeypatch,
+    caplog,
+):
     import json
 
-    traces = _install_call_fakes(monkeypatch)
+    _install_call_fakes(monkeypatch)
     client = _Client(
         [
             _Response(json.JSONDecodeError("bad envelope", "private body", 0)),
@@ -101,8 +104,8 @@ def test_malformed_response_envelope_retries_without_leaking_body(monkeypatch):
 
     assert client.calls == 2
     assert result["answer"] == {"signal_evaluations": []}
-    assert traces[0]["outcome"] == "invalid_json_envelope"
-    assert "private body" not in str(traces[0]["response_doc"])
+    assert "private body" not in caplog.text
+    assert "private body" not in str(result)
 
 
 def test_verifier_fails_closed_without_raising_after_malformed_json(monkeypatch):

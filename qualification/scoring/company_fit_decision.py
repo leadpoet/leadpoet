@@ -1,12 +1,7 @@
-"""Three-state company-fit compatibility contract.
+"""Three-state company-fit decision contract.
 
-This temporary host-side adapter matches the model-owned
-``company-fit-decision:v1`` shape tracked by
-https://github.com/leadpoet/Sourcing_model/pull/171. It keeps the historical
-``(passed, reason)`` unpacking API so older callers cannot turn non-empty
-decision strings into accidental truthy passes. Remove this adapter after the
-signed ``leadpoet-lab`` artifact that contains that contract is pinned and the
-consumer imports the model-owned implementation directly.
+The stable ``(passed, reason)`` API prevents non-empty decision strings from
+becoming accidental truthy passes across qualification consumers.
 """
 
 from __future__ import annotations

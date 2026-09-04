@@ -746,14 +746,12 @@ SUBMISSION_CONSENT_FIELDS = (
     F("public_rerun", "bool"),
 )
 SUBMISSION_PRESIGN_BODY_FIELDS = (
-    F("source_sha256", "sha256"),
     F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
     F("consent", "object", fields=SUBMISSION_CONSENT_FIELDS),
 )
 SUBMISSION_FINALIZE_BODY_FIELDS = (
     F("submission_id", "str", minimum=1, maximum=64),
     F("source_ref", "str", minimum=1, maximum=512),
-    F("source_sha256", "sha256"),
     F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
 )
 

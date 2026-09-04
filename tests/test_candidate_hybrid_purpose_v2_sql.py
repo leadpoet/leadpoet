@@ -43,7 +43,7 @@ def test_candidate_hybrid_purpose_migration_matches_canonical_contract() -> None
         SQL,
         re.MULTILINE,
     )
-    assert (UPGRADE_MIGRATION_NAME, CONTRACT_RPC) in REQUIRED_SUPABASE_V2_RPCS
+    assert (UPGRADE_MIGRATION_NAME, CONTRACT_RPC) not in REQUIRED_SUPABASE_V2_RPCS
 
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(

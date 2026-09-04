@@ -22,7 +22,8 @@ def test_source_archive_is_deterministic_and_needs_no_dockerfile(tmp_path):
     assert first.read_bytes() == second.read_bytes()
     facts = source_bundle.validate_source_archive(first.read_bytes())
     assert one == two
-    assert facts["source_sha256"] == one["source_sha256"]
+    assert set(one) == {"source_size_bytes"}
+    assert set(facts) == {"source_size_bytes", "source_root"}
     assert facts["source_size_bytes"] == one["source_size_bytes"]
     assert facts["source_root"] == ""
 

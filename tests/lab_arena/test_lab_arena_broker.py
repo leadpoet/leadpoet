@@ -334,10 +334,12 @@ def test_errors_and_responses_carry_no_provider_account_or_credential_detail():
 def test_price_table_parsing_and_validation():
     response = {"data": [
         {"id": "openai/gpt-4o-mini", "pricing": {"prompt": "0.00000015", "completion": "0.0000006", "request": "0", "image": "0", "web_search": "0", "internal_reasoning": "0"}},
+        {"id": "openai/catalog/id/that-is-not-an-arena-model-id", "pricing": {"prompt": "0.1", "completion": "0.1"}},
         {"id": "other/model", "pricing": {"prompt": "1"}},
     ]}
     table = br.price_table_from_models_response(response, fetched_at="2026-09-02T00:00:00Z")
     assert table["models"]["openai/gpt-4o-mini"]["completion"] == "0.0000006"
+    assert "openai/catalog/id/that-is-not-an-arena-model-id" not in table["models"]
     assert "other/model" not in table["models"]
     with pytest.raises(contracts.ArenaContractError):
         br.price_table_from_models_response(response, ["missing/model"], fetched_at="2026-09-02T00:00:00Z")

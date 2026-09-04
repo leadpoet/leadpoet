@@ -168,8 +168,8 @@ run, candidate, ephemeral, and Name ownership tags.
 
 ### IAM change boundary and recovery
 
-A Sourcing_model, `leadpoet-lab`, or Research Lab source release is not by
-itself an IAM change. Ordinary commits and model versions that retain the
+A public baseline or Research Lab source release is not by itself an IAM
+change. Ordinary commits and bundle versions that retain the
 declared AWS actions, resources, account, region, roles, attachments,
 permissions boundary, prefixes, and tag conditions reuse the existing
 authority without policy mutation. A release needs a new IAM plan only when it
@@ -178,7 +178,7 @@ S3, Secrets Manager, or role layout. Exact artifact and commit admission stays
 fail closed without coupling policy changes to every source release.
 
 The August 2026 rebenchmark recovery exposed mechanism defects, not missing
-operator access and not a Sourcing_model commit failure. First, AWS can return
+operator access and not a baseline commit failure. First, AWS can return
 `MissingContextValues` at both aggregate and resource-specific levels,
 including keys from statements that do not apply to the simulated action. For
 managed parity-controller changes, the commissioner evaluates those keys

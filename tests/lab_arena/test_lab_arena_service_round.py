@@ -144,9 +144,9 @@ def deterministic_scorer(companies, icp, is_reference_model):
 class ModelSandbox:
     """A fake model: reads the ICP, calls Deepline's Exa search through the shim bridge, writes companies."""
 
-    def __init__(self, *, flavor_by_digest: Dict[str, str], broken_digests: set):
-        self.flavor_by_digest = flavor_by_digest
-        self.broken_digests = broken_digests  # shared with the harness, mutated by tests
+    def __init__(self, *, flavor_by_submission: Dict[str, str], broken_submissions: set):
+        self.flavor_by_submission = flavor_by_submission
+        self.broken_submissions = broken_submissions  # shared with the harness, mutated by tests
         self.lock = threading.Lock()
         self.runs = 0
         self.inflate_scores = False  # a cheating validator reports 99.0 for every company
@@ -196,10 +196,13 @@ class ModelSandbox:
         assert spec.entry_command == runtime.AGENT_ENTRY_COMMAND
         assert runtime_digest == SCORER_IMAGE_DIGEST
         assert spec.source_dir is not None
-        digest = "sha256:" + spec.source_dir.parent.name.split("sha256-")[1]
-        if digest in self.broken_digests:
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        if submission_id in self.broken_submissions:
             return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"crash")
-        flavor = self.flavor_by_digest[digest]
+        flavor = self.flavor_by_submission.get(submission_id)
+        if flavor is None:
+            flavor = (spec.source_dir / "flavor.txt").read_text(encoding="utf-8")
+            self.flavor_by_submission[submission_id] = flavor
         bucket = icp["employee_count"][0]
         companies = [
             {
@@ -270,7 +273,9 @@ class InProcessApi:
         try:
             return self.service.handle_source(run_id, lease_token)
         except Exception as exc:
-            InProcessApi.errors.append("%s: %s" % (type(exc).__name__, str(exc)[:1500]))
+            InProcessApi.errors.append(
+                "%s: %s" % (type(exc).__name__, str(exc)[:1500])
+            )
             raise
 
 
@@ -351,9 +356,9 @@ class Harness:
         self.banned: List[str] = []  # the live ban list the service reads
         self.api_factory = None  # runners talk to the service in-process unless a test supplies an API client
         self.baseline_source = flavor_source_archive("PublicBaseline")
-        baseline_facts = source_bundle.validate_source_archive(self.baseline_source)
-        self.flavors[baseline_facts["source_sha256"]] = "PublicBaseline"
-        self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
+        self.sandbox = ModelSandbox(
+            flavor_by_submission=self.flavors, broken_submissions=self.broken
+        )
         self.service = self.build_service()
 
     def objects_key(self) -> str:
@@ -403,13 +408,11 @@ class Harness:
         miner = keypair("svc-miner-" + (miner_label or flavor))
         payload = flavor_source_archive(flavor)
         facts = source_bundle.validate_source_archive(payload)
-        self.flavors[facts["source_sha256"]] = flavor
         presign = contracts.build_signed_request(
             scope=contracts.SCOPE_SUBMISSION_PRESIGN,
             round_id=round_id,
             hotkey=miner.ss58_address,
             body={
-                "source_sha256": facts["source_sha256"],
                 "source_size_bytes": facts["source_size_bytes"],
                 "consent": {"public_rerun": True},
             },
@@ -417,6 +420,7 @@ class Harness:
             sign_message=lambda message: miner.sign(message.encode()).hex(),
         )
         target = self.service.handle_submission_presign(presign)
+        self.flavors[target["submission_id"]] = flavor
         self.objects.put(target["source_ref"], payload)
         finalize = contracts.build_signed_request(
             scope=contracts.SCOPE_SUBMISSION_FINALIZE,
@@ -425,7 +429,6 @@ class Harness:
             body={
                 "submission_id": target["submission_id"],
                 "source_ref": target["source_ref"],
-                "source_sha256": facts["source_sha256"],
                 "source_size_bytes": facts["source_size_bytes"],
             },
             timestamp=int(self.clock().timestamp()),
@@ -534,7 +537,7 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     king = next(participant for participant in second["participants"] if participant["is_king"])
     assert king["miner_hotkey"] == harness.baseline_hotkey
     assert king["miner_hotkey"] != first["king_hotkey"]
-    harness.flavors.setdefault(king["source_sha256"], "PublicBaseline")
+    harness.flavors.setdefault(king["submission_id"], "PublicBaseline")
 
     _run_stage_one_to_scoring(harness, len(second["participants"]), runners=2)
     harness.advance_until("published", runners=2)
@@ -602,7 +605,9 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     harness.round_id = configuration["round_id"]
     for flavor in harness.challengers:
         harness.submit(flavor, harness.round_id)
-    broken = next(digest for digest, flavor in harness.flavors.items() if flavor == "Foxtrot")
+    broken = next(
+        submission_id for submission_id, flavor in harness.flavors.items() if flavor == "Foxtrot"
+    )
     harness.broken.add(broken)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert service.advance_round(harness.round_id)["status"] == "ok"
@@ -610,7 +615,7 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     assert service.advance_round(harness.round_id)["status"] == "ok"
     participants = service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
     assignments = contracts.STAGE_1_ICP_COUNT * len(participants)
     scheduled_now = harness.clock.now
@@ -636,13 +641,17 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     harness.round_id = configuration["round_id"]
     harness.submit("EchoTwo", harness.round_id, miner_label="Echo")
     broken_submission = harness.submit("FoxtrotTwo", harness.round_id)
-    broken = next(digest for digest, flavor in harness.flavors.items() if flavor == "FoxtrotTwo")
+    broken = next(
+        submission_id
+        for submission_id, flavor in harness.flavors.items()
+        if flavor == "FoxtrotTwo"
+    )
     harness.broken.add(broken)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert service.advance_round(harness.round_id)["status"] == "ok"
     participants = service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert service.advance_round(harness.round_id)["assignments"] == contracts.STAGE_1_ICP_COUNT * len(participants)
     harness.run_stage_with_runners(1)
@@ -694,7 +703,7 @@ def test_shadow_round_uses_the_same_two_stage_flow_without_rewards(connect, tmp_
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     _run_stage_one_to_scoring(harness, len(participants), runners=2)
     harness.advance_until("published", runners=2)
 
@@ -779,7 +788,7 @@ def _start_round(harness: Harness, *, day: int = 9, epoch: int = 30000) -> int:
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert service.advance_round(harness.round_id)["status"] == "ok"
     for participant in service.store.get_round(harness.round_id)["participants"]:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     return len(service.store.get_round(harness.round_id)["participants"])
 
 
@@ -796,7 +805,7 @@ def test_stage_one_judge_failure_excludes_only_that_challenger(connect, tmp_path
         for participant in harness.service.store.get_round(harness.round_id)[
             "participants"
         ]
-        if harness.flavors[participant["source_sha256"]] == "JudgeFailOne"
+        if harness.flavors[participant["submission_id"]] == "JudgeFailOne"
     )
     harness.sandbox.judge_failures.add(("JudgeFailOne", 0))
     _run_stage_one_to_scoring(harness, participants, runners=2)
@@ -839,7 +848,7 @@ def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
         for participant in harness.service.store.get_round(harness.round_id)[
             "participants"
         ]
-        if harness.flavors[participant["source_sha256"]] == "JudgeFailFinal"
+        if harness.flavors[participant["submission_id"]] == "JudgeFailFinal"
     )
     assert failed["submission_id"] in harness.service.store.get_round(
         harness.round_id
@@ -910,11 +919,11 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
     assert len(parts) == 3 and len(prior_winner_parts) == 1 and len(baseline_parts) == 1
     assert prior_winner_parts[0]["submission_id"] == fresh
     assert prior_winner_parts[0]["is_king"] is False
-    assert prior_winner_parts[0]["source_sha256"] == fresh_row["source_sha256"]
+    assert prior_winner_parts[0]["submission_id"] == fresh_row["submission_id"]
     assert baseline_parts[0]["miner_hotkey"] == harness.baseline_hotkey
     assert fresh_row["status"] == "frozen" and fresh_row["is_king"] is False
     for participant in parts:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     _run_stage_one_to_scoring(harness, 3, runners=1)
     harness.advance_until("published", runners=1)
     second = service.store.get_round(harness.round_id)
@@ -1013,13 +1022,11 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     miner = keypair("svc-miner-Http-A")
     payload = flavor_source_archive("Http-A")
     facts = source_bundle.validate_source_archive(payload)
-    harness.flavors[facts["source_sha256"]] = "Http-A"
     envelope = contracts.build_signed_request(
         scope=contracts.SCOPE_SUBMISSION_PRESIGN,
         round_id=harness.round_id,
         hotkey=miner.ss58_address,
         body={
-            "source_sha256": facts["source_sha256"],
             "source_size_bytes": facts["source_size_bytes"],
             "consent": {"public_rerun": True},
         },
@@ -1034,6 +1041,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert presigned.status_code == 200
     target = presigned.json()
     submission_id = target["submission_id"]
+    harness.flavors[submission_id] = "Http-A"
     status = original_get("http://localhost/arena/v1/submissions/%s" % submission_id)
     assert status.status_code == 200 and status.json()["status"] == "uploading"
     harness.objects.put(target["source_ref"], payload)
@@ -1044,7 +1052,6 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
         body={
             "submission_id": submission_id,
             "source_ref": target["source_ref"],
-            "source_sha256": facts["source_sha256"],
             "source_size_bytes": facts["source_size_bytes"],
         },
         timestamp=int(harness.clock().timestamp()),
@@ -1065,7 +1072,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
     _run_stage_one_to_scoring(harness, len(participants), runners=2)
     harness.advance_until("published", runners=2)
@@ -1113,7 +1120,7 @@ def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
     first_id = harness.round_id
     participants = service.store.get_round(first_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
     harness.clock.now = datetime.now(timezone.utc)
     second = service.create_round(
@@ -1137,7 +1144,6 @@ def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
         round_id="arena-2099-01-01",
         hotkey=unknown_miner.ss58_address,
         body={
-            "source_sha256": unknown_facts["source_sha256"],
             "source_size_bytes": unknown_facts["source_size_bytes"],
             "consent": {"public_rerun": True},
         },
@@ -1291,7 +1297,7 @@ def test_result_writes_retry_after_transient_object_store_failures(connect, tmp_
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
-        harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
     _run_stage_one_to_scoring(harness, len(participants), runners=1)
     harness.advance_until("published", runners=1)
@@ -1327,7 +1333,6 @@ def test_a_banned_miner_cannot_submit_to_the_frozen_round(connect, tmp_path):
         round_id=harness.round_id,
         hotkey=miner.ss58_address,
         body={
-            "source_sha256": facts["source_sha256"],
             "source_size_bytes": facts["source_size_bytes"],
             "consent": {"public_rerun": True},
         },

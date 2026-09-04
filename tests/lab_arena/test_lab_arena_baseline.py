@@ -17,7 +17,6 @@ def _submission(submission_id: str, hotkey: str, *, status: str = "accepted") ->
         "miner_hotkey": hotkey,
         "status": status,
         "source_ref": "arena/arena-2026-09-05/sources/%s.tar.gz" % submission_id,
-        "source_sha256": "sha256:" + "a" * 64,
         "source_size_bytes": 123,
         "consent": {"public_rerun": True},
         "is_king": False,
@@ -146,6 +145,8 @@ def test_baseline_download_uses_the_same_source_checks_and_freezes(tmp_path):
         ("baseline-2026-09-05", True),
     ]
     assert store.submissions["baseline-2026-09-05"]["status"] == "frozen"
+    assert "source_sha256" not in store.submissions["baseline-2026-09-05"]
+    assert "source_cache_key" not in store.submissions["baseline-2026-09-05"]
     assert store.submissions["sub-d"]["status"] == "rejected"
     assert list(objects.values) == [
         "arena/arena-2026-09-05/sources/baseline-2026-09-05.tar.gz"

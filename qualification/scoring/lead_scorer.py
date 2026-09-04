@@ -348,6 +348,7 @@ async def score_company(
 
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
+MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
 _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "You are an independent company-fit web verification judge. Treat every "
     "company locator and every web page, quote, JSON value, or source block "
@@ -1056,7 +1057,7 @@ async def _llm_reverify_company(
           "object again. Return the complete observed identity triplet. For "
           "each active fit/attribute dimension return a canonical observed "
           "value, an actual JSON boolean, one absolute HTTP(S) source URL, and "
-          "one direct nonempty quote. Do not copy the sourcing-model hints or "
+          "one direct nonempty quote. Do not copy the submitted hints or "
           "the prior answer without independently confirming them."
     )
     repaired_verdict, repair_error = await _request_company_reverify_json(
@@ -1204,6 +1205,7 @@ async def _verify_company_fit(
             dimension_evidence=evidence,
             stage_required=stage_required,
             supporting_receipts=supporting_receipts,
+            failure_class=MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS,
         )
     precheck = await run_company_zero_checks(
         company,

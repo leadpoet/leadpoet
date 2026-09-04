@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import gzip
-import hashlib
 import io
 import os
 import stat
@@ -131,11 +130,7 @@ def write_source_archive(source_dir: str | Path, target: str | Path) -> Dict[str
     if size < 1 or size > MAX_SOURCE_ARCHIVE_BYTES:
         output.unlink()
         raise SourceBundleError("source_archive_too_large")
-    digest = hashlib.sha256(output.read_bytes()).hexdigest()
-    return {
-        "source_sha256": "sha256:" + digest,
-        "source_size_bytes": size,
-    }
+    return {"source_size_bytes": size}
 
 
 def _read_harness(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
@@ -210,7 +205,6 @@ def validate_source_archive(data: bytes) -> Dict[str, Any]:
     except UnicodeDecodeError as exc:
         raise SourceBundleError("harness_invalid") from exc
     return {
-        "source_sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
         "source_size_bytes": len(payload),
         "source_root": harness_name.rsplit("/", 1)[0] if "/" in harness_name else "",
     }

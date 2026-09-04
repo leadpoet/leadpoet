@@ -953,6 +953,21 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
+    assert "leadpoet.production_parity_arena_rebenchmark_evidence.v1" in source
+    assert (
+        "https://github.com/leadpoet/pydantic-harness/"
+        "archive/refs/heads/main.tar.gz"
+    ) in source
+    assert 'arena_counts.get("accepted_execute_runs")' in source
+    assert 'arena_counts.get("accepted_score_runs")' in source
+    assert "configured_icps != 20" in source
+    assert "per_icp_evidence_is_complete" in source
+    assert 'item.get("execute_accepted") is True' in source
+    assert 'item.get("score_accepted") is True' in source
+    assert '"valid_company_with_https_evidence_count"' in source
+    assert '"successful_openrouter_execute_call_count"' in source
+    assert '"successful_openrouter_score_settlement_count"' in source
+    assert 'arena_recovery.get("service_restarted") is not True' in source
 
 
 def test_full_workflow_fetches_exact_bundle_head_then_binds_canonical_main():
@@ -1138,12 +1153,20 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "_run_miner_intake_path(",
         "/research-lab/source-adapters",
         '"chain_registration_boundary": "strict-ephemeral-hotkey"',
+        "_run_arena_rebenchmark_path(",
+        '"baseline_source_url": ARENA_BASELINE_SOURCE_URL',
+        '"sandbox": "gvisor-runsc"',
+        '"transport": "live-httpx"',
+        '"publication_visible": True',
         '"production_database_mutated": False',
         '"production_chain_mutated": False',
     )
     assert all(item in source for item in required)
     forbidden = ("chain.submit_extrinsic(", "subtensor.set_weights(", "testnet")
     assert all(item not in source for item in forbidden)
+    assert source.index("arena_rebenchmark = _run_arena_rebenchmark_path(") < source.index(
+        'failure_stage = "weight-readiness"'
+    )
 
 
 def test_full_miner_intake_keeps_public_source_credentials_forbidden():

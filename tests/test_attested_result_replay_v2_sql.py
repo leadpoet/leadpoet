@@ -56,8 +56,8 @@ def test_result_replay_table_is_limited_to_public_weight_authority_results():
         )
 
 
-def test_active_model_result_replay_is_exactly_scoped_and_migration_gated():
-    assert replayable_execution_result_v2(
+def test_retired_active_model_result_replay_is_not_runtime_authority():
+    assert not replayable_execution_result_v2(
         operation="attest_active_private_model",
         purpose="research_lab.active_private_model.v2",
     )

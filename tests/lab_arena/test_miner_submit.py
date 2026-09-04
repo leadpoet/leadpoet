@@ -128,7 +128,11 @@ def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path)
     assert url == "https://uploads.example/source" and timeout == 300
     assert int(headers["content-length"]) == len(archive)
     facts = source_bundle.validate_source_archive(archive)
-    assert facts["source_sha256"] == presign["body"]["source_sha256"]
+    assert facts["source_size_bytes"] == len(archive)
+    assert presign["body"] == {
+        "source_size_bytes": len(archive),
+        "consent": {"public_rerun": True},
+    }
     finalize = _valid_signature(
         session.posts[1][1], contracts.SCOPE_SUBMISSION_FINALIZE
     )
@@ -136,7 +140,6 @@ def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path)
         "submission_id": result["submission_id"],
         "source_ref": "arena/arena-2026-09-04/sources/%s.tar.gz"
         % result["submission_id"],
-        "source_sha256": facts["source_sha256"],
         "source_size_bytes": len(archive),
     }
 

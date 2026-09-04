@@ -605,7 +605,7 @@ def canonicalize_generated_icp(
     employee_bucket_radius: int | None = None,
     all_employee_buckets: bool | None = None,
 ) -> Dict[str, Any]:
-    """Apply the private sourcing-model ICP contract before storage."""
+    """Apply the shared competition ICP contract before storage."""
 
     normalized = dict(icp)
     raw_employee_count = normalized.get("employee_count")

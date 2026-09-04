@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import gzip
-import hashlib
 import io
 import json
 import os
@@ -62,7 +61,6 @@ def _source_archive_with_requirements(requirement: str) -> bytes:
 
 
 SOURCE_BYTES = _source_archive()
-SOURCE_SHA256 = "sha256:" + hashlib.sha256(SOURCE_BYTES).hexdigest()
 SOURCE_REF = "arena/%s/sources/s1.tar.gz" % ROUND
 
 
@@ -135,7 +133,6 @@ def lease(run_id="r1", position=0):
         "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
         "image_reference": IMAGE_REFERENCE,
         "source_ref": SOURCE_REF,
-        "source_sha256": SOURCE_SHA256,
         "source_size_bytes": len(SOURCE_BYTES),
         "round_id": ROUND, "evaluation_date": "2026-09-02",
     }
@@ -275,7 +272,7 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
 
 def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tmp_path):
     payload = _source_archive_with_requirements("pydantic-ai==1.0.0\n")
-    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    submission_id = "sub-first"
     fetches = []
     installs = []
 
@@ -288,14 +285,20 @@ def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tm
         (target / "installed.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     cache = rn.SourceCache(tmp_path / "sources", fetch, dependency_installer=install)
-    arguments = ("run-1", "a" * 64, SOURCE_REF, digest, len(payload))
+    arguments = ("run-1", "a" * 64, SOURCE_REF, submission_id, len(payload))
     with cache.acquire(*arguments) as (source, dependencies):
         assert (source / "harness.py").is_file()
         assert (dependencies / "installed.py").is_file()
-    with cache.acquire("run-2", "b" * 64, SOURCE_REF, digest, len(payload)):
+    cache = rn.SourceCache(tmp_path / "sources", fetch, dependency_installer=install)
+    with cache.acquire("run-2", "b" * 64, SOURCE_REF, submission_id, len(payload)):
         pass
-    assert fetches == [("run-1", "a" * 64)]
-    assert installs == ["pydantic-ai==1.0.0\n"]
+    second_submission_id = "sub-second"
+    with cache.acquire("run-3", "c" * 64, SOURCE_REF, second_submission_id, len(payload)):
+        pass
+    assert fetches == [("run-1", "a" * 64), ("run-3", "c" * 64)]
+    assert installs == ["pydantic-ai==1.0.0\n"] * 2
+    assert (tmp_path / "sources" / ("submission-" + submission_id)).is_dir()
+    assert (tmp_path / "sources" / ("submission-" + second_submission_id)).is_dir()
 
 
 def test_source_cache_prepares_different_bundles_in_parallel(tmp_path):
@@ -318,9 +321,8 @@ def test_source_cache_prepares_different_bundles_in_parallel(tmp_path):
 
     def prepare(run_id):
         payload = payloads[run_id]
-        digest = "sha256:" + hashlib.sha256(payload).hexdigest()
         with cache.acquire(
-            run_id, "a" * 64, SOURCE_REF, digest, len(payload)
+            run_id, "a" * 64, SOURCE_REF, "submission-" + run_id, len(payload)
         ) as paths:
             assert (paths[0] / "harness.py").is_file()
 
@@ -367,9 +369,8 @@ def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
     tmp_path,
 ):
     payload = _source_archive_with_requirements("missing-package==1.0.0\n")
-    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
     run_lease = lease()
-    run_lease.update(source_sha256=digest, source_size_bytes=len(payload))
+    run_lease.update(source_size_bytes=len(payload))
     api = FakeApi([run_lease])
     api.source_payload = payload
 
@@ -514,9 +515,9 @@ def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
-def test_source_integrity_and_runtime_image_mismatches_are_refused(tmp_path):
+def test_invalid_submission_id_and_runtime_image_mismatches_are_refused(tmp_path):
     wrong_source = lease("r1")
-    wrong_source["source_sha256"] = "sha256:" + "b" * 64
+    wrong_source["submission_id"] = "../unsafe"
     mismatched = lease("r2")
     mismatched["image_reference"] = ARENA_REPOSITORY + "@sha256:" + "b" * 64
     wrong_judge = scoring_lease("r3")

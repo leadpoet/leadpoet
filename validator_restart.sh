@@ -1422,7 +1422,7 @@ run_validator_active_release_phase() {
     AWS_REGION="$AWS_REGION" \
     AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
     "$VALIDATOR_PYTHON_BIN" \
-    -m gateway.tee.prepare_active_release_lineage_v2 \
+    "$VALIDATOR_ACTIVE_RELEASE_PREPARER" \
     "${topology_authority_args[@]}" "$@"
 }
 

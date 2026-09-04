@@ -13,7 +13,6 @@ credential, and never chooses a miner or ICP.
 from __future__ import annotations
 
 import base64
-import hashlib
 import http.server
 import json
 import os
@@ -52,7 +51,6 @@ MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a ru
 HTTP_FIRST_BYTES = b"GPHDO"
 HTTP_ERROR_STATUS = {"budget_exhausted": 402, "worker_unavailable": 503, "request_too_large": 413}
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
-SOURCE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REQUIREMENT_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
     r"(?:\[[A-Za-z0-9_,.-]{1,255}\])?"
@@ -606,7 +604,7 @@ def _lock_down_dependency_tree(path: Path) -> None:
 
 
 class SourceCache:
-    """A bounded LRU keyed only by the archive transport checksum."""
+    """A bounded LRU keyed by the existing server-assigned submission id."""
 
     def __init__(
         self,
@@ -638,22 +636,21 @@ class SourceCache:
 
     def _load_existing_locked(self) -> None:
         existing = []
-        for target in sorted(self._root.glob("sha256-*"), key=lambda item: item.name):
+        for target in sorted(self._root.glob("submission-*"), key=lambda item: item.name):
             marker = target / ".ready"
             archive = target / "source.tar.gz"
             source = target / "source"
             dependencies = target / "deps"
             try:
-                digest = marker.read_text(encoding="utf-8").strip()
                 marker_time = marker.stat().st_mtime_ns
                 archive_size = archive.stat().st_size
-            except (OSError, UnicodeError):
+            except OSError:
                 _remove_cache_path(target)
                 continue
-            expected_name = "sha256-" + digest.removeprefix("sha256:")
+            submission_id = target.name.removeprefix("submission-")
             if (
-                not SOURCE_DIGEST_RE.fullmatch(digest)
-                or target.name != expected_name
+                not contracts.SUBMISSION_ID_RE.fullmatch(submission_id)
+                or target.name != "submission-" + submission_id
                 or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
                 or source.is_symlink()
                 or not source.is_dir()
@@ -663,19 +660,19 @@ class SourceCache:
                 _remove_cache_path(target)
                 continue
             try:
-                actual = "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
-            except OSError:
+                facts = source_bundle.validate_source_archive(archive.read_bytes())
+            except (OSError, source_bundle.SourceBundleError):
                 _remove_cache_path(target)
                 continue
-            if actual != digest:
+            if facts["source_size_bytes"] != archive_size:
                 _remove_cache_path(target)
                 continue
             existing.append(
-                (marker_time, target.name, digest, source, dependencies, _cache_path_bytes(target))
+                (marker_time, target.name, submission_id, source, dependencies, _cache_path_bytes(target))
             )
-        for _time, _name, digest, source, dependencies, size in sorted(existing):
-            self._ready[digest] = (source, dependencies)
-            self._sizes[digest] = size
+        for _time, _name, submission_id, source, dependencies, size in sorted(existing):
+            self._ready[submission_id] = (source, dependencies)
+            self._sizes[submission_id] = size
         self._evict_locked()
 
     def _within_limits_locked(self) -> bool:
@@ -685,7 +682,7 @@ class SourceCache:
         protected_set = set(protected)
         while not self._within_limits_locked():
             victim = next(
-                (digest for digest in self._ready if digest not in protected_set and self._in_use.get(digest, 0) == 0),
+                (submission_id for submission_id in self._ready if submission_id not in protected_set and self._in_use.get(submission_id, 0) == 0),
                 None,
             )
             if victim is None:
@@ -697,18 +694,18 @@ class SourceCache:
 
     def _cached_source_locked(
         self,
-        source_sha256: str,
+        submission_id: str,
         source_size_bytes: int,
     ) -> Optional[Tuple[Path, Path]]:
-        cached = self._ready.get(source_sha256)
+        cached = self._ready.get(submission_id)
         if cached is None:
             return None
         archive = cached[0].parent / "source.tar.gz"
         if archive.is_file() and archive.stat().st_size == source_size_bytes:
-            self._ready.move_to_end(source_sha256)
+            self._ready.move_to_end(submission_id)
             return cached
-        self._ready.pop(source_sha256, None)
-        self._sizes.pop(source_sha256, None)
+        self._ready.pop(submission_id, None)
+        self._sizes.pop(submission_id, None)
         _remove_cache_path(cached[0].parent)
         return None
 
@@ -717,10 +714,10 @@ class SourceCache:
         run_id: str,
         lease_token: str,
         source_ref: str,
-        source_sha256: str,
+        submission_id: str,
         source_size_bytes: int,
     ) -> Tuple[Tuple[Path, Path], int]:
-        target = self._root / ("sha256-" + source_sha256.removeprefix("sha256:"))
+        target = self._root / ("submission-" + submission_id)
         if target.exists() or target.is_symlink():
             _remove_cache_path(target)
         target.mkdir(parents=True, mode=0o700)
@@ -731,12 +728,9 @@ class SourceCache:
             payload = bytes(self._fetcher(run_id, lease_token))
             if len(payload) != source_size_bytes:
                 raise RunnerError("run source size does not match its lease")
-            actual_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
-            if actual_sha256 != source_sha256:
-                raise RunnerError("run source checksum does not match its lease")
             facts = source_bundle.validate_source_archive(payload)
-            if facts["source_sha256"] != source_sha256:
-                raise RunnerError("run source checksum does not match its lease")
+            if facts["source_size_bytes"] != source_size_bytes:
+                raise RunnerError("run source size does not match its lease")
             archive_path.write_bytes(payload)
             os.chmod(archive_path, 0o400)
             source_path.mkdir(mode=0o700)
@@ -746,7 +740,7 @@ class SourceCache:
             if requirements.is_file():
                 self._dependency_installer(requirements, dependency_path)
             _lock_down_dependency_tree(dependency_path)
-            (target / ".ready").write_text(source_sha256, encoding="utf-8")
+            (target / ".ready").touch(mode=0o400)
             size = _cache_path_bytes(target)
             if size > self._max_bytes:
                 raise RunnerError("source exceeds runner cache capacity")
@@ -764,13 +758,13 @@ class SourceCache:
         run_id: str,
         lease_token: str,
         source_ref: str,
-        source_sha256: str,
+        submission_id: str,
         source_size_bytes: int,
     ) -> Iterator[Tuple[Path, Path]]:
         if not isinstance(source_ref, str) or not source_ref or len(source_ref) > 1024:
             raise RunnerError("source ref is invalid")
-        if not isinstance(source_sha256, str) or not SOURCE_DIGEST_RE.fullmatch(source_sha256):
-            raise RunnerError("source checksum is invalid")
+        if not isinstance(submission_id, str) or not contracts.SUBMISSION_ID_RE.fullmatch(submission_id):
+            raise RunnerError("submission id is invalid")
         if (
             isinstance(source_size_bytes, bool)
             or not isinstance(source_size_bytes, int)
@@ -779,46 +773,46 @@ class SourceCache:
             raise RunnerError("source size is invalid")
         must_prepare = False
         with self._condition:
-            while source_sha256 in self._building:
+            while submission_id in self._building:
                 self._condition.wait()
-            paths = self._cached_source_locked(source_sha256, source_size_bytes)
+            paths = self._cached_source_locked(submission_id, source_size_bytes)
             if paths is None:
-                self._building.add(source_sha256)
+                self._building.add(submission_id)
                 must_prepare = True
             else:
-                self._in_use[source_sha256] = self._in_use.get(source_sha256, 0) + 1
+                self._in_use[submission_id] = self._in_use.get(submission_id, 0) + 1
         if must_prepare:
             try:
                 paths, size = self._prepare_source(
                     run_id,
                     lease_token,
                     source_ref,
-                    source_sha256,
+                    submission_id,
                     source_size_bytes,
                 )
                 with self._condition:
-                    self._ready[source_sha256] = paths
-                    self._sizes[source_sha256] = size
-                    self._evict_locked(protected=(source_sha256,))
+                    self._ready[submission_id] = paths
+                    self._sizes[submission_id] = size
+                    self._evict_locked(protected=(submission_id,))
                     if not self._within_limits_locked():
-                        self._ready.pop(source_sha256, None)
-                        self._sizes.pop(source_sha256, None)
+                        self._ready.pop(submission_id, None)
+                        self._sizes.pop(submission_id, None)
                         _remove_cache_path(paths[0].parent)
                         raise RunnerError("source cache capacity is in use")
-                    self._in_use[source_sha256] = 1
+                    self._in_use[submission_id] = 1
             finally:
                 with self._condition:
-                    self._building.discard(source_sha256)
+                    self._building.discard(submission_id)
                     self._condition.notify_all()
         try:
             yield paths
         finally:
             with self._lock:
-                remaining = self._in_use.get(source_sha256, 0) - 1
+                remaining = self._in_use.get(submission_id, 0) - 1
                 if remaining > 0:
-                    self._in_use[source_sha256] = remaining
+                    self._in_use[submission_id] = remaining
                 else:
-                    self._in_use.pop(source_sha256, None)
+                    self._in_use.pop(submission_id, None)
                 self._evict_locked()
 
 
@@ -1195,7 +1189,7 @@ class AssignmentExecutor:
                             str(lease["run_id"]),
                             lease_token,
                             lease.get("source_ref"),
-                            lease.get("source_sha256"),
+                            lease.get("submission_id"),
                             lease.get("source_size_bytes"),
                         )
                     )
@@ -1375,7 +1369,13 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
-            self.completed.append({"run_id": lease.get("run_id"), "error": type(exc).__name__})
+            self.completed.append(
+                {
+                    "run_id": lease.get("run_id"),
+                    "error": type(exc).__name__,
+                    "detail": str(exc)[:200],
+                }
+            )
         finally:
             self._slots.release()
 

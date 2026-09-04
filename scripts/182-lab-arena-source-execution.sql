@@ -21,7 +21,6 @@ BEGIN
       AND submissions.status IN ('uploading', 'accepted', 'frozen')
       AND (
         submissions.source_ref IS NULL
-        OR submissions.source_sha256 IS NULL
         OR submissions.source_size_bytes IS NULL
       )
     ORDER BY rounds.round_id
@@ -46,7 +45,6 @@ WHERE rounds.round_id = submissions.round_id
   AND submissions.status IN ('uploading', 'accepted', 'frozen')
   AND (
     submissions.source_ref IS NULL
-    OR submissions.source_sha256 IS NULL
     OR submissions.source_size_bytes IS NULL
   );
 ALTER TABLE public.lab_arena_submissions
@@ -155,7 +153,6 @@ BEGIN
           AND source_submission.round_id = runs.round_id
           AND source_submission.status = 'frozen'
           AND source_submission.source_ref IS NOT NULL
-          AND source_submission.source_sha256 IS NOT NULL
           AND source_submission.source_size_bytes IS NOT NULL
       )
     )
@@ -177,7 +174,6 @@ BEGIN
   WHERE submission_id = v_run.submission_id;
   IF v_run.kind = 'execute'
      AND (v_submission.source_ref IS NULL
-          OR v_submission.source_sha256 IS NULL
           OR v_submission.source_size_bytes IS NULL) THEN
     RAISE EXCEPTION 'lab_arena_source_missing' USING ERRCODE = '23502';
   END IF;
@@ -190,7 +186,6 @@ BEGIN
     'submission_id', v_run.submission_id,
     'miner_hotkey', v_run.miner_hotkey,
     'source_ref', CASE WHEN v_run.kind = 'execute' THEN v_submission.source_ref END,
-    'source_sha256', CASE WHEN v_run.kind = 'execute' THEN v_submission.source_sha256 END,
     'source_size_bytes', CASE WHEN v_run.kind = 'execute' THEN v_submission.source_size_bytes END,
     'stage', v_run.stage,
     'icp_position', v_run.icp_position,

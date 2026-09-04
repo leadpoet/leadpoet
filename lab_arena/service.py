@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import secrets
@@ -631,13 +630,11 @@ class ArenaService:
         ):
             raise ServiceError("baseline_hotkey_reserved", 403)
         body = contracts.validate_submission_presign_body(validated["body"])
-        # This random id is the submission identity. The source SHA is only a
-        # byte-integrity check and never identifies or ranks the agent.
+        # The submission id is the only server-assigned source identity.
         submission_id = "sub-%s" % secrets.token_hex(16)
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         document = {
             "source_ref": source_ref,
-            "source_sha256": body["source_sha256"],
             "source_size_bytes": body["source_size_bytes"],
             "consent": dict(body["consent"]),
         }
@@ -687,9 +684,6 @@ class ArenaService:
             raise ServiceError("source_upload_unavailable", 409) from exc
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
-        actual_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
-        if actual_sha256 != row.get("source_sha256"):
-            raise ServiceError("submission_rejected:source_sha256_mismatch", 400)
         try:
             source_bundle.validate_source_archive(payload)
         except source_bundle.SourceBundleError as exc:
@@ -714,7 +708,7 @@ class ArenaService:
             or row.get("miner_hotkey") != validated["hotkey"]
         ):
             raise ServiceError("submission_missing", 404)
-        for field in ("source_ref", "source_sha256", "source_size_bytes"):
+        for field in ("source_ref", "source_size_bytes"):
             if body[field] != row.get(field):
                 raise ServiceError("submission_transport_mismatch", 409)
         if row.get("status") == "accepted":
@@ -770,7 +764,6 @@ class ArenaService:
             "submission_id": row["submission_id"],
             "miner_hotkey": row["miner_hotkey"],
             "source_ref": row["source_ref"],
-            "source_sha256": row["source_sha256"],
             "source_size_bytes": int(row["source_size_bytes"]),
             "is_king": bool(is_king),
         }
@@ -829,7 +822,6 @@ class ArenaService:
                 hotkey,
                 {
                     "source_ref": source_ref,
-                    "source_sha256": facts["source_sha256"],
                     "source_size_bytes": facts["source_size_bytes"],
                     "consent": {"public_rerun": True},
                     "is_king": True,
@@ -1462,13 +1454,12 @@ class ArenaService:
             raise ServiceError("participant_missing", 500)
         if any(
             participant.get(field) in (None, "")
-            for field in ("source_ref", "source_sha256", "source_size_bytes")
+            for field in ("source_ref", "source_size_bytes")
         ):
             raise ServiceError("participant_source_missing", 500)
         lease.update(
             {
                 "source_ref": participant["source_ref"],
-                "source_sha256": participant["source_sha256"],
                 "source_size_bytes": int(participant["source_size_bytes"]),
             }
         )
@@ -1497,11 +1488,19 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         raw_expiry = run.get("lease_expires_at")
         try:
-            expiry = (
-                raw_expiry
-                if isinstance(raw_expiry, datetime)
-                else datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
-            )
+            if isinstance(raw_expiry, datetime):
+                expiry = raw_expiry
+            else:
+                encoded_expiry = str(raw_expiry).replace("Z", "+00:00")
+                try:
+                    expiry = datetime.fromisoformat(encoded_expiry)
+                except ValueError:
+                    # Python 3.9 accepts only three or six fractional digits
+                    # here, but PostgreSQL can serialize any width from one
+                    # through six. strptime accepts the full PostgreSQL range.
+                    expiry = datetime.strptime(
+                        encoded_expiry, "%Y-%m-%dT%H:%M:%S.%f%z"
+                    )
             if expiry.tzinfo is None:
                 expiry = expiry.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
@@ -1513,7 +1512,6 @@ class ArenaService:
             raise ServiceError("run_source_unavailable", 409)
         source_ref = str(submission.get("source_ref") or "")
         expected_size = int(submission.get("source_size_bytes") or 0)
-        expected_sha256 = str(submission.get("source_sha256") or "")
         try:
             payload = self._objects.get_bounded(
                 source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
@@ -1521,8 +1519,6 @@ class ArenaService:
         except Exception as exc:
             raise ServiceError("run_source_unavailable", 503) from exc
         if len(payload) != expected_size:
-            raise ServiceError("run_source_integrity_failed", 500)
-        if "sha256:" + hashlib.sha256(payload).hexdigest() != expected_sha256:
             raise ServiceError("run_source_integrity_failed", 500)
         return payload
 

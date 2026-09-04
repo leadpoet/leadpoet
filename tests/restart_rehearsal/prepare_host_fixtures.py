@@ -248,11 +248,19 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
     dockerfile_hash = sha256_bytes(
         (gateway_root / "tee/Dockerfile.enclave").read_bytes()
     )
+    topology = json.loads(
+        (gateway_root / "tee/topology.json").read_text(encoding="utf-8")
+    )
+    topology_roles = topology.get("roles")
+    if not isinstance(topology_roles, dict) or not topology_roles:
+        raise RuntimeError("release fixture topology roles are invalid")
+    identity_names = {
+        path.stem for path in generated_identities.glob("*.json")
+    }
+    if identity_names != set(topology_roles):
+        raise RuntimeError("release fixture role identities are incomplete")
     roles = {}
-    for role in (
-        "gateway_coordinator",
-        "gateway_scoring",
-    ):
+    for role in sorted(topology_roles):
         identity = json.loads(
             (
                 gateway_root
@@ -260,16 +268,26 @@ def _release_build_input(*, commit: str, destination: Path) -> dict:
                 / f"{role}.json"
             ).read_text(encoding="utf-8")
         )
+        historical_role = role == "gateway_autoresearch"
         roles[role] = {
             "build_identity_hash": identity["identity_hash"],
             "commit_sha": commit,
             "dependency_lock_hash": identity["dependency_lock_hash"],
             "dockerfile_hash": dockerfile_hash,
-            "eif_hash": eif_hash(commit, role),
+            "eif_hash": (
+                _hash(f"historical-eif:{commit}:{role}")
+                if historical_role
+                else eif_hash(commit, role)
+            ),
             "execution_manifest_hash": identity["execution_manifest_hash"],
-            "normalized_image_hash": normalized_image_id(commit, role),
+            "normalized_image_hash": (
+                _hash(f"historical-image:{commit}:{role}")
+                if historical_role
+                else normalized_image_id(commit, role)
+            ),
             "pcr0": pcr0(commit),
             "source_manifest_hash": source_hash,
+            "service_role": identity["service_role"],
             "topology_hash": identity["topology_hash"],
         }
     value = {

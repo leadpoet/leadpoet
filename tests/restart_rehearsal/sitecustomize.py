@@ -3357,12 +3357,23 @@ def _release_channel(commit: str) -> dict[str, Any]:
         pcr0 as artifact_pcr0,
     )
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from gateway.tee.release_channel_v2 import build_release_channel_v2
+    from gateway.tee.release_channel_v2 import (
+        build_historical_release_channel_v2,
+        build_release_channel_v2,
+    )
     from gateway.tee.release_manifest_v2 import (
         BUILD_EVIDENCE_SCHEMA_VERSION,
+        BUILDER_DOMAINS,
+        DETERMINISTIC_FIELDS,
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        PROTECTED_BASELINE_COMMIT,
+        RELEASE_MANIFEST_SCHEMA_VERSION,
         build_release_manifest,
+        historical_three_role_specs,
+        validate_historical_release_manifest,
     )
     from gateway.tee.topology import ROLE_SPECS
+    from leadpoet_canonical.attested_v2 import sha256_json
     from validator_tee.host.release_v2 import (
         build_validator_build_evidence,
         build_validator_release,
@@ -3381,8 +3392,19 @@ def _release_channel(commit: str) -> dict[str, Any]:
     expected_roles = release_build_input.get("gateway_roles")
     if not isinstance(expected_roles, dict):
         raise ValueError("local release build input roles are unavailable")
+    historical_topology_hash = None
+    if set(expected_roles) == set(ROLE_SPECS):
+        role_specs = ROLE_SPECS
+    else:
+        historical_specs = historical_three_role_specs(
+            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        )
+        if set(expected_roles) != set(historical_specs):
+            raise ValueError("local release build input roles are unsupported")
+        role_specs = historical_specs
+        historical_topology_hash = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
     gateway_rows = []
-    for role, spec in sorted(ROLE_SPECS.items()):
+    for role, spec in sorted(role_specs.items()):
         expected = expected_roles.get(role)
         if not isinstance(expected, dict):
             raise ValueError(
@@ -3412,7 +3434,10 @@ def _release_channel(commit: str) -> dict[str, Any]:
                         "builder_id": f"local-{domain}-parent",
                         "build_ordinal": ordinal,
                         "physical_role": role,
-                        "service_role": spec["service_role"],
+                        "service_role": str(
+                            expected.get("service_role")
+                            or spec["service_role"]
+                        ),
                         **deterministic,
                     }
                 )
@@ -3420,12 +3445,55 @@ def _release_channel(commit: str) -> dict[str, Any]:
         hashlib.sha256(b"leadpoet-local-acceptance-signer").digest()
     )
     acceptance_public_key = acceptance_key.public_key().public_bytes_raw()
-    gateway_manifest = build_release_manifest(
-        gateway_rows,
-        acceptance_signer_pubkey_hash=(
-            "sha256:" + hashlib.sha256(acceptance_public_key).hexdigest()
-        ),
+    acceptance_signer_pubkey_hash = (
+        "sha256:" + hashlib.sha256(acceptance_public_key).hexdigest()
     )
+    if historical_topology_hash is None:
+        gateway_manifest = build_release_manifest(
+            gateway_rows,
+            acceptance_signer_pubkey_hash=acceptance_signer_pubkey_hash,
+        )
+    else:
+        evidence_rows = [dict(row) for row in gateway_rows]
+        role_documents = {}
+        for role in sorted(role_specs):
+            role_rows = [
+                row for row in evidence_rows if row["physical_role"] == role
+            ]
+            role_documents[role] = {
+                "physical_role": role,
+                "service_role": role_rows[0]["service_role"],
+                **{
+                    field: role_rows[0][field]
+                    for field in DETERMINISTIC_FIELDS
+                },
+                "eif_hashes": sorted({row["eif_hash"] for row in role_rows}),
+                "verified_build_count": len(role_rows),
+                "builder_domains": sorted(BUILDER_DOMAINS),
+            }
+        sorted_rows = sorted(
+            evidence_rows,
+            key=lambda row: (
+                row["physical_role"],
+                row["builder_domain"],
+                row["builder_id"],
+                row["build_ordinal"],
+            ),
+        )
+        body = {
+            "schema_version": RELEASE_MANIFEST_SCHEMA_VERSION,
+            "commit_sha": commit,
+            "topology_hash": historical_topology_hash,
+            "protected_baseline_commit": PROTECTED_BASELINE_COMMIT,
+            "acceptance_signer_pubkey_hash": acceptance_signer_pubkey_hash,
+            "roles": role_documents,
+            "build_evidence_root": sha256_json(sorted_rows),
+            "verified_build_count": len(sorted_rows),
+        }
+        gateway_manifest = validate_historical_release_manifest(
+            {**body, "release_hash": sha256_json(body)},
+            expected_topology_hash=historical_topology_hash,
+        )
     validator_release = build_validator_release(
         commit_sha=commit,
         pcr0=pcr0,
@@ -3450,11 +3518,16 @@ def _release_channel(commit: str) -> dict[str, Any]:
         for domain in ("gateway", "validator")
         for ordinal in (1, 2, 3)
     ]
+    validator_manifest = build_validator_release_manifest(validator_evidence)
+    if historical_topology_hash is not None:
+        return build_historical_release_channel_v2(
+            gateway_release_manifest=gateway_manifest,
+            validator_release_manifest=validator_manifest,
+            expected_topology_hash=historical_topology_hash,
+        )
     return build_release_channel_v2(
         gateway_release_manifest=gateway_manifest,
-        validator_release_manifest=build_validator_release_manifest(
-            validator_evidence
-        ),
+        validator_release_manifest=validator_manifest,
     )
 
 

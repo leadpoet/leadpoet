@@ -21,8 +21,6 @@ from urllib.error import HTTPError
 import pytest
 import yaml
 
-from gateway.research_lab import daily_baseline_readiness
-from gateway.research_lab import scoring_worker
 from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
 
 from leadpoet_canonical.production_parity import (
@@ -4088,6 +4086,8 @@ def test_fast_live_boundary_enforces_per_request_and_aggregate_deadlines(
 
 @pytest.mark.asyncio
 async def test_parity_date_controls_baseline_rollover_and_readiness(monkeypatch):
+    from gateway.research_lab import daily_baseline_readiness, scoring_worker
+
     target_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
     parity_environment = {
         "LEADPOET_PRODUCTION_PARITY_MODE": "enabled",
@@ -4589,6 +4589,8 @@ def test_controller_dependency_closure_includes_runtime_identity_and_database_cl
 def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchanged(
     monkeypatch,
 ):
+    from gateway.research_lab import scoring_worker
+
     run_id = "pp-123-1"
     bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
         f"493765492819:{run_id}:{SHA}".encode("ascii")
@@ -4645,6 +4647,8 @@ def test_full_baseline_checkpoint_is_run_scoped_and_production_default_is_unchan
 def test_full_baseline_checkpoint_fails_closed_on_partial_boundary(
     monkeypatch,
 ):
+    from gateway.research_lab import scoring_worker
+
     monkeypatch.setenv("LEADPOET_PRODUCTION_PARITY_MODE", "enabled")
     with pytest.raises(RuntimeError, match="checkpoint boundary is invalid"):
         scoring_worker._baseline_progress_s3_location(
@@ -4662,6 +4666,8 @@ def test_full_baseline_checkpoint_rejects_mismatched_run_identity(
     monkeypatch,
     poison: str,
 ):
+    from gateway.research_lab import scoring_worker
+
     run_id = "pp-123-1"
     bucket = "leadpoet-parity-493765492819-" + hashlib.sha256(
         f"493765492819:{run_id}:{SHA}".encode("ascii")
@@ -4833,14 +4839,10 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
                     "production_database_mutated": False,
                     "production_chain_mutated": False,
                     "chain_registration_boundary": "strict-ephemeral-hotkey",
-                    "openrouter": {"admitted": True},
                     "source_add": {
                         "admitted": True,
                         "global_miner_submissions_enabled": False,
-                        "autoresearch_paused": True,
-                        "scoring_paused": True,
                         "source_add_paused": False,
-                        "non_source_miner_route_rejected": True,
                     },
                 }
             ),
@@ -4855,10 +4857,6 @@ def test_miner_intake_subprocess_starts_before_clone_environment_is_applied(
         supabase_origin=ORIGIN,
         gateway_env_file=tmp_path / "gateway.env",
         artifact_bucket="leadpoet-parity-493765492819-" + "f" * 16,
-        production_gateway_environment={
-            "OPENROUTER_API_KEY": "runtime-credential",
-            "OPENROUTER_MANAGEMENT_KEY": "management-credential",
-        },
         miner_intake_secret=json.dumps(
             {"builtwith_api_key": "builtwith-credential"}
         ),
@@ -4903,56 +4901,9 @@ async def test_miner_intake_restores_controls_changed_for_source_only_state():
     async def call_rpc(name, payload):
         observed.append((name, dict(payload)))
 
-    async def set_autoresearch(**payload):
-        observed.append(("autoresearch", dict(payload)))
-
-    async def set_scoring(**payload):
-        observed.append(("scoring", dict(payload)))
-
     await full_host._restore_miner_intake_controls(
-        {
-            "source_add_paused": True,
-            "autoresearch_paused": False,
-            "scoring_paused": False,
-        },
+        {"source_add_paused": True},
         call_rpc=call_rpc,
-        set_autoresearch_maintenance_paused=set_autoresearch,
-        set_scoring_maintenance_paused=set_scoring,
-    )
-
-    assert [name for name, _payload in observed] == [
-        "research_lab_source_add_set_paused",
-        "autoresearch",
-        "scoring",
-    ]
-    assert all(payload["p_paused"] is True for name, payload in observed[:1])
-    assert all(payload["paused"] is False for name, payload in observed[1:])
-    assert all(
-        payload.get("p_reason", payload.get("reason"))
-        == "production_parity_miner_intake_complete"
-        for _name, payload in observed
-    )
-
-
-@pytest.mark.asyncio
-async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
-    observed: list[tuple[str, object]] = []
-
-    async def call_rpc(name, payload):
-        observed.append((name, dict(payload)))
-
-    async def unexpected_setter(**_payload):
-        raise AssertionError("an already-paused independent lane was rewritten")
-
-    await full_host._restore_miner_intake_controls(
-        {
-            "source_add_paused": True,
-            "autoresearch_paused": True,
-            "scoring_paused": True,
-        },
-        call_rpc=call_rpc,
-        set_autoresearch_maintenance_paused=unexpected_setter,
-        set_scoring_maintenance_paused=unexpected_setter,
     )
 
     assert observed == [
@@ -4965,6 +4916,21 @@ async def test_miner_intake_does_not_rewrite_already_paused_other_lanes():
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_miner_intake_does_not_rewrite_already_active_source_add():
+    observed: list[tuple[str, object]] = []
+
+    async def call_rpc(name, payload):
+        observed.append((name, dict(payload)))
+
+    await full_host._restore_miner_intake_controls(
+        {"source_add_paused": False},
+        call_rpc=call_rpc,
+    )
+
+    assert observed == []
 
 
 def test_full_clone_final_evidence_uses_run_scoped_gateway_token():

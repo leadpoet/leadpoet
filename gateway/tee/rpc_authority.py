@@ -42,8 +42,6 @@ COORDINATOR_METHODS = frozenset(
         "v2_get_kms_recipient",
         "v2_get_source_add_ingress_recipient",
         "v2_seal_source_add_ingress_credential",
-        "v2_get_openrouter_ingress_recipient",
-        "v2_seal_openrouter_ingress_credential",
         "v2_provision_encrypted_secret",
         "v2_get_job_kms_recipient",
         "v2_provision_job_encrypted_secret",

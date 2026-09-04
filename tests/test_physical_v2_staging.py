@@ -1151,8 +1151,6 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "primary/audit workflow did not consume the clone allocation",
         '"chain_boundary": "strict-non-forwarding"',
         "_run_miner_intake_path(",
-        "/research-lab/openrouter-keys/credential-recipient",
-        "/research-lab/openrouter-keys",
         "/research-lab/source-adapters",
         '"chain_registration_boundary": "strict-ephemeral-hotkey"',
         '"production_database_mutated": False',
@@ -1167,10 +1165,7 @@ def test_full_miner_intake_keeps_public_source_credentials_forbidden():
     source = (ROOT / "scripts/run_production_parity_full_host.py").read_text()
     assert '"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false"' in source
     assert '"RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false"' in source
-    assert "closed_recipient_response.status_code != 403" in source
     assert '"global_miner_submissions_enabled": False' in source
-    assert '"autoresearch_paused": True' in source
-    assert '"scoring_paused": True' in source
     assert '"source_add_paused": False' in source
     assert 'retired_response.status_code != 410' in source
     assert 'forbidden_response.status_code != 422' in source

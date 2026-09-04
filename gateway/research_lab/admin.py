@@ -16,11 +16,8 @@ import urllib.request
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from gateway.build_info import get_build_info
 from gateway.deploy_readiness import (
-    assert_resume_allowed,
     build_deploy_readiness,
-    default_manifest_path,
     write_deploy_readiness_manifest,
 )
 from .maintenance import (
@@ -29,10 +26,7 @@ from .maintenance import (
     champion_v2_cutover_readiness_report,
     default_actor_ref,
     dumps_status,
-    get_scoring_maintenance_state,
     reconcile_champion_reward_statuses,
-    resume_gateway_restart_owned_maintenance,
-    set_scoring_maintenance_paused,
 )
 from .store import call_rpc, select_all, select_one
 
@@ -164,19 +158,6 @@ def build_parser() -> argparse.ArgumentParser:
         control.add_argument("--actor-ref", default=default_actor_ref())
         control.set_defaults(source_add_command=action, apply=True)
 
-    pause = sub.add_parser("pause-scoring", help="Pause competition scoring claims")
-    pause.add_argument("--reason", required=True)
-    pause.add_argument("--actor-ref", default=default_actor_ref())
-    resume = sub.add_parser("resume-scoring", help="Resume competition scoring claims")
-    resume.add_argument("--reason", default="maintenance complete")
-    resume.add_argument("--actor-ref", default=default_actor_ref())
-
-    restart = sub.add_parser(
-        "resume-restart-maintenance",
-        help="Verify retained scoring maintenance state after restart",
-    )
-    restart.add_argument("--expected-commit", required=True)
-
     readiness = sub.add_parser(
         "check-deploy-readiness", help="Check gateway and validator release alignment"
     )
@@ -184,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     readiness.add_argument("--write-manifest", nargs="?", const="")
     readiness.add_argument("--no-enforce-resume-block", action="store_true")
 
-    sub.add_parser("status", help="Print scoring and SOURCE_ADD maintenance state")
+    sub.add_parser("status", help="Print SOURCE_ADD maintenance state")
 
     champion = sub.add_parser("reconcile-champion-reward-statuses")
     champion.add_argument("--epoch", type=int)
@@ -224,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cutover = sub.add_parser(
         "champion-v2-cutover-readiness",
-        help="Require 100% V2 receipt coverage for historical positive champion balances",
+        help="Require complete V2 receipt coverage for historical positive champion balances",
     )
     cutover.add_argument("--epoch", type=int)
     cutover.add_argument("--netuid", type=int)
@@ -742,59 +723,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
         return result
-    if args.command in {"pause-scoring", "resume-scoring"}:
-        paused = args.command == "pause-scoring"
-        if not paused:
-            try:
-                deploy_guard = assert_resume_allowed()
-            except RuntimeError as exc:
-                return {
-                    "ok": False,
-                    "action": args.command,
-                    "blocked_reason": "deploy_readiness_guard_failed",
-                    "error": str(exc),
-                }
-        else:
-            deploy_guard = None
-        event = await set_scoring_maintenance_paused(
-            paused=paused,
-            reason=args.reason,
-            actor_ref=args.actor_ref,
-            event_doc={"operator_action": args.command},
-        )
-        result = {
-            "ok": True,
-            "action": args.command,
-            "event_id": event.get("event_id"),
-            "event_seq": event.get("seq"),
-            "event_hash": event.get("anchored_hash"),
-            "state": await get_scoring_maintenance_state(),
-        }
-        if deploy_guard is not None:
-            result["deploy_readiness_guard"] = deploy_guard
-        return result
-    if args.command == "resume-restart-maintenance":
-        expected = str(args.expected_commit or "").strip().lower()
-        actual = str(get_build_info().get("git_commit") or "").strip().lower()
-        if (
-            len(expected) != 40
-            or any(character not in "0123456789abcdef" for character in expected)
-            or actual != expected
-        ):
-            return {
-                "ok": False,
-                "action": "resume-restart-maintenance",
-                "blocked_reason": "exact_commit_mismatch",
-                "expected_commit": expected,
-                "actual_commit": actual,
-            }
-        result = await resume_gateway_restart_owned_maintenance()
-        result["verified_commit"] = actual
-        return result
     if args.command == "status":
         return {
             "ok": True,
-            "scoring_state": await get_scoring_maintenance_state(),
             "source_add": await _source_add_status(),
         }
     if args.command == "reconcile-champion-reward-statuses":

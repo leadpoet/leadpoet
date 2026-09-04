@@ -570,7 +570,7 @@ async def test_gateway_client_preserves_structured_enclave_error_type(
     )
 
     with pytest.raises(gateway_client.TEEEnclaveRPCError) as captured:
-        await client._send_rpc("v2_seal_openrouter_ingress_credential", {})
+        await client._send_rpc("v2_seal_source_add_ingress_credential", {})
     assert captured.value.error_type == "KMSRecipientV2Error"
     assert rpc_socket.closed is True
 

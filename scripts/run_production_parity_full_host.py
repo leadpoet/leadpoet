@@ -91,26 +91,12 @@ RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
 ARTIFACT_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 PINNED_IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
 SCHEMA_VERSION = "leadpoet.production_parity_full.v3"
-OPENROUTER_RUNTIME_CREDENTIAL_REFS = (
-    "RESEARCH_LAB_OPENROUTER_API_KEY",
-    "RESEARCH_LAB_V2_OPENROUTER_API_KEY",
-    "OPENROUTER_API_KEY",
-    "QUALIFICATION_OPENROUTER_API_KEY",
-    "OPENROUTER_KEY",
-)
-OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
-    "RESEARCH_LAB_OPENROUTER_MANAGEMENT_KEY",
-    "OPENROUTER_MANAGEMENT_KEY",
-    "OPENROUTER_API_MANAGEMENT_KEY",
-    "OR_MANAGEMENT_KEY",
-)
 MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
     "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
     "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
     "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
     "RESEARCH_LAB_SOURCE_ADD_ENABLED": "true",
     "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED": "false",
-    "RESEARCH_LAB_PAID_LOOPS_ENABLED": "false",
 }
 EARLY_BOOT_MARKER = Path(
     "/run/leadpoet-production-parity/early-boot-isolated"
@@ -149,7 +135,6 @@ FULL_FAILURE_STAGES = frozenset(
         "acceptance-corpus",
         "gateway-restart",
         "gateway-health",
-        "clone-controls",
         "rebenchmark-publication",
         "weight-readiness",
         "allocation-handoff",
@@ -1231,114 +1216,6 @@ def _read_child_request() -> dict[str, Any]:
     return dict(value)
 
 
-async def _run_clone_controls_child(request: Mapping[str, Any]) -> dict[str, Any]:
-    if (
-        request.get("schema_version")
-        != "leadpoet.production_parity_clone_controls_request.v1"
-        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
-        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
-        or not ARTIFACT_BUCKET_RE.fullmatch(
-            str(request.get("artifact_bucket") or "")
-        )
-    ):
-        raise FullParityError("clone controls request is invalid")
-    candidate_sha = str(request["candidate_sha"])
-    run_id = str(request["run_id"])
-    artifact_bucket = str(request["artifact_bucket"])
-    supabase_origin = str(request.get("supabase_origin") or "")
-    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
-    values = _validated_clone_environment(
-        gateway_env_file,
-        candidate_sha=candidate_sha,
-        run_id=run_id,
-        supabase_origin=supabase_origin,
-        artifact_bucket=artifact_bucket,
-    )
-    with _applied_clone_environment(values, gateway_env_file):
-        from gateway.research_lab.maintenance import (
-            set_autoresearch_maintenance_paused,
-            set_scoring_maintenance_paused,
-        )
-
-        scoring = await set_scoring_maintenance_paused(
-            paused=False,
-            reason="production_parity_full_rebenchmark",
-            actor_ref="system:production-parity",
-            event_doc={"production_parity": True},
-        )
-        autoresearch = await set_autoresearch_maintenance_paused(
-            paused=True,
-            reason="production_parity_no_miner_or_candidate_activity",
-            actor_ref="system:production-parity",
-            event_doc={"production_parity": True},
-        )
-    scoring_event_id = str(scoring.get("event_id") or "")
-    autoresearch_event_id = str(autoresearch.get("event_id") or "")
-    if (
-        not 1 <= len(scoring_event_id) <= 128
-        or not 1 <= len(autoresearch_event_id) <= 128
-    ):
-        raise FullParityError("clone controls did not persist bounded events")
-    return {
-        "schema_version": "leadpoet.production_parity_clone_controls_evidence.v1",
-        "candidate_sha": candidate_sha,
-        "run_id": run_id,
-        "artifact_bucket": artifact_bucket,
-        "scoring_event_id": scoring_event_id,
-        "autoresearch_event_id": autoresearch_event_id,
-        "scoring_paused": False,
-        "autoresearch_paused": True,
-    }
-
-
-def _run_clone_controls(
-    *,
-    candidate_sha: str,
-    run_id: str,
-    supabase_origin: str,
-    gateway_env_file: Path,
-    artifact_bucket: str,
-) -> dict[str, Any]:
-    _validated_clone_environment(
-        gateway_env_file,
-        candidate_sha=candidate_sha,
-        run_id=run_id,
-        supabase_origin=supabase_origin,
-        artifact_bucket=artifact_bucket,
-    )
-    request = {
-        "schema_version": "leadpoet.production_parity_clone_controls_request.v1",
-        "candidate_sha": candidate_sha,
-        "run_id": run_id,
-        "artifact_bucket": artifact_bucket,
-        "supabase_origin": supabase_origin,
-        "gateway_env_file": str(gateway_env_file),
-    }
-    result = _run(
-        [sys.executable, str(Path(__file__).resolve()), "--clone-controls-child"],
-        timeout=180,
-        env=_clone_child_environment(),
-        input_text=json.dumps(request, separators=(",", ":")),
-    )
-    if result.returncode != 0 or len(result.stdout or "") > 64 * 1024:
-        raise FullParityError("clone controls child failed closed")
-    evidence = _last_json_document(
-        result.stdout or "", field="clone controls child"
-    )
-    if (
-        evidence.get("schema_version")
-        != "leadpoet.production_parity_clone_controls_evidence.v1"
-        or evidence.get("candidate_sha") != candidate_sha
-        or evidence.get("run_id") != run_id
-        or evidence.get("artifact_bucket") != artifact_bucket
-        or evidence.get("scoring_paused") is not False
-        or evidence.get("autoresearch_paused") is not True
-        or not str(evidence.get("scoring_event_id") or "")
-        or not str(evidence.get("autoresearch_event_id") or "")
-    ):
-        raise FullParityError("clone controls child evidence is incomplete")
-    return evidence
-
 
 def _gateway_json(path: str) -> dict[str, Any]:
     with urlopen("http://127.0.0.1:8000" + path, timeout=60) as response:
@@ -1667,19 +1544,8 @@ def _run_miner_intake_path(
     supabase_origin: str,
     gateway_env_file: Path,
     artifact_bucket: str,
-    production_gateway_environment: Mapping[str, str],
     miner_intake_secret: str,
 ) -> dict[str, Any]:
-    runtime_credential = _required_secret_from_environment(
-        production_gateway_environment,
-        OPENROUTER_RUNTIME_CREDENTIAL_REFS,
-        field="production OpenRouter runtime credential",
-    )
-    management_credential = _required_secret_from_environment(
-        production_gateway_environment,
-        OPENROUTER_MANAGEMENT_CREDENTIAL_REFS,
-        field="production OpenRouter management credential",
-    )
     builtwith_credential = _builtwith_key_from_secret(miner_intake_secret)
     _validated_clone_environment(
         gateway_env_file,
@@ -1700,8 +1566,6 @@ def _run_miner_intake_path(
         "region": region,
         "supabase_origin": supabase_origin,
         "gateway_env_file": str(gateway_env_file),
-        "openrouter_runtime_credential": runtime_credential,
-        "openrouter_management_credential": management_credential,
         "builtwith_credential": builtwith_credential,
     }
     result = _run(
@@ -1717,7 +1581,7 @@ def _run_miner_intake_path(
     # Drop all parent references before interpreting child output. The child
     # emits only bounded booleans/counts; credentials never enter evidence.
     request.clear()
-    runtime_credential = management_credential = builtwith_credential = ""
+    builtwith_credential = ""
     if (
         result.returncode != 0
         or len(result.stdout or "") > 256 * 1024
@@ -1738,19 +1602,12 @@ def _run_miner_intake_path(
         or evidence.get("production_chain_mutated") is not False
         or evidence.get("chain_registration_boundary")
         != "strict-ephemeral-hotkey"
-        or evidence.get("openrouter", {}).get("admitted") is not True
         or evidence.get("source_add", {}).get("admitted") is not True
         or evidence.get("source_add", {}).get(
             "global_miner_submissions_enabled"
         )
         is not False
-        or evidence.get("source_add", {}).get("autoresearch_paused") is not True
-        or evidence.get("source_add", {}).get("scoring_paused") is not True
         or evidence.get("source_add", {}).get("source_add_paused") is not False
-        or evidence.get("source_add", {}).get(
-            "non_source_miner_route_rejected"
-        )
-        is not True
     ):
         raise FullParityError("miner-intake evidence is incomplete")
     return evidence
@@ -1848,20 +1705,9 @@ async def _run_miner_intake_child_validated(
 
     from gateway.main import app
     from gateway.research_lab import api as research_lab_api
-    from gateway.research_lab.maintenance import (
-        get_autoresearch_maintenance_state,
-        get_scoring_maintenance_state,
-        set_autoresearch_maintenance_paused,
-        set_scoring_maintenance_paused,
-    )
     from gateway.research_lab.source_add_workflow import source_add_control_state
     from gateway.research_lab.store import call_rpc, select_many, select_one
-    from leadpoet_canonical.credential_recipient_v2 import (
-        verify_and_encrypt_openrouter_credential_v2,
-        verify_openrouter_credential_release_v2,
-    )
     from neurons.miner import (
-        _research_lab_openrouter_key_signed_payload,
         _research_lab_signed_payload,
         _research_lab_source_add_signed_payload,
     )
@@ -1881,12 +1727,8 @@ async def _run_miner_intake_child_validated(
         raise FullParityError("miner-intake child identity differs")
     candidate_sha = str(request["candidate_sha"])
     run_id = str(request["run_id"])
-    runtime_credential = str(request.get("openrouter_runtime_credential") or "").strip()
-    management_credential = str(
-        request.get("openrouter_management_credential") or ""
-    ).strip()
     builtwith_credential = str(request.get("builtwith_credential") or "").strip()
-    if not runtime_credential or not management_credential or not builtwith_credential:
+    if not builtwith_credential:
         raise FullParityError("miner-intake credentials are incomplete")
 
     keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
@@ -1905,8 +1747,6 @@ async def _run_miner_intake_child_validated(
     research_lab_api.chain_is_hotkey_registered = strict_chain_registration
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     source_controls: dict[str, Any] = {}
-    miner_submissions_env_name = "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED"
-    miner_submissions_before = os.environ.get(miner_submissions_env_name)
     try:
         if research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled:
             raise FullParityError(
@@ -1917,148 +1757,13 @@ async def _run_miner_intake_child_validated(
             base_url="http://production-parity.invalid",
             timeout=httpx.Timeout(180.0),
         ) as client:
-            timestamp = int(time.time())
-            key_fingerprint = hashlib.sha256(
-                f"{runtime_credential}:{management_credential}".encode("utf-8")
-            ).hexdigest()[:24]
-            recipient_payload = _research_lab_signed_payload(
-                wallet,
-                {
-                    "miner_hotkey": miner_hotkey,
-                    "timestamp": timestamp,
-                    "idempotency_key": (
-                        f"research-openrouter-recipient:{miner_hotkey}:"
-                        f"{key_fingerprint}"
-                    ),
-                },
-            )
-            closed_recipient_response = await client.post(
-                "/research-lab/openrouter-keys/credential-recipient",
-                json=recipient_payload,
-            )
-            if (
-                closed_recipient_response.status_code != 403
-                or closed_recipient_response.json().get("detail")
-                != "Research Lab miner submissions are disabled"
-                or observed_chain_checks
-            ):
-                raise FullParityError(
-                    "non-SOURCE_ADD miner intake did not fail closed"
-                )
-            os.environ[miner_submissions_env_name] = "true"
-            recipient_response = await client.post(
-                "/research-lab/openrouter-keys/credential-recipient",
-                json=recipient_payload,
-            )
-            if recipient_response.status_code != 200:
-                raise FullParityError(
-                    "OpenRouter credential recipient rejected the exact miner request"
-                )
-            chain_check_milestones.append(len(observed_chain_checks))
-            recipients = recipient_response.json()
-            verified_coordinator_boot = verify_openrouter_credential_release_v2(
-                recipients["release_evidence"]
-            )
-            encrypted_runtime = verify_and_encrypt_openrouter_credential_v2(
-                recipients["runtime"],
-                runtime_credential,
-                miner_hotkey=miner_hotkey,
-                credential_kind="runtime",
-                verified_coordinator_boot_identity=verified_coordinator_boot,
-            )
-            encrypted_management = verify_and_encrypt_openrouter_credential_v2(
-                recipients["management"],
-                management_credential,
-                miner_hotkey=miner_hotkey,
-                credential_kind="management",
-                verified_coordinator_boot_identity=verified_coordinator_boot,
-            )
-            register_payload = _research_lab_openrouter_key_signed_payload(
-                wallet,
-                {
-                    "miner_hotkey": miner_hotkey,
-                    "timestamp": int(time.time()),
-                    "idempotency_key": (
-                        f"research-openrouter-key:{miner_hotkey}:"
-                        f"{key_fingerprint}"
-                    ),
-                    "openrouter_api_key_v2": encrypted_runtime,
-                    "openrouter_management_key_v2": encrypted_management,
-                    "key_label": "production-parity-miner-intake",
-                },
-            )
-            register_response = await client.post(
-                "/research-lab/openrouter-keys", json=register_payload
-            )
-            if register_response.status_code != 200:
-                raise FullParityError(
-                    "OpenRouter registration rejected the exact miner request"
-                )
-            chain_check_milestones.append(len(observed_chain_checks))
-            register_result = register_response.json()
-            key_ref = str(register_result.get("key_ref") or "")
-            key_row = await select_one(
-                "research_lab_openrouter_key_refs",
-                filters=(("key_ref", key_ref),),
-            )
-            envelope_rows = await select_many(
-                "research_lab_provider_credential_envelopes_v2",
-                filters=(("key_ref", key_ref),),
-                limit=3,
-            )
-            openrouter_persistence = json.dumps(
-                {
-                    "response": register_result,
-                    "key_ref": key_row,
-                    "envelopes": envelope_rows,
-                },
-                sort_keys=True,
-                default=str,
-            )
-            if (
-                not key_ref
-                or not isinstance(key_row, Mapping)
-                or key_row.get("preflight_status") != "passed"
-                or len(envelope_rows) != 2
-                or {str(row.get("credential_kind") or "") for row in envelope_rows}
-                != {"runtime", "management"}
-                or runtime_credential in openrouter_persistence
-                or management_credential in openrouter_persistence
-            ):
-                raise FullParityError(
-                    "OpenRouter registration persistence is incomplete"
-                )
-
-            os.environ[miner_submissions_env_name] = "false"
-            if research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled:
-                raise FullParityError(
-                    "global miner submissions remained enabled for SOURCE_ADD"
-                )
             builtwith_probe = _verify_builtwith_credential_live(
                 builtwith_credential
             )
-            autoresearch_state = await get_autoresearch_maintenance_state()
-            scoring_state = await get_scoring_maintenance_state()
             source_state = await source_add_control_state()
             source_controls = {
-                "autoresearch_paused": bool(autoresearch_state.get("paused")),
-                "scoring_paused": bool(scoring_state.get("paused")),
                 "source_add_paused": bool(source_state.get("paused", True)),
             }
-            if not source_controls["autoresearch_paused"]:
-                await set_autoresearch_maintenance_paused(
-                    paused=True,
-                    reason="production_parity_miner_intake",
-                    actor_ref="system:production-parity",
-                    event_doc={"production_parity": True},
-                )
-            if not source_controls["scoring_paused"]:
-                await set_scoring_maintenance_paused(
-                    paused=True,
-                    reason="production_parity_miner_intake",
-                    actor_ref="system:production-parity",
-                    event_doc={"production_parity": True},
-                )
             if source_controls["source_add_paused"]:
                 await call_rpc(
                     "research_lab_source_add_set_paused",
@@ -2068,19 +1773,9 @@ async def _run_miner_intake_child_validated(
                         "p_actor_ref": "system:production-parity",
                     },
                 )
-            source_only_autoresearch_state = (
-                await get_autoresearch_maintenance_state()
-            )
-            source_only_scoring_state = await get_scoring_maintenance_state()
             source_only_source_state = await source_add_control_state()
-            if (
-                source_only_autoresearch_state.get("paused") is not True
-                or source_only_scoring_state.get("paused") is not True
-                or source_only_source_state.get("paused") is not False
-            ):
-                raise FullParityError(
-                    "SOURCE_ADD-only maintenance controls did not activate"
-                )
+            if source_only_source_state.get("paused") is not False:
+                raise FullParityError("SOURCE_ADD maintenance control did not activate")
             manifest, source_brief, idempotency_key, source_metadata = (
                 build_source_add_submission_docs(
                     miner_hotkey=miner_hotkey,
@@ -2171,20 +1866,13 @@ async def _run_miner_intake_child_validated(
                 or int(work_rows[0].get("attempt_count") or 0) != 0
                 or current_doc.get("credential_envelope") not in ({}, None)
                 or builtwith_credential in source_persistence
-                or runtime_credential in source_persistence
-                or management_credential in source_persistence
             ):
                 raise FullParityError("SOURCE_ADD admission persistence is incomplete")
             if (
-                (await get_autoresearch_maintenance_state()).get("paused")
-                is not True
-                or (await get_scoring_maintenance_state()).get("paused") is not True
-                or (await source_add_control_state()).get("paused") is not False
+                (await source_add_control_state()).get("paused") is not False
                 or research_lab_api.ResearchLabGatewayConfig.from_env().miner_submissions_enabled
             ):
-                raise FullParityError(
-                    "SOURCE_ADD admission changed an independent maintenance control"
-                )
+                raise FullParityError("SOURCE_ADD admission changed its intake controls")
 
             retired_payload = _research_lab_signed_payload(
                 wallet,
@@ -2217,7 +1905,7 @@ async def _run_miner_intake_child_validated(
 
         if (
             any(hotkey != miner_hotkey for hotkey in observed_chain_checks)
-            or len(chain_check_milestones) != 4
+            or len(chain_check_milestones) != 2
             or any(
                 current <= previous
                 for previous, current in zip(
@@ -2240,17 +1928,6 @@ async def _run_miner_intake_child_validated(
             "chain_registration_boundary": "strict-ephemeral-hotkey",
             "production_database_mutated": False,
             "production_chain_mutated": False,
-            "provider_security_write": "exact-idempotent-logging-disable",
-            "openrouter": {
-                "real_production_credentials": True,
-                "recipient_attestation_verified": True,
-                "miner_signature_verified": True,
-                "measured_provider_preflight_passed": True,
-                "admitted": True,
-                "key_ref_persisted": True,
-                "credential_envelope_count": 2,
-                "plaintext_absent": True,
-            },
             "source_add": {
                 "provider": "builtwith",
                 "live_provider_credential_verified": (
@@ -2266,40 +1943,24 @@ async def _run_miner_intake_child_validated(
                 "public_credentials_forbidden": True,
                 "plaintext_absent": True,
                 "global_miner_submissions_enabled": False,
-                "autoresearch_paused": True,
-                "scoring_paused": True,
                 "source_add_paused": False,
-                "non_source_miner_route_rejected": True,
             },
         }
     finally:
         research_lab_api.chain_is_hotkey_registered = original_chain_registration
         try:
-            await _restore_miner_intake_controls(
-                source_controls,
-                call_rpc=call_rpc,
-                set_autoresearch_maintenance_paused=(
-                    set_autoresearch_maintenance_paused
-                ),
-                set_scoring_maintenance_paused=set_scoring_maintenance_paused,
-            )
+            await _restore_miner_intake_controls(source_controls, call_rpc=call_rpc)
         finally:
-            if miner_submissions_before is None:
-                os.environ.pop(miner_submissions_env_name, None)
-            else:
-                os.environ[miner_submissions_env_name] = miner_submissions_before
             request = {}
-            runtime_credential = management_credential = builtwith_credential = ""
+            builtwith_credential = ""
 
 
 async def _restore_miner_intake_controls(
     source_controls: Mapping[str, Any],
     *,
     call_rpc: Any,
-    set_autoresearch_maintenance_paused: Any,
-    set_scoring_maintenance_paused: Any,
 ) -> None:
-    """Restore clone-local controls changed to prove SOURCE_ADD-only intake."""
+    """Restore the clone-local SOURCE_ADD control changed for intake."""
 
     if source_controls.get("source_add_paused"):
         await call_rpc(
@@ -2309,20 +1970,6 @@ async def _restore_miner_intake_controls(
                 "p_reason": "production_parity_miner_intake_complete",
                 "p_actor_ref": "system:production-parity",
             },
-        )
-    if source_controls.get("autoresearch_paused") is False:
-        await set_autoresearch_maintenance_paused(
-            paused=False,
-            reason="production_parity_miner_intake_complete",
-            actor_ref="system:production-parity",
-            event_doc={"production_parity": True},
-        )
-    if source_controls.get("scoring_paused") is False:
-        await set_scoring_maintenance_paused(
-            paused=False,
-            reason="production_parity_miner_intake_complete",
-            actor_ref="system:production-parity",
-            event_doc={"production_parity": True},
         )
 
 
@@ -2959,14 +2606,6 @@ def run_full(
         ):
             raise FullParityError("gateway V2 health is not exact-candidate ready")
 
-        failure_stage = "clone-controls"
-        controls = _run_clone_controls(
-            candidate_sha=candidate_sha,
-            run_id=run_id,
-            supabase_origin=supabase_origin,
-            gateway_env_file=gateway_env_file,
-            artifact_bucket=artifact_bucket,
-        )
         failure_stage = "rebenchmark-publication"
         rebenchmark = _wait_rebenchmark(
             candidate_sha=candidate_sha,
@@ -3042,14 +2681,6 @@ def run_full(
             raise FullParityError(
                 "gateway handoff and primary/audit allocation hashes differ"
             )
-        production_gateway_environment = _parse_environment_document(
-            _secret_value(
-                secrets_client,
-                production_gateway_secret_id,
-                field="production gateway environment",
-            ),
-            field="production gateway environment",
-        )
         failure_stage = "miner-intake"
         miner_intake = _run_miner_intake_path(
             region=region,
@@ -3058,7 +2689,6 @@ def run_full(
             supabase_origin=supabase_origin,
             gateway_env_file=gateway_env_file,
             artifact_bucket=artifact_bucket,
-            production_gateway_environment=production_gateway_environment,
             miner_intake_secret=_secret_value(
                 secrets_client,
                 miner_intake_secret_id,
@@ -3096,7 +2726,6 @@ def run_full(
                     "pcr0": health.get("pcr0"),
                     "attestation_ready": True,
                 },
-                "controls": controls,
                 "acceptance_corpus": acceptance_corpus,
                 "external_write_boundaries": {
                     "arweave": "blocked-production-parity",
@@ -3166,7 +2795,6 @@ def run_full(
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(argv if argv is not None else sys.argv[1:])
     child_modes = {
-        "--clone-controls-child",
         "--clone-handoff-child",
         "--miner-intake-child",
     }
@@ -3175,9 +2803,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.disable(logging.CRITICAL)
         try:
             request = _read_child_request()
-            if child_mode == "--clone-controls-child":
-                result = asyncio.run(_run_clone_controls_child(request))
-            elif child_mode == "--clone-handoff-child":
+            if child_mode == "--clone-handoff-child":
                 result = _run_clone_handoff_child(request)
             else:
                 result = asyncio.run(_run_miner_intake_child(request))

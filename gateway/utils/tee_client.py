@@ -585,34 +585,6 @@ class TEEClient:
             },
         )
 
-    async def v2_get_openrouter_ingress_recipient(
-        self,
-        *,
-        miner_hotkey: str,
-        credential_kind: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_get_openrouter_ingress_recipient",
-            {
-                "miner_hotkey": miner_hotkey,
-                "credential_kind": credential_kind,
-            },
-        )
-
-    async def v2_seal_openrouter_ingress_credential(
-        self,
-        *,
-        request_id: str,
-        ciphertext_b64: str,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_seal_openrouter_ingress_credential",
-            {
-                "request_id": request_id,
-                "ciphertext_b64": ciphertext_b64,
-            },
-        )
-
     async def v2_provision_encrypted_secret(
         self,
         *,

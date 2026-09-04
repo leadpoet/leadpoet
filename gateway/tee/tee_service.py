@@ -1307,18 +1307,6 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
                 credential_ref=str(params.get("credential_ref") or ""),
             )
         }
-    if method == "v2_get_openrouter_ingress_recipient":
-        if not isinstance(params, dict) or set(params) != {
-            "miner_hotkey",
-            "credential_kind",
-        }:
-            raise ValueError("V2 OpenRouter ingress recipient fields are invalid")
-        return {
-            "result": get_v2_kms_recipient().openrouter_ingress_recipient_request(
-                miner_hotkey=str(params.get("miner_hotkey") or ""),
-                credential_kind=str(params.get("credential_kind") or ""),
-            )
-        }
     if method == "v2_seal_source_add_ingress_credential":
         if not isinstance(params, dict) or set(params) != {
             "request_id",
@@ -1352,47 +1340,6 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
                     ciphertext_b64=ciphertext_b64,
                 )
                 envelope = seal_source_add_ingress_credential_v2(
-                    lease,
-                    vault=get_v2_artifact_vault(),
-                )
-                v2_ingress_seal_cache[cache_key] = {
-                    "ciphertext_hash": ciphertext_hash,
-                    "credential_envelope": dict(envelope),
-                }
-        return {"result": {"credential_envelope": envelope}}
-    if method == "v2_seal_openrouter_ingress_credential":
-        if not isinstance(params, dict) or set(params) != {
-            "request_id",
-            "ciphertext_b64",
-        }:
-            raise ValueError("V2 OpenRouter ingress ciphertext fields are invalid")
-        from gateway.tee.openrouter_credential_v2 import (
-            seal_openrouter_ingress_credential_v2,
-        )
-
-        request_id = str(params.get("request_id") or "").lower()
-        ciphertext_b64 = str(params.get("ciphertext_b64") or "")
-        from leadpoet_canonical.attested_v2 import sha256_bytes
-
-        try:
-            ciphertext_hash = sha256_bytes(
-                base64.b64decode(ciphertext_b64, validate=True)
-            )
-        except Exception as exc:
-            raise ValueError("V2 OpenRouter ingress ciphertext is invalid") from exc
-        cache_key = ("openrouter", request_id)
-        with v2_ingress_seal_cache_lock:
-            existing = v2_ingress_seal_cache.get(cache_key)
-            if existing is not None:
-                if existing["ciphertext_hash"] != ciphertext_hash:
-                    raise ValueError("V2 OpenRouter ingress ciphertext changed")
-                envelope = dict(existing["credential_envelope"])
-            else:
-                lease = get_v2_kms_recipient().unwrap_openrouter_ingress_credential(
-                    request_id=request_id,
-                    ciphertext_b64=ciphertext_b64,
-                )
-                envelope = seal_openrouter_ingress_credential_v2(
                     lease,
                     vault=get_v2_artifact_vault(),
                 )

@@ -978,17 +978,9 @@ jobs:
               or value.get("external_write_boundaries", {}).get("arweave")
                   != "blocked-production-parity"
               or value.get("miner_intake", {}).get("status") != "passed"
-              or value.get("miner_intake", {}).get("provider_security_write")
-                  != "exact-idempotent-logging-disable"
               or value.get("miner_intake", {}).get(
                   "chain_registration_boundary"
               ) != "strict-ephemeral-hotkey"
-              or value.get("miner_intake", {}).get("openrouter", {}).get(
-                  "real_production_credentials"
-              ) is not True
-              or value.get("miner_intake", {}).get("openrouter", {}).get(
-                  "admitted"
-              ) is not True
               or value.get("miner_intake", {}).get("source_add", {}).get(
                   "live_provider_credential_verified"
               ) is not True

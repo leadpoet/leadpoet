@@ -165,14 +165,10 @@ def test_provider_error_health_threshold_cannot_be_disabled_by_env(clean_env):
 
 def test_source_intelligence_defaults_and_independent_rollbacks(clean_env):
     config = ResearchLabGatewayConfig.from_env()
-    status = config.public_status()
     assert config.code_edit_source_access_v2 is True
     assert config.planner_symbol_index_enabled is True
     assert config.planner_reference_repair_enabled is True
     assert config.planner_reference_repair_max_attempts == 1
-    assert status["hosted_worker"]["code_edit_source_inspection"]["source_access_v2"] is True
-    assert status["hosted_worker"]["loop_planner"]["symbol_index_enabled"] is True
-    assert status["hosted_worker"]["loop_planner"]["reference_repair_enabled"] is True
 
     clean_env.setenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "false")
     clean_env.setenv("RESEARCH_LAB_PLANNER_SYMBOL_INDEX_ENABLED", "false")
@@ -200,6 +196,12 @@ def test_daily_scoring_schedule_env_overrides(clean_env):
 def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     config = ResearchLabGatewayConfig.from_env()
     status = config.public_status()
+    assert set(status) == {
+        "api_enabled",
+        "production_writes_enabled",
+        "source_add_enabled",
+        "source_add",
+    }
     assert config.source_add_enabled is True
     assert config.source_add_rewards_enabled is True
     assert config.source_add_dispatcher_enabled is True

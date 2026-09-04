@@ -75,8 +75,6 @@ OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
 OP_ATTEST_ACTIVE_PRIVATE_MODEL = "attest_active_private_model"
 OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
 OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
-OP_REGISTER_OPENROUTER_CREDENTIAL_V2 = "register_openrouter_credential_v2"
-OP_PREFLIGHT_OPENROUTER_CREDENTIAL_V2 = "preflight_openrouter_credential_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
@@ -229,12 +227,6 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_PROVIDER_OUTCOME_SNAPSHOT_V2: frozenset(
         {"research_lab.provider_outcome_snapshot.v2"}
     ),
-    OP_REGISTER_OPENROUTER_CREDENTIAL_V2: frozenset(
-        {"research_lab.openrouter_credential.v2"}
-    ),
-    OP_PREFLIGHT_OPENROUTER_CREDENTIAL_V2: frozenset(
-        {"research_lab.openrouter_credit_preflight.v2"}
-    ),
     OP_ATTEST_ARTIFACT_PERSISTENCE: frozenset(
         {"leadpoet.artifact_persistence.v2"}
     ),
@@ -376,18 +368,6 @@ class CoordinatorExecutorV2:
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
         provider_outcome_supplier: Optional[Callable[[], Mapping[str, Any]]] = None,
-        openrouter_registration_resolver: Optional[
-            Callable[
-                [Mapping[str, Any], ExecutionContextV2],
-                ExecutionResultV2,
-            ]
-        ] = None,
-        openrouter_preflight_resolver: Optional[
-            Callable[
-                [Mapping[str, Any], ExecutionContextV2],
-                ExecutionResultV2,
-            ]
-        ] = None,
         active_private_model_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -421,8 +401,6 @@ class CoordinatorExecutorV2:
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
-        self._openrouter_registration_resolver = openrouter_registration_resolver
-        self._openrouter_preflight_resolver = openrouter_preflight_resolver
         self._active_private_model_resolver = active_private_model_resolver
         self._config = config_supplier()
 
@@ -671,28 +649,6 @@ class CoordinatorExecutorV2:
                 ),
                 transport_attempts=tuple(dict(item) for item in attempts),
             )
-        if operation == OP_REGISTER_OPENROUTER_CREDENTIAL_V2:
-            if self._openrouter_registration_resolver is None:
-                raise ValueError(
-                    "measured OpenRouter credential registration is unavailable"
-                )
-            result = self._openrouter_registration_resolver(payload, context)
-            if not isinstance(result, ExecutionResultV2):
-                raise ValueError(
-                    "measured OpenRouter credential registration is invalid"
-                )
-            return result
-        if operation == OP_PREFLIGHT_OPENROUTER_CREDENTIAL_V2:
-            if self._openrouter_preflight_resolver is None:
-                raise ValueError(
-                    "measured OpenRouter credit preflight is unavailable"
-                )
-            result = self._openrouter_preflight_resolver(payload, context)
-            if not isinstance(result, ExecutionResultV2):
-                raise ValueError(
-                    "measured OpenRouter credit preflight is invalid"
-                )
-            return result
         if operation == OP_RESEARCH_LAB_REWARD_DECISION:
             decision_kind = str(payload.get("decision_kind") or "")
             measured_payload = payload

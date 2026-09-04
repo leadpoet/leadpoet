@@ -277,6 +277,7 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
+        "PYTHONPATH": SANDBOX_MODEL_DIR,
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
         "PYTHONHASHSEED": str(spec.random_seed),

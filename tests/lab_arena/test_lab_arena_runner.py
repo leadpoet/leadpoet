@@ -11,6 +11,8 @@ import json
 import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 import tarfile
 import threading
@@ -619,6 +621,88 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
             os.environ.pop(shim.WORKER_SOCKET_ENV, None)
         assert frame_status == 200 and json.loads(frame_body)["results"]
         assert len(state.calls) == 2  # only the two matched requests reached the Arena
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def test_agent_entrypoint_loads_the_trusted_shim_for_a_standard_http_client(tmp_path):
+    """The OCI Python path installs the broker shim before a miner harness imports urllib."""
+
+    api = FakeApi([])
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1")
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    server = rn.WorkerSocketServer(
+        socket_dir / runtime.SANDBOX_SOCKET_NAME,
+        api,
+        state,
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "harness.py").write_text(
+        "import json\n"
+        "import urllib.request\n"
+        "def run_icp(icp):\n"
+        "    url = 'https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com%2F'\n"
+        "    with urllib.request.urlopen(url, timeout=5) as response:\n"
+        "        result = json.load(response)\n"
+        "    return [{'company_name': result['results'][0]['url']}]\n",
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "icp.json"
+    input_path.write_text(
+        json.dumps({"icp": {"icp_id": "arena:test", "prompt": "find leads"}}),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "companies.json"
+    trusted_model = tmp_path / "model"
+    trusted_model.mkdir()
+    (trusted_model / "sitecustomize.py").write_text(
+        shim.SITECUSTOMIZE_SOURCE,
+        encoding="utf-8",
+    )
+    (trusted_model / "lab_arena").symlink_to(
+        Path(rn.__file__).resolve().parent,
+        target_is_directory=True,
+    )
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from lab_arena.agent_entrypoint import run\n"
+        "run(source_dir=Path(sys.argv[1]), input_path=Path(sys.argv[2]), "
+        "output_path=Path(sys.argv[3]))\n"
+    )
+    environment = {
+        "HOME": str(tmp_path),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": runtime.PROCESS_ENV["PATH"],
+        "PYTHONPATH": str(trusted_model),
+        shim.WORKER_SOCKET_ENV: str(socket_dir / runtime.SANDBOX_SOCKET_NAME),
+    }
+    server.start()
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(source),
+                str(input_path),
+                str(output_path),
+            ],
+            cwd=source,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+        assert json.loads(output_path.read_text(encoding="utf-8")) == {
+            "companies": [{"company_name": "https://co1.example.com"}]
+        }
+        assert api.provider_frames[-1]["operation_id"] == "scrapingdog.scrape"
     finally:
         server.stop()
         shutil.rmtree(socket_dir, ignore_errors=True)

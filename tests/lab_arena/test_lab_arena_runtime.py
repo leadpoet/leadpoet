@@ -235,6 +235,7 @@ def test_oci_spec_invariants(tmp_path):
     assert {"type": "RLIMIT_NPROC", "hard": spec.pids_limit, "soft": spec.pids_limit} in process["rlimits"]
     env = dict(item.split("=", 1) for item in process["env"])
     assert env["TZ"] == "UTC" and env["LANG"] == "C.UTF-8" and env["LC_ALL"] == "C.UTF-8"
+    assert env["PYTHONPATH"] == "/model"
     assert env["PYTHONHASHSEED"] == "12345" and env["LAB_ARENA_RANDOM_SEED"] == "12345"
     assert env["LAB_ARENA_EVALUATION_DATE"] == "2026-09-02"
     assert env["LAB_ARENA_WORKER_SOCKET"] == "/run/lab_arena/worker.sock"

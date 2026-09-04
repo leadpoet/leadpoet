@@ -1226,6 +1226,7 @@ class LocalPostgRESTState:
         durable_schema_sha: str = "",
     ):
         self.state_root = state_root
+        self.source_root = source_root
         self.fixture = fixture
         self.tables = tables
         self.rpcs = rpcs

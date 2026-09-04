@@ -430,17 +430,16 @@ def test_protected_manifest_detects_logic_change(tmp_path: Path):
         destination = copied_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    target = copied_root / "lab_arena" / "scoring.py"
+    target = copied_root / "research_lab" / "employee_buckets.py"
     target.write_text(
         target.read_text(encoding="utf-8").replace(
-            "    bindings = dict(POLICY_ENV_BINDINGS)\n",
-            "    assert DEFAULT_JUDGE_MODELS\n"
-            "    bindings = dict(POLICY_ENV_BINDINGS)\n",
+            "if isinstance(value, bool):",
+            "if value is None:\n        return str(default or \"\")\n    if isinstance(value, bool):",
             1,
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ProtectedWorkflowError, match="scoring.py"):
+    with pytest.raises(ProtectedWorkflowError, match="employee_buckets.py"):
         verify_manifest(copied_root, manifest)
 
 

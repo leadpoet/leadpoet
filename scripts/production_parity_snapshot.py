@@ -75,7 +75,7 @@ _LAB_ARENA_MIGRATION = {
     "path": "scripts/179-lab-arena-v1.sql",
     "sequence": 179,
     "sha256": (
-        "sha256:bd20a27b25055cc82a7a6b39593eed0e23cc0d9ac1142577e31a909312899eb7"
+        "sha256:8b70a1c5dba0af0a0b7be7730cb44296bd2e1f8636985cddb6ca7121c4ab0f10"
     ),
     "transaction_mode": "candidate-file",
 }
@@ -103,6 +103,12 @@ _LAB_ARENA_MIGRATIONS = (
         "path": "scripts/183-lab-arena-miner-reward-basis.sql",
         "sequence": 183,
         "sha256": "sha256:24258e6eb313ebdaadfc49cc532983239e2928fe975a875b26ef8f8e709725b1",
+        "transaction_mode": "candidate-file",
+    },
+    {
+        "path": "scripts/184-lab-arena-scoring-failure-isolation.sql",
+        "sequence": 184,
+        "sha256": "sha256:8759ea2a207c9702eb5383693f2bb2afb673a62f225b08e349dd59f14fb3e691",
         "transaction_mode": "candidate-file",
     },
 )

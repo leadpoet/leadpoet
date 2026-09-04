@@ -805,7 +805,7 @@ def test_stage_one_judge_failure_excludes_only_that_challenger(connect, tmp_path
         for participant in harness.service.store.get_round(harness.round_id)[
             "participants"
         ]
-        if harness.flavors[participant["source_sha256"]] == "JudgeFailOne"
+        if harness.flavors[participant["submission_id"]] == "JudgeFailOne"
     )
     harness.sandbox.judge_failures.add(("JudgeFailOne", 0))
     _run_stage_one_to_scoring(harness, participants, runners=2)
@@ -848,7 +848,7 @@ def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
         for participant in harness.service.store.get_round(harness.round_id)[
             "participants"
         ]
-        if harness.flavors[participant["source_sha256"]] == "JudgeFailFinal"
+        if harness.flavors[participant["submission_id"]] == "JudgeFailFinal"
     )
     assert failed["submission_id"] in harness.service.store.get_round(
         harness.round_id

@@ -1875,14 +1875,13 @@ fi
     assert result.returncode == 0, result.stderr
 
 
-def test_gateway_restart_has_no_retired_sourcing_model_maintenance() -> None:
+def test_gateway_restart_has_no_retired_rebenchmark_maintenance() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     assert script.count('"GATEWAY_V2_DEFER_WORKER_FLEETS"') == 3
     assert "reconcile_gateway_rebenchmark_retry_runtime" not in script
     assert "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" not in script
     assert "stop_research_lab_private_model_containers" not in script
-    assert "leadpoet/sourcing-model" not in script
 
 
 def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -> None:

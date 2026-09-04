@@ -132,7 +132,8 @@ def test_remote_protocol_checks_version_again_before_stage_move():
     source = MODULE._REMOTE
     assert "current_id != before_id or current_raw != raw" in source
     assert 'fail("version_race")' in source
-    assert '"--remove-from-version-id", before_id' in source
+    assert '"--version-stages", "AWSCURRENT"' in source
+    assert 'if updated == raw:' in source
     assert 'fail("secret_document_conflicting_duplicate")' in source
     assert 'comments=True, posix=True' in source
 
@@ -155,7 +156,7 @@ def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monke
     assert "redirect_stdout(sink)" in MODULE._RUNNER_WALLET_REMOTE
 
 
-def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True):
+def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True, return_state=False):
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"current": "initial", "versions": {"initial": raw}}))
     aws = tmp_path / "aws"
@@ -172,12 +173,10 @@ elif args[:2] == ["secretsmanager", "get-secret-value"]:
 elif args[:2] == ["secretsmanager", "put-secret-value"]:
     version = args[args.index("--client-request-token") + 1]
     state["versions"][version] = sys.stdin.read()
+    if args[args.index("--version-stages") + 1] == "AWSCURRENT":
+        state["current"] = version
     json.dump(state, open(path, "w"))
     print(json.dumps({"VersionId": version}))
-elif args[:2] == ["secretsmanager", "update-secret-version-stage"]:
-    state["current"] = args[args.index("--move-to-version-id") + 1]
-    json.dump(state, open(path, "w"))
-    print("{}")
 else:
     raise SystemExit(2)
 """)
@@ -204,6 +203,8 @@ else:
         return json.loads(result.stdout)
     assert result.returncode == 0, result.stdout
     final = json.loads(state.read_text())
+    if return_state:
+        return json.loads(result.stdout), final
     return final["versions"][final["current"]]
 
 
@@ -227,6 +228,21 @@ def test_remote_fake_aws_rejects_duplicate_target_key(tmp_path):
     raw = "LAB_ARENA_MODE=off\nLAB_ARENA_MODE=off\nOPENROUTER_API_KEY=or\nSCRAPINGDOG_API_KEY=sd\nDEEPLINE_API_KEY=deep\nSUPABASE_URL=https://db.example\nSUPABASE_ANON_KEY=anon\n"
     result = _run_remote_with_fake_aws(tmp_path, raw, expect_success=False)
     assert result == {"ok": False, "code": "target_key_duplicate"}
+
+
+def test_remote_fake_aws_noops_when_current_document_already_matches(tmp_path):
+    source = {
+        "OPENROUTER_API_KEY": "or", "SCRAPINGDOG_API_KEY": "sd",
+        "DEEPLINE_API_KEY": "deep", "SUPABASE_URL": "https://db.example",
+        "SUPABASE_ANON_KEY": "anon", "LAB_ARENA_MODE": "live",
+        "LAB_ARENA_OPENROUTER_API_KEY": "or", "LAB_ARENA_SCRAPINGDOG_API_KEY": "sd",
+        "LAB_ARENA_DEEPLINE_API_KEY": "deep", "LAB_ARENA_SUPABASE_URL": "https://db.example",
+        "LAB_ARENA_SUPABASE_ANON_KEY": "anon", "LAB_ARENA_SERVICE_KEY": "sb_secret_scoped-test",
+    }
+    raw = json.dumps(source, separators=(",", ":"))
+    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True)
+    assert result["unchanged"] is True
+    assert state == {"current": "initial", "versions": {"initial": raw}}
 
 
 def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypatch, tmp_path, capsys):

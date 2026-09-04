@@ -243,21 +243,21 @@ else:
 print_result = {"ok": True, "account": account, "format": document_format,
                 "changed_keys": sorted(updates), "applied": False,
                 "before_version": before_id}
+if updated == raw:
+    print_result["unchanged"] = True
+    print(json.dumps(print_result, separators=(",", ":")))
+    raise SystemExit(0)
 if not request["apply"]:
     print(json.dumps(print_result, separators=(",", ":")))
     raise SystemExit(0)
 candidate = str(uuid.uuid4())
 put = ["secretsmanager", "put-secret-value", "--secret-id", secret_id,
-       "--client-request-token", candidate, "--version-stages", "AWSPENDING",
+       "--client-request-token", candidate, "--version-stages", "AWSCURRENT",
        "--secret-string", "file:///dev/stdin", "--output", "json"]
-aws(put, updated)
 current_id, current_raw = get(secret_id)
 if current_id != before_id or current_raw != raw:
     fail("version_race")
-move = ["secretsmanager", "update-secret-version-stage", "--secret-id", secret_id,
-        "--version-stage", "AWSCURRENT", "--move-to-version-id", candidate,
-        "--remove-from-version-id", before_id, "--output", "json"]
-aws(move)
+aws(put, updated)
 after_id, after_raw = get(secret_id)
 if after_id != candidate or after_raw != updated:
     fail("post_apply_mismatch")

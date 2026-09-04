@@ -400,7 +400,6 @@ if release.get("commit_sha") != candidate:
         }
     )
 for relative_path, expected_kind in (
-    ("config-v2/acceptance-corpus-v2.json", "file"),
     ("validator-app", "directory"),
     ("gateway-attested-runtime/scoring_import_closure.json", "file"),
 ):

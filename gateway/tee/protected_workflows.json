@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "b52963d25090c5be57e21c0a7f90e679219fe449",
+  "baseline_commit": "d0db977777ea72a8836a837d35c28db186a6ba0f",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -1397,7 +1397,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:81977f6e20eb3a01db63eef7617cdbb4eacbee6d30682a9e9810a0ce285f069f",
+      "ast_sha256": "sha256:b6dc0a70a4ac094e511d7b250ff76c62c58f63c0ce76718dfe64c751b0fd9cbe",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1482,7 +1482,7 @@
       "symbol": "_catalog_bindings"
     },
     {
-      "ast_sha256": "sha256:1d9932b7894a80f6aeb053e8a988fd50134d909b61343f4abbb97c1e020f0fe0",
+      "ast_sha256": "sha256:13bebc64b84308551589b449fa79083165fe9ea810caffd98d7ff21e8ab32dab",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_official_host_availability"
     },
@@ -7272,7 +7272,7 @@
       "symbol": "build_loop_direction_reference_repair_messages"
     },
     {
-      "ast_sha256": "sha256:89c775d602a65d1db28566f1bb7f75b975c67630e7a0224ad94ff5954d02794c",
+      "ast_sha256": "sha256:01055837803b234aeed5eecfc38116b5df534148ba0f2d48c8c5207f12658e08",
       "path": "research_lab/code_editing.py",
       "symbol": "build_plan_alignment_judge_messages"
     },
@@ -8827,7 +8827,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:97db0b570d21077603d47b4196f7f1acaf60f023fba86bddb5d602c87e3f48c5",
-  "protected_source_commit": "706e51eb7350f4ff81da40eb469699c4a4adc3c3",
+  "manifest_hash": "sha256:2b0f036b6e61c19180ce15e42399e566c4e09f4165c268cc5891acb727086752",
+  "protected_source_commit": "d0db977777ea72a8836a837d35c28db186a6ba0f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

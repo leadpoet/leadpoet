@@ -16,11 +16,8 @@ import time
 from typing import Mapping
 
 from gateway.research_lab.config import (
-    HOSTED_PROXY_PREFIXES,
-    LEGACY_HOSTED_PROXY_PREFIXES,
     LEGACY_SCORING_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
-    V2_HOSTED_PROXY_PREFIXES,
     V2_SCORING_PROXY_PREFIXES,
     resolve_worker_process_count,
 )
@@ -33,11 +30,8 @@ from Leadpoet.utils.subnet_epoch import (
 TRUTHY = {"1", "true", "yes", "on"}
 WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
 DEFERRED_WORKER_FLEETS_ENV = "GATEWAY_V2_DEFER_WORKER_FLEETS"
-WORKER_FLEET_ROLES = frozenset(
-    {"gateway_autoresearch", "gateway_scoring"}
-)
+WORKER_FLEET_ROLES = frozenset({"gateway_scoring"})
 WORKER_FLEET_ROLE_BY_KIND = {
-    "hosted": "gateway_autoresearch",
     "scoring": "gateway_scoring",
 }
 DEFAULT_WORKER_STARTUP_TIMEOUT_SECONDS = 120.0
@@ -338,7 +332,6 @@ class ResearchLabWorkerFleetPlan:
 @dataclass(frozen=True)
 class ResearchLabWorkerAutoStartPlan:
     auto_start_enabled: bool
-    hosted: ResearchLabWorkerFleetPlan
     scoring: ResearchLabWorkerFleetPlan
 
 
@@ -347,28 +340,12 @@ def build_research_lab_worker_autostart_plan(
 ) -> ResearchLabWorkerAutoStartPlan:
     env = env or os.environ
     auto_start_enabled = _truthy_env(env, "RESEARCH_LAB_AUTO_START_WORKERS", "true")
-    hosted_proxies, hosted_proxy_source = _preferred_proxy_configuration(
-        env,
-        v2_prefixes=V2_HOSTED_PROXY_PREFIXES,
-        legacy_prefixes=LEGACY_HOSTED_PROXY_PREFIXES,
-    )
     scoring_proxies, scoring_proxy_source = _preferred_proxy_configuration(
         env,
         v2_prefixes=V2_SCORING_PROXY_PREFIXES,
         legacy_prefixes=LEGACY_SCORING_PROXY_PREFIXES,
     )
-    hosted_legacy_count = _int_env(env, "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT", 0)
     scoring_legacy_count = _int_env(env, "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", 0)
-
-    hosted_enabled = (
-        auto_start_enabled
-        and _truthy_env(env, "RESEARCH_LAB_AUTO_START_HOSTED_WORKERS", "true")
-        and (
-            _truthy_env(env, "RESEARCH_LAB_HOSTED_RUNS_ENABLED")
-            or _truthy_env(env, "RESEARCH_LAB_HOSTED_WORKER_ENABLED")
-        )
-        and (hosted_legacy_count > 0 or bool(hosted_proxies))
-    )
     public_baseline_enabled = _truthy_env(
         env,
         "RESEARCH_LAB_PUBLIC_BASELINE_REBENCHMARK_ENABLED",
@@ -381,14 +358,6 @@ def build_research_lab_worker_autostart_plan(
         and (scoring_legacy_count > 0 or bool(scoring_proxies))
     )
 
-    hosted_reason = ""
-    if not auto_start_enabled:
-        hosted_reason = "auto_start_disabled"
-    elif not (_truthy_env(env, "RESEARCH_LAB_HOSTED_RUNS_ENABLED") or _truthy_env(env, "RESEARCH_LAB_HOSTED_WORKER_ENABLED")):
-        hosted_reason = "hosted_runs_disabled"
-    elif hosted_legacy_count <= 0 and not hosted_proxies:
-        hosted_reason = "no_auto_research_proxies"
-
     scoring_reason = ""
     if not auto_start_enabled:
         scoring_reason = "auto_start_disabled"
@@ -397,21 +366,9 @@ def build_research_lab_worker_autostart_plan(
     elif scoring_legacy_count <= 0 and not scoring_proxies:
         scoring_reason = "no_qualification_proxies"
 
-    hosted_count = _resolve_worker_count(hosted_legacy_count, len(hosted_proxies))
     scoring_count = _resolve_worker_count(scoring_legacy_count, len(scoring_proxies))
     return ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=auto_start_enabled,
-        hosted=ResearchLabWorkerFleetPlan(
-            kind="hosted",
-            worker_count=hosted_count if hosted_enabled else 0,
-            worker_prefix=str(env.get("RESEARCH_LAB_HOSTED_WORKER_PREFIX", "research-lab-worker")),
-            log_level=str(env.get("RESEARCH_LAB_HOSTED_WORKER_LOG_LEVEL", "INFO")),
-            proxy_refs=tuple(_proxy_ref(proxy) for proxy in hosted_proxies),
-            enabled=hosted_enabled,
-            reason=hosted_reason,
-            proxy_source=hosted_proxy_source,
-            proxy_values=hosted_proxies,
-        ),
         scoring=ResearchLabWorkerFleetPlan(
             kind="scoring",
             worker_count=scoring_count if scoring_enabled else 0,
@@ -580,7 +537,7 @@ class ResearchLabWorkerSupervisor:
     def _start_fleet(self, fleet: ResearchLabWorkerFleetPlan) -> None:
         if fleet.kind != "scoring":
             raise ResearchLabWorkerStartupError(
-                "hosted Research Lab workers are retired",
+                "only scoring Research Lab workers are supported",
                 reason="worker_kind_retired",
                 fleet_kind=fleet.kind,
             )
@@ -616,7 +573,7 @@ class ResearchLabWorkerSupervisor:
     ) -> None:
         if fleet.kind != "scoring":
             raise ResearchLabWorkerStartupError(
-                "hosted Research Lab workers are retired",
+                "only scoring Research Lab workers are supported",
                 reason="worker_kind_retired",
                 fleet_kind=fleet.kind,
             )
@@ -883,7 +840,7 @@ class ResearchLabWorkerSupervisor:
     ) -> tuple[subprocess.Popen[bytes], int]:
         if fleet.kind != "scoring":
             raise ResearchLabWorkerStartupError(
-                "hosted Research Lab workers are retired",
+                "only scoring Research Lab workers are supported",
                 reason="worker_kind_retired",
                 fleet_kind=fleet.kind,
                 worker_index=index,
@@ -966,9 +923,7 @@ class ResearchLabWorkerSupervisor:
         dead = sorted(key for key, child in self.children.items() if child.poll() is not None)
         running = {key for key, child in self.children.items() if child.poll() is None}
         missing_ready = sorted(running - self._ready_children)
-        hosted_running = sum(key.startswith("hosted:") for key in running)
         scoring_running = sum(key.startswith("scoring:") for key in running)
-        expected_hosted = 0
         expected_scoring = (
             0
             if "gateway_scoring" in self.deferred_worker_fleet_roles
@@ -979,18 +934,10 @@ class ResearchLabWorkerSupervisor:
                 "authoritative V2 workers are not healthy: dead=%s missing_ready=%s"
                 % (dead, missing_ready)
             )
-        if self._full_topology_required() and (
-            hosted_running != expected_hosted
-            or scoring_running != expected_scoring
-        ):
+        if self._full_topology_required() and scoring_running != expected_scoring:
             raise ResearchLabWorkerStartupError(
-                "authoritative V2 worker count differs: hosted=%d/%d scoring=%d/%d"
-                % (
-                    hosted_running,
-                    expected_hosted,
-                    scoring_running,
-                    expected_scoring,
-                )
+                "authoritative V2 scoring worker count differs: scoring=%d/%d"
+                % (scoring_running, expected_scoring)
             )
         return {
             "schema_version": "leadpoet.research_lab_worker_health.v2",
@@ -1001,9 +948,6 @@ class ResearchLabWorkerSupervisor:
             "deferred_worker_fleet_roles": sorted(
                 self.deferred_worker_fleet_roles
             ),
-            "hosted_configured": self.plan.hosted.worker_count,
-            "hosted_expected_running": expected_hosted,
-            "hosted_running": hosted_running,
             "scoring_configured": self.plan.scoring.worker_count,
             "scoring_expected_running": expected_scoring,
             "scoring_running": scoring_running,

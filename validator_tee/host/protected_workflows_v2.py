@@ -106,7 +106,7 @@ PROTECTED_SYMBOLS = {
         "verify_compact_published_weight_authority_v2",
     ),
     "leadpoet_canonical/weight_computation.py": (
-        "_check_lab_arena_champion_triple",
+        "compute_final_weights_with_lab_arena",
         "weight_config_document",
         "normalize_to_u16_with_uids_pure",
         "research_lab_uid_weights_from_allocation",

@@ -25,6 +25,7 @@ from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     WeightComputationError,
     compute_final_weights,
+    compute_final_weights_with_lab_arena,
     weight_config_hash,
 )
 from leadpoet_canonical.weight_authority_v2 import gateway_weight_input_value_documents_v2
@@ -130,7 +131,7 @@ def test_weights_pay_the_king_exactly_and_refuse_a_triple_that_differs_from_its_
     basis = signed_basis(signer)
     baseline = compute_final_weights(snapshot())
     proposed = proposed_snapshot(basis)
-    result = compute_final_weights(proposed)
+    result = compute_final_weights_with_lab_arena(proposed)
     assert abs(sum(result["weights"]) - 1.0) < 1e-12
     assert abs(weight_of(result, 3) - 0.25) < 1e-9 and weight_of(baseline, 3) == 0.0
     assert weight_of(result, 0) <= weight_of(baseline, 0) + 1e-9  # the Arena amount is never burned
@@ -144,20 +145,23 @@ def test_weights_pay_the_king_exactly_and_refuse_a_triple_that_differs_from_its_
         mutate(broken)
         broken["config_hash"] = weight_config_hash(broken)
         with pytest.raises(WeightComputationError, match="lab_arena_reward_basis"):
-            compute_final_weights(broken)
+            compute_final_weights_with_lab_arena(broken)
     # A basis that does not hash is refused too.
     corrupt = dict(proposed, lab_arena_reward_basis=dict(basis, king_start_epoch=24800))
     with pytest.raises(WeightComputationError, match="lab_arena_reward_basis"):
-        compute_final_weights(corrupt)
+        compute_final_weights_with_lab_arena(corrupt)
     # An ineligible epoch names the basis and a zero triple; that is consistent.
     stale = signed_basis(signer, effective=24700, start=24700)
     zero = snapshot(lab_arena_reward_basis=stale)
     assert kernel.champion_values(stale, EPOCH, HOTKEYS)["eligible"] is False
-    assert compute_final_weights(zero)["weights"] == baseline["weights"]
+    assert compute_final_weights_with_lab_arena(zero)["weights"] == baseline["weights"]
 
 
 def test_rewards_off_leaves_every_document_byte_identical(signer):
     plain = snapshot()
+    assert canonical_json(compute_final_weights_with_lab_arena(plain)) == canonical_json(
+        compute_final_weights(plain)
+    )
     documents = gateway_weight_input_value_documents_v2(calculation_snapshot=plain, gateway_authority_event_hash=_sha("event"))
     assert "lab_arena_reward_basis" not in documents["champions"]["value"]
     again = gateway_weight_input_value_documents_v2(calculation_snapshot=snapshot(), gateway_authority_event_hash=_sha("event"))

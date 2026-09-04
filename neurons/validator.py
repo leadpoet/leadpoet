@@ -155,7 +155,7 @@ import aiohttp
 from urllib.parse import urlparse
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
-    compute_final_weights as compute_canonical_final_weights,
+    compute_final_weights_with_lab_arena as compute_canonical_final_weights,
     normalize_to_u16_with_uids_pure,
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,

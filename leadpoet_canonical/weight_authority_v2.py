@@ -37,7 +37,9 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PORT,
 )
-from leadpoet_canonical.weight_computation import compute_final_weights
+from leadpoet_canonical.weight_computation import (
+    compute_final_weights_with_lab_arena as compute_final_weights,
+)
 
 
 WEIGHT_SNAPSHOT_V2_SCHEMA_VERSION = "leadpoet.weight_snapshot.v2"

@@ -2,11 +2,12 @@
 
 This is the one kernel every side of the weight path runs: the validator host
 proposes with it, the gateway coordinator re-derives with it against the
-measured database row, and the canonical weight computation checks with it
-that a snapshot's champion triple is exactly what its basis implies. It is
-pure: no I/O, no environment, no chain state. ``verify_reward_basis_signature``
-is the only function that touches a dependency (``cryptography``), imported
-lazily, so importing this module needs the standard library alone.
+measured database row, and the Arena adapter checks with it that a snapshot's
+champion triple is exactly what its basis implies before it calls the frozen
+canonical weight computation. It is pure: no I/O, no environment, no chain
+state. ``verify_reward_basis_signature`` is the only function that touches a
+dependency (``cryptography``), imported lazily, so importing this module needs
+the standard library alone.
 
 Every constant the arithmetic needs comes from the signed basis itself
 (``reward_constants``): the pool percent of total emissions, the weekly king

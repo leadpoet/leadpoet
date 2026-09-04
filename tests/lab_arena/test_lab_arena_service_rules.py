@@ -501,6 +501,10 @@ def test_source_download_requires_the_active_execute_lease():
     service._clock = lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)
 
     assert service.handle_source("run-1", token) == payload
+    # PostgreSQL removes trailing fractional zeros, so PostgREST can return a
+    # five-digit fraction that Python 3.9's datetime.fromisoformat rejects.
+    run["lease_expires_at"] = "2026-09-02T01:10:00.12345+00:00"
+    assert service.handle_source("run-1", token) == payload
     with pytest.raises(ServiceError, match="lease_invalid"):
         service.handle_source("run-1", "b" * 64)
     run["status"] = "accepted"

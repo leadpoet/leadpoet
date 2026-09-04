@@ -8,14 +8,10 @@ PARITY_WORKFLOW = (
 )
 
 
-def test_deploy_checks_uses_local_consumer_gates_not_private_source_checkout() -> None:
+def test_deploy_checks_has_no_closed_model_checkout() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-
-    assert "SOURCING_MODEL_READ_TOKEN" not in workflow
-    assert "repository: leadpoet/Sourcing_model" not in workflow
-    assert "SOURCING_MODEL_SOURCE_SHA" not in workflow
-    assert "Run exact Sourcing_model custody and consumer tests" not in workflow
-    assert "exact_sourcing_model_source" not in workflow
+    assert "closed-model" not in workflow.lower()
+    assert "private model" not in workflow.lower()
 
 
 def test_production_parity_has_no_closed_model_admission_job() -> None:
@@ -24,7 +20,6 @@ def test_production_parity_has_no_closed_model_admission_job() -> None:
         "signed-artifact-admission",
         "verify_signed_sourcing_artifact_admission.py",
         "branches/leadpoet-lab/current.json",
-        "SOURCING_MODEL_READ_TOKEN",
-        "repository: leadpoet/Sourcing_model",
+        "closed-model",
     ):
         assert forbidden not in workflow

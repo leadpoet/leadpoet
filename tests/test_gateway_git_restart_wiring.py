@@ -2686,7 +2686,7 @@ def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
         assert f"COPY {path}/ ./{path}/" in dockerfile
 
 
-def test_gateway_restart_does_not_require_private_sourcing_model_identity() -> None:
+def test_gateway_restart_does_not_require_closed_model_identity() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in script

@@ -1369,7 +1369,13 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
-            self.completed.append({"run_id": lease.get("run_id"), "error": type(exc).__name__})
+            self.completed.append(
+                {
+                    "run_id": lease.get("run_id"),
+                    "error": type(exc).__name__,
+                    "detail": str(exc)[:200],
+                }
+            )
         finally:
             self._slots.release()
 

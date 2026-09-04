@@ -115,7 +115,7 @@ def test_per_icp_score_matches_the_shared_evaluation_math():
         _junk(),
         _breakdown(30.0, details=[_signal(1, 30.0)]),
     ]
-    gate, primary = evaluator.count_penalizable_false_positives(
+    gate, primary = competition.count_penalizable_false_positives(
         breakdowns, icp_has_intent_signals=True
     )
     expected = compute_evaluation_aggregates(
@@ -239,9 +239,9 @@ def test_breakdown_redaction_keeps_score_inputs_and_removes_payloads():
     originals = [_breakdown(70.0), _junk()]
     redacted = [verify.redact_breakdown(item) for item in originals]
     for intent in (True, False):
-        assert evaluator.count_penalizable_false_positives(
+        assert competition.count_penalizable_false_positives(
             redacted, icp_has_intent_signals=intent
-        ) == evaluator.count_penalizable_false_positives(
+        ) == competition.count_penalizable_false_positives(
             originals, icp_has_intent_signals=intent
         )
     forbidden = {

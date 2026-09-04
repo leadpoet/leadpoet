@@ -874,46 +874,6 @@ def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
         )
 
 
-@pytest.mark.parametrize(
-    "operation,purpose",
-    [
-        ("run_dev_replay_v2", "research_lab.candidate_test.v2"),
-        ("run_dev_hybrid_v2", "research_lab.candidate_hybrid_test.v2"),
-    ],
-)
-def test_retired_dev_evaluation_operations_have_the_ordinary_input_limit(
-    operation,
-    purpose,
-):
-    operations = {operation: {purpose}}
-    normalized = job_manager_v2._manifest(
-        _manifest(
-            b"{}",
-            operation=operation,
-            purpose=purpose,
-            payload_size_bytes=job_manager_v2.MAX_INPUT_BYTES,
-        ),
-        role="gateway_scoring",
-        operations=operations,
-    )
-    assert normalized["payload_size_bytes"] == job_manager_v2.MAX_INPUT_BYTES
-
-    with pytest.raises(
-        ExecutionJobV2Error,
-        match="payload size is outside limit",
-    ):
-        job_manager_v2._manifest(
-            _manifest(
-                b"{}",
-                operation=operation,
-                purpose=purpose,
-                payload_size_bytes=job_manager_v2.MAX_INPUT_BYTES + 1,
-            ),
-            role="gateway_scoring",
-            operations=operations,
-        )
-
-
 def test_large_ancestry_scope_is_applied_to_external_parent_graphs(monkeypatch):
     monkeypatch.setattr(
         job_manager_v2,

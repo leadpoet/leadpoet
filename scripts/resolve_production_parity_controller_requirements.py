@@ -15,8 +15,10 @@ REQUIRED_PACKAGES = (
     "bittensor",
     "boto3",
     "cryptography",
+    "fastapi",
     "httpx",
     "supabase",
+    "uvicorn",
 )
 NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)")
 

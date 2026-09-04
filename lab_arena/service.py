@@ -1488,11 +1488,19 @@ class ArenaService:
             raise ServiceError("lease_inactive", 409)
         raw_expiry = run.get("lease_expires_at")
         try:
-            expiry = (
-                raw_expiry
-                if isinstance(raw_expiry, datetime)
-                else datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
-            )
+            if isinstance(raw_expiry, datetime):
+                expiry = raw_expiry
+            else:
+                encoded_expiry = str(raw_expiry).replace("Z", "+00:00")
+                try:
+                    expiry = datetime.fromisoformat(encoded_expiry)
+                except ValueError:
+                    # Python 3.9 accepts only three or six fractional digits
+                    # here, but PostgreSQL can serialize any width from one
+                    # through six. strptime accepts the full PostgreSQL range.
+                    expiry = datetime.strptime(
+                        encoded_expiry, "%Y-%m-%dT%H:%M:%S.%f%z"
+                    )
             if expiry.tzinfo is None:
                 expiry = expiry.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):

@@ -70,6 +70,10 @@ from scripts.production_parity_snapshot import (  # noqa: E402
     restore_snapshot,
 )
 from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
+from qualification.competition_models import (  # noqa: E402
+    public_http_url,
+    validate_companies,
+)
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -78,6 +82,16 @@ RUN_RE = re.compile(r"^[a-z0-9-]{6,40}$")
 ARTIFACT_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 PINNED_IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@-]+@sha256:[0-9a-f]{64}$")
 SCHEMA_VERSION = "leadpoet.production_parity_full.v3"
+ARENA_REBENCHMARK_REQUEST_SCHEMA_VERSION = (
+    "leadpoet.production_parity_arena_rebenchmark_request.v1"
+)
+ARENA_REBENCHMARK_EVIDENCE_SCHEMA_VERSION = (
+    "leadpoet.production_parity_arena_rebenchmark_evidence.v1"
+)
+ARENA_BASELINE_SOURCE_URL = (
+    "https://github.com/leadpoet/pydantic-harness/"
+    "archive/refs/heads/main.tar.gz"
+)
 MINER_INTAKE_ENVIRONMENT_OVERRIDES = {
     "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
     "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
@@ -120,6 +134,7 @@ FULL_FAILURE_STAGES = frozenset(
         "clone-secret",
         "gateway-restart",
         "gateway-health",
+        "arena-rebenchmark",
         "weight-readiness",
         "allocation-handoff",
         "nonforwarding-weight-path",
@@ -693,6 +708,12 @@ def _validated_clone_environment(
         or str(values.get("DISABLE_BACKGROUND_TASKS") or "").lower()
         != "true"
         or str(values.get("LANGFUSE_ENABLED") or "").lower() != "false"
+        or str(values.get("LAB_ARENA_MODE") or "").lower() != "off"
+        or str(values.get("LAB_ARENA_SUPABASE_URL") or "").rstrip("/")
+        != normalized_origin
+        or not str(values.get("LAB_ARENA_SUPABASE_ANON_KEY") or "").strip()
+        or str(values.get("LAB_ARENA_SERVICE_JWT") or "").count(".") != 2
+        or values.get("LAB_ARENA_BUCKET") != artifact_bucket
         or values.get("AWS_S3_BUCKET") != artifact_bucket
         or values.get("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET")
         != artifact_bucket
@@ -1018,15 +1039,18 @@ def _required_secret_from_environment(
     raise FullParityError(f"{field} is unavailable in the authorized environment")
 
 
-def _clone_service_role_key(
+def _clone_role_key(
     values: Mapping[str, str],
     *,
+    environment_key: str,
+    expected_role: str,
+    role_label: str,
     candidate_sha: str,
     run_id: str,
     supabase_origin: str,
     jwt_secret: str,
 ) -> str:
-    """Verify the run-scoped 48-hour clone token."""
+    """Verify one run-scoped 48-hour clone token."""
 
     boundary = validate_production_parity_boundary_document_v2(
         values,
@@ -1042,11 +1066,11 @@ def _clone_service_role_key(
         or str(values.get("SUPABASE_URL") or "").rstrip("/") != normalized_origin
         or not jwt_secret
     ):
-        raise FullParityError("run-scoped clone service role identity differs")
+        raise FullParityError(f"run-scoped clone {role_label} identity differs")
     token = _required_secret_from_environment(
         values,
-        ("SUPABASE_SERVICE_ROLE_KEY",),
-        field="run-scoped clone service role credential",
+        (environment_key,),
+        field=f"run-scoped clone {role_label} credential",
     )
     try:
         encoded_header, encoded_payload, encoded_signature = token.split(".")
@@ -1082,7 +1106,7 @@ def _clone_service_role_key(
         expires_at = int(payload.get("exp"))
     except (binascii.Error, TypeError, ValueError, UnicodeDecodeError) as exc:
         raise FullParityError(
-            "run-scoped clone service role credential is invalid"
+            f"run-scoped clone {role_label} credential is invalid"
         ) from exc
     expected_signature = hmac.new(
         jwt_secret.encode("ascii"),
@@ -1094,16 +1118,60 @@ def _clone_service_role_key(
         header != {"alg": "HS256", "typ": "JWT"}
         or payload.get("aud") != "authenticated"
         or payload.get("iss") != "leadpoet-production-parity"
-        or payload.get("role") != "service_role"
+        or payload.get("role") != expected_role
         or expires_at - issued_at != 172_805
         or issued_at > now
         or expires_at <= now
         or not hmac.compare_digest(signature, expected_signature)
     ):
         raise FullParityError(
-            "run-scoped clone service role credential identity differs"
+            f"run-scoped clone {role_label} credential identity differs"
         )
     return token
+
+
+def _clone_service_role_key(
+    values: Mapping[str, str],
+    *,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    jwt_secret: str,
+) -> str:
+    """Verify the run-scoped clone service-role token."""
+
+    return _clone_role_key(
+        values,
+        environment_key="SUPABASE_SERVICE_ROLE_KEY",
+        expected_role="service_role",
+        role_label="service role",
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        jwt_secret=jwt_secret,
+    )
+
+
+def _clone_arena_service_role_key(
+    values: Mapping[str, str],
+    *,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    jwt_secret: str,
+) -> str:
+    """Verify the run-scoped clone Arena least-privilege token."""
+
+    return _clone_role_key(
+        values,
+        environment_key="LAB_ARENA_SERVICE_JWT",
+        expected_role="lab_arena_service",
+        role_label="Arena service role",
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        jwt_secret=jwt_secret,
+    )
 
 
 def _builtwith_key_from_secret(raw: str) -> str:
@@ -1134,6 +1202,1284 @@ def _last_json_document(output: str, *, field: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             return dict(value)
     raise FullParityError(f"{field} did not return redacted JSON evidence")
+
+
+def _arena_provider_keys(values: Mapping[str, str]) -> dict[str, str]:
+    """Resolve the three organizer-held provider credentials without exposing them."""
+
+    return {
+        "openrouter": _required_secret_from_environment(
+            values,
+            (
+                "LAB_ARENA_OPENROUTER_API_KEY",
+                "RESEARCH_LAB_OPENROUTER_API_KEY",
+                "RESEARCH_LAB_V2_OPENROUTER_API_KEY",
+                "OPENROUTER_API_KEY",
+                "OPENROUTER_KEY",
+                "QUALIFICATION_OPENROUTER_API_KEY",
+            ),
+            field="Arena OpenRouter credential",
+        ),
+        "scrapingdog": _required_secret_from_environment(
+            values,
+            (
+                "LAB_ARENA_SCRAPINGDOG_API_KEY",
+                "RESEARCH_LAB_SCRAPINGDOG_API_KEY",
+                "RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY",
+                "SCRAPINGDOG_API_KEY",
+                "QUALIFICATION_SCRAPINGDOG_API_KEY",
+            ),
+            field="Arena ScrapingDog credential",
+        ),
+        "deepline": _required_secret_from_environment(
+            values,
+            (
+                "LAB_ARENA_DEEPLINE_API_KEY",
+                "RESEARCH_LAB_DEEPLINE_API_KEY",
+                "RESEARCH_LAB_V2_DEEPLINE_API_KEY",
+                "DEEPLINE_API_KEY",
+            ),
+            field="Arena Deepline credential",
+        ),
+    }
+
+
+def _verified_arena_runsc_path(*, run_id: str) -> tuple[Path, dict[str, Any]]:
+    """Return the exact verified runsc artifact prepared by gateway restart."""
+
+    from gateway.tee.sandbox_runtime_artifact import (
+        load_runsc_lock,
+        verify_runsc_artifact,
+    )
+
+    if not RUN_RE.fullmatch(run_id):
+        raise FullParityError("Arena runsc identity is invalid")
+    lock_path = ROOT / "gateway" / "tee" / "runsc-runtime.lock.json"
+    lock = load_runsc_lock(lock_path)
+    artifact = (
+        FULL_WORK_ROOT
+        / run_id
+        / "runtime"
+        / "offline-artifacts"
+        / str(lock["artifact_filename"])
+    )
+    try:
+        metadata = artifact.lstat()
+    except OSError as exc:
+        raise FullParityError("Arena runsc artifact is unavailable") from exc
+    if (
+        artifact.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or not os.access(artifact, os.X_OK)
+    ):
+        raise FullParityError("Arena runsc artifact identity differs")
+    facts = verify_runsc_artifact(
+        lock_path=lock_path,
+        artifact_path=artifact,
+    )
+    return artifact, facts
+
+
+def _arena_https_evidence_urls(company: Mapping[str, Any]) -> set[str]:
+    """Return normalized public HTTPS evidence URLs for one company."""
+
+    values = list(company.get("fit_evidence_urls") or [])
+    for signal in company.get("intent_signals") or []:
+        if isinstance(signal, Mapping):
+            values.append(signal.get("url"))
+    required = company.get("required_attribute")
+    if isinstance(required, Mapping):
+        values.append(required.get("evidence_url"))
+    urls: set[str] = set()
+    for value in values:
+        try:
+            normalized = public_http_url(value)
+        except ValueError:
+            continue
+        if urlsplit(normalized).scheme == "https":
+            urls.add(normalized)
+    return urls
+
+
+def _successful_openrouter_settlement_count(
+    settlements: Sequence[Mapping[str, Any]],
+) -> int:
+    """Count settled OpenRouter calls with one successful provider response."""
+
+    successful = 0
+    for settlement in settlements:
+        terminal = settlement.get("terminal_response")
+        status = terminal.get("status") if isinstance(terminal, Mapping) else None
+        if (
+            settlement.get("entry_kind") == "settlement"
+            and settlement.get("provider") == "openrouter"
+            and isinstance(status, int)
+            and not isinstance(status, bool)
+            and 200 <= status < 300
+        ):
+            successful += 1
+    return successful
+
+
+def _validate_arena_rebenchmark_evidence(
+    value: Mapping[str, Any],
+    *,
+    candidate_sha: str,
+    run_id: str,
+    artifact_bucket: str,
+) -> dict[str, Any]:
+    """Require one complete, live, public-baseline Arena result."""
+
+    from lab_arena import contracts as arena_contracts
+
+    counts = value.get("counts")
+    providers = value.get("providers")
+    recovery = value.get("restart_recovery")
+    runtime = value.get("runtime")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (counts, providers, recovery, runtime)
+    ):
+        raise FullParityError("Arena rebenchmark evidence is incomplete")
+    assert isinstance(counts, Mapping)
+    assert isinstance(providers, Mapping)
+    assert isinstance(recovery, Mapping)
+    assert isinstance(runtime, Mapping)
+    configured = counts.get("configured_icp_count")
+    stage_1_count = counts.get("stage_1_icp_count")
+    stage_2_count = counts.get("stage_2_icp_count")
+    numeric_counts = (
+        configured,
+        stage_1_count,
+        stage_2_count,
+        counts.get("accepted_execute_runs"),
+        counts.get("accepted_score_runs"),
+        counts.get("scored_icp_count"),
+        counts.get("unique_icp_positions"),
+        counts.get("company_count"),
+        counts.get("evidence_url_count"),
+        providers.get("settled_provider_call_count"),
+        providers.get("execute_settled_provider_call_count"),
+        providers.get("score_settled_provider_call_count"),
+        providers.get("successful_openrouter_execute_call_count"),
+        providers.get("successful_openrouter_score_settlement_count"),
+    )
+    provider_names = providers.get("names")
+    evaluation_date = str(value.get("evaluation_date") or "")
+    try:
+        final_score = float(value.get("baseline_final_score"))
+        set_id = int(value.get("daily_icp_set_id"))
+    except (TypeError, ValueError) as exc:
+        raise FullParityError("Arena rebenchmark evidence is incomplete") from exc
+    if any(
+        isinstance(item, bool) or not isinstance(item, int)
+        for item in numeric_counts
+    ):
+        raise FullParityError("Arena rebenchmark evidence is incomplete")
+    assert isinstance(configured, int)
+    icp_results = value.get("icp_results")
+    if not isinstance(icp_results, list) or len(icp_results) != configured:
+        raise FullParityError("Arena rebenchmark evidence is incomplete")
+    per_icp_count_fields = (
+        "company_count",
+        "valid_company_with_https_evidence_count",
+        "https_evidence_url_count",
+        "successful_openrouter_execute_call_count",
+        "successful_openrouter_score_settlement_count",
+    )
+    positions: set[int] = set()
+    for result in icp_results:
+        if not isinstance(result, Mapping):
+            raise FullParityError("Arena rebenchmark evidence is incomplete")
+        position = result.get("icp_position")
+        per_icp_counts = tuple(result.get(name) for name in per_icp_count_fields)
+        if (
+            isinstance(position, bool)
+            or not isinstance(position, int)
+            or result.get("execute_accepted") is not True
+            or result.get("score_accepted") is not True
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 1
+                for item in per_icp_counts
+            )
+        ):
+            raise FullParityError("Arena rebenchmark evidence is incomplete")
+        positions.add(position)
+    if positions != set(range(configured)):
+        raise FullParityError("Arena rebenchmark evidence is incomplete")
+    if (
+        value.get("schema_version")
+        != ARENA_REBENCHMARK_EVIDENCE_SCHEMA_VERSION
+        or value.get("candidate_sha") != candidate_sha
+        or value.get("run_id") != run_id
+        or value.get("artifact_bucket") != artifact_bucket
+        or value.get("status") != "passed"
+        or value.get("mode") != "shadow"
+        or value.get("baseline_source_url") != ARENA_BASELINE_SOURCE_URL
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", evaluation_date) is None
+        or str(set_id) != evaluation_date.replace("-", "")
+        or re.fullmatch(
+            r"arena-\d{4}-\d{2}-\d{2}-[a-z0-9]{1,16}",
+            str(value.get("round_id") or ""),
+        )
+        is None
+        or stage_1_count != len(arena_contracts.stage_positions(1))
+        or stage_2_count != len(arena_contracts.stage_positions(2))
+        or configured != stage_1_count + stage_2_count
+        or configured != arena_contracts.BENCHMARK_ICP_COUNT
+        or any(counts.get(name) != configured for name in (
+            "accepted_execute_runs",
+            "accepted_score_runs",
+            "scored_icp_count",
+            "unique_icp_positions",
+        ))
+        or int(counts.get("company_count") or 0) < 1
+        or int(counts.get("evidence_url_count") or 0) < 1
+        or not math.isfinite(final_score)
+        or not 0.0 <= final_score <= 100.0
+        or not isinstance(provider_names, list)
+        or any(not isinstance(name, str) for name in provider_names)
+        or "openrouter" not in provider_names
+        or int(providers.get("settled_provider_call_count") or 0) < 2
+        or int(providers.get("execute_settled_provider_call_count") or 0) < 1
+        or int(providers.get("score_settled_provider_call_count") or 0) < 1
+        or int(providers.get("successful_openrouter_execute_call_count") or 0)
+        < configured
+        or int(
+            providers.get("successful_openrouter_score_settlement_count") or 0
+        )
+        < configured
+        or providers.get("transport") != "live-httpx"
+        or runtime.get("runner") != "lab_arena.runner.Runner"
+        or runtime.get("sandbox") != "gvisor-runsc"
+        or runtime.get("api") != "lab_arena.api.loopback-http"
+        or runtime.get("object_store") != "s3"
+        or runtime.get("judge_image_materialization")
+        != "exact-candidate-local-docker"
+        or recovery.get("service_restarted") is not True
+        or recovery.get("runner_restarted") is not True
+        or recovery.get("resumed_round_status") != "stage1"
+        or recovery.get("persisted_execute_runs") != stage_1_count
+        or value.get("publication_visible") is not True
+        or value.get("public_benchmark_visible") is not True
+        or value.get("public_results_visible") is not True
+        or value.get("production_database_mutated") is not False
+        or value.get("production_chain_mutated") is not False
+    ):
+        raise FullParityError("Arena rebenchmark evidence is incomplete")
+    return dict(value)
+
+
+def _run_arena_rebenchmark_path(
+    *,
+    region: str,
+    candidate_sha: str,
+    run_id: str,
+    supabase_origin: str,
+    gateway_env_file: Path,
+    artifact_bucket: str,
+    jwt_secret: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Run the public baseline through the real Arena on the disposable clone."""
+
+    if region != "us-east-1" or timeout_seconds <= 0:
+        raise FullParityError("Arena rebenchmark request is invalid")
+    values = _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
+    )
+    _clone_arena_service_role_key(
+        values,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        jwt_secret=jwt_secret,
+    )
+    runsc_path, runsc_facts = _verified_arena_runsc_path(run_id=run_id)
+    request = {
+        "schema_version": ARENA_REBENCHMARK_REQUEST_SCHEMA_VERSION,
+        "candidate_sha": candidate_sha,
+        "run_id": run_id,
+        "artifact_bucket": artifact_bucket,
+        "region": region,
+        "supabase_origin": supabase_origin,
+        "gateway_env_file": str(gateway_env_file),
+        "runsc_path": str(runsc_path),
+        "runsc_artifact_hash": runsc_facts["artifact_hash"],
+        "timeout_seconds": min(timeout_seconds, MAX_FULL_TIMEOUT_SECONDS),
+    }
+    result = _run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--arena-rebenchmark-child",
+        ],
+        timeout=min(timeout_seconds, MAX_FULL_TIMEOUT_SECONDS),
+        env=_clone_child_environment(region=region),
+        input_text=json.dumps(request, separators=(",", ":")),
+    )
+    request.clear()
+    if (
+        result.returncode != 0
+        or len(result.stdout or "") > 256 * 1024
+        or len(result.stderr or "") > 64 * 1024
+    ):
+        raise FullParityError("Arena rebenchmark child failed closed")
+    evidence = _last_json_document(
+        result.stdout or "", field="Arena rebenchmark child"
+    )
+    return _validate_arena_rebenchmark_evidence(
+        evidence,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        artifact_bucket=artifact_bucket,
+    )
+
+
+class _ParityArenaChainReads:
+    """The shadow run needs runner ownership checks, not chain authority."""
+
+    def __init__(self, runner_hotkey: str) -> None:
+        self._runner_hotkey = runner_hotkey
+
+    def finalized_head(self) -> Any:
+        raise RuntimeError("chain reads are disabled in production parity")
+
+    def metagraph(self, finalized: bool = True) -> Any:
+        del finalized
+        raise RuntimeError("chain reads are disabled in production parity")
+
+    def current_settlement_epoch(self) -> int:
+        raise RuntimeError("chain reads are disabled in production parity")
+
+    def hotkeys_owned_by_same_coldkey(self, hotkey: str) -> list[str]:
+        return [hotkey] if hotkey == self._runner_hotkey else []
+
+    def uid_for_hotkey(self, hotkey: str) -> None:
+        del hotkey
+        return None
+
+
+class _ArenaApiServer:
+    """Run the candidate Arena FastAPI app on one loopback HTTP socket."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+        self._server: Any | None = None
+        self._socket: Any | None = None
+        self._thread: threading.Thread | None = None
+        self.base_url = ""
+
+    def start(self) -> str:
+        import socket
+
+        import uvicorn
+
+        if self._server is not None:
+            raise FullParityError("Arena API server already started")
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2048)
+        port = int(listener.getsockname()[1])
+        server = uvicorn.Server(
+            uvicorn.Config(
+                self._app,
+                host="127.0.0.1",
+                port=port,
+                access_log=False,
+                log_level="critical",
+                lifespan="off",
+            )
+        )
+        thread = threading.Thread(
+            target=server.run,
+            kwargs={"sockets": [listener]},
+            name="production-parity-arena-api",
+            daemon=True,
+        )
+        self._server = server
+        self._socket = listener
+        self._thread = thread
+        self.base_url = f"http://127.0.0.1:{port}"
+        thread.start()
+        deadline = time.monotonic() + 30
+        opener = build_opener(ProxyHandler({}))
+        while time.monotonic() < deadline:
+            if not thread.is_alive():
+                break
+            try:
+                with opener.open(
+                    self.base_url + "/arena/v1/current", timeout=2
+                ) as response:
+                    if int(response.status) == 200:
+                        return self.base_url
+            except (OSError, TimeoutError, URLError):
+                time.sleep(0.1)
+        self.stop()
+        raise FullParityError("Arena API server did not become ready")
+
+    def stop(self) -> None:
+        server = self._server
+        listener = self._socket
+        thread = self._thread
+        if server is None:
+            return
+        server.should_exit = True
+        if thread is not None:
+            thread.join(timeout=30)
+        try:
+            if listener is not None:
+                listener.close()
+        finally:
+            self._server = None
+            self._socket = None
+            self._thread = None
+        if thread is not None and thread.is_alive():
+            raise FullParityError("Arena API server did not stop")
+
+
+def _build_arena_judge_rootfs(
+    *,
+    candidate_sha: str,
+    run_id: str,
+    arena_root: Path,
+) -> dict[str, Any]:
+    """Build the exact candidate judge and export its merged root filesystem."""
+
+    suffix = hashlib.sha256(run_id.encode("ascii")).hexdigest()[:12]
+    image_tag = f"leadpoet-parity-judge:{candidate_sha[:12]}-{suffix}"
+    container_name = f"leadpoet-parity-judge-{suffix}"
+    build_log = arena_root / "judge-build.log"
+    build = _run(
+        [
+            "docker",
+            "build",
+            "--pull",
+            "--platform",
+            "linux/amd64",
+            "--file",
+            str(ROOT / "lab_arena" / "judge" / "Dockerfile"),
+            "--build-arg",
+            f"LEADPOET_BUILD_COMMIT={candidate_sha}",
+            "--tag",
+            image_tag,
+            str(ROOT),
+        ],
+        timeout=7200,
+        log_path=build_log,
+    )
+    _require(build, stage="exact-candidate Arena judge build")
+    inspect_result = _run(
+        ["docker", "image", "inspect", "--format={{.Id}}", image_tag],
+        timeout=60,
+    )
+    image_digest = _require(
+        inspect_result, stage="exact-candidate Arena judge identity"
+    ).strip()
+    if HASH_RE.fullmatch(image_digest) is None:
+        raise FullParityError("exact-candidate Arena judge identity differs")
+    image_reference = (
+        "localhost/leadpoet/production-parity-judge@" + image_digest
+    )
+    image_root = arena_root / "runner" / "images"
+    cache_target = image_root / ("sha256-" + image_digest.removeprefix("sha256:"))
+    rootfs = cache_target / "rootfs"
+    archive = arena_root / "judge-rootfs.tar"
+    image_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    cache_target.mkdir(mode=0o700)
+    rootfs.mkdir(mode=0o700)
+    created = False
+    try:
+        _require(
+            _run(
+                ["docker", "create", "--name", container_name, image_tag],
+                timeout=60,
+            ),
+            stage="exact-candidate Arena judge container",
+        )
+        created = True
+        _require(
+            _run(
+                [
+                    "docker",
+                    "export",
+                    "--output",
+                    str(archive),
+                    container_name,
+                ],
+                timeout=1800,
+            ),
+            stage="exact-candidate Arena judge export",
+        )
+        _require(
+            _run(
+                [
+                    "tar",
+                    "--extract",
+                    "--file",
+                    str(archive),
+                    "--directory",
+                    str(rootfs),
+                    "--numeric-owner",
+                ],
+                timeout=1800,
+            ),
+            stage="exact-candidate Arena judge rootfs",
+        )
+    finally:
+        archive.unlink(missing_ok=True)
+        if created:
+            _run(
+                ["docker", "container", "rm", "--force", container_name],
+                timeout=60,
+            )
+    if (
+        not (rootfs / "model" / "scorer_entrypoint.py").is_file()
+        or not (rootfs / "usr" / "local" / "bin" / "python3").exists()
+    ):
+        raise FullParityError("exact-candidate Arena judge rootfs is incomplete")
+    marker = cache_target / ".exported"
+    marker.write_text(image_digest, encoding="ascii")
+    marker.chmod(0o600)
+    return {
+        "image_digest": image_digest,
+        "image_reference": image_reference,
+        "image_tag": image_tag,
+        "image_cache_root": image_root,
+    }
+
+
+def _remove_arena_judge_image(image_tag: str) -> None:
+    if image_tag:
+        _run(
+            ["docker", "image", "rm", "--force", image_tag],
+            timeout=120,
+        )
+
+
+def _build_parity_arena_service(
+    *,
+    values: Mapping[str, str],
+    artifact_bucket: str,
+    region: str,
+    runner_hotkey: str,
+    baseline_hotkey: str,
+    scorer_image_digest: str,
+    scorer_image_reference: str,
+    provider_keys: Mapping[str, str],
+    price_table: Mapping[str, Any],
+) -> tuple[Any, Any]:
+    """Build the production Arena service against only disposable state."""
+
+    from lab_arena import broker as broker_module
+    from lab_arena import chain as chain_module
+    from lab_arena.api import create_app
+    from lab_arena.service import (
+        ArenaService,
+        RoundDefaults,
+        S3ObjectStore,
+        ServiceConfig,
+    )
+    from lab_arena.store import ArenaStore, PostgrestTransport
+    from lab_arena.wiring import fetch_public_source_archive
+
+    transport = PostgrestTransport(
+        str(values["LAB_ARENA_SUPABASE_URL"]),
+        anon_key=str(values["LAB_ARENA_SUPABASE_ANON_KEY"]),
+        service_jwt=str(values["LAB_ARENA_SERVICE_JWT"]),
+        timeout_seconds=30,
+    )
+    store = ArenaStore(transport)
+    object_store = S3ObjectStore(artifact_bucket, region_name=region)
+
+    def key_for(provider: str) -> str:
+        secret = str(provider_keys.get(provider) or "")
+        if not secret:
+            raise broker_module.BrokerError("broker_unavailable")
+        return secret
+
+    def broker_factory(
+        service: Any, round_row: Mapping[str, Any]
+    ) -> Any:
+        del round_row
+        judge_models = sorted(
+            {
+                str(model)
+                for model in (
+                    service.scorer_policy.get("judge_models") or {}
+                ).values()
+                if model
+            }
+        )
+        return broker_module.Broker(
+            store=store,
+            key_for=key_for,
+            judge_models=judge_models,
+            price_table=price_table,
+            transport=broker_module.HttpxProviderTransport(),
+        )
+
+    def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:
+        del active_at
+        return store.current_daily_icp_set(set_id)
+
+    service = ArenaService(
+        ServiceConfig(
+            mode="shadow",
+            store=store,
+            object_store=object_store,
+            signer=None,
+            chain=_ParityArenaChainReads(runner_hotkey),
+            verify_signature=chain_module.verify_hotkey_signature,
+            daily_icp_source=daily_icp_source,
+            banned_hotkeys_source=lambda: (),
+            broker_factory=broker_factory,
+            defaults=RoundDefaults(
+                runner_hotkeys=(runner_hotkey,),
+                baseline_hotkey=baseline_hotkey,
+                baseline_source_url=ARENA_BASELINE_SOURCE_URL,
+                scorer_image_digest=scorer_image_digest,
+                scorer_image_reference=scorer_image_reference,
+                daily_cutoff_hour_utc=None,
+                rewards_enabled=False,
+            ),
+            baseline_source_fetcher=fetch_public_source_archive,
+            reward_signer_factory=None,
+        )
+    )
+    return service, create_app(service)
+
+
+def _build_parity_arena_runner(
+    *,
+    api_base_url: str,
+    round_id: str,
+    evaluation_date: str,
+    runner_keypair: Any,
+    runsc_path: Path,
+    runner_root: Path,
+) -> tuple[Any, Any]:
+    """Build the real signed Arena runner with the verified runsc runtime."""
+
+    from lab_arena import runner as runner_module
+    from lab_arena import runtime as runtime_module
+
+    sandboxes = runner_root / "sandboxes"
+    runs = runner_root / "runs"
+    images = runner_root / "images"
+    sources = runner_root / "sources"
+    for directory in (runner_root, sandboxes, runs, images, sources):
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if directory.is_symlink() or not directory.is_dir():
+            raise FullParityError("Arena runner work directory is unsafe")
+        directory.chmod(0o700)
+
+    def refuse_image_export(
+        image_reference: str, image_digest: str, target_dir: Path
+    ) -> None:
+        del image_reference, image_digest, target_dir
+        raise runner_module.RunnerError(
+            "exact-candidate Arena judge rootfs is not preloaded"
+        )
+
+    api = runner_module.HttpArenaApiClient(api_base_url)
+    api.round(round_id)
+    cache = runner_module.ImageCache(images, refuse_image_export)
+    source_cache = runner_module.SourceCache(sources, api.source)
+    sandbox_runtime = runtime_module.RunscRuntime(
+        runtime_module.RuntimeConfig(
+            runsc_path=runsc_path,
+            work_dir=sandboxes,
+        )
+    )
+    identity = runner_module.RunnerIdentity(
+        hotkey=runner_keypair.ss58_address,
+        sign=lambda message: runner_keypair.sign(
+            message.encode("utf-8")
+        ).hex(),
+    )
+    config = runner_module.RunnerConfig(
+        round_id=round_id,
+        identity=identity,
+        api=api,
+        sandbox_runtime=sandbox_runtime,
+        image_cache=cache,
+        source_cache=source_cache,
+        work_dir=runs,
+        max_parallel_runs=8,
+        evaluation_date=evaluation_date,
+        socket_root=Path("/tmp"),
+    )
+    return runner_module.Runner(config), api
+
+
+def _drain_arena_assignments(
+    *,
+    service: Any,
+    runner: Any,
+    round_id: str,
+    stage: int,
+    kind: str,
+    deadline: float,
+) -> list[dict[str, Any]]:
+    """Run until every configured position has one accepted real result."""
+
+    from lab_arena import contracts as arena_contracts
+
+    expected_positions = set(arena_contracts.stage_positions(stage))
+    while True:
+        rows = service.store.list_runs(round_id, stage=stage, kind=kind)
+        if rows and all(
+            row.get("status") in {"accepted", "failed"} for row in rows
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise FullParityError("Arena assignment deadline expired")
+        service.store.expire_leases(round_id)
+        taken = runner.run_once(max_claims=1000)
+        if taken == 0:
+            time.sleep(2)
+    accepted = [row for row in rows if row.get("status") == "accepted"]
+    accepted_positions = {int(row["icp_position"]) for row in accepted}
+    if (
+        accepted_positions != expected_positions
+        or len(accepted) != len(expected_positions)
+        or any(
+            row.get("status") in {"pending", "leased", "submitted"}
+            for row in rows
+        )
+    ):
+        raise FullParityError(
+            f"Arena {kind} did not accept every configured ICP"
+        )
+    return [dict(row) for row in accepted]
+
+
+def _require_arena_round_status(
+    service: Any, round_id: str, expected: str
+) -> dict[str, Any]:
+    row = service.store.get_round(round_id)
+    if not isinstance(row, Mapping) or row.get("status") != expected:
+        raise FullParityError(f"Arena round did not reach {expected}")
+    return dict(row)
+
+
+def _arena_public_json(base_url: str, path: str) -> dict[str, Any]:
+    opener = build_opener(ProxyHandler({}), _RejectCloneRedirects())
+    try:
+        with opener.open(base_url.rstrip("/") + path, timeout=30) as response:
+            if int(response.status) != 200:
+                raise FullParityError("Arena public result is unavailable")
+            value = json.load(response)
+    except (HTTPError, OSError, TimeoutError, URLError, ValueError) as exc:
+        raise FullParityError("Arena public result is unavailable") from exc
+    if not isinstance(value, Mapping):
+        raise FullParityError("Arena public result is invalid")
+    return dict(value)
+
+
+def _close_parity_arena_runtime(
+    *,
+    runner: Any | None,
+    api_client: Any | None,
+    api_server: _ArenaApiServer | None,
+    service: Any | None,
+) -> None:
+    errors = []
+    for resource, method in (
+        (runner, "close"),
+        (api_client, "close"),
+        (api_server, "stop"),
+    ):
+        if resource is None:
+            continue
+        try:
+            getattr(resource, method)()
+        except Exception as exc:  # noqa: BLE001 - child reports a fixed error only
+            errors.append(type(exc).__name__)
+    if service is not None:
+        try:
+            service.store.close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(type(exc).__name__)
+    if errors:
+        raise FullParityError("Arena runtime cleanup failed")
+
+
+def _run_arena_rebenchmark_child(
+    request: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Execute one complete public-baseline daily Arena round on the clone."""
+
+    if (
+        request.get("schema_version")
+        != ARENA_REBENCHMARK_REQUEST_SCHEMA_VERSION
+        or not SHA_RE.fullmatch(str(request.get("candidate_sha") or ""))
+        or not RUN_RE.fullmatch(str(request.get("run_id") or ""))
+        or not ARTIFACT_BUCKET_RE.fullmatch(
+            str(request.get("artifact_bucket") or "")
+        )
+        or request.get("region") != "us-east-1"
+        or isinstance(request.get("timeout_seconds"), bool)
+        or not isinstance(request.get("timeout_seconds"), int)
+        or not 1 <= int(request.get("timeout_seconds") or 0) <= MAX_FULL_TIMEOUT_SECONDS
+    ):
+        raise FullParityError("Arena rebenchmark child request is invalid")
+    candidate_sha = str(request["candidate_sha"])
+    run_id = str(request["run_id"])
+    artifact_bucket = str(request["artifact_bucket"])
+    region = str(request["region"])
+    supabase_origin = str(request.get("supabase_origin") or "")
+    gateway_env_file = Path(str(request.get("gateway_env_file") or ""))
+    arena_root = FULL_WORK_ROOT / run_id / "runtime" / "arena"
+    if arena_root.exists() or arena_root.is_symlink():
+        raise FullParityError("Arena work directory already exists")
+    values = _validated_clone_environment(
+        gateway_env_file,
+        candidate_sha=candidate_sha,
+        run_id=run_id,
+        supabase_origin=supabase_origin,
+        artifact_bucket=artifact_bucket,
+    )
+    runsc_path, runsc_facts = _verified_arena_runsc_path(run_id=run_id)
+    if (
+        str(request.get("runsc_path") or "") != str(runsc_path)
+        or request.get("runsc_artifact_hash") != runsc_facts["artifact_hash"]
+    ):
+        raise FullParityError("Arena runsc child identity differs")
+    provider_keys = _arena_provider_keys(values)
+    arena_root.mkdir(mode=0o700)
+    deadline = time.monotonic() + int(request["timeout_seconds"])
+    image: dict[str, Any] = {}
+    service = runner = api_client = api_server = None
+    try:
+        image = _build_arena_judge_rootfs(
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            arena_root=arena_root,
+        )
+        from bittensor_wallet import Keypair
+        from lab_arena import broker as broker_module
+        from lab_arena import contracts as arena_contracts
+
+        runner_keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+        baseline_keypair = Keypair.create_from_mnemonic(
+            Keypair.generate_mnemonic()
+        )
+        price_table = broker_module.fetch_openrouter_price_table()
+        service, app = _build_parity_arena_service(
+            values=values,
+            artifact_bucket=artifact_bucket,
+            region=region,
+            runner_hotkey=runner_keypair.ss58_address,
+            baseline_hotkey=baseline_keypair.ss58_address,
+            scorer_image_digest=str(image["image_digest"]),
+            scorer_image_reference=str(image["image_reference"]),
+            provider_keys=provider_keys,
+            price_table=price_table,
+        )
+        startup = service.startup_checks()
+        now = datetime.now(timezone.utc)
+        evaluation_date = now.date().isoformat()
+        set_id = int(now.strftime("%Y%m%d"))
+        daily = service.store.current_daily_icp_set(set_id)
+        raw_icps = daily.get("icps") if isinstance(daily, Mapping) else None
+        icps = (
+            [dict(item) for item in raw_icps if isinstance(item, Mapping)]
+            if isinstance(raw_icps, list)
+            else []
+        )
+        icp_ids = [str(item.get("icp_id") or "") for item in icps]
+        if (
+            startup.get("database_identity", {}).get("current_user")
+            != "lab_arena_service"
+            or daily.get("status") != "ready"
+            or int(daily.get("set_id") or 0) != set_id
+            or len(icps) != arena_contracts.BENCHMARK_ICP_COUNT
+            or len(icps) != len(raw_icps or [])
+            or any(not item for item in icp_ids)
+            or len(set(icp_ids)) != len(icp_ids)
+            or datetime.now(timezone.utc).date().isoformat() != evaluation_date
+        ):
+            raise FullParityError("latest clone daily ICP set is not ready")
+        suffix = hashlib.sha256(
+            f"{run_id}:{candidate_sha}".encode("ascii")
+        ).hexdigest()[:12]
+        round_id = f"arena-{evaluation_date}-{suffix}"
+        configuration = service.create_round(now, round_id=round_id)
+        _require_arena_round_status(service, round_id, "open")
+        stage_counts = {
+            1: int(configuration["stage_1_icp_count"]),
+            2: int(configuration["stage_2_icp_count"]),
+        }
+        configured_count = stage_counts[1] + stage_counts[2]
+        expected_positions = {
+            stage: set(arena_contracts.stage_positions(stage))
+            for stage in (1, 2)
+        }
+        if (
+            configured_count != arena_contracts.BENCHMARK_ICP_COUNT
+            or any(
+                len(expected_positions[stage]) != stage_counts[stage]
+                for stage in (1, 2)
+            )
+        ):
+            raise FullParityError("Arena round ICP configuration differs")
+        committed = service.commit_benchmark(round_id)
+        if int(committed.get("participants") or 0) != 1:
+            raise FullParityError("Arena baseline was not the sole participant")
+        round_row = _require_arena_round_status(service, round_id, "committed")
+        participants = list(round_row.get("participants") or [])
+        if len(participants) != 1 or participants[0].get("is_king") is not True:
+            raise FullParityError("Arena baseline participant is invalid")
+        baseline_submission_id = str(participants[0].get("submission_id") or "")
+
+        opened_stage1 = service.open_stage(round_id, 1)
+        if int(opened_stage1.get("assignments") or 0) != stage_counts[1]:
+            raise FullParityError("Arena stage 1 assignments differ")
+        _require_arena_round_status(service, round_id, "stage1")
+        api_server = _ArenaApiServer(app)
+        api_base_url = api_server.start()
+        runner, api_client = _build_parity_arena_runner(
+            api_base_url=api_base_url,
+            round_id=round_id,
+            evaluation_date=evaluation_date,
+            runner_keypair=runner_keypair,
+            runsc_path=runsc_path,
+            runner_root=arena_root / "runner",
+        )
+        stage1_execute = _drain_arena_assignments(
+            service=service,
+            runner=runner,
+            round_id=round_id,
+            stage=1,
+            kind="execute",
+            deadline=deadline,
+        )
+        persisted_execute_runs = len(stage1_execute)
+
+        _close_parity_arena_runtime(
+            runner=runner,
+            api_client=api_client,
+            api_server=api_server,
+            service=service,
+        )
+        service = runner = api_client = api_server = None
+
+        service, app = _build_parity_arena_service(
+            values=values,
+            artifact_bucket=artifact_bucket,
+            region=region,
+            runner_hotkey=runner_keypair.ss58_address,
+            baseline_hotkey=baseline_keypair.ss58_address,
+            scorer_image_digest=str(image["image_digest"]),
+            scorer_image_reference=str(image["image_reference"]),
+            provider_keys=provider_keys,
+            price_table=price_table,
+        )
+        service.startup_checks()
+        _require_arena_round_status(service, round_id, "stage1")
+        recovered = service.store.list_runs(
+            round_id, stage=1, status="accepted", kind="execute"
+        )
+        if len(recovered) != persisted_execute_runs:
+            raise FullParityError("Arena restart did not recover stage results")
+        api_server = _ArenaApiServer(app)
+        api_base_url = api_server.start()
+        runner, api_client = _build_parity_arena_runner(
+            api_base_url=api_base_url,
+            round_id=round_id,
+            evaluation_date=evaluation_date,
+            runner_keypair=runner_keypair,
+            runsc_path=runsc_path,
+            runner_root=arena_root / "runner",
+        )
+
+        service.close_stage(round_id, 1)
+        _require_arena_round_status(service, round_id, "stage1_closed")
+        opened_scoring = service.open_scoring(round_id, 1)
+        if int(opened_scoring.get("assignments") or 0) != stage_counts[1]:
+            raise FullParityError("Arena stage 1 scoring assignments differ")
+        _require_arena_round_status(service, round_id, "stage1_scoring")
+        stage1_score = _drain_arena_assignments(
+            service=service,
+            runner=runner,
+            round_id=round_id,
+            stage=1,
+            kind="score",
+            deadline=deadline,
+        )
+        service.close_scoring(round_id, 1)
+        _require_arena_round_status(service, round_id, "stage1_judged")
+        service.score_stage(round_id, 1)
+        _require_arena_round_status(service, round_id, "stage1_scored")
+
+        opened_stage2 = service.open_stage(round_id, 2)
+        if int(opened_stage2.get("assignments") or 0) != stage_counts[2]:
+            raise FullParityError("Arena stage 2 assignments differ")
+        _require_arena_round_status(service, round_id, "stage2")
+        stage2_execute = _drain_arena_assignments(
+            service=service,
+            runner=runner,
+            round_id=round_id,
+            stage=2,
+            kind="execute",
+            deadline=deadline,
+        )
+        service.close_stage(round_id, 2)
+        _require_arena_round_status(service, round_id, "stage2_closed")
+        opened_scoring = service.open_scoring(round_id, 2)
+        if int(opened_scoring.get("assignments") or 0) != stage_counts[2]:
+            raise FullParityError("Arena stage 2 scoring assignments differ")
+        _require_arena_round_status(service, round_id, "stage2_scoring")
+        stage2_score = _drain_arena_assignments(
+            service=service,
+            runner=runner,
+            round_id=round_id,
+            stage=2,
+            kind="score",
+            deadline=deadline,
+        )
+        service.close_scoring(round_id, 2)
+        _require_arena_round_status(service, round_id, "stage2_judged")
+        service.score_stage(round_id, 2)
+        _require_arena_round_status(service, round_id, "scored")
+        service.publish(round_id)
+        _require_arena_round_status(service, round_id, "published")
+
+        round_view = _arena_public_json(
+            api_base_url, f"/arena/v1/rounds/{round_id}"
+        )
+        benchmark_view = _arena_public_json(
+            api_base_url, f"/arena/v1/rounds/{round_id}/benchmark"
+        )
+        results_view = _arena_public_json(
+            api_base_url,
+            f"/arena/v1/rounds/{round_id}/results/{baseline_submission_id}",
+        )
+        benchmark_icps = benchmark_view.get("icps")
+        benchmark_ids = (
+            [str(item.get("icp_id") or "") for item in benchmark_icps]
+            if isinstance(benchmark_icps, list)
+            and all(isinstance(item, Mapping) for item in benchmark_icps)
+            else []
+        )
+        outputs = results_view.get("outputs")
+        score_doc = results_view.get("scores")
+        stage1_scores = (
+            score_doc.get("stage_1") if isinstance(score_doc, Mapping) else None
+        )
+        stage2_scores = (
+            score_doc.get("stage_2") if isinstance(score_doc, Mapping) else None
+        )
+        if (
+            round_view.get("status") != "published"
+            or not isinstance(round_view.get("publication"), Mapping)
+            or benchmark_ids != icp_ids
+            or not isinstance(outputs, Mapping)
+            or len(outputs) != configured_count
+            or not isinstance(stage1_scores, list)
+            or not isinstance(stage2_scores, list)
+            or len(stage1_scores) + len(stage2_scores) != configured_count
+            or results_view.get("submission", {}).get("is_baseline") is not True
+        ):
+            raise FullParityError("Arena public daily result is incomplete")
+        all_execute = stage1_execute + stage2_execute
+        all_score = stage1_score + stage2_score
+        positions = {int(row["icp_position"]) for row in all_execute}
+        score_positions = {int(row["icp_position"]) for row in all_score}
+        all_expected_positions = expected_positions[1] | expected_positions[2]
+        if (
+            positions != all_expected_positions
+            or score_positions != all_expected_positions
+        ):
+            raise FullParityError("Arena did not cover every configured ICP")
+
+        execute_by_position = {
+            int(row["icp_position"]): row for row in all_execute
+        }
+        score_by_position = {
+            int(row["icp_position"]): row for row in all_score
+        }
+        company_count = 0
+        evidence_urls: set[str] = set()
+        execute_settlements = 0
+        score_settlements = 0
+        successful_openrouter_execute_calls = 0
+        successful_openrouter_score_settlements = 0
+        provider_names: set[str] = set()
+        icp_results = []
+        for position in sorted(all_expected_positions):
+            execute_row = execute_by_position[position]
+            score_row = score_by_position[position]
+            if score_row.get("scored_run_id") != execute_row.get("run_id"):
+                raise FullParityError("Arena score does not match its execute run")
+            output = outputs.get(str(execute_row["run_id"]))
+            companies = (
+                output.get("companies") if isinstance(output, Mapping) else None
+            )
+            if not isinstance(companies, list):
+                raise FullParityError("Arena public company output is invalid")
+            try:
+                validated_companies = validate_companies(
+                    companies,
+                    max_companies=max(1, len(companies)),
+                )
+            except ValueError as exc:
+                raise FullParityError(
+                    "Arena public company output is invalid"
+                ) from exc
+            company_count += len(validated_companies)
+            position_evidence_urls: set[str] = set()
+            valid_companies_with_https_evidence = 0
+            for company in validated_companies:
+                valid_company_urls = _arena_https_evidence_urls(company)
+                if valid_company_urls:
+                    valid_companies_with_https_evidence += 1
+                    position_evidence_urls.update(valid_company_urls)
+            evidence_urls.update(position_evidence_urls)
+
+            execute_ledger = service.store.list_ledger(
+                run_id=str(execute_row["run_id"])
+            )
+            score_ledger = service.store.list_ledger(
+                run_id=str(score_row["run_id"])
+            )
+            execute_position_settlements = [
+                item
+                for item in execute_ledger
+                if item.get("entry_kind") == "settlement"
+            ]
+            score_position_settlements = [
+                item
+                for item in score_ledger
+                if item.get("entry_kind") == "settlement"
+            ]
+            execute_settlements += len(execute_position_settlements)
+            score_settlements += len(score_position_settlements)
+            provider_names.update(
+                str(item.get("provider") or "")
+                for item in execute_position_settlements + score_position_settlements
+                if item.get("provider")
+            )
+
+            execute_openrouter_successes = _successful_openrouter_settlement_count(
+                execute_position_settlements
+            )
+            score_openrouter_successes = _successful_openrouter_settlement_count(
+                score_position_settlements
+            )
+            successful_openrouter_execute_calls += execute_openrouter_successes
+            successful_openrouter_score_settlements += score_openrouter_successes
+            icp_results.append(
+                {
+                    "icp_position": position,
+                    "execute_accepted": execute_row.get("status") == "accepted",
+                    "score_accepted": score_row.get("status") == "accepted",
+                    "company_count": len(validated_companies),
+                    "valid_company_with_https_evidence_count": (
+                        valid_companies_with_https_evidence
+                    ),
+                    "https_evidence_url_count": len(position_evidence_urls),
+                    "successful_openrouter_execute_call_count": (
+                        execute_openrouter_successes
+                    ),
+                    "successful_openrouter_score_settlement_count": (
+                        score_openrouter_successes
+                    ),
+                }
+            )
+        final_score = (
+            results_view.get("submission_scores", {}).get("final")
+            if isinstance(results_view.get("submission_scores"), Mapping)
+            else None
+        )
+        evidence = {
+            "schema_version": ARENA_REBENCHMARK_EVIDENCE_SCHEMA_VERSION,
+            "candidate_sha": candidate_sha,
+            "run_id": run_id,
+            "artifact_bucket": artifact_bucket,
+            "status": "passed",
+            "mode": "shadow",
+            "round_id": round_id,
+            "evaluation_date": evaluation_date,
+            "daily_icp_set_id": set_id,
+            "baseline_source_url": ARENA_BASELINE_SOURCE_URL,
+            "baseline_final_score": final_score,
+            "icp_results": icp_results,
+            "counts": {
+                "configured_icp_count": len(icps),
+                "stage_1_icp_count": stage_counts[1],
+                "stage_2_icp_count": stage_counts[2],
+                "accepted_execute_runs": len(all_execute),
+                "accepted_score_runs": len(all_score),
+                "scored_icp_count": len(stage1_scores) + len(stage2_scores),
+                "unique_icp_positions": len(positions),
+                "company_count": company_count,
+                "evidence_url_count": len(evidence_urls),
+            },
+            "providers": {
+                "transport": "live-httpx",
+                "names": sorted(provider_names),
+                "settled_provider_call_count": (
+                    execute_settlements + score_settlements
+                ),
+                "execute_settled_provider_call_count": execute_settlements,
+                "score_settled_provider_call_count": score_settlements,
+                "successful_openrouter_execute_call_count": (
+                    successful_openrouter_execute_calls
+                ),
+                "successful_openrouter_score_settlement_count": (
+                    successful_openrouter_score_settlements
+                ),
+            },
+            "runtime": {
+                "runner": "lab_arena.runner.Runner",
+                "sandbox": "gvisor-runsc",
+                "runsc_artifact_hash": runsc_facts["artifact_hash"],
+                "api": "lab_arena.api.loopback-http",
+                "object_store": "s3",
+                "judge_image_materialization": "exact-candidate-local-docker",
+            },
+            "restart_recovery": {
+                "service_restarted": True,
+                "runner_restarted": True,
+                "resumed_round_status": "stage1",
+                "persisted_execute_runs": persisted_execute_runs,
+            },
+            "publication_visible": True,
+            "public_benchmark_visible": True,
+            "public_results_visible": True,
+            "production_database_mutated": False,
+            "production_chain_mutated": False,
+        }
+        return _validate_arena_rebenchmark_evidence(
+            evidence,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            artifact_bucket=artifact_bucket,
+        )
+    finally:
+        provider_keys = {}
+        cleanup_error = None
+        try:
+            _close_parity_arena_runtime(
+                runner=runner,
+                api_client=api_client,
+                api_server=api_server,
+                service=service,
+            )
+        except Exception as exc:  # noqa: BLE001 - child prints only fixed text
+            cleanup_error = exc
+        _remove_arena_judge_image(str(image.get("image_tag") or ""))
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _run_miner_intake_path(
@@ -2087,6 +3433,20 @@ def run_full(
             supabase_origin=supabase_origin,
             artifact_bucket=artifact_bucket,
         )
+        failure_stage = "arena-rebenchmark"
+        arena_rebenchmark = _run_arena_rebenchmark_path(
+            region=region,
+            candidate_sha=candidate_sha,
+            run_id=run_id,
+            supabase_origin=supabase_origin,
+            gateway_env_file=gateway_env_file,
+            artifact_bucket=artifact_bucket,
+            jwt_secret=database.jwt_secret,
+            timeout_seconds=_remaining_full_timeout(
+                deadline=deadline,
+                stage="live Arena baseline rebenchmark",
+            ),
+        )
         failure_stage = "weight-readiness"
         readiness = _run(
             [
@@ -2189,6 +3549,7 @@ def run_full(
                 "external_write_boundaries": {
                     "arweave": "blocked-production-parity",
                 },
+                "arena_rebenchmark": arena_rebenchmark,
                 "allocation_handoff": handoff,
                 "weight_path": weight_path,
                 "miner_intake": miner_intake,
@@ -2253,6 +3614,7 @@ def run_full(
 def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(argv if argv is not None else sys.argv[1:])
     child_modes = {
+        "--arena-rebenchmark-child",
         "--clone-handoff-child",
         "--miner-intake-child",
     }
@@ -2261,7 +3623,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         logging.disable(logging.CRITICAL)
         try:
             request = _read_child_request()
-            if child_mode == "--clone-handoff-child":
+            if child_mode == "--arena-rebenchmark-child":
+                result = _run_arena_rebenchmark_child(request)
+            elif child_mode == "--clone-handoff-child":
                 result = _run_clone_handoff_child(request)
             else:
                 result = asyncio.run(_run_miner_intake_child(request))

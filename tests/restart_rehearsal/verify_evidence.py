@@ -1675,8 +1675,8 @@ def main() -> int:
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
-        if len(state.get("enclaves", [])) != 3:
-            raise SystemExit("gateway did not start the exact three-enclave topology")
+        if len(state.get("enclaves", [])) != 2:
+            raise SystemExit("gateway did not start the exact two-enclave topology")
     else:
         restart_invariants = verify_validator_gateway_activation_barrier(
             serialized_adapter_events(),

@@ -481,7 +481,7 @@ helper. If the helper is unavailable, synchronize the canonical checkout with
 
 ### Sourcing architecture simplicity (non-negotiable)
 
-The Research Lab sourcing-model overhaul is an agent-bundle competition. A
+The Research Lab sourcing overhaul is an agent-bundle competition. A
 miner may choose or modify any model, harness, prompts, dependencies, routing,
 and internal orchestration. Start from the smallest interoperable boundary:
 
@@ -503,8 +503,8 @@ rebuild equivalent layers under different names.
 When implementing this overhaul, prefer removing the old sourcing identity and
 attestation plumbing over preserving it through compatibility layers.
 Reintroduce an excluded verification mechanism only after a new explicit user
-request names it. This override applies to the `Sourcing_model` and Research
-Lab agent-bundle path; it does not independently relax validator, chain-signing,
+request names it. This override applies to the Research Lab agent-bundle path;
+it does not independently relax validator, chain-signing,
 or weight-submission safety outside that path.
 
 ## Routine handoff

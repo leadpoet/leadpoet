@@ -273,7 +273,9 @@ class InProcessApi:
         try:
             return self.service.handle_source(run_id, lease_token)
         except Exception as exc:
-            InProcessApi.errors.append("%s: %s" % (type(exc).__name__, str(exc)[:1500]))
+            InProcessApi.errors.append(
+                "%s: %s" % (type(exc).__name__, str(exc)[:1500])
+            )
             raise
 
 

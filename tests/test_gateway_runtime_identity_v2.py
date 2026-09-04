@@ -275,9 +275,9 @@ def test_config_hash_is_canonical_and_order_independent(tmp_path: Path):
 def test_runtime_reconstructs_exact_measured_research_lab_config(tmp_path: Path):
     manager, _, _ = _manager(tmp_path)
     configuration = _configuration()
-    configuration["research_lab_execution_config"]["fields"][
-        "source_add_leg1_alpha_percent"
-    ] = 0.35
+    fields = configuration["research_lab_execution_config"]["fields"]
+    fields["source_add_leg1_alpha_percent"] = 0.35
+    fields["lab_champion_threshold_points"] = 2.75
     configuration["research_lab_execution_config_hash"] = (
         research_lab_execution_config_hash(
             configuration["research_lab_execution_config"]
@@ -288,6 +288,7 @@ def test_runtime_reconstructs_exact_measured_research_lab_config(tmp_path: Path)
         expected_config_hash=_configuration_hash(configuration),
     )
     assert manager.research_lab_config().source_add_leg1_alpha_percent == 0.35
+    assert manager.research_lab_config().lab_champion_threshold_points == 2.75
 
 
 def test_runtime_configuration_accepts_the_fixed_512_release_bound(tmp_path: Path):

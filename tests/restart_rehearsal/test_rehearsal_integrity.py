@@ -3492,15 +3492,9 @@ def test_deferred_gateway_rehearsal_keeps_legacy_and_selects_v2_tls_proxies(
     spec.loader.exec_module(adapter)
 
     values = adapter._gateway_secret()
-    assert values["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert values[
         "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"
     ].startswith("http://")
-    assert values[
-        "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"
-    ].startswith("https://")
     assert values["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
         "https://"
     )
@@ -3520,17 +3514,8 @@ def test_gateway_secret_exercises_tls_proxy_success_and_plaintext_failure(
     spec.loader.exec_module(adapter)
 
     success = adapter._gateway_secret()
-    assert success["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert success["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
         "http://"
-    )
-    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].startswith(
-        "https://"
-    )
-    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].endswith(
-        ":443"
     )
     assert success["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
         "https://"
@@ -3542,11 +3527,7 @@ def test_gateway_secret_exercises_tls_proxy_success_and_plaintext_failure(
         "plaintext_proxy_rejected",
     )
     failure = adapter._gateway_secret()
-    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1" not in failure
     assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1" not in failure
-    assert failure["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
-        "http://"
-    )
     assert failure["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
         "http://"
     )

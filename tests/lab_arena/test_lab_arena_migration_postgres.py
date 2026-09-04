@@ -18,7 +18,7 @@ import pytest
 
 from bittensor_wallet import Keypair
 
-from lab_arena import contracts
+from lab_arena import contracts, rewards
 from lab_arena.store import (
     ArenaRoleError,
     ArenaStore,
@@ -44,20 +44,6 @@ def hotkey(label: str) -> str:
 
 def sha(seed: str) -> str:
     return contracts.document_hash({"seed": seed})
-
-
-def source_doc(
-    round_id: str, submission_id: str, seed: str, *, is_king: bool = False
-) -> Dict[str, Any]:
-    doc: Dict[str, Any] = {
-        "source_ref": "arena/%s/sources/%s.tar.gz" % (round_id, submission_id),
-        "source_sha256": sha(seed),
-        "source_size_bytes": 4096,
-        "consent": {"public_rerun": True},
-    }
-    if is_king:
-        doc["is_king"] = True
-    return doc
 
 
 @pytest.fixture(scope="module")
@@ -123,8 +109,25 @@ def round_config(
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
         "baseline_hotkey": hotkey("baseline"),
+        "reward_constants": rewards.reward_constants_document(),
     }
     return body
+
+
+def source_submission_doc(
+    round_id: str,
+    submission_id: str,
+    *,
+    is_king: bool = False,
+) -> Dict[str, Any]:
+    document: Dict[str, Any] = {
+        "source_ref": "arena/%s/sources/%s.tar.gz" % (round_id, submission_id),
+        "source_size_bytes": 4096,
+        "consent": {"public_rerun": True},
+    }
+    if is_king:
+        document["is_king"] = True
+    return document
 
 
 def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix: str, king_index=None) -> List[Dict[str, Any]]:
@@ -136,11 +139,11 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
             round_id,
             submission_id,
             miner,
-            source_doc(round_id, submission_id, submission_id),
+            source_submission_doc(round_id, submission_id),
         )
         assert result["status"] == "registered"
         result = store.update_submission(
-            round_id, submission_id, "uploading", "accepted"
+            round_id, submission_id, "uploading", "accepted", {}
         )
         assert result["status"] == "ok", result
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
@@ -415,7 +418,7 @@ def test_service_refuses_to_start_as_superuser(connect):
         transport.close()
 
 
-def test_same_source_bytes_do_not_reject_a_second_miner(store):
+def test_source_admission_has_no_cross_miner_digest_identity(store):
     round_id = "arena-2026-09-02-shared"
     runner = hotkey("shared-runner")
     assert store.create_round(round_id, round_config(round_id, [runner]))["status"] == "created"
@@ -426,13 +429,14 @@ def test_same_source_bytes_do_not_reject_a_second_miner(store):
             round_id,
             submission_id,
             miner,
-            source_doc(round_id, submission_id, "shared-source"),
+            source_submission_doc(round_id, submission_id),
         )["status"] == "registered"
         accepted = store.update_submission(
             round_id,
             submission_id,
             "uploading",
             "accepted",
+            {},
         )
         assert accepted["status"] == "ok"
 
@@ -452,7 +456,7 @@ def test_database_refuses_submissions_outside_the_half_open_window(store, round_
         round_id,
         round_id + "-submission",
         hotkey(round_id + "-miner"),
-        source_doc(round_id, round_id + "-submission", round_id),
+        source_submission_doc(round_id, round_id + "-submission"),
     )
     assert result["status"] == "window_closed"
 
@@ -469,18 +473,15 @@ def test_service_can_add_only_the_round_baseline_after_miner_cutoff(store):
         round_id,
         "late-miner",
         hotkey("late-miner"),
-        source_doc(round_id, "late-miner", "late-miner"),
+        source_submission_doc(round_id, "late-miner"),
     )
     assert ordinary["status"] == "window_closed"
     baseline = store.register_submission(
         round_id,
         "baseline-2026-09-02-baseline",
         hotkey("public-baseline"),
-        source_doc(
-            round_id,
-            "baseline-2026-09-02-baseline",
-            "public-baseline",
-            is_king=True,
+        source_submission_doc(
+            round_id, "baseline-2026-09-02-baseline", is_king=True
         ),
     )
     assert baseline == {
@@ -614,6 +615,7 @@ def _reward_docs(round_id: str, published_at: str, epoch: int, king_key: str, *,
         "king_hotkey": king_key,
         "king_outcome": "crowned",
         "king_start_epoch": epoch,
+        "reward_constants": rewards.reward_constants_document(),
         "reward_basis_hash": sha("basis" + marker),
         "signature": {"public_key_hash": key_hash},
     }

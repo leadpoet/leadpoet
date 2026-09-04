@@ -167,7 +167,7 @@ def test_streaming_refused_loudly():
         _call(extra_body={"stream": True}, opener=_opener([]))
 
 
-def test_no_s3_prefix_keeps_capture_disabled(fake_boto3, monkeypatch):
+def test_no_s3_prefix_disables_raw_trace_storage(fake_boto3, monkeypatch):
     monkeypatch.delenv(ot.RAW_TRACE_S3_PREFIX_ENV, raising=False)
     monkeypatch.setenv(ot.RAW_TRACE_KMS_KEY_ENV, "kms-key-9")
     result = _call(opener=_opener([_chat_response()]))
@@ -178,7 +178,7 @@ def test_no_s3_prefix_keeps_capture_disabled(fake_boto3, monkeypatch):
     assert fake_boto3 == []
 
 
-def test_raw_trace_prefix_has_no_private_model_default(monkeypatch):
+def test_raw_trace_prefix_has_no_implicit_default(monkeypatch):
     monkeypatch.delenv(ot.RAW_TRACE_S3_PREFIX_ENV, raising=False)
     assert ot.resolved_raw_trace_s3_prefix() == ""
 

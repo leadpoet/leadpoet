@@ -53,8 +53,6 @@ PCR0_COPY_PATHS=(
     "gateway/tasks/__init__.py"
     "gateway/tasks/icp_generator.py"
     "qualification/__init__.py"
-    "scripts/run_research_lab_hosted_worker.py"
-    "scripts/run_research_lab_hosted_worker_fleet.py"
     "scripts/run_research_lab_scoring_worker.py"
     "scripts/run_research_lab_scoring_worker_fleet.py"
     "neurons/validator.py"

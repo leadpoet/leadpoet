@@ -20,12 +20,6 @@ from gateway.utils.tee_egress_forwarder import (
 
 
 _PROBE_DESTINATIONS = {
-    "gateway_autoresearch": (
-        ("openrouter.ai", 443),
-        ("api.exa.ai", 443),
-        ("api.scrapingdog.com", 443),
-        ("code.deepline.com", 443),
-    ),
     "gateway_scoring": (
         ("openrouter.ai", 443),
         ("api.exa.ai", 443),

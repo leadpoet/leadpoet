@@ -1,4 +1,4 @@
-"""Host-side bootstrap for the fixed three-enclave V2 gateway topology.
+"""Host-side bootstrap for the fixed two-enclave V2 gateway topology.
 
 The parent supplies public configuration and relays boot documents, certificates,
 and ciphertext.  Every enclave verifies peers against the independently built
@@ -131,10 +131,7 @@ def runtime_configuration_documents(
     normalized_worker_counts = {
         str(role): int(count) for role, count in configured_worker_counts.items()
     }
-    if set(normalized_worker_counts) != {
-        "gateway_scoring",
-        "gateway_autoresearch",
-    } or any(
+    if set(normalized_worker_counts) != {"gateway_scoring"} or any(
         count <= 0 or count > 500 for count in normalized_worker_counts.values()
     ):
         raise TEEV2BootstrapError("configured worker counts are invalid")
@@ -163,9 +160,6 @@ def runtime_configuration_documents(
         configured_worker_count = 0
         if role == "gateway_scoring":
             execution_worker_count = 10
-            configured_worker_count = normalized_worker_counts[role]
-        elif role == "gateway_autoresearch":
-            execution_worker_count = normalized_worker_counts[role]
             configured_worker_count = normalized_worker_counts[role]
         configuration = {
             "bootstrap_schema_version": BOOTSTRAP_SCHEMA_VERSION,
@@ -237,7 +231,7 @@ async def bootstrap_gateway_enclaves_v2(
     clients: Optional[Mapping[str, Any]] = None,
     boot_verifier: Callable[..., Mapping[str, Any]] = verify_boot_identity_nitro,
 ) -> Dict[str, Any]:
-    """Configure, independently verify, pair, and health-check all three roles."""
+    """Configure, independently verify, pair, and health-check both roles."""
 
     release = validate_release_manifest(release_manifest)
     if set(runtime_documents) != set(ROLE_SPECS):
@@ -301,10 +295,7 @@ async def bootstrap_gateway_enclaves_v2(
             raise TEEV2BootstrapError("%s TLS service did not start" % role)
 
     channels = []
-    for runner_role in (
-        "gateway_scoring",
-        "gateway_autoresearch",
-    ):
+    for runner_role in ("gateway_scoring",):
         runner_to_coordinator = await role_clients[runner_role].v2_call_peer_health(
             "gateway_coordinator"
         )

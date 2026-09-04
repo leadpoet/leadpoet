@@ -62,7 +62,6 @@ async def verify_v2_runtime_ready(
     calls = {
         "gateway_coordinator": "coordinator_v2_health",
         "gateway_scoring": "scoring_v2_health",
-        "gateway_autoresearch": "autoresearch_v2_health",
     }
     expected_workers = {
         "gateway_coordinator": 1,
@@ -90,13 +89,6 @@ async def verify_v2_runtime_ready(
             or (
                 role == "gateway_scoring"
                 and configured_worker_count <= 0
-            )
-            or (
-                role == "gateway_autoresearch"
-                and (
-                    configured_worker_count <= 0
-                    or health.get("worker_count") != configured_worker_count
-                )
             )
             or health.get("workers_alive") is not True
         ):

@@ -38,7 +38,6 @@ DEFAULT_CACHE_SIZE = 20
 GATEWAY_ROLES = (
     "gateway_coordinator",
     "gateway_scoring",
-    "gateway_autoresearch",
 )
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")

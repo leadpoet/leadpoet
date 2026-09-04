@@ -22,8 +22,6 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from gateway.research_lab.worker_autostart import (
     DEFERRED_WORKER_FLEETS_ENV,
-    HOSTED_PROXY_PREFIXES,
-    LEGACY_HOSTED_PROXY_PREFIXES,
     LEGACY_SCORING_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
     DeferredWorkerFleetConfigurationError,
@@ -204,7 +202,6 @@ def scrub_parent_environment_file_v2(
             "gateway V2 plaintext credential commitments are unavailable"
         )
     count_fields = {
-        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "hosted_worker_count",
         "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "scoring_worker_count",
     }
     raw_count_environment = report.get("required_count_environment")
@@ -392,15 +389,6 @@ def _worker_proxy_profile_values(
 
 
 _WORKER_PROXY_ROLE_CONFIGURATION = {
-    "gateway_autoresearch": {
-        "legacy_prefixes": LEGACY_HOSTED_PROXY_PREFIXES,
-        "process_count_environment": (
-            "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT"
-        ),
-        "required_v2_environment": (
-            "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"
-        ),
-    },
     "gateway_scoring": {
         "legacy_prefixes": LEGACY_SCORING_PROXY_PREFIXES,
         "process_count_environment": (
@@ -475,20 +463,18 @@ def _validated_worker_proxy_configuration(
         deferred_roles = deferred_worker_fleet_roles(environment)
     except DeferredWorkerFleetConfigurationError as exc:
         raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
-    if not plan.hosted.enabled or not plan.scoring.enabled:
+    if not plan.scoring.enabled:
         raise GatewayEnvelopePreparationV2Error(
-            "configured hosted and scoring worker fleets are required"
+            "configured scoring worker fleet is required"
         )
-    if not plan.hosted.proxy_values or not plan.scoring.proxy_values:
+    if not plan.scoring.proxy_values:
         raise GatewayEnvelopePreparationV2Error(
             "worker proxy values are required for initial V2 sealing"
         )
     configured_fleets = {
-        "gateway_autoresearch": plan.hosted.proxy_values,
         "gateway_scoring": plan.scoring.proxy_values,
     }
     proxy_sources = {
-        "gateway_autoresearch": plan.hosted.proxy_source,
         "gateway_scoring": plan.scoring.proxy_source,
     }
     for role, values in configured_fleets.items():
@@ -530,12 +516,9 @@ def _validated_worker_proxy_configuration(
             probe_result = proxy_fleet_probe(configured_fleets)
         except WorkerProxyTransportPreflightV2Error as exc:
             raise GatewayEnvelopePreparationV2Error(
-                "%s; required proxy environments are %s and %s"
+                "%s; required proxy environment is %s"
                 % (
                     str(exc),
-                    _WORKER_PROXY_ROLE_CONFIGURATION[
-                        "gateway_autoresearch"
-                    ]["required_v2_environment"],
                     _WORKER_PROXY_ROLE_CONFIGURATION[
                         "gateway_scoring"
                     ]["required_v2_environment"],
@@ -578,10 +561,6 @@ def _validated_worker_proxy_configuration(
             verified_fleets = selected_fleets
 
     profile_fleets = {
-        "gateway_autoresearch": _worker_proxy_profile_values(
-            verified_fleets["gateway_autoresearch"],
-            plan.hosted.worker_count,
-        ),
         "gateway_scoring": _worker_proxy_profile_values(
             verified_fleets["gateway_scoring"],
             plan.scoring.worker_count,
@@ -605,7 +584,7 @@ def _validated_worker_proxy_configuration(
     }
     configured_names = _proxy_environment_names(
         environment,
-        (*HOSTED_PROXY_PREFIXES, *SCORING_PROXY_PREFIXES),
+        SCORING_PROXY_PREFIXES,
     )
     return (
         plan,
@@ -755,16 +734,9 @@ def prepare_gateway_envelopes_v2(
             )
 
         proxy_sources = {
-            "gateway_autoresearch": _proxy_names(
-                environment, HOSTED_PROXY_PREFIXES
-            ),
             "gateway_scoring": _proxy_names(environment, SCORING_PROXY_PREFIXES),
         }
         fleets = {
-            "gateway_autoresearch": (
-                proxy_profile_values["gateway_autoresearch"],
-                "autoresearch_proxy_{:02d}.json",
-            ),
             "gateway_scoring": (
                 proxy_profile_values["gateway_scoring"],
                 "scoring_proxy_{:02d}.json",
@@ -804,11 +776,9 @@ def prepare_gateway_envelopes_v2(
         report = {
             "schema_version": "leadpoet.gateway_envelope_transition.v2",
             "deploy_commit": commit,
-            "hosted_worker_count": plan.hosted.worker_count,
             "scoring_worker_count": plan.scoring.worker_count,
             "worker_proxy_transport_policy": _WORKER_PROXY_TRANSPORT_POLICY,
             "worker_proxy_source": {
-                "gateway_autoresearch": plan.hosted.proxy_source,
                 "gateway_scoring": plan.scoring.proxy_source,
             },
             "worker_proxy_credential_ref_hashes": proxy_commitments,
@@ -818,9 +788,6 @@ def prepare_gateway_envelopes_v2(
             ],
             "deferred_worker_fleet_roles": sorted(deferred_roles),
             "required_count_environment": {
-                "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": str(
-                    plan.hosted.worker_count
-                ),
                 "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": str(
                     plan.scoring.worker_count
                 ),
@@ -895,10 +862,8 @@ def install_gateway_envelopes_v2(
                 or ()
             }
         )
-        and report.get("hosted_worker_count") == plan.hosted.worker_count
         and report.get("scoring_worker_count") == plan.scoring.worker_count
     ):
-        hosted_count = int(report.get("hosted_worker_count") or 0)
         scoring_count = int(report.get("scoring_worker_count") or 0)
         expected_names = {
             "artifact_master_key.json",
@@ -909,10 +874,6 @@ def install_gateway_envelopes_v2(
             "supabase_service_role.json",
             "truelist.json",
             *set(_SPECIAL_PROFILES),
-            *{
-                "autoresearch_proxy_%02d.json" % index
-                for index in range(hosted_count)
-            },
             *{
                 "scoring_proxy_%02d.json" % index
                 for index in range(scoring_count)

@@ -191,38 +191,9 @@ _CHECKPOINTED_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = (
 
 
 def _execution_failure_code(exc: Exception) -> str:
-    """Project only bounded safe sandbox observations into the signed code."""
+    """Project a bounded exception type into the signed failure code."""
 
-    generic = "execution_%s" % type(exc).__name__.lower()[:80]
-    try:
-        exc_type = type(exc)
-        if (
-            exc_type.__module__ != "gateway.tee.model_sandbox_v2"
-            or exc_type.__name__ != "ModelSandboxV2Error"
-        ):
-            return generic
-        from gateway.tee.model_sandbox_v2 import (
-            ModelSandboxV2Error,
-            validate_model_sandbox_failure_projection_v1,
-        )
-
-        if exc_type is not ModelSandboxV2Error:
-            return generic
-        projection = validate_model_sandbox_failure_projection_v1(
-            exc.failure_projection
-        )
-        exception_class_hash = projection.exception_class_hash or "none"
-        projected = "%s/%s/%s/%s" % (
-            generic,
-            projection.launcher_code,
-            exception_class_hash,
-            projection.stderr_hash,
-        )
-        if len(projected) > 256 or not _IDENTIFIER_RE.fullmatch(projected):
-            return generic
-        return projected
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
-        return generic
+    return "execution_%s" % type(exc).__name__.lower()[:80]
 
 
 class ExecutionJobV2Error(RuntimeError):

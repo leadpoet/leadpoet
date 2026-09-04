@@ -24,11 +24,9 @@ ATTESTED_RUNTIME_PACKAGES = (
     "validator_models",
 )
 ATTESTED_RUNTIME_FILES = (
-    "scripts/record_research_lab_dev_snapshots.py",
     "validator_tee/host/docker_operation_guard_v2.py",
 )
 ATTESTED_RUNTIME_GENERATED_FILES = (
-    "gateway_enclave_build_identities/gateway_autoresearch.json",
     "gateway_enclave_build_identities/gateway_coordinator.json",
     "gateway_enclave_build_identities/gateway_scoring.json",
     "gateway_enclave_build_identity.json",
@@ -39,7 +37,6 @@ ATTESTED_RUNTIME_GENERATED_FILES = (
 _ATTESTED_RUNTIME_ROLES = (
     "gateway_coordinator",
     "gateway_scoring",
-    "gateway_autoresearch",
 )
 _FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _FALLBACK_COMMAND_TIMEOUT_SECONDS = 30

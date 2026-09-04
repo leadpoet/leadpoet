@@ -14,7 +14,6 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from gateway.research_lab.config import (
-    LEGACY_HOSTED_PROXY_PREFIXES,
     LEGACY_SCORING_PROXY_PREFIXES,
 )
 from gateway.research_lab.worker_autostart import _configured_proxies
@@ -29,11 +28,6 @@ DEFAULT_BACKUP_DIRECTORY = Path(
     "/home/ec2-user/.config/leadpoet/env-backups"
 )
 _TARGET_ENVIRONMENT = {
-    "gateway_autoresearch": {
-        "proxy": "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1",
-        "count": "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
-        "legacy_prefixes": LEGACY_HOSTED_PROXY_PREFIXES,
-    },
     "gateway_scoring": {
         "proxy": "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1",
         "count": "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
@@ -143,12 +137,10 @@ def _worker_count(
 
 def _validated_proxy_values(
     *,
-    autoresearch_proxy: str,
     scoring_proxy: str,
     proxy_fleet_probe: Callable[..., None],
 ) -> dict[str, str]:
     values = {
-        "gateway_autoresearch": str(autoresearch_proxy or "").strip(),
         "gateway_scoring": str(scoring_proxy or "").strip(),
     }
     for role, value in values.items():
@@ -236,7 +228,6 @@ def update_gateway_v2_proxy_secret(
     secrets_client: Any,
     secret_id: str,
     backup_directory: Path,
-    autoresearch_proxy: str,
     scoring_proxy: str,
     proxy_fleet_probe: Callable[..., None] = verify_worker_proxy_fleets_v2,
     now: datetime | None = None,
@@ -252,7 +243,6 @@ def update_gateway_v2_proxy_secret(
     initial_secret = _secret_string(initial_response)
     environment, document_format = _parse_environment(initial_secret)
     proxies = _validated_proxy_values(
-        autoresearch_proxy=autoresearch_proxy,
         scoring_proxy=scoring_proxy,
         proxy_fleet_probe=proxy_fleet_probe,
     )
@@ -374,9 +364,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    autoresearch_proxy = getpass.getpass(
-        "Enter RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1: "
-    )
     scoring_proxy = getpass.getpass(
         "Enter RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1: "
     )
@@ -387,14 +374,12 @@ def main() -> int:
         secrets_client=boto3.client("secretsmanager", region_name="us-east-1"),
         secret_id=str(args.secret_id),
         backup_directory=args.backup_directory,
-        autoresearch_proxy=autoresearch_proxy,
         scoring_proxy=scoring_proxy,
     )
     print(
         "Gateway V2 proxy secret updated and read back successfully; "
-        "autoresearch_workers=%d scoring_workers=%d backup=%s"
+        "scoring_workers=%d backup=%s"
         % (
-            result["worker_counts"]["gateway_autoresearch"],
             result["worker_counts"]["gateway_scoring"],
             result["backup_path"],
         )

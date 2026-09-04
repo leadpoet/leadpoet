@@ -11,6 +11,7 @@ from gateway.tee.release_manifest_v2 import (
     role_expectation,
     validate_release_manifest,
 )
+from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     sha256_json,
@@ -27,14 +28,10 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _MAX_COMPACT_RELEASES = 512
 _VALIDATOR_PHYSICAL_ROLE = "validator_weights"
-_APPROVED_RELEASE_ROLES = frozenset(
-    {
-        "gateway_autoresearch",
-        "gateway_coordinator",
-        "gateway_scoring",
-        _VALIDATOR_PHYSICAL_ROLE,
-    }
-)
+_APPROVED_RELEASE_ROLES = frozenset(ROLE_SPECS) | {_VALIDATOR_PHYSICAL_ROLE}
+_HISTORICAL_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {
+    "gateway_autoresearch"
+}
 
 
 class ReleaseLineageV2Error(RuntimeError):
@@ -90,7 +87,13 @@ def validate_compact_release_lineage_v2(
                 "compact release lineage entry is invalid"
             )
         roles = release.get("roles")
-        if not isinstance(roles, Mapping) or set(roles) != _APPROVED_RELEASE_ROLES:
+        observed_roles = set(roles) if isinstance(roles, Mapping) else set()
+        allowed_roles = (
+            {_APPROVED_RELEASE_ROLES}
+            if commit == current_commit
+            else {_APPROVED_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
+        )
+        if not isinstance(roles, Mapping) or frozenset(observed_roles) not in allowed_roles:
             raise ReleaseLineageV2Error(
                 "compact release lineage roles are incomplete"
             )

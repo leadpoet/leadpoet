@@ -643,6 +643,7 @@ PROTECTED_SYMBOLS = {
     "scripts/verify_installed_gateway_controller_v1.py": (
         "__module__",
         "SUPPORTED_CONTROLLER_COMMITS",
+        "RECOVERY_HOST_CONTROLLER_COMMITS",
         "CONTROLLER_FILES",
         "_COMMIT_RE",
         "_UNSAFE_GIT_ENV_NAMES",
@@ -659,6 +660,7 @@ PROTECTED_SYMBOLS = {
         "verify_candidate_bound_controller_lineage",
         "verify_installed_controller_bundle",
         "_exec_verified_helper",
+        "_recover_exact_controller_checkout_drift",
         "main",
     ),
     "gateway/tee/restart_preflight_v2.py": (

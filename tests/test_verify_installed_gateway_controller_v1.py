@@ -21,6 +21,8 @@ N_MINUS_ONE_COMMIT = next(iter(verifier.SUPPORTED_CONTROLLER_COMMITS))
 REAL_REPOSITORY = Path(__file__).resolve().parents[1]
 SEQUENTIAL_N_MINUS_ONE_COMMIT = "d649562b8c1e0077f670431cd9b22714eb686cd5"
 SEQUENTIAL_CANDIDATE_COMMIT = "d72e475381e127aa209be33deed763d44a8289e6"
+PRODUCTION_CONTROLLER_COMMIT = "77130df450aa60cd889fb637031b7df6c0c57a63"
+PRODUCTION_RECOVERY_HOST_COMMIT = "ef0dfeaad19810d3ab2db137d397a2890830a574"
 
 
 def _source_candidate_commit(source_repository: Path) -> str:
@@ -134,6 +136,10 @@ def _controller_fixture(
         **payloads,
         "gw_restart.sh": b"#!/bin/bash\n# candidate\nexit 0\n",
     }
+    recovery_payloads = {
+        **payloads,
+        "gw_restart.sh": b"#!/bin/bash\n# recovery host\nexit 0\n",
+    }
     installed_payloads = (
         candidate_payloads if controller_commit == CANDIDATE_COMMIT else payloads
     )
@@ -168,7 +174,12 @@ def _controller_fixture(
             return f"{git_mode} blob {'0' * 40}\t{relative_path}"
         if arguments[0] == "show":
             commit, relative_path = str(arguments[1]).split(":", 1)
-            selected = candidate_payloads if commit == CANDIDATE_COMMIT else payloads
+            if commit == CANDIDATE_COMMIT:
+                selected = candidate_payloads
+            elif commit in verifier.RECOVERY_HOST_CONTROLLER_COMMITS:
+                selected = recovery_payloads
+            else:
+                selected = payloads
             result = selected[relative_path]
             return result if binary else result.decode("utf-8")
         raise AssertionError(arguments)
@@ -243,6 +254,59 @@ def test_real_sequential_prefetch_accepts_d649_when_d72_object_is_absent(
     assert result["controller_commit"] == SEQUENTIAL_N_MINUS_ONE_COMMIT
     assert result["host_controller_commits"] == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
     assert observed_object_checks == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
+
+
+def test_real_bundle_accepts_exact_production_recovery_host_wrapper(
+    tmp_path: Path,
+) -> None:
+    current, host_restart = _real_controller_fixture(
+        tmp_path,
+        controller_commit=PRODUCTION_CONTROLLER_COMMIT,
+    )
+    host_restart.write_bytes(
+        subprocess.check_output(
+            [
+                "git",
+                "show",
+                f"{PRODUCTION_RECOVERY_HOST_COMMIT}:gw_restart.sh",
+            ],
+            cwd=REAL_REPOSITORY,
+        )
+    )
+
+    result = verifier.verify_installed_controller_bundle(
+        repo_root=REAL_REPOSITORY,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=_source_candidate_commit(REAL_REPOSITORY),
+        expected_controller_commit=PRODUCTION_CONTROLLER_COMMIT,
+    )
+
+    assert result["controller_commit"] == PRODUCTION_CONTROLLER_COMMIT
+    assert result["host_controller_commits"] == [PRODUCTION_RECOVERY_HOST_COMMIT]
+
+
+def test_unknown_host_wrapper_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    host_restart.write_bytes(b"#!/bin/bash\n# unknown wrapper\nexit 0\n")
+
+    with pytest.raises(
+        verifier.InstalledGatewayControllerError,
+        match="host wrapper differs from Git authority",
+    ):
+        verifier.verify_installed_controller_bundle(
+            repo_root=repository,
+            controller_current=current,
+            host_restart_path=host_restart,
+            expected_commit=CANDIDATE_COMMIT,
+            expected_controller_commit=N_MINUS_ONE_COMMIT,
+        )
 
 
 def test_real_controller_lineage_rejects_pre_floor_commit(

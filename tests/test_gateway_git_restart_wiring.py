@@ -132,7 +132,8 @@ def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
     assert "GATEWAY_EXACT_COMMIT_HELPER" in script
     assert (
         'if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \\\n'
-        '    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then'
+        '    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ] \\\n'
+        '    && [ -z "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then'
         in script
     )
     assert (

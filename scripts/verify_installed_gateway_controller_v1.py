@@ -19,6 +19,12 @@ from typing import Any, Iterator, Mapping, Sequence
 SUPPORTED_CONTROLLER_COMMITS = frozenset(
     {"0dd3a385a23a3af0fa17210bfe02a39cc4023952"}
 )
+# Exact Git identity left in the production host-wrapper slot by the first
+# controller cutover.  Keep this recovery allowance separate from the minimum
+# compatible controller floors: it admits only these reviewed wrapper bytes.
+RECOVERY_HOST_CONTROLLER_COMMITS = frozenset(
+    {"ef0dfeaad19810d3ab2db137d397a2890830a574"}
+)
 CONTROLLER_FILES: Mapping[str, tuple[int, str]] = {
     "gw_restart.sh": (0o700, "100755"),
     "scripts/gateway_git_deploy.py": (0o600, "100644"),
@@ -515,7 +521,11 @@ def verify_installed_controller_bundle(
         )
         observed[relative_path] = payload
     host_wrapper = _read_exact_file(Path(host_restart_path), expected_mode=0o700)
-    host_candidates = set(SUPPORTED_CONTROLLER_COMMITS) | {controller_commit}
+    host_candidates = (
+        set(SUPPORTED_CONTROLLER_COMMITS)
+        | set(RECOVERY_HOST_CONTROLLER_COMMITS)
+        | {controller_commit}
+    )
     host_controller_commits = {
         candidate
         for candidate in host_candidates

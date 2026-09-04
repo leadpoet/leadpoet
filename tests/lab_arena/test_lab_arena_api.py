@@ -145,6 +145,30 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     assert nan.status_code == 400
 
 
+def test_complete_route_accepts_the_shared_completion_size(client):
+    http, _service = client
+    envelope = {
+        "body": {
+            "run_id": "r1",
+            "output": {"chunks": ["x" * 65_000 for _ in range(18)]},
+        }
+    }
+    raw = json.dumps(envelope).encode("utf-8")
+    assert MAX_JSON_BODY_BYTES < len(raw) < contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+    assert http.post("/arena/v1/runs/r1/complete", content=raw).status_code == 200
+
+    oversized = http.post(
+        "/arena/v1/runs/r1/complete",
+        content=b"{}",
+        headers={
+            "content-length": str(
+                contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes + 1
+            )
+        },
+    )
+    assert oversized.status_code == 413
+
+
 def test_submission_routes_presign_and_finalize_one_source_upload(client):
     http, service = client
     envelope = {"scope": contracts.SCOPE_SUBMISSION_PRESIGN, "body": {"source_sha256": "sha256:" + "a" * 64, "source_size_bytes": 100}}

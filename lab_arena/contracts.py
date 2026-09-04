@@ -261,6 +261,15 @@ PUBLICATION_LIMITS = StrictLimits(
     max_string_bytes=65_536,
     max_total_bytes=64 * 1_048_576,
 )
+# A completion can contain the judge's accepted 2 MiB scoring output. Keep one
+# small allowance for the signed request fields that wrap that output.
+COMPLETION_REQUEST_LIMITS = StrictLimits(
+    max_depth=16,
+    max_list_items=20_000,
+    max_object_keys=512,
+    max_string_bytes=65_536,
+    max_total_bytes=(2 * 1_048_576) + 65_536,
+)
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
@@ -431,7 +440,7 @@ def validate_signed_request(
     now: int,
     verify_signature: Any,
     expected_round_id: Optional[str] = None,
-    limits: StrictLimits = REQUEST_LIMITS,
+    limits: Optional[StrictLimits] = None,
     window_seconds: int = REQUEST_TIMESTAMP_WINDOW_SECONDS,
 ) -> Dict[str, Any]:
     """Validate scope, window, shape, and signature. Returns the envelope.
@@ -440,6 +449,8 @@ def validate_signed_request(
     this module performs no chain or crypto import of its own.
     """
 
+    if limits is None:
+        limits = COMPLETION_REQUEST_LIMITS if expected_scope == SCOPE_COMPLETE else REQUEST_LIMITS
     if not isinstance(envelope, Mapping):
         raise ArenaContractError("signed request must be an object")
     check_strict_document(envelope, limits)

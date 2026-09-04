@@ -31,7 +31,19 @@ def _refuse_declared_oversize(request: Request, limit: int) -> None:
             raise HTTPException(status_code=400, detail="content-length invalid")
 
 
-async def _read_json(request: Request, *, limit: int = MAX_JSON_BODY_BYTES) -> Any:
+async def _read_json(
+    request: Request,
+    *,
+    limits: Optional[contracts.StrictLimits] = None,
+) -> Any:
+    limits = limits or contracts.StrictLimits(
+        max_depth=12,
+        max_list_items=2048,
+        max_object_keys=256,
+        max_string_bytes=524_288,
+        max_total_bytes=MAX_JSON_BODY_BYTES,
+    )
+    limit = limits.max_total_bytes
     _refuse_declared_oversize(request, limit)
     chunks = []
     total = 0
@@ -46,7 +58,7 @@ async def _read_json(request: Request, *, limit: int = MAX_JSON_BODY_BYTES) -> A
     except (UnicodeDecodeError, ValueError):
         raise HTTPException(status_code=400, detail="body is not JSON")
     try:
-        contracts.check_strict_document(document, contracts.PUBLICATION_LIMITS if limit > MAX_JSON_BODY_BYTES else contracts.StrictLimits(max_depth=12, max_list_items=2048, max_object_keys=256, max_string_bytes=524_288, max_total_bytes=limit))
+        contracts.check_strict_document(document, limits)
     except ArenaContractError as exc:
         raise HTTPException(status_code=400, detail=str(exc)[:120])
     return document
@@ -149,7 +161,9 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.post("/arena/v1/runs/{run_id}/complete")
     async def complete(run_id: str, request: Request) -> Any:
-        envelope = await _read_json(request)
+        envelope = await _read_json(
+            request, limits=contracts.COMPLETION_REQUEST_LIMITS
+        )
         body = envelope.get("body") if isinstance(envelope, dict) else None
         if not isinstance(body, dict) or str(body.get("run_id") or "") != run_id:
             raise HTTPException(status_code=400, detail="path run id does not match body")

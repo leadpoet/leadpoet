@@ -99,6 +99,45 @@ def test_signed_request_roundtrip_and_rejections():
         signed(keypair, scope="lab_arena.other.v1")
 
 
+def test_completion_signed_request_uses_its_larger_shared_limit():
+    keypair = Keypair.create_from_uri("//Alice")
+    chunks = ["x" * 65_000 for _ in range(32)]
+    envelope = signed(
+        keypair,
+        scope=c.SCOPE_COMPLETE,
+        body={"run_id": "run-1", "output": {"chunks": chunks}},
+    )
+    assert len(c.canonical_json(envelope).encode("utf-8")) > c.REQUEST_LIMITS.max_total_bytes
+    assert c.COMPLETION_REQUEST_LIMITS.max_total_bytes > 2 * 1024 * 1024
+    assert c.validate_signed_request(
+        envelope,
+        expected_scope=c.SCOPE_COMPLETE,
+        now=int(time.time()),
+        verify_signature=wallet_verifier,
+    ) == envelope
+
+    oversized = signed(
+        keypair,
+        scope=c.SCOPE_COMPLETE,
+        body={"run_id": "run-1", "output": {"chunks": chunks + chunks[:2]}},
+    )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_signed_request(
+            oversized,
+            expected_scope=c.SCOPE_COMPLETE,
+            now=int(time.time()),
+            verify_signature=wallet_verifier,
+        )
+
+    with pytest.raises(c.ArenaContractError):
+        c.validate_signed_request(
+            envelope,
+            expected_scope=c.SCOPE_CLAIM,
+            now=int(time.time()),
+            verify_signature=wallet_verifier,
+        )
+
+
 def test_hashed_documents():
     document = c.hashed_document({"b": 2, "a": [1, {"z": None}]}, "doc_hash")
     assert c.verify_hashed_document(document, "doc_hash") == document["doc_hash"]

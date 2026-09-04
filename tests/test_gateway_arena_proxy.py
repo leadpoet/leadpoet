@@ -74,6 +74,38 @@ def test_proxy_refuses_oversized_and_invalid_paths(monkeypatch):
     assert client.get("/arena/v1//current").status_code == 404
 
 
+def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
+    observed = {}
+
+    async def forward(method, path, *, query, body, headers):
+        observed.update(method=method, path=path, body=body)
+        return httpx.Response(200, content=b'{}')
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    body = b"x" * (arena_proxy._MAX_REQUEST_BYTES + 1)
+    assert len(body) < arena_proxy.contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+
+    complete = client.post("/arena/v1/runs/r1/complete", content=body)
+    assert complete.status_code == 200
+    assert observed == {
+        "method": "POST",
+        "path": "v1/runs/r1/complete",
+        "body": body,
+    }
+    assert client.post("/arena/v1/submissions", content=body).status_code == 413
+    assert client.post(
+        "/arena/v1/runs/r1/complete",
+        content=b"{}",
+        headers={
+            "content-length": str(
+                arena_proxy.contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes + 1
+            )
+        },
+    ).status_code == 413
+
+
 def test_proxy_contains_sidecar_failure(monkeypatch):
     async def fail(*_args, **_kwargs):
         raise httpx.ConnectError("unavailable")

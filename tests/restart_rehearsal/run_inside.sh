@@ -542,7 +542,7 @@ from gateway.tee.prepare_active_release_lineage_v2 import (
     prepare_gateway_final_active_lineage_v2,
     prepare_validator_initial_active_lineage_v2,
 )
-from gateway.tee.release_channel_v2 import fetch_release_channel_v2
+from gateway.tee.release_channel_v2 import fetch_prior_release_channel_v2
 from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from validator_tee.enclave.hotkey_authority_v2 import (
@@ -603,7 +603,7 @@ async def no_active_graphs(**_kwargs):
     return []
 
 
-running_channel = fetch_release_channel_v2(
+running_channel = fetch_prior_release_channel_v2(
     bucket="leadpoet-attested-v2-artifacts-493765492819",
     commit_sha=running,
     s3_client=s3_client,

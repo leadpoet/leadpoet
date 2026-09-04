@@ -226,9 +226,23 @@ def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
             'echo "Preparing exact local build inputs before production shutdown"'
         ) : script.index('record_validator_restart_timing "local_release_ready"')
     ]
-    assert release_build.count("follow_superseding_validator_release") == 2
+    assert release_build.count("follow_superseding_validator_release") == 1
     assert release_build.index("follow_superseding_validator_release") < (
         release_build.index("gateway/tee/build_local_release_v2.sh")
+    )
+    acquisition_start = script.index(
+        'if ! follow_superseding_validator_release; then',
+        script.index('echo "Capturing the official subnet restart start before release acquisition"'),
+    )
+    acquisition_end = script.index("VALIDATOR_V2_MISSING_INPUTS=()", acquisition_start)
+    acquisition = script[acquisition_start:acquisition_end]
+    assert acquisition.count("follow_superseding_validator_release") == 4
+    assert "Acquiring the exact historical attested V2 release channel" in acquisition
+    assert '--expected-commit "$VALIDATOR_DEPLOY_SHA"' in acquisition
+    assert '--gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"' in acquisition
+    assert '--validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"' in acquisition
+    assert acquisition.index('[ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]') < (
+        acquisition.index("--ensure")
     )
     assert script.index("follow_superseding_validator_release") < script.index(
         'echo "Stopping validator processes and containers"'
@@ -567,7 +581,8 @@ def test_standalone_active_release_sidecars_use_bounded_nofollow_reads() -> None
     assert "stat.S_ISREG(metadata.st_mode)" in standalone
     assert "max_document_bytes = 4 * 1024 * 1024" in standalone
     assert "os.read(fd, max_document_bytes + 1)" in standalone
-    assert standalone.count("load_bounded_json(") == 3
+    assert standalone.count("load_bounded_json(") == 4
+    assert "validate_historical_compact_release_lineage_v2" in standalone
     assert ".read_text(" not in standalone
     assert ".read_bytes(" not in standalone
 
@@ -620,6 +635,7 @@ def _make_forward_restart_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
         Path("validator_restart.sh"),
         Path("Leadpoet/utils/exact_commit_restart_v2.py"),
         Path("gateway/tee/prepare_active_release_lineage_v2.py"),
+        Path("gateway/tee/topology.json"),
         Path("validator_tee/scripts/verify_pinned_gateway_release_v2.sh"),
     ):
         target = repo / relative

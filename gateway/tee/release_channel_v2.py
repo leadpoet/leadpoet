@@ -21,6 +21,7 @@ import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import (
+    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
     LOCAL_RELEASE_SCHEMA_VERSION,
     validate_historical_release_manifest,
     validate_prior_release_manifest,
@@ -103,12 +104,30 @@ def build_release_channel_v2(
     gateway_release_manifest: Mapping[str, Any],
     validator_release_manifest: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Build a channel only for the canonical current release topology."""
+    """Build a release channel for the canonical current topology."""
 
     return _build_release_channel_v2(
         gateway_release_manifest=gateway_release_manifest,
         validator_release_manifest=validator_release_manifest,
         gateway_validator=validate_release_manifest,
+    )
+
+
+def build_historical_release_channel_v2(
+    *,
+    gateway_release_manifest: Mapping[str, Any],
+    validator_release_manifest: Mapping[str, Any],
+    expected_topology_hash: str,
+) -> Dict[str, Any]:
+    """Build a channel for the explicitly selected known old topology."""
+
+    return _build_release_channel_v2(
+        gateway_release_manifest=gateway_release_manifest,
+        validator_release_manifest=validator_release_manifest,
+        gateway_validator=lambda value: validate_historical_release_manifest(
+            value,
+            expected_topology_hash=expected_topology_hash,
+        ),
     )
 
 
@@ -148,7 +167,7 @@ def _validate_release_channel_v2(
 def validate_release_channel_v2(
     value: Mapping[str, Any], *, expected_commit: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Validate a channel only for the canonical current release topology."""
+    """Validate a channel for the canonical current topology."""
 
     return _validate_release_channel_v2(
         value,
@@ -158,14 +177,20 @@ def validate_release_channel_v2(
 
 
 def validate_historical_release_channel_v2(
-    value: Mapping[str, Any], *, expected_commit: Optional[str] = None
+    value: Mapping[str, Any],
+    *,
+    expected_topology_hash: str = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    expected_commit: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Validate a channel for the exact known retired gateway topology."""
+    """Validate a channel for the explicitly selected known old topology."""
 
     return _validate_release_channel_v2(
         value,
         expected_commit=expected_commit,
-        gateway_validator=validate_historical_release_manifest,
+        gateway_validator=lambda manifest: validate_historical_release_manifest(
+            manifest,
+            expected_topology_hash=expected_topology_hash,
+        ),
     )
 
 
@@ -343,11 +368,43 @@ def fetch_prior_release_channel_v2(
     )
 
 
+def fetch_historical_release_channel_v2(
+    *,
+    bucket: str,
+    commit_sha: str,
+    expected_topology_hash: str,
+    prefix: str = DEFAULT_PREFIX,
+    s3_client: Any = None,
+) -> Dict[str, Any]:
+    """Fetch one channel through the explicit known historical validator."""
+
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+    try:
+        response = s3_client.get_object(
+            Bucket=str(bucket), Key=release_channel_key(commit_sha, prefix=prefix)
+        )
+        payload = response["Body"].read()
+        value = json.loads(payload)
+    except Exception as exc:
+        raise ReleaseChannelV2Error(
+            "approved historical release channel is unavailable"
+        ) from exc
+    return validate_historical_release_channel_v2(
+        value,
+        expected_topology_hash=expected_topology_hash,
+        expected_commit=commit_sha,
+    )
+
+
 def _build_release_lineage_v2(
     channels: Sequence[Mapping[str, Any]],
     *,
     current_commit: str,
-    prior_commits: Sequence[str],
+    prior_commits: Sequence[str] = (),
+    channel_validator: Any = None,
 ) -> Dict[str, Any]:
     commit = str(current_commit or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -359,12 +416,15 @@ def _build_release_lineage_v2(
         raise ReleaseChannelV2Error("prior release lineage commit is invalid")
     releases: Dict[str, Any] = {}
     for value in channels:
-        claimed_commit = str(value.get("commit_sha") or "").lower()
-        channel = (
-            validate_prior_release_channel_v2(value)
-            if claimed_commit in prior
-            else validate_release_channel_v2(value)
-        )
+        if channel_validator is None:
+            claimed_commit = str(value.get("commit_sha") or "").lower()
+            channel = (
+                validate_prior_release_channel_v2(value)
+                if claimed_commit in prior
+                else validate_release_channel_v2(value)
+            )
+        else:
+            channel = channel_validator(value)
         channel_commit = channel["commit_sha"]
         if channel_commit in releases:
             raise ReleaseChannelV2Error("release lineage commit is duplicated")
@@ -411,12 +471,40 @@ def build_release_lineage_v2(
     *,
     current_commit: str,
 ) -> Dict[str, Any]:
-    """Compact only canonical current-topology release channels."""
+    """Compact exact current-topology channels for immutable configuration."""
 
     return _build_release_lineage_v2(
         channels,
         current_commit=current_commit,
         prior_commits=(),
+        channel_validator=validate_release_channel_v2,
+    )
+
+
+def build_historical_release_lineage_v2(
+    channels: Sequence[Mapping[str, Any]],
+    *,
+    current_commit: str,
+    expected_topology_hash: str,
+) -> Dict[str, Any]:
+    """Compact only exact channels from one selected historical topology."""
+
+    lineage = _build_release_lineage_v2(
+        channels,
+        current_commit=current_commit,
+        channel_validator=lambda value: validate_historical_release_channel_v2(
+            value,
+            expected_topology_hash=expected_topology_hash,
+        ),
+    )
+    from gateway.tee.release_lineage_v2 import (
+        validate_historical_compact_release_lineage_v2,
+    )
+
+    return validate_historical_compact_release_lineage_v2(
+        lineage,
+        expected_topology_hash=expected_topology_hash,
+        expected_current_commit=current_commit,
     )
 
 
@@ -682,6 +770,78 @@ def fetch_release_lineage_v2(
         prior_commits=tuple(
             commit for commit in commits if commit != selected_current
         ),
+    )
+
+
+def fetch_historical_release_lineage_v2(
+    *,
+    bucket: str,
+    current_commit: str,
+    expected_topology_hash: str,
+    prefix: str = DEFAULT_PREFIX,
+    s3_client: Any = None,
+    allowed_commits: Sequence[str],
+    required_commits: Sequence[str],
+) -> Dict[str, Any]:
+    """Fetch a bounded all-old-topology lineage for an exact rollback."""
+
+    normalized_prefix = str(prefix or "").strip("/")
+    if not normalized_prefix or ".." in normalized_prefix.split("/"):
+        raise ReleaseChannelV2Error("release channel prefix is invalid")
+    if isinstance(required_commits, (str, bytes)) or isinstance(
+        allowed_commits, (str, bytes)
+    ):
+        raise ReleaseChannelV2Error(
+            "historical release lineage commits are invalid"
+        )
+    required = tuple(required_commits)
+    allowed_values = tuple(allowed_commits)
+    current = str(current_commit or "").lower()
+    if (
+        not required
+        or len(required) > MAX_LINEAGE_RELEASES
+        or len(required) != len(set(required))
+        or any(
+            not isinstance(commit, str)
+            or commit != commit.lower()
+            or not _COMMIT_RE.fullmatch(commit)
+            for commit in required
+        )
+        or not _COMMIT_RE.fullmatch(current)
+        or current not in required
+    ):
+        raise ReleaseChannelV2Error(
+            "historical required release lineage is invalid"
+        )
+    allowed = {str(commit or "").lower() for commit in allowed_values}
+    if (
+        not allowed_values
+        or not allowed
+        or any(
+            not isinstance(commit, str)
+            or commit != commit.lower()
+            or not _COMMIT_RE.fullmatch(commit)
+            for commit in allowed_values
+        )
+        or any(commit not in allowed for commit in required)
+    ):
+        raise ReleaseChannelV2Error(
+            "historical release lineage Git ancestry is invalid"
+        )
+    channels = [
+        fetch_historical_release_channel_v2(
+            bucket=bucket,
+            commit_sha=commit,
+            expected_topology_hash=expected_topology_hash,
+            prefix=normalized_prefix,
+            s3_client=s3_client,
+        )
+        for commit in required
+    ]
+    return build_historical_release_lineage_v2(
+        channels,
+        current_commit=current,
+        expected_topology_hash=expected_topology_hash,
     )
 
 

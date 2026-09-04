@@ -66,6 +66,18 @@ _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 
 
+def _gateway_role_specs(
+    expected_historical_topology_hash: str | None,
+) -> Mapping[str, Mapping[str, Any]]:
+    if expected_historical_topology_hash is None:
+        return ROLE_SPECS
+    from gateway.tee.release_manifest_v2 import historical_three_role_specs
+
+    return historical_three_role_specs(
+        expected_topology_hash=expected_historical_topology_hash
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -329,33 +341,63 @@ def _validated_v2_release_authority(
     gateway_release_manifest: Mapping[str, Any],
     validator_release_manifest: Mapping[str, Any],
     compact_lineage: Mapping[str, Any],
+    expected_historical_topology_hash: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Validate and cross-bind the current immutable V2 release authority."""
 
     from gateway.tee.release_channel_v2 import (
+        build_historical_release_channel_v2,
+        build_historical_release_lineage_v2,
         build_release_channel_v2,
         build_release_lineage_v2,
+        validate_historical_release_channel_v2,
         validate_release_channel_v2,
     )
-    from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+        validate_historical_compact_release_lineage_v2,
+    )
 
     commit = _exact_commit(expected_commit, "expected_commit")
-    channel = validate_release_channel_v2(
-        build_release_channel_v2(
-            gateway_release_manifest=gateway_release_manifest,
-            validator_release_manifest=validator_release_manifest,
-        ),
-        expected_commit=commit,
-    )
-    gateway_release = channel["gateway_release_manifest"]
-    lineage = validate_compact_release_lineage_v2(
-        compact_lineage,
-        expected_current_commit=commit,
-        expected_current_gateway_release_hash=gateway_release["release_hash"],
-    )
-    expected_current = build_release_lineage_v2(
-        [channel], current_commit=commit
-    )["releases"][commit]
+    if expected_historical_topology_hash is None:
+        channel = validate_release_channel_v2(
+            build_release_channel_v2(
+                gateway_release_manifest=gateway_release_manifest,
+                validator_release_manifest=validator_release_manifest,
+            ),
+            expected_commit=commit,
+        )
+        gateway_release = channel["gateway_release_manifest"]
+        lineage = validate_compact_release_lineage_v2(
+            compact_lineage,
+            expected_current_commit=commit,
+            expected_current_gateway_release_hash=gateway_release["release_hash"],
+        )
+        expected_current = build_release_lineage_v2(
+            [channel], current_commit=commit
+        )["releases"][commit]
+    else:
+        channel = validate_historical_release_channel_v2(
+            build_historical_release_channel_v2(
+                gateway_release_manifest=gateway_release_manifest,
+                validator_release_manifest=validator_release_manifest,
+                expected_topology_hash=expected_historical_topology_hash,
+            ),
+            expected_topology_hash=expected_historical_topology_hash,
+            expected_commit=commit,
+        )
+        gateway_release = channel["gateway_release_manifest"]
+        lineage = validate_historical_compact_release_lineage_v2(
+            compact_lineage,
+            expected_topology_hash=expected_historical_topology_hash,
+            expected_current_commit=commit,
+            expected_current_gateway_release_hash=gateway_release["release_hash"],
+        )
+        expected_current = build_historical_release_lineage_v2(
+            [channel],
+            current_commit=commit,
+            expected_topology_hash=expected_historical_topology_hash,
+        )["releases"][commit]
     if lineage["releases"].get(commit) != expected_current:
         raise RuntimeError(
             "compact release lineage current entry differs from release channel"
@@ -410,7 +452,11 @@ def _verified_boot_summary(
     }
 
 
-def _runtime_readiness_boot_hashes(value: Mapping[str, Any]) -> dict[str, str]:
+def _runtime_readiness_boot_hashes(
+    value: Mapping[str, Any],
+    *,
+    role_specs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, str]:
     fields = {
         "schema_version",
         "status",
@@ -427,7 +473,8 @@ def _runtime_readiness_boot_hashes(value: Mapping[str, Any]) -> dict[str, str]:
         raise RuntimeError("gateway runtime readiness is not successful")
     _exact_hash(value.get("provider_registry_hash"), "provider registry hash")
     rows = value.get("roles")
-    if not isinstance(rows, list) or len(rows) != len(_V2_GATEWAY_ROLES):
+    expected_roles = tuple(sorted(role_specs))
+    if not isinstance(rows, list) or len(rows) != len(expected_roles):
         raise RuntimeError("gateway runtime readiness roles are incomplete")
     hashes: dict[str, str] = {}
     for row in rows:
@@ -441,8 +488,8 @@ def _runtime_readiness_boot_hashes(value: Mapping[str, Any]) -> dict[str, str]:
             raise RuntimeError("gateway runtime readiness role is invalid")
         role = str(row.get("physical_role") or "")
         if (
-            role not in ROLE_SPECS
-            or row.get("role") != ROLE_SPECS[role]["service_role"]
+            role not in role_specs
+            or row.get("role") != role_specs[role]["service_role"]
         ):
             raise RuntimeError("gateway runtime readiness role identity differs")
         if role in hashes:
@@ -454,7 +501,7 @@ def _runtime_readiness_boot_hashes(value: Mapping[str, Any]) -> dict[str, str]:
         hashes[role] = _exact_hash(
             row.get("boot_identity_hash"), f"{role} runtime boot identity hash"
         )
-    if set(hashes) != set(_V2_GATEWAY_ROLES):
+    if set(hashes) != set(expected_roles):
         raise RuntimeError("gateway runtime readiness roles are incomplete")
     return hashes
 
@@ -472,6 +519,7 @@ def build_gateway_v2_readiness_evidence(
     runtime_readiness: Mapping[str, Any],
     coordinator_attestation_pcr0: str,
     boot_verifier: Any = None,
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build redacted evidence after fresh verification of every gateway role."""
 
@@ -485,17 +533,35 @@ def build_gateway_v2_readiness_evidence(
         gateway_release_manifest=gateway_release_manifest,
         validator_release_manifest=validator_release_manifest,
         compact_lineage=compact_lineage,
+        expected_historical_topology_hash=expected_historical_topology_hash,
     )
-    if set(boot_identities) != set(_V2_GATEWAY_ROLES):
+    role_specs = _gateway_role_specs(expected_historical_topology_hash)
+    gateway_roles = tuple(sorted(role_specs))
+    if set(boot_identities) != set(gateway_roles):
         raise RuntimeError("gateway boot identities do not cover every role")
-    if set(expected_role_config_hashes) != set(_V2_GATEWAY_ROLES):
+    if set(expected_role_config_hashes) != set(gateway_roles):
         raise RuntimeError("gateway runtime documents do not cover every role")
-    runtime_role_boot_hashes = _runtime_readiness_boot_hashes(runtime_readiness)
+    runtime_role_boot_hashes = _runtime_readiness_boot_hashes(
+        runtime_readiness,
+        role_specs=role_specs,
+    )
     roles: dict[str, dict[str, str]] = {}
-    from gateway.tee.release_manifest_v2 import role_expectation
+    from gateway.tee.release_manifest_v2 import (
+        historical_role_expectation,
+        role_expectation,
+    )
 
-    for role in _V2_GATEWAY_ROLES:
-        expectation = role_expectation(channel["gateway_release_manifest"], role)
+    for role in gateway_roles:
+        if expected_historical_topology_hash is None:
+            expectation = role_expectation(
+                channel["gateway_release_manifest"], role
+            )
+        else:
+            expectation = historical_role_expectation(
+                channel["gateway_release_manifest"],
+                role,
+                expected_topology_hash=expected_historical_topology_hash,
+            )
         summary = _verified_boot_summary(
             boot_identity=boot_identities[role],
             expectation=expectation,
@@ -551,7 +617,7 @@ def build_gateway_v2_readiness_evidence(
             "validator release hash",
         ),
         "lineage_hash": _exact_hash(lineage["lineage_hash"], "lineage hash"),
-        "roles": {role: roles[role] for role in _V2_GATEWAY_ROLES},
+        "roles": {role: roles[role] for role in gateway_roles},
         "coordinator_attestation_pcr0": coordinator_attestation,
     }
 
@@ -566,6 +632,7 @@ def build_validator_v2_readiness_evidence(
     boot_identity: Mapping[str, Any],
     expected_config_hash: str,
     boot_verifier: Any = None,
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build redacted evidence after fresh verification of validator_weights."""
 
@@ -577,6 +644,7 @@ def build_validator_v2_readiness_evidence(
         gateway_release_manifest=gateway_release_manifest,
         validator_release_manifest=validator_release_manifest,
         compact_lineage=compact_lineage,
+        expected_historical_topology_hash=expected_historical_topology_hash,
     )
     validator_release = channel["validator_release_manifest"]
     validator_authority = validator_release["release"]
@@ -624,7 +692,10 @@ def build_validator_v2_readiness_evidence(
 
 
 def build_gateway_v2_readiness_evidence_from_observation(
-    *, expected_commit: str, observation: Mapping[str, Any]
+    *,
+    expected_commit: str,
+    observation: Mapping[str, Any],
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     fields = {
         "schema_version",
@@ -658,11 +729,15 @@ def build_gateway_v2_readiness_evidence_from_observation(
         coordinator_attestation_pcr0=observation[
             "coordinator_attestation_pcr0"
         ],
+        expected_historical_topology_hash=expected_historical_topology_hash,
     )
 
 
 def build_validator_v2_readiness_evidence_from_observation(
-    *, expected_commit: str, observation: Mapping[str, Any]
+    *,
+    expected_commit: str,
+    observation: Mapping[str, Any],
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     fields = {
         "schema_version",
@@ -688,10 +763,15 @@ def build_validator_v2_readiness_evidence_from_observation(
         compact_lineage=observation["compact_lineage"],
         boot_identity=observation["boot_identity"],
         expected_config_hash=observation["expected_config_hash"],
+        expected_historical_topology_hash=expected_historical_topology_hash,
     )
 
 
-def _normalize_gateway_v2_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_gateway_v2_evidence(
+    value: Mapping[str, Any],
+    *,
+    expected_historical_topology_hash: str | None = None,
+) -> dict[str, Any]:
     fields = {
         "schema_version",
         "commit_sha",
@@ -714,10 +794,12 @@ def _normalize_gateway_v2_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         if _exact_commit(value.get(field), field) != commit:
             raise RuntimeError(f"gateway evidence {field} differs")
     roles = value.get("roles")
-    if not isinstance(roles, Mapping) or set(roles) != set(_V2_GATEWAY_ROLES):
+    role_specs = _gateway_role_specs(expected_historical_topology_hash)
+    gateway_roles = tuple(sorted(role_specs))
+    if not isinstance(roles, Mapping) or set(roles) != set(gateway_roles):
         raise RuntimeError("gateway V2 readiness roles are incomplete")
     normalized_roles = {}
-    for role in _V2_GATEWAY_ROLES:
+    for role in gateway_roles:
         summary = roles[role]
         if not isinstance(summary, Mapping) or set(summary) != {
             "commit_sha",
@@ -864,11 +946,15 @@ def build_v2_deploy_readiness_manifest(
     expected_commit: str,
     gateway_evidence: Mapping[str, Any],
     validator_evidence: Mapping[str, Any],
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     """Join two freshly verified hosts into one exact-release resume authority."""
 
     commit = _exact_commit(expected_commit, "expected_commit")
-    gateway = _normalize_gateway_v2_evidence(gateway_evidence)
+    gateway = _normalize_gateway_v2_evidence(
+        gateway_evidence,
+        expected_historical_topology_hash=expected_historical_topology_hash,
+    )
     validator = _normalize_validator_v2_evidence(validator_evidence)
     if gateway["commit_sha"] != commit or validator["commit_sha"] != commit:
         raise RuntimeError("deploy readiness evidence commit differs")
@@ -920,6 +1006,7 @@ def validate_v2_deploy_readiness_manifest(
     *,
     runtime_source_commit: str | None = None,
     runtime_build_commit: str | None = None,
+    expected_historical_topology_hash: str | None = None,
 ) -> dict[str, Any]:
     """Validate current-release readiness without a wall-clock freshness guess."""
 
@@ -947,7 +1034,10 @@ def validate_v2_deploy_readiness_manifest(
     if _canonical_hash(body) != manifest_hash:
         raise RuntimeError("deploy readiness v2 manifest hash differs")
     commit = _exact_commit(document.get("expected_commit_sha"), "expected commit")
-    gateway = _normalize_gateway_v2_evidence(document.get("gateway"))
+    gateway = _normalize_gateway_v2_evidence(
+        document.get("gateway"),
+        expected_historical_topology_hash=expected_historical_topology_hash,
+    )
     validator = _normalize_validator_v2_evidence(document.get("validator"))
     if gateway["commit_sha"] != commit or validator["commit_sha"] != commit:
         raise RuntimeError("deploy readiness v2 commit differs")

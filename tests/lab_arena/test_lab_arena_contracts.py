@@ -143,11 +143,9 @@ def base_round_configuration():
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
         "baseline_hotkey": Keypair.create_from_uri("//Baseline").ss58_address,
-        "baseline_image_reference": "ghcr.io/leadpoet/pydantic-harness:latest",
+        "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
         "runner_hotkeys": [Keypair.create_from_uri("//Alice").ss58_address, Keypair.create_from_uri("//Floor").ss58_address],
         "banned_hotkeys": [],
-        "image_rules": {"schema_version": "leadpoet.lab_arena.image_rules.v1", "max_image_bytes": 2147483648, "max_layers": 64, "max_rootfs_bytes": 8589934592, "platform": {"os": "linux", "architecture": "amd64"}, "layer_media_types": ["application/vnd.oci.image.layer.v1.tar+gzip"]},
-        "registry_repository": "arena.example/lab-arena/models",
         "reward_constants": {"pool_percent": 25, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
     }
 
@@ -166,6 +164,7 @@ def test_round_configuration_contains_only_plain_public_settings():
         lambda d: d["reward_constants"].update(epochs_per_reward_week=141),
         lambda d: d["reward_constants"].update(pool_basis="fulfillment_residual"),
         lambda d: d.update(scorer_image_reference="registry.example/lab/scorer:latest"),
+        lambda d: d.update(baseline_source_url="http://example.test/source.tar.gz"),
         lambda d: d.update(runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address] * 2),
         lambda d: d["schedule"].update(stage_1_scoring_close="2026-09-02T00:00:00Z"),
         lambda d: d.update(unexpected=1),
@@ -179,6 +178,30 @@ def test_round_configuration_contains_only_plain_public_settings():
     adjustable = base_round_configuration()
     adjustable["reward_constants"]["pool_percent"] = 5
     assert c.validate_round_configuration(adjustable)["reward_constants"]["pool_percent"] == 5
+
+
+def test_source_submission_contract_has_two_small_signed_steps():
+    digest = "sha256:" + "a" * 64
+    presign = {
+        "source_sha256": digest,
+        "source_size_bytes": 123,
+        "consent": {"public_rerun": True},
+    }
+    assert c.validate_submission_presign_body(presign) == presign
+    finalize = {
+        "submission_id": "sub-abc123",
+        "source_ref": "arena/arena-2026-09-02/sources/sub-abc123.tar.gz",
+        "source_sha256": digest,
+        "source_size_bytes": 123,
+    }
+    assert c.validate_submission_finalize_body(finalize) == finalize
+    for bad in (
+        dict(presign, consent={"public_rerun": False}),
+        dict(presign, source_size_bytes=10 * 1024 * 1024 + 1),
+        dict(presign, image_reference="registry.example/agent:latest"),
+    ):
+        with pytest.raises(c.ArenaContractError):
+            c.validate_submission_presign_body(bad)
 
 
 def test_run_result_reward_basis_and_scoring_plan_contracts():

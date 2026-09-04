@@ -12,6 +12,9 @@ SQL = MIGRATION.read_text(encoding="utf-8")
 DAILY_SQL = (SCRIPTS / "180-lab-arena-daily-competition.sql").read_text(
     encoding="utf-8"
 )
+SOURCE_SQL = (SCRIPTS / "181-lab-arena-source-submissions.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -51,7 +54,8 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
     assert numbered[178] == ["178-research-lab-source-add-miner-status.sql"]
     assert numbered[179] == ["179-lab-arena-v1.sql"]
     assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
-    assert max(numbered) == 180, "180 must sit directly above the production frontier"
+    assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
+    assert max(numbered) == 181, "181 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
@@ -212,6 +216,19 @@ def test_daily_migration_has_one_private_input_and_no_parallel_baseline_state():
     assert "receipt" not in DAILY_SQL.lower()
     assert "manifest" not in DAILY_SQL.lower()
     assert "hash_chain" not in DAILY_SQL.lower()
+
+
+def test_source_intake_migration_has_one_active_slot_and_no_image_identity():
+    assert "source_ref TEXT" in SOURCE_SQL
+    assert "source_sha256 TEXT" in SOURCE_SQL
+    assert "source_size_bytes BIGINT" in SOURCE_SQL
+    assert "status IN ('uploading', 'accepted', 'frozen')" in SOURCE_SQL
+    assert "lab_arena_submissions_one_active_per_miner_uq" in SOURCE_SQL
+    assert "submitted_reference" not in SOURCE_SQL
+    assert "image_digest" not in SOURCE_SQL
+    assert "manifest" not in SOURCE_SQL.lower()
+    assert "receipt" not in SOURCE_SQL.lower()
+    assert "hash_chain" not in SOURCE_SQL.lower()
 
 
 def test_host_openrouter_money_caps_are_atomic_and_round_wide_per_submission():

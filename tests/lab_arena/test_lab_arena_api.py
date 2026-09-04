@@ -20,9 +20,8 @@ class StubStore:
         return {
             "status": "accepted",
             "rejection_rule": None,
-            "image_digest": "sha256:" + "a" * 64,
-            "image_reference": "arena.example/private@sha256:" + "a" * 64,
-            "submitted_reference": "miner.example/secret@sha256:" + "a" * 64,
+            "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+            "source_size_bytes": 100,
         } if submission_id == "sub-1" else None
 
 
@@ -51,9 +50,13 @@ class StubService:
     def public_results(self, round_id, submission_id):
         return {"round_id": round_id, "submission_id": submission_id}
 
-    def handle_submission(self, envelope):
-        self.calls["submission"] = envelope
-        return {"status": "uploaded", "submission_id": "sub-1"}
+    def handle_submission_presign(self, envelope):
+        self.calls["submission_presign"] = envelope
+        return {"status": "upload_ready", "submission_id": "sub-1"}
+
+    def handle_submission_finalize(self, submission_id, envelope):
+        self.calls["submission_finalize"] = (submission_id, envelope)
+        return {"status": "accepted", "submission_id": submission_id}
 
     def handle_claim(self, envelope):
         self.calls["claim"] = envelope
@@ -131,13 +134,19 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     assert nan.status_code == 400
 
 
-def test_submission_route_takes_one_signed_json_body_naming_an_image(client):
+def test_submission_routes_presign_and_finalize_one_source_upload(client):
     http, service = client
-    envelope = {"scope": contracts.SCOPE_SUBMISSION, "body": {"image_reference": "ghcr.io/acme/agent@sha256:" + "a" * 64}}
-    response = http.post("/arena/v1/submissions", content=json.dumps(envelope))
-    assert response.status_code == 200 and service.calls["submission"] == envelope
-    assert http.post("/arena/v1/submissions", content=b"x").status_code == 400
-    assert http.post("/arena/v1/submissions", content=b"{bad").status_code == 400
+    envelope = {"scope": contracts.SCOPE_SUBMISSION_PRESIGN, "body": {"source_sha256": "sha256:" + "a" * 64, "source_size_bytes": 100}}
+    response = http.post("/arena/v1/submissions/presign", content=json.dumps(envelope))
+    assert response.status_code == 200 and service.calls["submission_presign"] == envelope
+    finalize = {"scope": contracts.SCOPE_SUBMISSION_FINALIZE, "body": {"submission_id": "sub-1"}}
+    response = http.post("/arena/v1/submissions/sub-1/finalize", content=json.dumps(finalize))
+    assert response.status_code == 200
+    assert service.calls["submission_finalize"] == ("sub-1", finalize)
+    mismatch = http.post("/arena/v1/submissions/sub-2/finalize", content=json.dumps(finalize))
+    assert mismatch.status_code == 400
+    assert http.post("/arena/v1/submissions/presign", content=b"x").status_code == 400
+    assert http.post("/arena/v1/submissions/presign", content=b"{bad").status_code == 400
     assert http.post("/arena/v1/funding/confirm", content=json.dumps({"scope": "gone"})).status_code == 404
     for provider in contracts.PROVIDERS:
         assert http.post("/arena/v1/credentials/%s" % provider, content=b"{}").status_code == 404
@@ -163,6 +172,6 @@ def test_an_oversized_declared_body_is_refused_before_it_is_read(client):
     http, service = client
     refused = http.post("/arena/v1/runs/claim", content=b"{}", headers={"content-length": str(MAX_JSON_BODY_BYTES + 1)})
     assert refused.status_code == 413
-    submission = http.post("/arena/v1/submissions", content=b"{}", headers={"content-length": str(MAX_JSON_BODY_BYTES + 1)})
+    submission = http.post("/arena/v1/submissions/presign", content=b"{}", headers={"content-length": str(MAX_JSON_BODY_BYTES + 1)})
     assert submission.status_code == 413
-    assert "submission" not in service.calls
+    assert "submission_presign" not in service.calls

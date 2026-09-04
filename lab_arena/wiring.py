@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -17,7 +18,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, signing
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
+from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
+
+
+_DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
 
 
 def _required(name: str) -> str:
@@ -25,6 +30,35 @@ def _required(name: str) -> str:
     if not value:
         raise ServiceError("environment %s is required" % name, 500)
     return value
+
+
+def fetch_public_source_archive(url: str, max_bytes: int) -> bytes:
+    """Download one public HTTPS archive without credentials or proxy state."""
+
+    if not str(url).startswith("https://"):
+        raise ServiceError("baseline source URL must use https", 500)
+    limit = min(int(max_bytes), MAX_SOURCE_ARCHIVE_BYTES)
+    request = urllib.request.Request(
+        str(url), headers={"Accept": "application/gzip, application/octet-stream"}
+    )
+    try:
+        with _DIRECT_URLOPEN(request, timeout=60.0) as response:
+            if int(getattr(response, "status", 200)) != 200:
+                raise ServiceError("baseline source download failed", 503)
+            final_url = str(getattr(response, "geturl", lambda: url)())
+            if not final_url.startswith("https://"):
+                raise ServiceError("baseline source redirect must use https", 500)
+            declared = response.headers.get("Content-Length")
+            if declared is not None and int(declared) > limit:
+                raise ServiceError("baseline source archive is too large", 500)
+            data = response.read(limit + 1)
+    except ServiceError:
+        raise
+    except Exception as exc:
+        raise ServiceError("baseline source download failed", 503) from exc
+    if not 1 <= len(data) <= limit:
+        raise ServiceError("baseline source archive is too large", 500)
+    return data
 
 
 class ChainReadsAdapter:
@@ -129,7 +163,7 @@ def _max_challengers_from_environment() -> int:
 
 
 def _max_image_bytes_from_environment() -> int:
-    """LAB_ARENA_MAX_IMAGE_BYTES: the compressed size ceiling of a submitted image."""
+    """LAB_ARENA_MAX_IMAGE_BYTES: compressed size ceiling of the trusted scorer."""
 
     raw = os.environ.get("LAB_ARENA_MAX_IMAGE_BYTES", "").strip()
     if not raw:
@@ -183,26 +217,27 @@ def build_service_from_environment(mode: str):
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
     runners = tuple(item.strip() for item in os.environ.get("LAB_ARENA_RUNNER_HOTKEYS", "").split(",") if item.strip())
-    # Miners may submit a public tag or digest. The Arena resolves and mirrors
-    # it once. The trusted scorer is also resolved once at startup.
-    registry = registry_client_from_environment(push=True)
-    source_registry = images.RegistryClient()
-    repository = _required("LAB_ARENA_REGISTRY_REPOSITORY")
+    # The trusted scorer remains an organizer-owned internal image. Miner and
+    # baseline agents enter as source archives and need no registry account.
+    registry = images.RegistryClient()
     image_rules = images.ImageRules(max_image_bytes=_max_image_bytes_from_environment())
     try:
         scorer = images.resolve_image(registry, images.parse_reference(_required("LAB_ARENA_SCORER_IMAGE")), image_rules)
     except images.ImageError as exc:
         raise ServiceError("scorer_image_unresolved:%s" % exc.rule_id, 500) from exc
+    finally:
+        registry.close()
     defaults = RoundDefaults(
         runner_hotkeys=runners,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
-        baseline_image_reference=_required("LAB_ARENA_BASELINE_IMAGE"),
+        baseline_source_url=os.environ.get(
+            "LAB_ARENA_BASELINE_SOURCE_URL",
+            "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+        ).strip(),
         max_challengers=_max_challengers_from_environment(),
         daily_cutoff_hour_utc=_daily_cutoff_hour_from_environment(),
         scorer_image_digest=scorer.image_digest,
         scorer_image_reference=str(scorer.reference),
-        image_rules=image_rules,
-        registry_repository=repository,
         pool_percent=_pool_percent_from_environment(),
         rewards_enabled=_rewards_enabled_from_environment(),
     )
@@ -229,9 +264,9 @@ def build_service_from_environment(mode: str):
 
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
-        registry=registry, source_registry=source_registry,
         daily_icp_source=daily_icp_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
+        baseline_source_fetcher=fetch_public_source_archive,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
     )
     service = ArenaService(config)

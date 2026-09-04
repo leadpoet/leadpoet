@@ -6,29 +6,25 @@ The baseline and miners use that one set and one scoring path.
 
 ## Competition boundary
 
-A miner submits one public OCI image by tag or digest. At intake, the Arena:
+A miner submits one local source directory. The helper:
 
-1. pulls the source anonymously;
-2. resolves a tag to one immutable manifest digest;
-3. checks the public size, layer, and Linux/AMD64 limits; and
-4. copies the image bytes to the Arena registry.
+1. requires `harness.py`;
+2. creates one sorted, size-limited archive with normalized metadata;
+3. gets a private upload target from the Arena;
+4. uploads the archive; and
+5. signs a final request so the Arena can validate and accept the bytes.
 
-The submitted tag or digest is only an image location. It does not determine
-identity, rank, or the winner. The runner ignores OCI command, environment,
-and work-directory settings. It always starts the miner bundle with:
+No Dockerfile, public registry, image tag, commit identity, receipt, or release
+manifest is part of miner admission. The archive SHA-256 value checks only
+that the uploaded bytes arrived unchanged. It is not a submission ID, model
+identity, ranking input, or activation gate. A miner can use any harness,
+model, prompts, packages, routing, or orchestration behind the one callable.
 
-```text
-/agent/run
-```
-
-The bundle reads `/input/icp.json` and writes `/output/companies.json` by the
-documented schemas. It has no direct network interface. Provider calls go
-through the runner socket and the Arena broker. A miner can use any internal
-harness, model, prompts, packages, routing, or orchestration.
-
-The source contract is `harness.run_icp(icp) -> list[dict]`. The function is
-synchronous and returns at most five company objects. The public baseline
-README gives the full input and output example:
+The source contract is `harness.run_icp(icp) -> list[dict]`. The function must
+be synchronous and have exactly one positional parameter. It cannot have
+keyword-only parameters, `*args`, or `**kwargs`. It returns at most five
+company objects. The public baseline README gives the full input and output
+example:
 [`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
 
 The organizer supplies one host key for each provider:
@@ -58,27 +54,26 @@ Set these values on the Arena service host:
 - `LAB_ARENA_BUCKET`
 - `LAB_ARENA_CHAIN_ENDPOINT`
 - the three host provider keys listed above
-- `LAB_ARENA_REGISTRY_REPOSITORY`
-- `LAB_ARENA_REGISTRY_USERNAME`
-- `LAB_ARENA_REGISTRY_PASSWORD`
 - `LAB_ARENA_SCORER_IMAGE`: a public tag or digest; startup resolves it to a
   digest for trusted scoring
 - `LAB_ARENA_RUNNER_HOTKEYS`: the runner hotkeys allowed to claim work
-- `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns the initial
-  public baseline
-- `LAB_ARENA_BASELINE_IMAGE`: the public PydanticAI baseline image tag or
-  digest
+- `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
+  public baseline entry
+- `LAB_ARENA_BASELINE_SOURCE_URL`: the public HTTPS PydanticAI source archive;
+  it defaults to the `leadpoet/pydantic-harness` main-branch archive
 
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
 `LAB_ARENA_DAILY_CUTOFF_UTC`, `LAB_ARENA_MAX_CHALLENGERS`,
-`LAB_ARENA_MAX_IMAGE_BYTES`, `LAB_ARENA_POOL_PERCENT`, and
+`LAB_ARENA_MAX_IMAGE_BYTES` for the trusted scorer image,
+`LAB_ARENA_POOL_PERCENT`, and
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.
 
 Apply `scripts/179-lab-arena-v1.sql` and
-`scripts/180-lab-arena-daily-competition.sql` with the database owner before
+`scripts/180-lab-arena-daily-competition.sql`, then
+`scripts/181-lab-arena-source-submissions.sql` with the database owner before
 service startup. Then check the service wiring:
 
 ```bash
@@ -110,8 +105,9 @@ executable gVisor `runsc`. It also needs:
 - `LAB_ARENA_RUNSC_PATH`
 
 `LAB_ARENA_MAX_PARALLEL_RUNS` and `LAB_ARENA_ROUND_ID` are optional. Provider
-keys, database access, registry push access, and the signing key stay on the
-service host. Start the runner with:
+keys, database access, source upload access, and the signing key stay on the
+service host. The runner can need read access to the organizer's trusted
+scorer image. Start the runner with:
 
 ```bash
 python3 scripts/run_lab_arena_runner.py
@@ -119,26 +115,25 @@ python3 scripts/run_lab_arena_runner.py
 
 ## Miner flow
 
-Choose **Agent Competition** in `neurons/miner.py`. It asks for the local
-source directory and a public image tag, then builds, pushes, signs, and
-submits the bundle. It never asks for provider credentials. Advanced users can
-also create and sign the small image request with `scripts/lab_arena_miner.py`:
+Choose **Agent Competition** in `neurons/miner.py`. It asks for only the local
+source directory, then archives, uploads, signs, and finalizes it. It never
+asks for provider credentials, a Dockerfile, or an image tag. The same helper
+can run directly:
 
-```json
-{
-  "image_reference": "ghcr.io/example/agent:latest",
-  "consent": {"public_rerun": true}
-}
+```bash
+python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+  --wallet-name default --hotkey-name default
 ```
 
 See the repository README for example bundles and schema links. An example is
 documentation only; it is not part of admission or scoring.
 
 At the first round cutoff, the service automatically admits the configured
-public baseline through the same image-admission flow. A temporary registry
-failure is retried. A rejected baseline prevents the round from starting.
-After a winner exists, that winner is carried into the next round, or its miner
-can submit a fresh bundle before the next cutoff.
+public baseline archive through the same source-admission checks. A temporary
+download or object-store failure is retried. An invalid baseline prevents the
+round from starting. Each daily round gets a new baseline download and uses
+only that baseline as the score miners must beat. Prior winners stay in reward
+history; they do not replace the next daily baseline.
 
 ## Rewards and independent disable controls
 

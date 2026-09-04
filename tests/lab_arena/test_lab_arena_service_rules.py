@@ -8,9 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, images
-from lab_arena import service as service_module
-from lab_arena.service import ArenaService, ServiceError
+from lab_arena import contracts, source_bundle
+from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 
 
 def _schedule():
@@ -29,26 +28,69 @@ def test_submission_requires_the_full_half_open_time_window(moment):
         {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule()}},
     )
     with pytest.raises(ServiceError, match="submission_window_closed"):
-        service.handle_submission({})
+        service.handle_submission_presign({})
 
 
 def test_submission_inside_the_window_registers_normally():
     class Store:
         @staticmethod
         def register_submission(*_args):
-            return {"status": "registered"}
+            return {
+                "status": "registered",
+                "submission_id": _args[1],
+                "source_ref": _args[3]["source_ref"],
+            }
+
+    class Objects:
+        @staticmethod
+        def presign_put(ref, **_kwargs):
+            return {
+                "upload_url": "https://uploads.example/" + ref,
+                "upload_headers": {
+                    "content-type": source_bundle.SOURCE_CONTENT_TYPE
+                },
+                "expires_in_seconds": 900,
+            }
 
     hotkey = "5" + "A" * 47
     digest = "sha256:" + "a" * 64
     service = object.__new__(ArenaService)
     service._store = Store()
+    service._objects = Objects()
     service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
     service._config = SimpleNamespace(chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
     service._request_round = lambda *_args, **_kwargs: (
-        {"hotkey": hotkey, "body": {"image_reference": "registry.example/agent@" + digest, "consent": {"public_rerun": True}}},
-        {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule()}},
+        {"hotkey": hotkey, "body": {"source_sha256": digest, "source_size_bytes": 10, "consent": {"public_rerun": True}}},
+        {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule(), "baseline_hotkey": "5" + "Z" * 47}},
     )
-    assert service.handle_submission({})["status"] == "uploaded"
+    result = service.handle_submission_presign({})
+    assert result["status"] == "upload_ready"
+    assert result["submission_id"].startswith("sub-")
+    assert result["source_ref"].endswith(result["submission_id"] + ".tar.gz")
+
+
+def test_source_upload_target_is_write_once_and_size_bound():
+    calls = []
+    client = SimpleNamespace(
+        generate_presigned_url=lambda operation, **kwargs: calls.append(
+            (operation, kwargs)
+        )
+        or "https://uploads.example/source"
+    )
+    objects = S3ObjectStore("arena-bucket", client=client)
+    target = objects.presign_put(
+        "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+        size_bytes=123,
+        content_type=source_bundle.SOURCE_CONTENT_TYPE,
+        expires_seconds=900,
+    )
+    assert target["upload_headers"] == {
+        "content-type": source_bundle.SOURCE_CONTENT_TYPE,
+        "content-length": "123",
+        "if-none-match": "*",
+    }
+    params = calls[0][1]["Params"]
+    assert params["ContentLength"] == 123 and params["IfNoneMatch"] == "*"
 
 
 def test_completion_cannot_cross_the_signed_round_boundary():
@@ -74,7 +116,6 @@ def test_completion_cannot_cross_the_signed_round_boundary():
 
 def test_final_admission_must_finish_before_the_round_freezes():
     service = object.__new__(ArenaService)
-    service._config = SimpleNamespace(registry=object())
     service._hot_round_lock = __import__("threading").Lock()
     service._hot_rounds = {}
     service._round = lambda _round_id: {
@@ -199,6 +240,33 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
         service._round("shadow-round")
 
 
+def test_public_round_does_not_expose_source_transport_fields():
+    service = object.__new__(ArenaService)
+    service._round = lambda _round_id: {
+        "round_id": "arena-2026-09-02",
+        "status": "committed",
+        "configuration_doc": {"mode": "shadow"},
+        "participants": [
+            {
+                "submission_id": "sub-random",
+                "miner_hotkey": "5" + "A" * 47,
+                "is_king": False,
+                "source_ref": "arena/private/source.tar.gz",
+                "source_sha256": "sha256:" + "a" * 64,
+                "source_size_bytes": 100,
+            }
+        ],
+    }
+    view = service.public_round("arena-2026-09-02")
+    assert view["participants"] == [
+        {
+            "submission_id": "sub-random",
+            "miner_hotkey": "5" + "A" * 47,
+            "is_king": False,
+        }
+    ]
+
+
 def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
     calls = []
 
@@ -233,9 +301,9 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
         "submission_id": "baseline-2026-09-02",
         "round_id": "arena-2026-09-02",
         "miner_hotkey": configured,
-        "image_digest": "sha256:" + "a" * 64,
-        "image_reference": "arena.example/lab/baseline@sha256:" + "a" * 64,
-        "submitted_reference": "source.example/lab/baseline:latest",
+        "source_ref": "arena/arena-2026-09-02/sources/baseline-2026-09-02.tar.gz",
+        "source_sha256": "sha256:" + "a" * 64,
+        "source_size_bytes": 100,
         "status": "accepted",
         "is_king": True,
     }
@@ -257,11 +325,10 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
         "round_id": "arena-2026-09-02",
         "configuration_doc": {
             "baseline_hotkey": configured,
-            "baseline_image_reference": "source.example/lab/baseline:latest",
+            "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
             "max_challengers": 10,
         },
     }
-    service._reigning_king_hotkey = lambda: None
     service._initial_baseline = lambda round_row: (
         baseline
         if round_row["configuration_doc"]["baseline_hotkey"] == configured
@@ -272,6 +339,53 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
     assert len(participants) == 1 and participants[0]["submission_id"] == baseline["submission_id"]
     assert participants[0]["is_king"] is True
     assert updates == [("arena-2026-09-02", baseline["submission_id"], "accepted", "frozen", {"is_king": True})]
+
+
+def test_each_new_day_uses_the_public_baseline_even_after_a_miner_won_yesterday():
+    baseline_hotkey = "5" + "A" * 47
+    winner_hotkey = "5" + "B" * 47
+    baseline = {
+        "submission_id": "baseline-2026-09-03",
+        "round_id": "arena-2026-09-03",
+        "miner_hotkey": baseline_hotkey,
+        "source_ref": "arena/arena-2026-09-03/sources/baseline-2026-09-03.tar.gz",
+        "source_sha256": "sha256:" + "a" * 64,
+        "source_size_bytes": 100,
+        "status": "accepted",
+        "is_king": True,
+    }
+
+    class Store:
+        @staticmethod
+        def list_submissions(_round_id, status):
+            return [baseline] if status == "accepted" else []
+
+        @staticmethod
+        def update_submission(*_args):
+            return {"status": "ok"}
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: {
+        "round_id": "arena-2026-09-03",
+        "configuration_doc": {
+            "baseline_hotkey": baseline_hotkey,
+            "max_challengers": 10,
+        },
+    }
+    service._initial_baseline = lambda _round_row: baseline
+    # Yesterday's result remains available for reward history. It must not
+    # select today's threshold participant.
+    service.latest_published_round = lambda: {
+        "round_id": "arena-2026-09-02",
+        "king_hotkey": winner_hotkey,
+        "king_outcome": "crowned",
+    }
+
+    participants = service.freeze_participants("arena-2026-09-03")
+    assert [(row["miner_hotkey"], row["is_king"]) for row in participants] == [
+        (baseline_hotkey, True)
+    ]
 
 
 def test_score_lease_uses_the_round_pinned_scorer_after_restart():
@@ -319,69 +433,52 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
 
 
-def test_image_admission_uses_one_absolute_tick_deadline(monkeypatch):
-    source_registry = object()
-    destination_registry = object()
-    digest = "sha256:" + "c" * 64
-    source_reference = images.parse_reference("source.example/miner/bundle@" + digest)
-    destination_reference = images.parse_reference("arena.example/lab/bundle@" + digest)
-    calls = []
-
-    class Descriptor:
-        reference = source_reference
-
-        @staticmethod
-        def to_document():
-            return {"image_digest": digest, "image_size_bytes": 1024, "layer_count": 1}
-
-    class Store:
-        @staticmethod
-        def list_submissions(_round_id, status):
-            assert status == "uploaded"
-            return [{"submission_id": "s1", "submitted_reference": str(source_reference)}]
-
-        @staticmethod
-        def update_submission(_round_id, _submission_id, _old, _new, _patch):
-            return {"status": "ok"}
-
-    def resolve(client, reference, rules, *, deadline=None):
-        calls.append(("resolve", client, reference, rules, deadline))
-        return Descriptor()
-
-    def mirror(client, descriptor, repository, *, destination_client=None, deadline=None):
-        calls.append(("mirror", client, descriptor, repository, destination_client, deadline))
-        return destination_reference
-
-    ticks = iter((100.0, 101.0))
-    monkeypatch.setattr(service_module.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(images, "resolve_image", resolve)
-    monkeypatch.setattr(images, "mirror_image", mirror)
+def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():
+    row = {
+        "submission_id": "sub-1",
+        "round_id": "arena-2026-09-02",
+        "miner_hotkey": "5" + "A" * 47,
+        "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+        "source_sha256": "sha256:" + "a" * 64,
+        "source_size_bytes": 4,
+        "status": "uploading",
+    }
+    updates = []
     service = object.__new__(ArenaService)
-    service._store = Store()
-    service._config = SimpleNamespace(
-        registry=destination_registry,
-        source_registry=source_registry,
-        admission_tick_seconds=10,
+    service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
+    service._store = SimpleNamespace(
+        get_submission=lambda _submission_id: row,
+        update_submission=lambda *args: updates.append(args) or {"status": "ok"},
     )
-    service._round = lambda _round_id: {
-        "status": "open",
-        "configuration_doc": {
-            "image_rules": images.ImageRules().to_document(),
-            "registry_repository": "arena.example/lab/bundle",
+    service._objects = SimpleNamespace(get_bounded=lambda *_args: b"nope")
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": row["miner_hotkey"],
+            "body": {
+                "submission_id": row["submission_id"],
+                "source_ref": row["source_ref"],
+                "source_sha256": row["source_sha256"],
+                "source_size_bytes": row["source_size_bytes"],
+            },
         },
-    }
+        {
+            "round_id": row["round_id"],
+            "status": "open",
+            "configuration_doc": {"schedule": _schedule()},
+        },
+    )
 
-    assert service.admit_uploaded_submissions("arena-2026-09-02") == {
-        "status": "ok",
-        "accepted": 1,
-        "rejected": 0,
-        "deferred": 0,
-        "remaining": 0,
-    }
-    assert calls[0][0:3] == ("resolve", source_registry, source_reference)
-    assert calls[0][-1] == 110.0
-    assert calls[1][0] == "mirror" and calls[1][1] is source_registry
-    assert calls[1][4] is destination_registry and calls[1][-1] == 110.0
+    with pytest.raises(ServiceError, match="source_sha256_mismatch"):
+        service.handle_submission_finalize(row["submission_id"], {})
+    assert updates == [
+        (
+            row["round_id"],
+            row["submission_id"],
+            "uploading",
+            "rejected",
+            {"rejection_rule": "source_sha256_mismatch"},
+        )
+    ]
 
 
 def _daily_source_icps():

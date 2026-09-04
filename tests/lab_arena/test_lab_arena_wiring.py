@@ -19,8 +19,7 @@ def test_service_wiring_requires_every_environment_value(monkeypatch):
     assert "LAB_ARENA_SUPABASE_URL" in str(failure.value)
 
 
-def test_service_config_requires_a_distinct_anonymous_source_registry():
-    destination = object()
+def test_service_config_has_no_miner_registry_or_image_admission_dependency():
     required = {
         "mode": "live",
         "store": object(),
@@ -31,13 +30,41 @@ def test_service_config_requires_a_distinct_anonymous_source_registry():
         "daily_icp_source": lambda **_kwargs: {"status": "unavailable"},
         "banned_hotkeys_source": lambda: (),
         "broker_factory": lambda *_args: object(),
-        "registry": destination,
+        "baseline_source_fetcher": lambda _url, _limit: b"archive",
     }
-    with pytest.raises(ServiceError, match="anonymous_source_registry_required"):
-        ServiceConfig(**required)
-    with pytest.raises(ServiceError, match="anonymous_source_registry_required"):
-        ServiceConfig(**required, source_registry=destination)
-    assert ServiceConfig(**required, source_registry=object()).source_registry is not destination
+    config = ServiceConfig(**required)
+    assert config.baseline_source_fetcher is required["baseline_source_fetcher"]
+    assert not hasattr(config, "registry") and not hasattr(config, "source_registry")
+
+
+def test_public_baseline_download_is_https_and_byte_bounded(monkeypatch):
+    class Response:
+        status = 200
+        headers = {"Content-Length": "7"}
+
+        @staticmethod
+        def geturl():
+            return "https://downloads.example/baseline.tar.gz"
+
+        @staticmethod
+        def read(limit):
+            assert limit == 11
+            return b"archive"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(
+        wiring, "_DIRECT_URLOPEN", lambda request, timeout: Response()
+    )
+    assert wiring.fetch_public_source_archive(
+        "https://example.test/baseline.tar.gz", 10
+    ) == b"archive"
+    with pytest.raises(ServiceError, match="must use https"):
+        wiring.fetch_public_source_archive("http://example.test/source.tar.gz", 10)
 
 
 def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):

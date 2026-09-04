@@ -1,8 +1,8 @@
 """Fail-closed validation for executable SOURCE_ADD model plans.
 
-The model plan is a public semantic contract. It carries only one fixed,
-credential-free request and a bounded response projection; the gateway binds
-the provider id to the already tested/provisioned private transport.
+The model plan is a public semantic contract. It carries one credential-free
+request and a bounded response projection; the gateway binds the provider id
+to the already tested/provisioned private transport.
 """
 
 from __future__ import annotations
@@ -18,7 +18,18 @@ SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION = (
 SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID = (
     "source_add.static_json_intent:v1"
 )
+SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION = (
+    "source-add-signal-bound-json-intent-plan:v1"
+)
+SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID = (
+    "source_add.signal_bound_json_intent:v1"
+)
 SOURCE_ADD_STATIC_JSON_INTENT_MAX_RESPONSE_BYTES = 1_048_576
+
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({
+    SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION,
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION,
+})
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,79}$")
 _TOOL_ID_RE = re.compile(r"^intent\.source_add\.[a-z][a-z0-9_-]{1,79}$")
@@ -99,6 +110,42 @@ def _field_name(value: Any, *, field_name: str) -> str:
     return text
 
 
+def _query_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if _QUERY_KEY_RE.fullmatch(key) is None or _SECRET_KEY_RE.search(key):
+        raise SourceAddExecutionPlanError(
+            "SOURCE_ADD execution request query is invalid"
+        )
+    return key
+
+
+def _signal_parameter_binding(value: Any) -> dict[str, Any]:
+    binding = _exact_mapping(
+        value,
+        field_name="SOURCE_ADD signal-bound query",
+        fields=frozenset({"source", "name", "max_length"}),
+    )
+    name = _field_name(
+        binding["name"],
+        field_name="SOURCE_ADD signal-bound query parameter",
+    )
+    max_length = binding["max_length"]
+    if (
+        binding["source"] != "signal_temporal_parameter"
+        or isinstance(max_length, bool)
+        or not isinstance(max_length, int)
+        or not 1 <= max_length <= 256
+    ):
+        raise SourceAddExecutionPlanError(
+            "SOURCE_ADD signal-bound query is invalid"
+        )
+    return {
+        "source": "signal_temporal_parameter",
+        "name": name,
+        "max_length": max_length,
+    }
+
+
 def _string_sequence(
     value: Any,
     *,
@@ -131,7 +178,7 @@ def normalize_source_add_execution_plan(
     max_calls: int,
     max_results: int,
 ) -> dict[str, Any]:
-    """Mirror the signed model's one-call static GET/JSON plan exactly."""
+    """Mirror the signed model's one-call GET/JSON plan exactly."""
 
     normalized_provider = str(provider_id or "").strip().casefold()
     normalized_tool = str(tool_id or "").strip()
@@ -147,7 +194,7 @@ def normalize_source_add_execution_plan(
         or max_results != 1
     ):
         raise SourceAddExecutionPlanError(
-            "SOURCE_ADD static JSON plan registration is incompatible"
+            "SOURCE_ADD JSON plan registration is incompatible"
         )
     plan = _exact_mapping(
         value,
@@ -162,9 +209,9 @@ def normalize_source_add_execution_plan(
             }
         ),
     )
+    schema_version = str(plan["schema_version"] or "")
     if (
-        plan["schema_version"]
-        != SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION
+        schema_version not in _SUPPORTED_SCHEMA_VERSIONS
         or str(plan["provider_id"] or "").strip().casefold()
         != normalized_provider
         or str(plan["tool_id"] or "").strip() != normalized_tool
@@ -179,7 +226,7 @@ def normalize_source_add_execution_plan(
     )
     if request["method"] != "GET":
         raise SourceAddExecutionPlanError(
-            "SOURCE_ADD static JSON plan method must be GET"
+            "SOURCE_ADD JSON plan method must be GET"
         )
     path = _canonical_path(
         request["path"], field_name="SOURCE_ADD execution request path"
@@ -189,25 +236,29 @@ def normalize_source_add_execution_plan(
         raise SourceAddExecutionPlanError(
             "SOURCE_ADD execution request query is out of bounds"
         )
-    query: dict[str, str] = {}
+    query: dict[str, Any] = {}
     seen_query_keys: set[str] = set()
     for raw_key, raw_value in raw_query.items():
-        key = str(raw_key or "").strip()
-        value_text = str(raw_value or "").strip()
+        key = _query_key(raw_key)
         folded = key.casefold()
-        if (
-            _QUERY_KEY_RE.fullmatch(key) is None
-            or _SECRET_KEY_RE.search(key)
-            or folded in seen_query_keys
-            or not value_text
-            or len(value_text) > 256
-            or any(ord(character) < 32 for character in value_text)
-        ):
+        if folded in seen_query_keys:
             raise SourceAddExecutionPlanError(
                 "SOURCE_ADD execution request query is invalid"
             )
         seen_query_keys.add(folded)
-        query[key] = value_text
+        if schema_version == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION:
+            value_text = str(raw_value or "").strip()
+            if (
+                not value_text
+                or len(value_text) > 256
+                or any(ord(character) < 32 for character in value_text)
+            ):
+                raise SourceAddExecutionPlanError(
+                    "SOURCE_ADD execution request query is invalid"
+                )
+            query[key] = value_text
+        else:
+            query[key] = _signal_parameter_binding(raw_value)
 
     raw_projection = plan["response_projection"]
     projection_fields = {
@@ -215,11 +266,15 @@ def normalize_source_add_execution_plan(
         "category",
         "object_field",
         "identity_field",
-        "expected_identity",
         "canonical_url_field",
         "canonical_url_path_prefix",
         "excerpt_fields",
     }
+    expected_identity_field = (
+        "expected_identity"
+        if schema_version == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION
+        else "expected_identity_query_key"
+    )
     if not isinstance(raw_projection, Mapping):
         raise SourceAddExecutionPlanError(
             "SOURCE_ADD response projection fields differ from the contract"
@@ -230,7 +285,8 @@ def normalize_source_add_execution_plan(
     } & set(raw_projection)
     if (
         len(domain_fields) != 1
-        or set(raw_projection) != projection_fields | domain_fields
+        or set(raw_projection)
+        != projection_fields | domain_fields | {expected_identity_field}
     ):
         raise SourceAddExecutionPlanError(
             "SOURCE_ADD response projection fields differ from the contract"
@@ -241,14 +297,29 @@ def normalize_source_add_execution_plan(
     categories = tuple(
         str(item or "").strip().upper() for item in intent_categories
     )
-    expected_identity = " ".join(
-        str(projection["expected_identity"] or "").split()
-    )
+    expected_identity = ""
+    expected_identity_query_key = ""
+    if schema_version == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION:
+        expected_identity = " ".join(
+            str(projection["expected_identity"] or "").split()
+        )
+    else:
+        expected_identity_query_key = _query_key(
+            projection["expected_identity_query_key"]
+        )
     if (
         projection["kind"] != "technology_context"
         or not category
         or category not in categories
-        or not 1 <= len(expected_identity) <= 160
+        or (
+            schema_version == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION
+            and not 1 <= len(expected_identity) <= 160
+        )
+        or (
+            schema_version
+            == SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION
+            and expected_identity_query_key not in query
+        )
     ):
         raise SourceAddExecutionPlanError(
             "SOURCE_ADD response projection identity is invalid"
@@ -284,7 +355,7 @@ def normalize_source_add_execution_plan(
         path_prefix += "/"
 
     return {
-        "schema_version": SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "provider_id": normalized_provider,
         "tool_id": normalized_tool,
         "request": {
@@ -297,7 +368,14 @@ def normalize_source_add_execution_plan(
             "category": category,
             "object_field": object_field,
             "identity_field": identity_field,
-            "expected_identity": expected_identity,
+            **(
+                {"expected_identity": expected_identity}
+                if schema_version
+                == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION
+                else {
+                    "expected_identity_query_key": expected_identity_query_key
+                }
+            ),
             "canonical_url_field": canonical_url_field,
             # This is a public citation-domain constraint, not the provider's
             # private transport host. Canonicalize the legacy input name so
@@ -385,9 +463,53 @@ def bind_source_add_execution_plan_to_probes(
         raise SourceAddExecutionPlanError(
             "SOURCE_ADD execution query differs from the provisioned endpoint"
         )
-    expected_query = {
-        str(key): str(value) for key, value in query.items()
-    }
+    schema_version = str(plan.get("schema_version") or "")
+    dynamic_query = (
+        schema_version
+        == SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION
+    )
+    if dynamic_query:
+        for raw_key, raw_binding in query.items():
+            binding = _signal_parameter_binding(raw_binding)
+            endpoint_parameter = parameter_names[str(raw_key).casefold()]
+            endpoint_type = endpoint_parameter.get("type")
+            endpoint_max_length = endpoint_parameter.get("max_length")
+            if endpoint_type not in {None, "", "string"}:
+                raise SourceAddExecutionPlanError(
+                    "SOURCE_ADD execution query differs from the provisioned endpoint"
+                )
+            if endpoint_max_length is not None and (
+                isinstance(endpoint_max_length, bool)
+                or not isinstance(endpoint_max_length, int)
+                or endpoint_max_length < binding["max_length"]
+            ):
+                raise SourceAddExecutionPlanError(
+                    "SOURCE_ADD execution query differs from the provisioned endpoint"
+                )
+    expected_query = {str(key): str(value) for key, value in query.items()}
+
+    def tested_query_matches(probe: Mapping[str, Any]) -> bool:
+        raw_test_query = probe.get("query")
+        if not isinstance(raw_test_query, Mapping):
+            return False
+        if not dynamic_query:
+            return {
+                str(key): str(value)
+                for key, value in raw_test_query.items()
+            } == expected_query
+        if set(raw_test_query) != set(query):
+            return False
+        for key, binding in query.items():
+            value = raw_test_query.get(key)
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > int(binding["max_length"])
+                or any(ord(character) < 32 for character in value)
+            ):
+                return False
+        return True
+
     matching_tests = [
         probe
         for probe in tested_probes
@@ -395,12 +517,7 @@ def bind_source_add_execution_plan_to_probes(
         and str(probe.get("method") or "").upper() == method
         and probe.get("path") == path
         and probe.get("body_json") is None
-        and isinstance(probe.get("query"), Mapping)
-        and {
-            str(key): str(value)
-            for key, value in probe["query"].items()
-        }
-        == expected_query
+        and tested_query_matches(probe)
     ]
     if len(matching_tests) != 1:
         raise SourceAddExecutionPlanError(
@@ -411,8 +528,20 @@ def bind_source_add_execution_plan_to_probes(
 def is_supported_source_add_execution_plan(value: Any) -> bool:
     return bool(
         isinstance(value, Mapping)
-        and value.get("schema_version")
-        == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION
+        and value.get("schema_version") in _SUPPORTED_SCHEMA_VERSIONS
+    )
+
+
+def source_add_execution_plan_compiler_id(value: Mapping[str, Any]) -> str:
+    schema_version = (
+        value.get("schema_version") if isinstance(value, Mapping) else None
+    )
+    if schema_version == SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION:
+        return SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+    if schema_version == SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION:
+        return SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID
+    raise SourceAddExecutionPlanError(
+        "SOURCE_ADD execution plan schema is unsupported"
     )
 
 
@@ -420,8 +549,11 @@ __all__ = [
     "SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID",
     "SOURCE_ADD_STATIC_JSON_INTENT_MAX_RESPONSE_BYTES",
     "SOURCE_ADD_STATIC_JSON_INTENT_PLAN_SCHEMA_VERSION",
+    "SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID",
+    "SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_PLAN_SCHEMA_VERSION",
     "SourceAddExecutionPlanError",
     "bind_source_add_execution_plan_to_probes",
     "is_supported_source_add_execution_plan",
     "normalize_source_add_execution_plan",
+    "source_add_execution_plan_compiler_id",
 ]

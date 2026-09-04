@@ -970,6 +970,7 @@ def build_plan_alignment_judge_messages(
         "SOURCE_ADD v8 judgment:\n"
         "- binding_manifest is an approved request-side attestation, not a SourceAddRoutingRegistration constructor keyword. The constructor reconstructs it from literal fields and derives revision and manifest_sha256.\n"
         "- Do not fail a v8 registration merely because the diff omits binding_manifest, revision, or manifest_sha256 keywords; that omission is required. Judge whether the constructor fields reproduce the plan's exact canonical manifest and approved routing values.\n"
+        "- execution_plan_identity is an approved manifest-defining constructor field only when it is present in the approved binding_manifest and the inspected constructor accepts it. Do not classify that exact literal plan as forbidden request metadata; still fail fixed public-ICP values, invented fields, host or credential bindings, and provider-specific branches outside the approved plan.\n"
         "- Fail a v8 registration that passes request metadata as constructor keywords, invents a forward manifest field, or omits a manifest field present in both the approved request and inspected constructor.\n\n"
         "Required output shape (set \"verdict\" to exactly \"pass\" or exactly \"fail\"):\n"
         "{\"schema_version\":\"1.0\",\"verdict\":\"pass\",\"reason\":\"...\","

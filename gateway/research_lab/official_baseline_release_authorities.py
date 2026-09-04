@@ -44,6 +44,7 @@ from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
 )
 from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
     SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
 )
 from research_lab.canonical import sha256_json
@@ -65,6 +66,10 @@ from research_lab.routing_experiments import (
 OFFICIAL_BINDING_CATALOG_SCHEMA_VERSION = (
     "model-runner-official-host-binding-catalog:v1"
 )
+_SOURCE_ADD_EXECUTION_COMPILER_IDS = frozenset({
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+})
 PROTECTED_PROVIDER_PROGRESS_SCHEMA_VERSION = (
     "leadpoet.research_lab.official_baseline_provider_progress.v1"
 )
@@ -648,8 +653,7 @@ def _source_add_registry_transport_available(
     return bool(
         entry.get("action_type") == "execute_intent_tool"
         and entry.get("tool_id") == f"intent.source_add.{provider_id}"
-        and entry.get("compiler_id")
-        == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        and entry.get("compiler_id") in _SOURCE_ADD_EXECUTION_COMPILER_IDS
         and _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider_id)
         and provider_id in ready_provider_ids
     )
@@ -730,7 +734,7 @@ def _official_host_availability(
             static_transport_ready = bool(
                 not source_add_transport_ready
                 and entry.get("compiler_id")
-                != SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+                not in _SOURCE_ADD_EXECUTION_COMPILER_IDS
                 and _reviewed_provider_transport_available(entry.get("provider"))
                 and _PROXY_ROUTE_BY_PROVIDER.get(
                     str(entry.get("provider") or "")
@@ -1127,11 +1131,10 @@ class ArtifactPreparedActionExecutor:
             and inventory.get("action_type") == "execute_intent_tool"
             and inventory.get("tool_id") == f"intent.source_add.{provider}"
             and inventory.get("compiler_id")
-            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            in _SOURCE_ADD_EXECUTION_COMPILER_IDS
             and value.get("action_type") == "execute_intent_tool"
             and value.get("tool_id") == f"intent.source_add.{provider}"
-            and value.get("compiler_id")
-            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            and value.get("compiler_id") == inventory.get("compiler_id")
         )
         credential_valid = bool(
             isinstance(credential, Mapping)

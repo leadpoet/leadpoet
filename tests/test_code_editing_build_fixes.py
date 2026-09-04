@@ -1611,6 +1611,8 @@ def test_plan_alignment_judge_does_not_require_v8_manifest_metadata_keywords():
     assert "binding_manifest is an approved request-side attestation" in content
     assert "Do not fail a v8 registration merely because" in content
     assert "omits binding_manifest, revision, or manifest_sha256" in content
+    assert "execution_plan_identity is an approved manifest-defining" in content
+    assert "still fail fixed public-ICP values" in content
 
 
 def test_code_edit_prompt_requires_direct_git_parent_and_safe_branch_feedback():

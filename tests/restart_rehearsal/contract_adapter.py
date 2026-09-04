@@ -194,7 +194,10 @@ def _targeted_substitutions_allowed() -> bool:
 
 
 def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
-    if module != "gateway.tee.verify_weight_submission_ready_v2":
+    if module not in {
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    }:
         return
     configured = os.environ.get("SUPABASE_URL", "").strip()
     if configured not in {PRODUCTION_SUPABASE_ORIGIN, LOCAL_POSTGREST_ORIGIN}:
@@ -2898,6 +2901,7 @@ def command_python(argv: list[str]) -> int:
             os.environ["PYTHONPATH"] = ":".join(python_paths)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.tee.prepare_active_release_lineage_v2",
             "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
@@ -2914,6 +2918,7 @@ def command_python(argv: list[str]) -> int:
             "gateway.tee.release_archive_v2",
         }:
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             current_python_path = os.environ.get("PYTHONPATH", "")
             python_paths = [
                 item for item in current_python_path.split(":") if item

@@ -8327,19 +8327,69 @@ def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
     monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     from tests.restart_rehearsal import contract_adapter
 
-    module = "gateway.tee.verify_weight_submission_ready_v2"
-    monkeypatch.setenv("SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN)
-    contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
-    assert os.environ["SUPABASE_URL"] == contract_adapter.LOCAL_POSTGREST_ORIGIN
-
-    monkeypatch.setenv("SUPABASE_URL", "https://unexpected.invalid")
-    with pytest.raises(ValueError, match="Supabase origin differs"):
+    modules = (
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    )
+    for module in modules:
+        monkeypatch.setenv(
+            "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+        )
         contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
+        assert (
+            os.environ["SUPABASE_URL"]
+            == contract_adapter.LOCAL_POSTGREST_ORIGIN
+        )
+
+        monkeypatch.setenv("SUPABASE_URL", "https://unexpected.invalid")
+        with pytest.raises(ValueError, match="Supabase origin differs"):
+            contract_adapter._route_host_storage_preflight_to_local_postgrest(
+                module
+            )
 
     contract_adapter._route_host_storage_preflight_to_local_postgrest(
         "gateway.tee.restart_preflight_v2"
     )
     assert os.environ["SUPABASE_URL"] == "https://unexpected.invalid"
+
+
+def test_gateway_active_release_preparer_routes_storage_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    module = "gateway.tee.prepare_active_release_lineage_v2"
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_record_production_module",
+        lambda name, argv: observed.update(module=name, recorded_argv=argv),
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            exec_argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", module, "--help"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_python(argv)
+
+    assert observed == {
+        "module": module,
+        "recorded_argv": argv,
+        "executable": contract_adapter.REAL_PYTHON,
+        "exec_argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
 
 
 def test_gateway_readiness_accepts_missing_optional_preflight_only_for_rollback() -> None:

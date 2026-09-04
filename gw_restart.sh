@@ -3659,6 +3659,15 @@ echo "Validating the prepared V2 release before production shutdown"
   for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
     V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
   done
+  V2_PREFLIGHT_ACCEPTANCE_ARGS=()
+  if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ]; then
+    V2_PREFLIGHT_ACCEPTANCE_ARGS=(
+      --acceptance-corpus-manifest \
+        "$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json"
+      --acceptance-corpus-root \
+        "$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2"
+    )
+  fi
   if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
       --deploy-commit "$PREPARED_GATEWAY_SHA" \
       --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
@@ -3666,6 +3675,7 @@ echo "Validating the prepared V2 release before production shutdown"
       --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
       --config-dir "$GATEWAY_V2_CONFIG_DIR" \
       --parent-env-file "$ENV_CLONE" \
+      "${V2_PREFLIGHT_ACCEPTANCE_ARGS[@]}" \
       --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
       "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"

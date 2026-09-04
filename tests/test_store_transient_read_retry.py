@@ -309,3 +309,41 @@ def test_insert_rows_rejects_empty_payload_before_client_access(monkeypatch):
 
     with pytest.raises(ValueError, match="requires at least one row"):
         asyncio.run(store.insert_rows("events", ()))
+
+
+def test_retry_survives_a_run_of_transient_drops():
+    """A read that is dropped repeatedly still completes.
+
+    The 2026-09-04 edge regime dropped a fraction of reads for hours. A
+    bundle build makes hundreds of reads and fails whole if any one of them
+    exhausts, so the per-read allowance has to absorb a run of drops, not
+    just an isolated one.
+    """
+
+    calls = {"n": 0}
+
+    def dropped_five_times():
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            raise _CloudflareEdgeError()
+        return "ok"
+
+    result = asyncio.run(
+        store._execute_read_with_retry(dropped_five_times, label="test")
+    )
+    assert result == "ok"
+    assert calls["n"] == 6
+
+
+def test_exhausted_read_sleeps_a_bounded_total():
+    """The widened allowance stays inside the preparation fetch budget."""
+
+    capped = store._TRANSIENT_READ_BACKOFF_SECONDS[-1]
+    total = sum(
+        store._TRANSIENT_READ_BACKOFF_SECONDS[
+            min(attempt, len(store._TRANSIENT_READ_BACKOFF_SECONDS) - 1)
+        ]
+        for attempt in range(store._TRANSIENT_READ_ATTEMPTS - 1)
+    )
+    assert store._TRANSIENT_READ_BACKOFF_SECONDS[-1] == capped
+    assert total <= 10.0

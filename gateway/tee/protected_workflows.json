@@ -4572,7 +4572,7 @@
       "symbol": "_UNSAFE_GIT_ENV_NAMES"
     },
     {
-      "ast_sha256": "sha256:ce8cbedd77e73ecd985104da7856c5cf9ab97623eb3517ab0a496ac63349a5a4",
+      "ast_sha256": "sha256:68a220c61febb21ca7d05d45525fa25fc775feda1b5d67adcc7eea43484742e2",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "__module__"
     },
@@ -4607,7 +4607,7 @@
       "symbol": "_read_exact_file"
     },
     {
-      "ast_sha256": "sha256:37c5fc487e6f267c88ea107de470e94791a6e20e53db8733a439b77ac15850d5",
+      "ast_sha256": "sha256:f9b5cbc7401857bfa69a03c41d3d29e7ab4f601e0aaccee3d1d12223bb397e6f",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "_recover_exact_controller_checkout_drift"
     },
@@ -4667,7 +4667,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:471f0739206e69f6ff99c0062fb9e24f596a870f6e223f575575052632715497",
-  "protected_source_commit": "cfc1344163c536f704a6f56196dee57d7a204a83",
+  "manifest_hash": "sha256:8b4cb481637f126ad9d348662beef7362021540cd1e9944bfb1cd620af0fa443",
+  "protected_source_commit": "462eef01b2f883730780764c85cb117203a42733",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

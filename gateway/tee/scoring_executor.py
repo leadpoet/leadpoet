@@ -21,6 +21,12 @@ from leadpoet_verifier.research_evaluation import (
 
 
 SCORING_EXECUTOR_SCHEMA_VERSION = "leadpoet.gateway_scoring_executor.v1"
+QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS = frozenset(
+    {
+        "qualification-company-scorer:v1",
+        "qualification-company-scorer:v2",
+    }
+)
 
 OP_QUALIFICATION_COMPANY_SCORES = "qualification_company_scores"
 OP_BENCHMARK_ICP_SCORE = "benchmark_icp_score"
@@ -439,9 +445,6 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
 
 async def _qualification_company_scores(payload: Mapping[str, Any]) -> Dict[str, Any]:
     from research_lab.eval.evaluator import QualificationStyleCompanyScorer
-    from research_lab.sourcing_model_contract_check import (
-        QUALIFICATION_SUPPORTED_SCORING_ADAPTER_VERSIONS,
-    )
 
     companies = payload.get("companies")
     icp = payload.get("icp")

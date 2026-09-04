@@ -47,6 +47,7 @@ from tests.restart_rehearsal.fixture_contract import (
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
     EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
+    LocalPostgRESTServer,
     LocalPostgRESTState,
     RUNTIME_TABLES,
     _apply_table_query,
@@ -6628,6 +6629,57 @@ def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
     ]
     with pytest.raises(SystemExit, match="rejected checkpoint"):
         verify_gateway_provider_preflight(rejected, transition="forward")
+
+
+def test_gateway_rehearsal_serves_source_add_admission_contract(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    rpc_name = "research_lab_source_add_admission_control_contract_v1"
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables=set(),
+        rpcs={rpc_name},
+    )
+    server = LocalPostgRESTServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            "http://127.0.0.1:%d/rest/v1/rpc/%s"
+            % (server.server_address[1], rpc_name),
+            data=b"{}",
+            headers={
+                "apikey": "rehearsal-secret",
+                "authorization": "Bearer rehearsal-secret",
+                "content-type": "application/json",
+            },
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=2.0) as response:
+            assert response.status == 200
+            assert json.loads(response.read()) == {
+                "schema_version": (
+                    "leadpoet.source_add_admission_control_contract.v1"
+                ),
+                "control_row_present": True,
+                "trigger_enabled": True,
+                "pause_rpc": "research_lab_source_add_set_paused",
+                "admission_trigger": "trg_source_add_work_admission_control",
+            }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
 
 
 def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(

@@ -20,6 +20,8 @@ if candidate_source_root.is_dir():
     sys.path.insert(0, str(candidate_source_root))
 
 with redirect_stdout(sys.stderr):
+    from gateway.tee.topology import ROLE_SPECS as GATEWAY_ROLE_SPECS
+
     if __package__:
         from .postgres_v2_contract_probe import (
             EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
@@ -1675,8 +1677,12 @@ def main() -> int:
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
-        if len(state.get("enclaves", [])) != 3:
-            raise SystemExit("gateway did not start the exact three-enclave topology")
+        expected_enclave_count = len(GATEWAY_ROLE_SPECS)
+        if len(state.get("enclaves", [])) != expected_enclave_count:
+            raise SystemExit(
+                "gateway did not start the candidate-defined "
+                f"{expected_enclave_count}-enclave topology"
+            )
     else:
         restart_invariants = verify_validator_gateway_activation_barrier(
             serialized_adapter_events(),

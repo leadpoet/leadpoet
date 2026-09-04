@@ -5916,6 +5916,8 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     } <= allowed
     assert verifier.count('"nitro:build_enclave"') == 2
     assert verifier.count('"nitro:run_enclave"') == 2
+    assert "len(GATEWAY_ROLE_SPECS)" in verifier
+    assert "exact three-enclave topology" not in verifier
 
 
 def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:
@@ -8532,6 +8534,39 @@ def test_gateway_verification_image_build_is_bound_to_role_and_candidate(
     ):
         with pytest.raises(ValueError, match="gateway verification image"):
             contract_adapter._external_build_role(argv, invalid_tag)
+
+
+def test_gateway_verification_normalized_image_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    role = "gateway_coordinator"
+    record = {
+        "commit": COMMIT,
+        "id": normalized_image_id(COMMIT, role),
+        "role": role,
+    }
+    image = f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-1"
+    assert contract_adapter._gateway_verification_image_is_bound(
+        image=image,
+        record=record,
+    )
+
+    invalid_cases = (
+        (f"leadpoet-gateway-verify:{role}-{'2' * 12}-1", record),
+        (f"leadpoet-gateway-verify:gateway_scoring-{COMMIT[:12]}-1", record),
+        (f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-0", record),
+        (image + "-raw", record),
+        (image, {**record, "id": "sha256:" + "2" * 64}),
+        (image, {**record, "provenance": "copied"}),
+    )
+    for invalid_image, invalid_record in invalid_cases:
+        assert not contract_adapter._gateway_verification_image_is_bound(
+            image=invalid_image,
+            record=invalid_record,
+        )
 
 
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(

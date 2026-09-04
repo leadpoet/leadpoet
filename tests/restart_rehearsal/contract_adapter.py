@@ -1271,6 +1271,30 @@ def _official_normalized_image_tag(role: str) -> str:
     return ""
 
 
+def _gateway_verification_image_is_bound(
+    *,
+    image: str,
+    record: dict[str, Any],
+) -> bool:
+    match = re.fullmatch(
+        r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)",
+        image,
+    )
+    if match is None:
+        return False
+    tagged_role, tagged_commit, _index = match.groups()
+    commit = str(record.get("commit") or "")
+    role = str(record.get("role") or "")
+    return (
+        commit == _candidate_sha()
+        and role == tagged_role
+        and role in GATEWAY_ROLES
+        and tagged_commit == commit[:12]
+        and not str(record.get("provenance") or "")
+        and _image_record_id(record) == normalized_image_id(commit, role)
+    )
+
+
 def _docker_run_contract(
     argv: list[str],
 ) -> tuple[str, dict[str, str], list[str], list[str]]:
@@ -2053,7 +2077,13 @@ def command_nitro(argv: list[str]) -> int:
                 candidate_bound = (
                     commit == _candidate_sha()
                     and role in ALL_ROLES
-                    and image == _official_normalized_image_tag(role)
+                    and (
+                        image == _official_normalized_image_tag(role)
+                        or _gateway_verification_image_is_bound(
+                            image=image,
+                            record=record,
+                        )
+                    )
                     and not str(record.get("provenance") or "")
                     and _image_record_id(record)
                     == normalized_image_id(commit, role)

@@ -13,12 +13,13 @@ import argparse
 import os
 import sys
 import threading
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from lab_arena.driver import drive_once  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,56 +32,6 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--no-driver", action="store_true", help="serve the API only; another process runs the driver")
     mode.add_argument("--driver-only", action="store_true", help="run the driver ticks only; serve nothing")
     return parser
-
-
-def drive_once(service) -> str:
-    """One driver tick: advance every active round, then open the next daily round.
-
-    Rounds overlap: the day's round runs its benchmark while the next round is
-    open for submissions, so a tick advances each round that is not published
-    or cancelled, oldest first. Every failure, including one while listing the
-    rounds, is contained and reported by exception type only (never a secret
-    or a payload): the next tick retries, and the driver thread never dies
-    while the process serves.
-    """
-
-    outcome = _advance_active(service)
-    parts = [] if outcome == "idle" else [outcome]
-    try:
-        rewards = service.activate_pending_rewards()
-    except Exception as exc:
-        parts.append("failed activate_rewards: %s" % type(exc).__name__)
-    else:
-        activated = int(rewards.get("activated") or 0)
-        if activated:
-            parts.append("activated rewards %d" % activated)
-    return "; ".join(parts) if parts else "idle"
-
-
-def _advance_active(service) -> str:
-    try:
-        active = list(service.active_rounds())
-    except Exception as exc:
-        return "failed active_rounds: %s" % type(exc).__name__
-    outcomes = []
-    for row in active:
-        try:
-            service.advance_round(row["round_id"])
-        except Exception as exc:
-            outcomes.append("failed advance_round %s: %s" % (row["round_id"], type(exc).__name__))
-        else:
-            outcomes.append("advanced %s" % row["round_id"])
-    if not any(row.get("status") == "open" for row in active):
-        # No round is open for submissions: create the next daily round if the
-        # service is configured to, otherwise wait for the operator.
-        try:
-            ensured = service.ensure_daily_round()
-        except Exception as exc:
-            outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
-        else:
-            if ensured.get("status") == "created":
-                outcomes.append("created %s" % ensured.get("round_id"))
-    return "; ".join(outcomes) if outcomes else "idle"
 
 
 def main(argv=None) -> int:

@@ -635,30 +635,11 @@ def test_hidden_openrouter_call_requires_privacy_context(monkeypatch):
         )
 
 
-def test_miner_cli_encrypts_both_keys_with_attested_recipients():
+def test_miner_cli_uses_agent_source_submission_without_provider_keys():
     source = (Path(__file__).resolve().parents[1] / "neurons" / "miner.py").read_text()
-    runtime_prompt_index = source.index("OpenRouter API key (hidden; encrypted locally)")
-    management_prompt_index = source.index(
-        "OpenRouter management key (hidden; encrypted locally)"
-    )
-    recipient_index = source.index(
-        '"/research-lab/openrouter-keys/credential-recipient"'
-    )
-    encryption_index = source.index(
-        "verify_and_encrypt_openrouter_credential_v2("
-    )
-    payload_index = source.index(
-        '"openrouter_management_key_v2": encrypted_management'
-    )
-
-    assert (
-        runtime_prompt_index
-        < management_prompt_index
-        < recipient_index
-        < encryption_index
-        < payload_index
-    )
-    prompt_block = source[runtime_prompt_index:payload_index]
-    assert "logging" not in prompt_block.lower()
-    assert '"openrouter_api_key": raw_key' not in source
-    assert '"openrouter_management_key": raw_management_key' not in source
+    assert "Agent Competition — Submit your model/agent source code" in source
+    assert '"scripts" / "lab_arena_miner.py"' in source
+    assert '"interactive"' in source
+    assert "OpenRouter API key (hidden; encrypted locally)" not in source
+    assert "OpenRouter management key (hidden; encrypted locally)" not in source
+    assert "/research-lab/openrouter-keys" not in source

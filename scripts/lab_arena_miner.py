@@ -27,7 +27,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import contracts, images  # noqa: E402
-from lab_arena.miner_submit import MinerSubmissionError, submit_agent_source  # noqa: E402
+from lab_arena.miner_submit import (  # noqa: E402
+    MinerSubmissionError,
+    run_interactive_submission,
+    submit_agent_source,
+)
 
 SCOPES = {
     "submission": contracts.SCOPE_SUBMISSION,
@@ -48,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--wallet-name", default=None)
     source.add_argument("--hotkey-name", default=None)
     source.add_argument("--hotkey-uri", default=None, help="development only: derive the hotkey from a URI")
+    interactive = commands.add_parser(
+        "interactive",
+        help="prompt for a local agent fork, build it, and submit it",
+    )
+    interactive.add_argument(
+        "--api-base-url",
+        default=os.environ.get("LAB_ARENA_API_BASE_URL")
+        or os.environ.get("GATEWAY_URL", "https://gateway.subnet71.com"),
+    )
+    interactive.add_argument("--wallet-name", default=None)
+    interactive.add_argument("--hotkey-name", default=None)
+    interactive.add_argument("--hotkey-uri", default=None, help="development only: derive the hotkey from a URI")
     body = commands.add_parser("submission-body", help="write the signed-request body that names one public image")
     body.add_argument("--image", required=True, help="registry/repository:tag or registry/repository@sha256:<digest>")
     body.add_argument("--out", required=True)
@@ -128,10 +144,16 @@ def submit_source(args) -> int:
     return 0
 
 
+def interactive(args) -> int:
+    return 0 if run_interactive_submission(_keypair(args), args.api_base_url) else 2
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "submit-source":
         return submit_source(args)
+    if args.command == "interactive":
+        return interactive(args)
     if args.command == "submission-body":
         return submission_body(args)
     if args.command == "sign":

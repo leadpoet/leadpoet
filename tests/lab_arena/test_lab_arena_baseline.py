@@ -67,7 +67,15 @@ class _Store:
 def _service(store: _Store, *, mode: str = "live", baseline_hotkey: str = "baseline") -> ArenaService:
     service = object.__new__(ArenaService)
     service._store = store
-    service._config = SimpleNamespace(mode=mode, defaults=SimpleNamespace(baseline_hotkey=baseline_hotkey))
+    service._config = SimpleNamespace(
+        mode=mode,
+        defaults=SimpleNamespace(
+            baseline_hotkey=baseline_hotkey,
+            baseline_image_reference="public.example/agents/baseline:latest",
+        ),
+        registry=None,
+        source_registry=None,
+    )
     return service
 
 
@@ -81,7 +89,8 @@ def _round(round_id: str = "arena-2026-09-05") -> dict:
 
 def test_first_same_mode_round_marks_the_normally_admitted_baseline_as_king():
     current = _round()
-    baseline = _submission("sub-b", "baseline")
+    baseline = _submission("baseline-2026-09-05", "baseline")
+    baseline.update({"round_id": current["round_id"], "is_king": True})
     challenger = _submission("sub-c", "challenger")
     overflow = _submission("sub-d", "overflow")
     # A winner in another mode does not replace this mode's initial baseline.
@@ -97,21 +106,22 @@ def test_first_same_mode_round_marks_the_normally_admitted_baseline_as_king():
     participants = _service(store).freeze_participants(current["round_id"])
 
     assert [(row["submission_id"], row["is_king"]) for row in participants] == [
-        ("sub-b", True),
+        ("baseline-2026-09-05", True),
         ("sub-c", False),
     ]
-    assert store.submissions["sub-b"]["status"] == "frozen"
-    assert store.submissions["sub-b"]["is_king"] is True
+    assert store.submissions["baseline-2026-09-05"]["status"] == "frozen"
+    assert store.submissions["baseline-2026-09-05"]["is_king"] is True
     assert store.submissions["sub-d"]["status"] == "rejected"
 
 
 def test_initial_baseline_must_complete_normal_image_admission():
     current = _round()
-    uploaded = _submission("sub-b", "baseline", status="uploaded")
+    uploaded = _submission("baseline-2026-09-05", "baseline", status="uploaded")
+    uploaded.update({"round_id": current["round_id"], "is_king": True})
     challenger = _submission("sub-c", "challenger")
     store = _Store(current, [uploaded, challenger])
 
-    with pytest.raises(ServiceError, match="baseline_submission_missing"):
+    with pytest.raises(ServiceError, match="baseline_registry_unavailable"):
         _service(store).freeze_participants(current["round_id"])
 
     assert store.submissions["sub-c"]["status"] == "accepted"

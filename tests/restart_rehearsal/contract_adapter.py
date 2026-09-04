@@ -240,16 +240,24 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
                     "candidate_archive",
                 )
 
-    candidate_build_name = f"{_candidate_sha()}-local"
-    for parent in resolved.parents:
-        if (
-            parent.name == candidate_build_name
-            and parent.parent.name == "gateway-release-build-v2"
-        ):
-            relative = resolved.relative_to(parent)
+    configured_build_root = Path(
+        os.environ.get(
+            "GATEWAY_V2_BUILD_WORK_ROOT",
+            "/home/ec2-user/.cache/leadpoet/gateway-release-build-v2",
+        )
+    )
+    if configured_build_root.is_absolute():
+        candidate_build_root = (
+            configured_build_root.resolve() / f"{_candidate_sha()}-local"
+        )
+        try:
+            relative = resolved.relative_to(candidate_build_root)
+        except ValueError:
+            pass
+        else:
             if (
                 len(relative.parts) >= 3
-                and re.fullmatch(r"[a-z][a-z0-9_]*", relative.parts[0])
+                and relative.parts[0] in GATEWAY_ROLES
                 and relative.parts[1] == "source"
             ):
                 return Path(*relative.parts[2:]), "candidate_archive"
@@ -967,6 +975,26 @@ def _external_build_role(argv: list[str], tag: str) -> str:
             or not dockerfile.endswith("/gateway/tee/Dockerfile.enclave")
         ):
             raise ValueError("gateway enclave build contract is invalid")
+        return role
+    if tag.startswith("leadpoet-gateway-verify:"):
+        match = re.fullmatch(
+            r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)-raw",
+            tag,
+        )
+        if match is None:
+            raise ValueError("gateway verification image tag is invalid")
+        role, short_commit, _index = match.groups()
+        build_args = _arg_values(argv, "--build-arg")
+        dockerfile = Path(_arg_value(argv, "-f"))
+        context = Path(argv[-1]) if argv else Path()
+        if (
+            role not in GATEWAY_ROLES
+            or short_commit != _candidate_sha()[:12]
+            or build_args
+            != ("SOURCE_DATE_EPOCH=0", f"LEADPOET_ENCLAVE_ROLE={role}")
+            or dockerfile != context / "tee/Dockerfile.enclave"
+        ):
+            raise ValueError("gateway verification image build contract is invalid")
         return role
     return ""
 

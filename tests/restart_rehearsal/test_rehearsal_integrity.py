@@ -8379,6 +8379,8 @@ def test_module_provenance_accepts_candidate_restart_authority_archive(
         module_path = bootstrap_root / "authority/scripts/gateway_git_deploy.py"
         module_path.parent.mkdir(parents=True)
         module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+        outside = bootstrap_root / "outside.py"
+        outside.write_text("VALUE = 'outside authority'\n", encoding="utf-8")
 
         relative, source_kind = contract_adapter._candidate_git_path(
             module_path.resolve(),
@@ -8387,6 +8389,19 @@ def test_module_provenance_accepts_candidate_restart_authority_archive(
 
         assert relative == Path("scripts/gateway_git_deploy.py")
         assert source_kind == "candidate_archive"
+        with pytest.raises(RuntimeError, match="recognized candidate"):
+            contract_adapter._candidate_git_path(
+                outside.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
+
+        escaped_link = bootstrap_root / "authority/escaped.py"
+        escaped_link.symlink_to(outside)
+        with pytest.raises(RuntimeError, match="recognized candidate"):
+            contract_adapter._candidate_git_path(
+                escaped_link.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
 
 
 def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
@@ -8397,6 +8412,7 @@ def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
     from tests.restart_rehearsal import contract_adapter
 
     build_root = tmp_path / "gateway-release-build-v2"
+    monkeypatch.setenv("GATEWAY_V2_BUILD_WORK_ROOT", str(build_root))
     module_path = (
         build_root
         / f"{COMMIT}-local"
@@ -8425,6 +8441,82 @@ def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
             wrong_candidate.resolve(),
             Path("/home/ec2-user/leadpoet_repo"),
         )
+
+    wrong_role = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_unknown/source/gateway/tee/build_identity.py"
+    )
+    wrong_role.parent.mkdir(parents=True)
+    wrong_role.write_text("VALUE = 'wrong role'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_role.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    outside_source = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/outside/gateway/tee/build_identity.py"
+    )
+    outside_source.parent.mkdir(parents=True)
+    outside_source.write_text("VALUE = 'outside source'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            outside_source.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    wrong_root = (
+        tmp_path
+        / "untrusted/gateway-release-build-v2"
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_root.parent.mkdir(parents=True)
+    wrong_root.write_text("VALUE = 'wrong root'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_root.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+
+def test_gateway_verification_image_build_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    context = Path("/build/gateway_coordinator/source/gateway")
+    argv = [
+        "build",
+        "--pull",
+        "--no-cache",
+        "--build-arg",
+        "SOURCE_DATE_EPOCH=0",
+        "--build-arg",
+        "LEADPOET_ENCLAVE_ROLE=gateway_coordinator",
+        "-f",
+        str(context / "tee/Dockerfile.enclave"),
+        "-t",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-1-raw",
+        str(context),
+    ]
+
+    assert (
+        contract_adapter._external_build_role(argv, argv[-2])
+        == "gateway_coordinator"
+    )
+
+    for invalid_tag in (
+        f"leadpoet-gateway-verify:gateway_coordinator-{'2' * 12}-1-raw",
+        f"leadpoet-gateway-verify:gateway_unknown-{COMMIT[:12]}-1-raw",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-raw",
+    ):
+        with pytest.raises(ValueError, match="gateway verification image"):
+            contract_adapter._external_build_role(argv, invalid_tag)
 
 
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(

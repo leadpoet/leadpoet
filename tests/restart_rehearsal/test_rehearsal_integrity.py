@@ -8328,6 +8328,7 @@ def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
     from tests.restart_rehearsal import contract_adapter
 
     modules = (
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
         "gateway.tee.prepare_active_release_lineage_v2",
         "gateway.tee.verify_weight_submission_ready_v2",
     )
@@ -8353,12 +8354,19 @@ def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
     assert os.environ["SUPABASE_URL"] == "https://unexpected.invalid"
 
 
-def test_gateway_active_release_preparer_routes_storage_before_exec(
+@pytest.mark.parametrize(
+    "module",
+    (
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+    ),
+)
+def test_gateway_active_release_helpers_route_storage_before_exec(
     monkeypatch: pytest.MonkeyPatch,
+    module: str,
 ) -> None:
     from tests.restart_rehearsal import contract_adapter
 
-    module = "gateway.tee.prepare_active_release_lineage_v2"
     observed: dict[str, Any] = {}
     monkeypatch.setenv(
         "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN

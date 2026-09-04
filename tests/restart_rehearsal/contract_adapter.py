@@ -195,6 +195,7 @@ def _targeted_substitutions_allowed() -> bool:
 
 def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
     if module not in {
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
         "gateway.tee.prepare_active_release_lineage_v2",
         "gateway.tee.verify_weight_submission_ready_v2",
     }:
@@ -2901,6 +2902,7 @@ def command_python(argv: list[str]) -> int:
             os.environ["PYTHONPATH"] = ":".join(python_paths)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
             "gateway.tee.prepare_active_release_lineage_v2",
             "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",

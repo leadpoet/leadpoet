@@ -8361,6 +8361,72 @@ def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
             )
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        "gateway-restart-controller-bootstrap.",
+        "validator-restart-controller-bootstrap.",
+    ),
+)
+def test_module_provenance_accepts_candidate_restart_authority_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    with _production_named_temp_directory(prefix) as bootstrap_root:
+        module_path = bootstrap_root / "authority/scripts/gateway_git_deploy.py"
+        module_path.parent.mkdir(parents=True)
+        module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+
+        relative, source_kind = contract_adapter._candidate_git_path(
+            module_path.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+        assert relative == Path("scripts/gateway_git_deploy.py")
+        assert source_kind == "candidate_archive"
+
+
+def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    build_root = tmp_path / "gateway-release-build-v2"
+    module_path = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+
+    relative, source_kind = contract_adapter._candidate_git_path(
+        module_path.resolve(),
+        Path("/home/ec2-user/leadpoet_repo"),
+    )
+
+    assert relative == Path("gateway/tee/build_identity.py")
+    assert source_kind == "candidate_archive"
+
+    wrong_candidate = (
+        build_root
+        / f"{'2' * 40}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_candidate.parent.mkdir(parents=True)
+    wrong_candidate.write_text("VALUE = 'wrong candidate'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_candidate.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

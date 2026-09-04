@@ -226,6 +226,33 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
                     resolved.relative_to(candidate_archive),
                     "candidate_archive",
                 )
+        if (
+            parent.parent == archive_parent
+            and re.fullmatch(
+                r"(?:gateway|validator)-restart-controller-bootstrap\.[A-Za-z0-9]+",
+                parent.name,
+            )
+        ):
+            candidate_archive = parent / "authority"
+            if candidate_archive in resolved.parents:
+                return (
+                    resolved.relative_to(candidate_archive),
+                    "candidate_archive",
+                )
+
+    candidate_build_name = f"{_candidate_sha()}-local"
+    for parent in resolved.parents:
+        if (
+            parent.name == candidate_build_name
+            and parent.parent.name == "gateway-release-build-v2"
+        ):
+            relative = resolved.relative_to(parent)
+            if (
+                len(relative.parts) >= 3
+                and re.fullmatch(r"[a-z][a-z0-9_]*", relative.parts[0])
+                and relative.parts[1] == "source"
+            ):
+                return Path(*relative.parts[2:]), "candidate_archive"
 
     raise RuntimeError(
         "production source is outside the candidate checkout or a recognized "

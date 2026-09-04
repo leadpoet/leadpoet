@@ -479,8 +479,11 @@ CREATE TABLE public.research_reimbursement_awards (
 CREATE TABLE public.qualification_private_icp_sets (
     set_id BIGINT PRIMARY KEY,
     icps JSONB NOT NULL,
+    icp_set_hash TEXT,
+    industry_distribution JSONB,
     active_from TIMESTAMPTZ,
     active_until TIMESTAMPTZ,
+    generation_seed TEXT,
     is_active BOOLEAN NOT NULL DEFAULT FALSE
 );
 ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;

@@ -1547,6 +1547,36 @@ def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> Non
         )
 
 
+def test_gateway_rehearsal_icp_schema_covers_runtime_contract() -> None:
+    match = re.search(
+        r"CREATE TABLE public\.qualification_private_icp_sets \((.*?)\n\);",
+        ALLOCATION_MIGRATION_PREREQUISITES_SQL,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    columns = {
+        line.strip().split()[0].rstrip(",")
+        for line in match.group(1).splitlines()
+        if line.strip()
+    }
+    assert columns == {
+        "set_id",
+        "icps",
+        "icp_set_hash",
+        "industry_distribution",
+        "active_from",
+        "active_until",
+        "generation_seed",
+        "is_active",
+    }
+    assert _apply_table_query(
+        [],
+        "select=set_id,icps,icp_set_hash,active_from,active_until"
+        "&is_active=eq.True&limit=1",
+        allowed_columns=frozenset(columns),
+    ) == []
+
+
 def test_migration_backed_contract_is_candidate_bound_and_complete(
     tmp_path,
 ) -> None:

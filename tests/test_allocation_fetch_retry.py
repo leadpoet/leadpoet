@@ -11,6 +11,7 @@ tight window can never be exceeded.
 """
 
 import json
+import logging
 import time
 from urllib.error import HTTPError, URLError
 
@@ -296,3 +297,93 @@ def test_submission_window_probe_fails_safe_to_the_tight_budget():
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_allocation_stage_timer_names_the_stage_that_raised(caplog):
+    """A failing stage must be identifiable from the gateway log alone."""
+
+    from gateway.research_lab import allocations as gateway_allocations
+
+    @gateway_allocations._timed_allocation_stage("load_latest_finalized_compute_snapshot_v2")
+    async def stage():
+        raise ValueError("historical compute fallback lacks finalized allocation authority")
+
+    with caplog.at_level(logging.WARNING, logger=gateway_allocations.logger.name):
+        with pytest.raises(ValueError):
+            await stage()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "stage=load_latest_finalized_compute_snapshot_v2" in message
+        and "error=ValueError" in message
+        for message in messages
+    ), messages
+
+
+@pytest.mark.asyncio
+async def test_allocation_stage_timer_is_quiet_for_a_fast_stage(caplog):
+    """A normal build must not add log volume."""
+
+    from gateway.research_lab import allocations as gateway_allocations
+
+    @gateway_allocations._timed_allocation_stage("active_champion_obligations")
+    async def stage():
+        return "ok"
+
+    with caplog.at_level(logging.WARNING, logger=gateway_allocations.logger.name):
+        assert await stage() == "ok"
+
+    assert [record.getMessage() for record in caplog.records] == []
+
+
+@pytest.mark.asyncio
+async def test_allocation_stage_timer_reports_a_slow_stage(monkeypatch, caplog):
+    """A stage over the threshold names itself without having to fail."""
+
+    from gateway.research_lab import allocations as gateway_allocations
+
+    monkeypatch.setattr(
+        gateway_allocations, "_ALLOCATION_STAGE_SLOW_SECONDS", 0.0
+    )
+
+    @gateway_allocations._timed_allocation_stage("active_reimbursement_obligations")
+    async def stage():
+        return "ok"
+
+    with caplog.at_level(logging.WARNING, logger=gateway_allocations.logger.name):
+        await stage()
+
+    assert any(
+        "stage=active_reimbursement_obligations" in record.getMessage()
+        and "elapsed_seconds=" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_every_allocation_build_stage_is_timed():
+    """The stages the build waits on must stay instrumented as it changes."""
+
+    import ast as _ast
+    import pathlib as _pathlib
+
+    source = _pathlib.Path("gateway/research_lab/allocations.py").read_text(
+        encoding="utf-8"
+    )
+    decorated = {
+        node.name
+        for node in _ast.parse(source).body
+        if isinstance(node, _ast.AsyncFunctionDef)
+        and any(
+            isinstance(decorator, _ast.Call)
+            and getattr(decorator.func, "id", "") == "_timed_allocation_stage"
+            for decorator in node.decorator_list
+        )
+    }
+    assert decorated == {
+        "_active_reimbursement_obligations",
+        "_active_champion_obligations",
+        "_active_source_add_obligations",
+        "_historical_compute_fallback_obligations",
+        "_load_latest_finalized_compute_snapshot_v2",
+    }, decorated

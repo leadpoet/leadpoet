@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import functools
 import hmac
 import logging
 import os
-from typing import Any, Mapping, Sequence
+import time
+from typing import Any, Callable, Mapping, Sequence
 
 from gateway.research_lab.alpha_pricing import (
     inject_alpha_price_valuation,
@@ -61,6 +63,57 @@ _ALLOCATION_V2_RETRY_MIN_INTERVAL_SECONDS = 300.0
 _ALLOCATION_V2_RECEIPT_TABLE = "research_lab_attested_execution_receipts_v2"
 _ALLOCATION_V2_RECEIPT_ROLE = "gateway_coordinator"
 _ALLOCATION_V2_RECEIPT_PURPOSE = "research_lab.allocation.v2"
+
+
+
+_ALLOCATION_STAGE_SLOW_SECONDS = float(
+    os.getenv("RESEARCH_LAB_ALLOCATION_STAGE_SLOW_SECONDS", "5") or 5
+)
+
+
+def _timed_allocation_stage(stage: str) -> Callable[[Any], Any]:
+    """Log how long one stage of the allocation build took, and how it failed.
+
+    The gateway exports exactly one span per HTTP request, so a build that takes
+    minutes reports a single duration with nothing beneath it and a failure
+    reports a generic 5xx. That is deliberate and this does not change it: the
+    stage timings go to the gateway's own log, not to the span exporter.
+
+    A stage is logged when it exceeds ``_ALLOCATION_STAGE_SLOW_SECONDS`` (five by
+    default, override with ``RESEARCH_LAB_ALLOCATION_STAGE_SLOW_SECONDS``) and
+    always when it raises, so a normal build stays quiet and a slow or broken one
+    names the stage responsible.
+    """
+
+    def decorate(func: Any) -> Any:
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
+            try:
+                result = await func(*args, **kwargs)
+            except BaseException as exc:
+                logger.warning(
+                    "research_lab allocation stage failed: stage=%s "
+                    "elapsed_seconds=%.1f error=%s: %s",
+                    stage,
+                    time.monotonic() - started,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+            elapsed = time.monotonic() - started
+            if elapsed >= _ALLOCATION_STAGE_SLOW_SECONDS:
+                logger.warning(
+                    "research_lab allocation stage slow: stage=%s "
+                    "elapsed_seconds=%.1f",
+                    stage,
+                    elapsed,
+                )
+            return result
+
+        return wrapper
+
+    return decorate
 
 
 def _active_gateway_commit() -> str:
@@ -485,6 +538,7 @@ async def build_research_lab_allocation_bundle(
     return {**bundle_without_id, "bundle_id": bundle_id}
 
 
+@_timed_allocation_stage("active_reimbursement_obligations")
 async def _active_reimbursement_obligations(
     epoch: int,
     *,
@@ -589,6 +643,7 @@ async def _active_reimbursement_obligations(
     return obligations, skipped
 
 
+@_timed_allocation_stage("historical_compute_fallback_obligations")
 async def _historical_compute_fallback_obligations(
     *,
     epoch: int,
@@ -630,6 +685,7 @@ async def _historical_compute_fallback_obligations(
     )
 
 
+@_timed_allocation_stage("load_latest_finalized_compute_snapshot_v2")
 async def _load_latest_finalized_compute_snapshot_v2(
     *,
     epoch: int,
@@ -903,6 +959,7 @@ def _historical_compute_fallback_from_snapshot(
     return obligations, skipped, source
 
 
+@_timed_allocation_stage("active_champion_obligations")
 async def _active_champion_obligations(
     epoch: int,
     *,
@@ -983,6 +1040,7 @@ async def _active_source_add_reward_rows(epoch: int) -> list[dict[str, Any]]:
     return rows
 
 
+@_timed_allocation_stage("active_source_add_obligations")
 async def _active_source_add_obligations(
     epoch: int,
     *,

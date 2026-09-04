@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import io
@@ -293,6 +294,38 @@ def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tm
         pass
     assert fetches == [("run-1", "a" * 64)]
     assert installs == ["pydantic-ai==1.0.0\n"]
+
+
+def test_source_cache_prepares_different_bundles_in_parallel(tmp_path):
+    payloads = {
+        "run-1": _source_archive_with_requirements("package-one==1.0.0\n"),
+        "run-2": _source_archive_with_requirements("package-two==1.0.0\n"),
+    }
+    barrier = threading.Barrier(2)
+
+    def fetch(run_id, _lease_token):
+        return payloads[run_id]
+
+    def install(_requirements, target):
+        barrier.wait(timeout=2)
+        (target / "installed.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    cache = rn.SourceCache(
+        tmp_path / "sources", fetch, dependency_installer=install
+    )
+
+    def prepare(run_id):
+        payload = payloads[run_id]
+        digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        with cache.acquire(
+            run_id, "a" * 64, SOURCE_REF, digest, len(payload)
+        ) as paths:
+            assert (paths[0] / "harness.py").is_file()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(prepare, run_id) for run_id in sorted(payloads)]
+        for future in futures:
+            future.result(timeout=3)
 
 
 def test_binary_requirement_install_rejects_urls_options_and_source_builds(

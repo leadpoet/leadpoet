@@ -56,7 +56,9 @@ ICP_WALL_CLOCK_SECONDS = 300
 # providers; it gets its own wall clock, longer than a model's, under the same
 # lease; provider calls refresh the lease while the judge is working.
 SCORING_WALL_CLOCK_SECONDS = 900
-LEASE_TTL_SECONDS = 420
+# One lease covers the longest sandbox run, first-use source setup, and the
+# small completion retry window. Provider calls renew it while work continues.
+LEASE_TTL_SECONDS = 1200
 
 
 def stage_positions(stage: int) -> Tuple[int, ...]:

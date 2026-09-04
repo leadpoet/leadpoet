@@ -542,6 +542,8 @@ class SourceCache:
         self._max_bytes = max_bytes
         self._max_entries = max_entries
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._building: set[str] = set()
         self._ready: "OrderedDict[str, Tuple[Path, Path]]" = OrderedDict()
         self._sizes: Dict[str, int] = {}
         self._in_use: Dict[str, int] = {}
@@ -608,23 +610,31 @@ class SourceCache:
             self._in_use.pop(victim, None)
             _remove_cache_path(source.parent)
 
-    def _source_for_locked(
+    def _cached_source_locked(
+        self,
+        source_sha256: str,
+        source_size_bytes: int,
+    ) -> Optional[Tuple[Path, Path]]:
+        cached = self._ready.get(source_sha256)
+        if cached is None:
+            return None
+        archive = cached[0].parent / "source.tar.gz"
+        if archive.is_file() and archive.stat().st_size == source_size_bytes:
+            self._ready.move_to_end(source_sha256)
+            return cached
+        self._ready.pop(source_sha256, None)
+        self._sizes.pop(source_sha256, None)
+        _remove_cache_path(cached[0].parent)
+        return None
+
+    def _prepare_source(
         self,
         run_id: str,
         lease_token: str,
         source_ref: str,
         source_sha256: str,
         source_size_bytes: int,
-    ) -> Tuple[Path, Path]:
-        cached = self._ready.get(source_sha256)
-        if cached is not None:
-            archive = cached[0].parent / "source.tar.gz"
-            if archive.is_file() and archive.stat().st_size == source_size_bytes:
-                self._ready.move_to_end(source_sha256)
-                return cached
-            self._ready.pop(source_sha256, None)
-            self._sizes.pop(source_sha256, None)
-            _remove_cache_path(cached[0].parent)
+    ) -> Tuple[Tuple[Path, Path], int]:
         target = self._root / ("sha256-" + source_sha256.removeprefix("sha256:"))
         if target.exists() or target.is_symlink():
             _remove_cache_path(target)
@@ -661,15 +671,7 @@ class SourceCache:
         except Exception:
             _remove_cache_path(target)
             raise
-        self._ready[source_sha256] = (source_path, dependency_path)
-        self._sizes[source_sha256] = size
-        self._evict_locked(protected=(source_sha256,))
-        if not self._within_limits_locked():
-            self._ready.pop(source_sha256, None)
-            self._sizes.pop(source_sha256, None)
-            _remove_cache_path(target)
-            raise RunnerError("source cache capacity is in use")
-        return source_path, dependency_path
+        return (source_path, dependency_path), size
 
     @contextmanager
     def acquire(
@@ -690,15 +692,39 @@ class SourceCache:
             or not 1 <= source_size_bytes <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
         ):
             raise RunnerError("source size is invalid")
-        with self._lock:
-            paths = self._source_for_locked(
-                run_id,
-                lease_token,
-                source_ref,
-                source_sha256,
-                source_size_bytes,
-            )
-            self._in_use[source_sha256] = self._in_use.get(source_sha256, 0) + 1
+        must_prepare = False
+        with self._condition:
+            while source_sha256 in self._building:
+                self._condition.wait()
+            paths = self._cached_source_locked(source_sha256, source_size_bytes)
+            if paths is None:
+                self._building.add(source_sha256)
+                must_prepare = True
+            else:
+                self._in_use[source_sha256] = self._in_use.get(source_sha256, 0) + 1
+        if must_prepare:
+            try:
+                paths, size = self._prepare_source(
+                    run_id,
+                    lease_token,
+                    source_ref,
+                    source_sha256,
+                    source_size_bytes,
+                )
+                with self._condition:
+                    self._ready[source_sha256] = paths
+                    self._sizes[source_sha256] = size
+                    self._evict_locked(protected=(source_sha256,))
+                    if not self._within_limits_locked():
+                        self._ready.pop(source_sha256, None)
+                        self._sizes.pop(source_sha256, None)
+                        _remove_cache_path(paths[0].parent)
+                        raise RunnerError("source cache capacity is in use")
+                    self._in_use[source_sha256] = 1
+            finally:
+                with self._condition:
+                    self._building.discard(source_sha256)
+                    self._condition.notify_all()
         try:
             yield paths
         finally:

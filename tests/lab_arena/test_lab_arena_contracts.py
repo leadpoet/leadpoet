@@ -39,7 +39,7 @@ def test_public_constants_are_the_plan_values():
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
     assert c.PROVIDERS == ("scrapingdog", "deepline", "openrouter") and c.CALL_QUOTAS_PER_ICP == {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
-    assert (c.ICP_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 420)
+    assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
     from leadpoet_canonical.constants import EPOCH_LENGTH
 
     assert EPOCH_LENGTH * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600

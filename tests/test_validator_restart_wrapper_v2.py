@@ -196,6 +196,12 @@ def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
     assert "Pulling latest GitHub main" not in invalid_forward.stdout
 
 
+def test_restart_uses_the_arena_runner_capacity_default():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert 'LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}"' in script
+
+
 def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_validator_release() {")

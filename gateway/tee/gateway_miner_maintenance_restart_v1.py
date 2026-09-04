@@ -3849,7 +3849,9 @@ def _wait_for_handoff_marker(
             str(path),
         )
         or not re.fullmatch(r"[0-9a-f]{64}", str(nonce))
-        or not 1 <= int(timeout_seconds) <= 300
+        or not 1
+        <= int(timeout_seconds)
+        <= SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS
     ):
         raise GatewayMinerMaintenanceRestartError(
             "miner-maintenance handoff request is invalid"
@@ -4062,7 +4064,10 @@ def bootstrap_gateway_miner_maintenance_restart(
             path=handoff_file,
             expected_commit=expected_commit,
             nonce=handoff_nonce,
-            timeout_seconds=300,
+            # The paired operator builds both exact runtime releases after this
+            # bootstrap proves the durable pause.  Keep this wait on the same
+            # bounded deadline as that existing paired coordination window.
+            timeout_seconds=SOURCE_ADD_CANONICAL_COORDINATION_DEADLINE_SECONDS,
         )
         _require_canonical_restart_lock_fd()
         final_tree = _validate_candidate_identity(

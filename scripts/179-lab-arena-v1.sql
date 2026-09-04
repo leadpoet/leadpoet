@@ -42,7 +42,7 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_catalog.pg_roles
     WHERE rolname IN ('lab_arena_owner', 'lab_arena_service')
-      AND (rolsuper OR rolbypassrls OR rolcanlogin)
+      AND (rolsuper OR rolbypassrls OR rolcanlogin OR rolreplication)
   ) THEN
     RAISE EXCEPTION 'lab arena roles must be NOLOGIN, non-superuser, and must not bypass RLS';
   END IF;
@@ -50,8 +50,8 @@ BEGIN
   -- Hosted Supabase rejects superuser-option syntax in ALTER ROLE, so
   -- NOSUPERUSER and NOBYPASSRLS stay at their CREATE ROLE defaults and are
   -- asserted above by catalog readback rather than written.
-  ALTER ROLE lab_arena_owner WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
-  ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION;
+  ALTER ROLE lab_arena_owner WITH NOCREATEDB NOCREATEROLE NOINHERIT;
+  ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT;
   -- The service role shares its PostgreSQL instance with the gateway when the
   -- Arena is not given its own database. Every Arena statement runs as this
   -- role (PostgREST applies impersonated-role settings per request), so its
@@ -106,7 +106,9 @@ BEGIN
   END IF;
 
   REVOKE CREATE ON SCHEMA public FROM lab_arena_service;
-  REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+  -- A non-superuser migration role can transfer ownership only while the
+  -- target owner has CREATE on this schema. Revoke it before commit.
+  GRANT CREATE ON SCHEMA public TO lab_arena_owner;
   GRANT USAGE ON SCHEMA public TO lab_arena_service;
   GRANT USAGE ON SCHEMA public TO lab_arena_owner;
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'extensions') THEN
@@ -2451,4 +2453,5 @@ COMMENT ON VIEW public.lab_arena_reward_basis_v1 IS
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

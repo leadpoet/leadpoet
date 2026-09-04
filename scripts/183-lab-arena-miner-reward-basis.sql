@@ -3,6 +3,9 @@
 
 BEGIN;
 
+-- Required only for ownership transfers by the hosted migration role.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 -- New publications have exactly two outcomes: a miner strictly beat the
 -- baseline, or no miner did. The stored round participants keep the internal
 -- is_king flag for migration compatibility, but public documents call it
@@ -341,4 +344,5 @@ $lab_arena_reward_basis_acl$;
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

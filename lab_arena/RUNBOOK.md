@@ -1,9 +1,9 @@
 # Research Lab Arena operator guide
 
-The Arena is a simple agent-bundle competition. It runs beside the old
-Research Lab reward path. It does not replace or modify that path. Operators
-can disable the Arena independently and can change the reward integration
-later.
+The Arena is a simple agent-bundle competition. Each round uses the same
+twenty ICPs as that day's public-baseline rebenchmark: ten in stage 1 and ten
+in stage 2. The Arena reads only the current active set through one database
+function; it does not generate a separate benchmark.
 
 ## Competition boundary
 
@@ -33,8 +33,8 @@ The organizer supplies one host key for each provider:
 - `LAB_ARENA_SCRAPINGDOG_API_KEY`
 - `LAB_ARENA_DEEPLINE_API_KEY`
 
-The OpenRouter key is shared by daily ICP generation, bundle calls, and judge
-calls. Only the organizer configures provider keys on the host. The broker
+The OpenRouter key is shared by bundle calls and judge calls. Only the
+organizer configures provider keys on the host. The broker
 permits any model in the organizer-fetched OpenRouter catalog that has usable
 pricing. It still enforces the fixed call, token, cost, privacy, and time
 limits. The trusted judge can use only its configured judge models.
@@ -71,8 +71,9 @@ Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.
 
-Apply `scripts/179-lab-arena-v1.sql` with the database owner before service
-startup. Then check the service wiring:
+Apply `scripts/179-lab-arena-v1.sql` and
+`scripts/181-lab-arena-daily-icp-source.sql` with the database owner before
+service startup. Then check the service wiring:
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only

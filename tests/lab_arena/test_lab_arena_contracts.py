@@ -33,7 +33,7 @@ def signed(keypair: Keypair, **overrides):
 
 
 def test_public_constants_are_the_plan_values():
-    assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 20, 30, 10)
+    assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 10, 20, 10)
     assert c.GENERATION_BATCH_SIZES == (20, 10)
     assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 8, 2)
     assert c.LAB_ARENA_POOL_PERCENT == 25
@@ -125,14 +125,8 @@ def base_round_configuration():
             "final_scoring_close": "2026-09-02T12:00:01Z",
             "publication_deadline": "2026-09-02T12:00:02Z",
         },
-        "generator": {
-            "model": "perplexity/sonar-pro",
-            "settings": {"temperature": 0.7, "max_tokens": 16000},
-            "batch_sizes": [20, 10],
-            "max_generation_attempts": 12,
-        },
         "stage_1_icp_count": 10,
-        "stage_2_icp_count": 20,
+        "stage_2_icp_count": 10,
         "finalist_count": 10,
         "max_challengers": 15,
         "runner_slot_ceiling": 8,
@@ -163,7 +157,7 @@ def test_round_configuration_contains_only_plain_public_settings():
     assert config == base_round_configuration()
     for mutate in (
         lambda d: d.update(stage_1_icp_count=9),
-        lambda d: d.update(stage_2_icp_count=19),
+        lambda d: d.update(stage_2_icp_count=9),
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
         lambda d: d.update(runner_slot_ceiling=9),
@@ -171,7 +165,6 @@ def test_round_configuration_contains_only_plain_public_settings():
         lambda d: d.update(providers=["scrapingdog"]),
         lambda d: d["reward_constants"].update(epochs_per_reward_week=141),
         lambda d: d["reward_constants"].update(pool_basis="fulfillment_residual"),
-        lambda d: d["generator"].update(batch_sizes=[15, 15]),
         lambda d: d.update(scorer_image_reference="registry.example/lab/scorer:latest"),
         lambda d: d.update(runner_hotkeys=[Keypair.create_from_uri("//Zed").ss58_address] * 2),
         lambda d: d["schedule"].update(stage_1_scoring_close="2026-09-02T00:00:00Z"),

@@ -55,6 +55,11 @@ def normalize_employee_count_bucket(*args, **kwargs):
 from lab_arena import contracts
 from lab_arena.contracts import ArenaContractError, canonical_json
 
+
+# Arena rounds now use the organizer's twenty-ICP daily set. This standalone
+# generator utility keeps its historical two-batch, thirty-ICP test contract.
+GENERATION_ICP_COUNT = sum(contracts.GENERATION_BATCH_SIZES)
+
 # ---------------------------------------------------------------------------
 # Generator identity (section 5.1: model and settings identities)
 # ---------------------------------------------------------------------------
@@ -217,7 +222,7 @@ def _build_slot_plan() -> Tuple[BatchPlan, ...]:
         slots = tuple(range(offset, offset + size))
         plans.append(BatchPlan("b%d" % (index + 1), slots, tuple(INDUSTRIES[:size])))
         offset += size
-    if offset != contracts.BENCHMARK_ICP_COUNT:
+    if offset != GENERATION_ICP_COUNT:
         raise ArenaContractError("generation batch sizes do not cover the benchmark")
     return tuple(plans)
 
@@ -227,8 +232,8 @@ FIXED_BATCH_IDS: Tuple[str, ...] = tuple(plan.batch_id for plan in SLOT_PLAN)
 
 
 def _require_slot(slot: int) -> int:
-    if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot < contracts.BENCHMARK_ICP_COUNT:
-        raise ArenaContractError("slot must be an integer in 0..%d" % (contracts.BENCHMARK_ICP_COUNT - 1))
+    if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot < GENERATION_ICP_COUNT:
+        raise ArenaContractError("slot must be an integer in 0..%d" % (GENERATION_ICP_COUNT - 1))
     return slot
 
 
@@ -253,9 +258,13 @@ def slot_industry(slot: int) -> str:
 
 
 def stage_positions(stage: int) -> Tuple[int, ...]:
-    """Return the benchmark positions for the fixed 10+20 stage split."""
+    """Return the historical generator utility's 10+20 stage positions."""
 
-    return contracts.stage_positions(stage)
+    if stage == 1:
+        return tuple(range(contracts.STAGE_1_ICP_COUNT))
+    if stage == 2:
+        return tuple(range(contracts.STAGE_1_ICP_COUNT, GENERATION_ICP_COUNT))
+    raise ArenaContractError("stage must be 1 or 2")
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +463,8 @@ def stage_distribution_lines(count: int) -> Tuple[str, ...]:
 
 
 def _validate_prompt_inputs(count: int, industries: Sequence[str], set_id: int) -> Tuple[str, ...]:
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > contracts.BENCHMARK_ICP_COUNT:
-        raise ArenaContractError("count must be an integer in 1..%d" % contracts.BENCHMARK_ICP_COUNT)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > GENERATION_ICP_COUNT:
+        raise ArenaContractError("count must be an integer in 1..%d" % GENERATION_ICP_COUNT)
     ordered = tuple(industries)
     if len(ordered) != count:
         raise ArenaContractError("industries must list exactly one entry per requested ICP")
@@ -1031,7 +1040,7 @@ class _GenerationRun:
     # -- flow ---------------------------------------------------------------
 
     def _missing_slots(self) -> List[int]:
-        return [slot for slot in range(contracts.BENCHMARK_ICP_COUNT) if slot not in self._accepted]
+        return [slot for slot in range(GENERATION_ICP_COUNT) if slot not in self._accepted]
 
     def _fail(self) -> BenchmarkGenerationFailed:
         return BenchmarkGenerationFailed(
@@ -1212,7 +1221,7 @@ class _GenerationRun:
             industries = tuple(slot_industry(slot) for slot in slots)
             attempt, response = self._dispatch(batch_id, slots, industries, replacement=True)
             self._process_response(batch_id, attempt, slots, industries, response)
-        ordered = tuple(self._accepted[slot] for slot in range(contracts.BENCHMARK_ICP_COUNT))
+        ordered = tuple(self._accepted[slot] for slot in range(GENERATION_ICP_COUNT))
         entries = tuple(self._entries)
         return BenchmarkResult(
             round_id=self._round_id,

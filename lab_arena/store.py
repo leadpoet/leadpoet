@@ -41,6 +41,7 @@ SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_whoami": (),
+    "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
@@ -427,6 +428,16 @@ class ArenaStore:
         if identity.get("rolcanlogin") is not False:
             raise ArenaRoleError("database role must be NOLOGIN")
         return identity
+
+    def current_daily_icp_set(self, set_id: int) -> Dict[str, Any]:
+        """Read only the active UTC-day ICP set exposed to the Arena."""
+
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_current_daily_icp_set", {"p_set_id": int(set_id)}
+            ),
+            "current_daily_icp_set",
+        )
 
     # -- rounds -----------------------------------------------------------
 

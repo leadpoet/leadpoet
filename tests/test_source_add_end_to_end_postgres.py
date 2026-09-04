@@ -78,7 +78,7 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _database_with_migrations(migrations):
+def _database_with_migrations(migrations, *, setup_sql=""):
     psycopg2 = pytest.importorskip("psycopg2")
     port = _free_port()
     container = "source-add-e2e-%s" % uuid4().hex[:12]
@@ -154,6 +154,8 @@ def _database_with_migrations(migrations):
                 );
                 """
             )
+            if setup_sql:
+                cursor.execute(setup_sql)
             for migration in migrations:
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         connection.close()

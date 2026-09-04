@@ -90,10 +90,6 @@ from qualification.scoring.company_fit_decision import (
     reconcile_company_fit_decisions,
     strict_company_fit_boolean,
 )
-from gateway.qualification.company_fit_proof_receipt import (
-    CompanyFitProofReceipt,
-    validate_company_fit_proof_receipt_binding,
-)
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
 # On by default.  Set INTENT_GATE_STRICT_JUDGE_ENABLED=false to disable
@@ -378,7 +374,7 @@ def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
     flag = strict_company_fit_boolean(verdict.get("employee_size_matches"))
     if not observed:
         return COMPANY_FIT_UNAVAILABLE
-    from research_lab.employee_buckets import (
+    from qualification.employee_buckets import (
         LINKEDIN_EMPLOYEE_BUCKETS,
         normalize_observed_employee_count_bucket,
     )
@@ -904,22 +900,6 @@ async def _request_company_reverify_json(
                     )
                     return None, f"provider HTTP {resp.status}"
                 body = await resp.json()
-        try:
-            from research_lab.openrouter_telemetry import record_openrouter_trace
-
-            record_openrouter_trace(
-                channel="qualification",
-                purpose=telemetry_purpose,
-                stage="scorer_judgment",
-                model_id=_SCORER_REVERIFY_MODEL,
-                request_body=request_body,
-                response_doc=body,
-            )
-        except Exception:  # noqa: BLE001 - telemetry cannot affect scoring
-            logger.debug(
-                "scorer_reverify_telemetry_failed",
-                exc_info=True,
-            )
         content = body["choices"][0]["message"]["content"]
         match = re.search(r"\{.*\}", content, re.S)
         if match is None:
@@ -941,7 +921,7 @@ async def _llm_reverify_company(
     icp: "ICPPrompt",
     *,
     require_company_fit_dimensions: bool = False,
-    proof_receipt: Optional[CompanyFitProofReceipt] = None,
+    proof_receipt: Optional[Any] = None,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -1216,8 +1196,13 @@ async def _verify_company_fit(
         for dimension, value in dimensions.items()
     }
     supporting_receipts: List[dict] = []
-    proof_receipt: Optional[CompanyFitProofReceipt] = None
+    proof_receipt: Optional[Any] = None
     if require_company_fit_proof_receipt:
+        from gateway.qualification.company_fit_proof_receipt import (
+            CompanyFitProofReceipt,
+            validate_company_fit_proof_receipt_binding,
+        )
+
         try:
             proof_receipt = CompanyFitProofReceipt.model_validate(
                 company.company_fit_proof_receipt
@@ -1638,6 +1623,12 @@ async def score_company_autoresearch_intent_v2(
     )
 
 
+# Public name used by the open baseline and Arena. Keep the existing function
+# as an internal compatibility target until the retired loop modules are
+# removed from the tree.
+score_company_competition_intent = score_company_autoresearch_intent_v2
+
+
 async def _attempt_autoresearch_evidence_repair(
     company: CompanyOutput, icp: ICPPrompt
 ) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
@@ -1797,7 +1788,7 @@ def _run_autoresearch_binary_fit_checks(
 
 def _normalize_linkedin_employee_bucket(value) -> str:
     try:
-        from research_lab.employee_buckets import normalize_employee_count_bucket
+        from qualification.employee_buckets import normalize_employee_count_bucket
 
         return normalize_employee_count_bucket(value, default=None)
     except Exception as e:
@@ -1836,7 +1827,7 @@ def _normalize_icp_employee_buckets(value) -> Tuple[set, bool]:
         return set(), False
 
     try:
-        from research_lab.employee_buckets import (
+        from qualification.employee_buckets import (
             LINKEDIN_EMPLOYEE_BUCKETS,
             normalize_employee_count_bucket,
         )
@@ -3126,7 +3117,9 @@ def calculate_age_months(signal_date: date) -> float:
     Returns:
         Age in months (can be fractional)
     """
-    today = date.today()
+    from qualification.scoring.evaluation_clock import evaluation_date
+
+    today = evaluation_date()
     days_old = (today - signal_date).days
     return days_old / 30.0  # Approximate months
 

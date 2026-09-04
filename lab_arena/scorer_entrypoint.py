@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from lab_arena import contracts, scoring, shim
+from qualification.scoring.evaluation_clock import use_evaluation_date
 
 PLACEHOLDER_CREDENTIALS = {name: "arena-placeholder-" + name.lower() for name in scoring.CREDENTIAL_ENV_NAMES}
 
@@ -41,8 +42,9 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
     scorer = scoring.lab_scorer(policy)
     item = {"scored_run_id": scored_run_id}
     try:
-        breakdowns = scoring.score_work_item(item, icp=icp, companies=companies, scorer=scorer, max_scored_companies=int(policy["max_scored_companies"]))
-    except scoring.ScoringError as exc:
+        with use_evaluation_date(str(document.get("evaluation_date") or "")):
+            breakdowns = scoring.score_work_item(item, icp=icp, companies=companies, scorer=scorer, max_scored_companies=int(policy["max_scored_companies"]))
+    except (scoring.ScoringError, ValueError) as exc:
         return scoring.build_scoring_failure(scored_run_id, "judge_error", detail=str(exc))
     return scoring.build_scoring_output(scored_run_id, breakdowns)
 

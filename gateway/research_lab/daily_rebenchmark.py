@@ -8,11 +8,13 @@ import logging
 import os
 import time
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from gateway.research_lab import public_baseline_store
-from gateway.research_lab.icp_window import (
-    RollingIcpWindowUnavailable,
-    fetch_daily_icp_window,
+from gateway.research_lab.daily_icp_set import (
+    DailyIcpSetUnavailable,
+    daily_icp_set_from_input_doc,
+    fetch_daily_icp_set,
     utc_day_start,
     utc_set_id_for_datetime,
 )
@@ -23,20 +25,15 @@ from gateway.research_lab.public_baseline_runner import (
     PublicBaselineDockerRunner,
     PublicBaselineRunError,
 )
-from gateway.research_lab.public_benchmarks import (
-    build_benchmark_visibility_split,
-    build_public_benchmark_report,
-    sanitize_benchmark_item_summary,
+from leadpoet_canonical.production_parity_boundary_v2 import (
+    configured_rebenchmark_now_v2,
 )
-from research_lab.eval.baseline_summary import (
-    build_baseline_health,
-    daily_noise_budget_doc,
+from qualification.scoring.competition import (
+    CompetitionCompanyScorer,
+    competition_score_from_breakdowns,
+    scorer_breakdown_has_retryable_infrastructure_failure,
 )
-from research_lab.eval.evaluator import (
-    QualificationStyleCompanyScorer,
-    benchmark_icp_score_from_company_scores,
-    fp_penalty_total_from_breakdowns,
-)
+from qualification.scoring.evaluation_clock import use_evaluation_date
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +45,6 @@ def _safe_error(exc: BaseException) -> str:
         "OPENROUTER_API_KEY",
         "DEEPLINE_API_KEY",
         "SCRAPINGDOG_API_KEY",
-        "EXA_API_KEY",
     ):
         secret = str(os.getenv(env_name, "") or "")
         if secret:
@@ -61,6 +57,35 @@ def _company_goal(icp: Mapping[str, Any]) -> int:
         return max(1, min(5, int(icp.get("max_companies") or 5)))
     except (TypeError, ValueError):
         return 5
+
+
+def _benchmark_summary(
+    *,
+    icp_ref: str,
+    score: float,
+    sourced_count: int,
+    breakdowns: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    count = len(breakdowns)
+    return {
+        "icp_ref": str(icp_ref),
+        "score": round(float(score), 6),
+        "company_count": count,
+        "sourced_count": int(sourced_count),
+        "average_icp_fit": round(
+            sum(float(row.get("icp_fit") or 0.0) for row in breakdowns)
+            / max(1, count),
+            6,
+        ),
+        "average_intent_score": round(
+            sum(
+                float(row.get("intent_signal_final") or 0.0)
+                for row in breakdowns
+            )
+            / max(1, count),
+            6,
+        ),
+    }
 
 
 def _existing_results(row: Mapping[str, Any], expected_refs: set[str]) -> list[dict[str, Any]]:
@@ -140,13 +165,15 @@ async def run_daily_public_rebenchmark(
     evaluation_epoch: int,
     now: datetime | None = None,
     runner_factory: Callable[[], PublicBaselineDockerRunner] = PublicBaselineDockerRunner,
-    scorer_factory: Callable[[], QualificationStyleCompanyScorer] = QualificationStyleCompanyScorer,
-    fetch_window: Callable[..., Any] = fetch_daily_icp_window,
+    scorer_factory: Callable[[], CompetitionCompanyScorer] = CompetitionCompanyScorer,
+    fetch_window: Callable[..., Any] = fetch_daily_icp_set,
     store: Any = public_baseline_store,
 ) -> dict[str, Any]:
     """Run or resume one daily baseline against every ICP in today's set."""
 
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current = configured_rebenchmark_now_v2(
+        now=now or datetime.now(timezone.utc)
+    ).astimezone(timezone.utc)
     benchmark_date = current.date().isoformat()
     start_offset = max(
         0,
@@ -163,7 +190,7 @@ async def run_daily_public_rebenchmark(
     expected_set_id = utc_set_id_for_datetime(current)
     try:
         window = await fetch_window(set_id=expected_set_id, active_at=current)
-    except RollingIcpWindowUnavailable as exc:
+    except DailyIcpSetUnavailable as exc:
         return {
             "status": "daily_icp_window_not_ready",
             "benchmark_date": benchmark_date,
@@ -172,81 +199,110 @@ async def run_daily_public_rebenchmark(
         }
 
     expected_count = len(window.benchmark_items)
-    run = await store.get_or_create_run(
-        benchmark_date=benchmark_date,
-        baseline_id=BASELINE_ID,
-        baseline_repository=BASELINE_REPOSITORY,
-        baseline_entrypoint=BASELINE_ENTRYPOINT,
-        rolling_window_hash=window.window_hash,
-        window_doc=window.public_doc,
-        evaluation_epoch=int(evaluation_epoch),
-        expected_icp_count=expected_count,
-        worker_ref=worker_ref,
-    )
+    claim_token = uuid4().hex
+    try:
+        run = await store.get_or_create_run(
+            benchmark_date=benchmark_date,
+            baseline_id=BASELINE_ID,
+            baseline_repository=BASELINE_REPOSITORY,
+            baseline_entrypoint=BASELINE_ENTRYPOINT,
+            window_doc=window.public_doc,
+            benchmark_input_doc=window.input_doc,
+            evaluation_epoch=int(evaluation_epoch),
+            expected_icp_count=expected_count,
+            worker_ref=worker_ref,
+            claim_token=claim_token,
+        )
+    except public_baseline_store.DailyRebenchmarkBusy:
+        return {
+            "status": "in_progress_elsewhere",
+            "benchmark_date": benchmark_date,
+        }
     if int(run.get("expected_icp_count") or 0) != expected_count:
         raise RuntimeError("stored daily rebenchmark ICP count does not match today's set")
+    if (
+        str(run.get("baseline_repository") or "") != BASELINE_REPOSITORY
+        or str(run.get("baseline_entrypoint") or "") != BASELINE_ENTRYPOINT
+    ):
+        raise RuntimeError("stored daily rebenchmark baseline identity differs")
+    window = daily_icp_set_from_input_doc(
+        run.get("benchmark_input_doc") or {},
+        required_set_id=expected_set_id,
+    )
+    if dict(run.get("window_doc") or {}) != window.public_doc:
+        raise RuntimeError("stored daily rebenchmark ICP references differ")
     if str(run.get("status") or "") == "completed":
         return {
             "status": "already_benchmarked",
             "benchmark_date": benchmark_date,
             "baseline_run_id": str(run.get("run_id") or ""),
-            "rolling_window_hash": window.window_hash,
             "aggregate_score": float(run.get("aggregate_score") or 0.0),
             "completed_icp_count": int(run.get("completed_icp_count") or 0),
+        }
+    if str(run.get("status") or "") == "failed":
+        return {
+            "status": "already_failed",
+            "benchmark_date": benchmark_date,
+            "baseline_run_id": str(run.get("run_id") or ""),
+            "error_code": str((run.get("error_doc") or {}).get("code") or ""),
         }
 
     expected_refs = {str(item["icp_ref"]) for item in window.benchmark_items}
     results = _existing_results(run, expected_refs)
     results_by_ref = _result_by_ref(results)
-    runner = runner_factory()
+    runner: PublicBaselineDockerRunner | None = None
     started = time.monotonic()
     try:
-        preflight = await asyncio.to_thread(runner.preflight)
-        model = str(preflight.get("model") or "")
-        scorer = scorer_factory()
-        for item in window.benchmark_items:
+        pending_items = [
+            item
+            for item in window.benchmark_items
+            if str(results_by_ref.get(str(item["icp_ref"]), {}).get("status") or "")
+            != "completed"
+        ]
+        if pending_items:
+            runner = runner_factory()
+            preflight = await asyncio.to_thread(runner.preflight)
+            model = str(preflight.get("model") or "")
+            scorer = scorer_factory()
+        else:
+            model = str(_usage_summary(results).get("model") or "")
+            scorer = None
+        for item in pending_items:
             icp_ref = str(item["icp_ref"])
-            previous = results_by_ref.get(icp_ref)
-            if previous is not None and str(previous.get("status") or "") == "completed":
-                continue
             try:
+                if runner is None or scorer is None:
+                    raise RuntimeError("daily rebenchmark runner is unavailable")
                 execution = await asyncio.to_thread(
                     runner.run_icp,
                     item["icp"],
                     evaluation_date=benchmark_date,
                     max_companies=_company_goal(item["icp"]),
                 )
-                breakdowns = await scorer.score_with_breakdowns(
-                    execution.companies,
-                    item["icp"],
-                    True,
-                )
-                company_scores = [
-                    float(value.get("final_score") or 0.0) for value in breakdowns
-                ]
-                score = benchmark_icp_score_from_company_scores(
-                    company_scores,
-                    requested_count=_company_goal(item["icp"]),
-                    fp_penalty_total=fp_penalty_total_from_breakdowns(
-                        breakdowns,
+                with use_evaluation_date(benchmark_date):
+                    breakdowns = await scorer.score_with_breakdowns(
+                        execution.companies,
                         item["icp"],
-                    ),
+                        False,
+                    )
+                if any(
+                    scorer_breakdown_has_retryable_infrastructure_failure(value)
+                    for value in breakdowns
+                ):
+                    raise RuntimeError(
+                        "retryable scorer verification infrastructure failure"
+                    )
+                score_result = competition_score_from_breakdowns(
+                    item["icp"], breakdowns
                 )
-                summary = sanitize_benchmark_item_summary(
-                    item=item,
+                score = float(score_result["per_icp_score"])
+                summary = _benchmark_summary(
+                    icp_ref=icp_ref,
                     score=score,
-                    company_count=len(company_scores),
-                    score_breakdowns=breakdowns,
                     sourced_count=len(execution.companies),
+                    breakdowns=breakdowns,
                 )
-                if not execution.companies:
-                    diagnostics = dict(summary.get("diagnostics") or {})
-                    diagnostics["sourcing_failed"] = False
-                    diagnostics["verified_empty_result"] = True
-                    summary["diagnostics"] = diagnostics
                 results_by_ref[icp_ref] = {
                     "icp_ref": icp_ref,
-                    "icp_hash": str(item.get("icp_hash") or ""),
                     "status": "completed",
                     "companies": execution.companies,
                     "score_breakdowns": breakdowns,
@@ -269,7 +325,6 @@ async def run_daily_public_rebenchmark(
                 )
                 results_by_ref[icp_ref] = {
                     "icp_ref": icp_ref,
-                    "icp_hash": str(item.get("icp_hash") or ""),
                     "status": "failed",
                     "error": {"code": code, "message": _safe_error(exc)},
                 }
@@ -281,12 +336,14 @@ async def run_daily_public_rebenchmark(
                     per_icp_results=ordered,
                     usage_doc=usage_doc,
                     worker_ref=worker_ref,
+                    claim_token=claim_token,
                 )
                 await store.fail_run(
                     run_id=str(run["run_id"]),
                     error_code=code,
                     error_message=_safe_error(exc),
                     worker_ref=worker_ref,
+                    claim_token=claim_token,
                 )
                 logger.warning(
                     "daily_public_rebenchmark_icp_failed icp_ref=%s error=%s",
@@ -308,6 +365,7 @@ async def run_daily_public_rebenchmark(
                 per_icp_results=ordered,
                 usage_doc=_usage_summary(ordered),
                 worker_ref=worker_ref,
+                claim_token=claim_token,
             )
 
         ordered = _ordered_results(window.benchmark_items, results_by_ref)
@@ -317,44 +375,7 @@ async def run_daily_public_rebenchmark(
         aggregate_score = sum(float(row.get("score") or 0.0) for row in summaries) / len(
             summaries
         )
-        max_unresolved = max(
-            0,
-            int(getattr(config, "private_baseline_max_unresolved_icps", 0) or 0),
-        )
-        baseline_health = build_baseline_health(
-            per_icp_summaries=summaries,
-            retried=0,
-            recovered=sum(
-                1
-                for row in results
-                if str(row.get("status") or "") == "completed"
-            ),
-            max_unresolved_icps=max_unresolved,
-        )
-        public_total = min(
-            max(1, int(getattr(config, "public_benchmark_public_total_icps", 10) or 10)),
-            max(1, expected_count - 1),
-        )
-        public_weak = min(
-            public_total,
-            max(0, int(getattr(config, "public_benchmark_public_weak_total", 0) or 0)),
-        )
-        visibility = build_benchmark_visibility_split(
-            rolling_window_hash=window.window_hash,
-            benchmark_items=window.benchmark_items,
-            per_icp_summaries=summaries,
-            public_icps_per_day=public_total,
-            public_weak_per_day=public_weak,
-            public_total_icps=public_total,
-            public_weak_total=public_weak,
-        )
         usage_doc = _usage_summary(ordered)
-        noise_budget = daily_noise_budget_doc(
-            benchmark_date=benchmark_date,
-            rolling_window_hash=window.window_hash,
-            per_icp_summaries=summaries,
-            aggregate_score=aggregate_score,
-        )
         score_summary_doc = {
             "schema_version": "research_lab_daily_rebenchmark.v1",
             "baseline": {
@@ -363,27 +384,33 @@ async def run_daily_public_rebenchmark(
                 "entrypoint": BASELINE_ENTRYPOINT,
             },
             "benchmark_date": benchmark_date,
-            "rolling_window_hash": window.window_hash,
+            "icp_set_id": int(window.set_id),
             "evaluation_epoch": int(evaluation_epoch),
             "aggregate_score": round(aggregate_score, 6),
             "per_icp_summaries": summaries,
-            "visibility_split": visibility,
-            "daily_noise_budget": noise_budget,
-            "baseline_health": baseline_health,
             "usage": usage_doc,
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }
-        public_report = build_public_benchmark_report(
-            benchmark_date=benchmark_date,
-            rolling_window_hash=window.window_hash,
-            aggregate_score=aggregate_score,
-            per_icp_summaries=summaries,
-            benchmark_items=window.benchmark_items,
-            public_icps_per_day=public_total,
-            public_weak_per_day=public_weak,
-            public_total_icps=public_total,
-            public_weak_total=public_weak,
-        )
+        public_report = {
+            "schema_version": "research_lab_public_baseline_report.v1",
+            "baseline": {
+                "id": BASELINE_ID,
+                "repository": BASELINE_REPOSITORY,
+                "entrypoint": BASELINE_ENTRYPOINT,
+            },
+            "benchmark_date": benchmark_date,
+            "icp_set_id": int(window.set_id),
+            "aggregate_score": round(aggregate_score, 6),
+            "completed_icp_count": expected_count,
+            "per_icp": [
+                {
+                    "icp_ref": str(summary.get("icp_ref") or ""),
+                    "score": float(summary.get("score") or 0.0),
+                    "company_count": int(summary.get("company_count") or 0),
+                }
+                for summary in summaries
+            ],
+        }
         completed = await store.complete_run(
             run_id=str(run["run_id"]),
             expected_icp_count=expected_count,
@@ -393,12 +420,13 @@ async def run_daily_public_rebenchmark(
             score_summary_doc=score_summary_doc,
             public_report_doc=public_report,
             worker_ref=worker_ref,
+            claim_token=claim_token,
         )
         return {
             "status": "completed",
             "benchmark_date": benchmark_date,
             "baseline_run_id": str(completed.get("run_id") or run["run_id"]),
-            "rolling_window_hash": window.window_hash,
+            "icp_set_id": int(window.set_id),
             "aggregate_score": round(aggregate_score, 6),
             "completed_icp_count": expected_count,
         }
@@ -409,6 +437,7 @@ async def run_daily_public_rebenchmark(
                 error_code="daily_rebenchmark_failed",
                 error_message=_safe_error(exc),
                 worker_ref=worker_ref,
+                claim_token=claim_token,
             )
         except Exception:
             logger.exception(
@@ -428,4 +457,5 @@ async def run_daily_public_rebenchmark(
             "error_code": "daily_rebenchmark_failed",
         }
     finally:
-        await asyncio.to_thread(runner.close)
+        if runner is not None:
+            await asyncio.to_thread(runner.close)

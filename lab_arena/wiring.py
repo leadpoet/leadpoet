@@ -10,18 +10,14 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lab_arena import benchmark, broker as broker_module, chain as chain_module, contracts, images, runtime, signing
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, signing
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
 from lab_arena.store import ArenaStore, PostgrestTransport
-
-
-_DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
 
 
 def _required(name: str) -> str:
@@ -29,42 +25,6 @@ def _required(name: str) -> str:
     if not value:
         raise ServiceError("environment %s is required" % name, 500)
     return value
-
-
-class OpenRouterGenerationProvider:
-    """Benchmark generation through the Arena's own OpenRouter account."""
-
-    def __init__(self, api_key: str, *, urlopen=None) -> None:
-        if not api_key:
-            raise ServiceError("generation api key is required", 500)
-        self._api_key = api_key
-        self._urlopen = urlopen or _DIRECT_URLOPEN
-
-    def __repr__(self) -> str:
-        return "OpenRouterGenerationProvider(<redacted>)"
-
-    def chat(self, *, messages, temperature, max_tokens, timeout_seconds):
-        body: Dict[str, Any] = {"model": benchmark.GENERATOR_MODEL, "messages": list(messages), "temperature": temperature}
-        if max_tokens is not None:
-            body["max_tokens"] = int(max_tokens)
-        request = urllib.request.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Authorization": "Bearer " + self._api_key, "Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
-        try:
-            with self._urlopen(request, timeout=float(timeout_seconds)) as response:
-                raw = response.read(16 * 1024 * 1024)
-                status = getattr(response, "status", 200)
-        except Exception as exc:  # transport or HTTP failure: the outcome is unknown
-            raise benchmark.ProviderFailure(type(exc).__name__) from exc
-        if status != 200:
-            raise benchmark.ProviderFailure("http_%s" % status)
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise benchmark.ProviderFailure("invalid_json") from exc
 
 
 class ChainReadsAdapter:
@@ -222,7 +182,6 @@ def build_service_from_environment(mode: str):
         "scrapingdog": _required("LAB_ARENA_SCRAPINGDOG_API_KEY"),
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
-    generation_provider = OpenRouterGenerationProvider(provider_keys["openrouter"])
     runners = tuple(item.strip() for item in os.environ.get("LAB_ARENA_RUNNER_HOTKEYS", "").split(",") if item.strip())
     # Miners may submit a public tag or digest. The Arena resolves and mirrors
     # it once. The trusted scorer is also resolved once at startup.
@@ -263,10 +222,14 @@ def build_service_from_environment(mode: str):
         judge_models = sorted({str(model) for model in (service.scorer_policy.get("judge_models") or {}).values() if model})
         return broker_module.Broker(store=store, key_for=key_for, judge_models=judge_models, price_table=price_table, transport=broker_module.HttpxProviderTransport())
 
+    def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:
+        del active_at  # the database function uses its own UTC statement time
+        return store.current_daily_icp_set(set_id)
+
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         registry=registry, source_registry=source_registry,
-        generation_provider=generation_provider,
+        daily_icp_source=daily_icp_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
     )

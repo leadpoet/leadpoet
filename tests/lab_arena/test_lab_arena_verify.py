@@ -156,10 +156,9 @@ def test_first_n_slice_and_employee_bucket_skip_are_recomputed():
     assert verify.slice_first_n(companies, 3) == companies[:3]
     assert verify.bucket_skip(icp, companies) == ([0, 2, 4], [1, 3])
     assert verify.bucket_skip(icp, companies, max_scored_companies=2) == ([0, 2], [1])
-    assert verify.icp_company_goal({"max_companies": 500}) == 50
+    assert verify.icp_company_goal({"max_companies": 500}) == 5
     assert verify.icp_company_goal({"max_companies": 0}) == 1
-    with pytest.raises(ArenaContractError):
-        verify.icp_company_goal({})
+    assert verify.icp_company_goal({}) == 5
     with pytest.raises(ArenaContractError):
         verify.bucket_skip(icp, ["not-a-company"])
 
@@ -167,9 +166,8 @@ def test_first_n_slice_and_employee_bucket_skip_are_recomputed():
 def test_stage_score_requires_the_exact_stage_or_final_icp_count():
     assert verify.stage_score([0.1] * 10, 10) == 0.1
     assert verify.stage_score([0.1] * 20, 20) == 0.1
-    assert verify.stage_score([0.1] * 30, 30) == 0.1
-    assert verify.stage_score(list(range(30)), 30) == verify.stage_score(list(reversed(range(30))), 30)
-    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 29, 30), ([1.0] * 15, 15)):
+    assert verify.stage_score(list(range(20)), 20) == verify.stage_score(list(reversed(range(20))), 20)
+    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 15, 15), ([1.0] * 29, 30)):
         with pytest.raises(ArenaContractError):
             verify.stage_score(scores, denominator)
 

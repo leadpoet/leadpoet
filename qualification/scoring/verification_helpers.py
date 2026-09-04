@@ -1013,7 +1013,9 @@ def _scan_dates_in_text(text: str, text_lower: str) -> list:
     """
     from datetime import date as _date
 
-    today = _date.today()
+    from qualification.scoring.evaluation_clock import evaluation_date
+
+    today = evaluation_date()
     found: list = []
 
     for m in re.finditer(r'(\d{4})-(\d{2})-(\d{2})', text):
@@ -1370,7 +1372,9 @@ def check_future_date(signal_date: Optional[str]) -> Optional[str]:
         parsed = date.fromisoformat(signal_date)
     except (ValueError, TypeError):
         return None
-    if parsed > date.today():
+    from qualification.scoring.evaluation_clock import evaluation_date
+
+    if parsed > evaluation_date():
         return f"Signal date {signal_date} is in the future — fabricated"
     return None
 
@@ -3746,24 +3750,6 @@ async def openrouter_chat(
                 )
                 response.raise_for_status()
                 data = response.json()
-                # trajectoryimprovements.md P1: evidence-verification verdicts
-                # are training labels — capture the exchange (never affects
-                # the business result).
-                try:
-                    from research_lab.openrouter_telemetry import (
-                        record_openrouter_trace,
-                    )
-
-                    record_openrouter_trace(
-                        channel="qualification",
-                        purpose="verification_helpers_chat",
-                        stage="scorer_judgment",
-                        model_id=str(payload.get("model") or ""),
-                        request_body=payload,
-                        response_doc=data,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
                 return data["choices"][0]["message"]["content"]
         except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e

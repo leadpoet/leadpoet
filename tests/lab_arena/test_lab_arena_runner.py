@@ -41,10 +41,15 @@ def valid_company(index: int) -> Dict[str, Any]:
     return {
         "company_name": "Co %d" % index,
         "company_website": "https://co%d.example.com" % index,
+        "company_linkedin": "",
         "industry": "Software",
         "employee_count": "51-200",
+        "company_stage": "Series A",
         "country": "United States",
-        "intent_signals": [{"source": "news", "description": "Raised a round", "url": "https://news.example.com/%d" % index, "date": "2026-08-01", "snippet": "Co raised money", "matched_icp_signal": 0}],
+        "state": "",
+        "fit_summary": "The company matches the ICP.",
+        "fit_evidence_urls": ["https://co%d.example.com/about" % index],
+        "intent_signals": [{"description": "Raised a round", "url": "https://news.example.com/%d" % index, "date": "2026-08-01", "why_now": "The funding makes outreach timely.", "snippet": "Co raised money", "matched_icp_signal": 0}],
     }
 
 

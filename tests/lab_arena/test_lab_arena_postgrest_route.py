@@ -107,9 +107,21 @@ def stack():
                 CREATE ROLE authenticator LOGIN PASSWORD 'authenticator-pw' NOINHERIT;
                 GRANT anon, authenticated, service_role TO authenticator;
                 CREATE TABLE public.lab_arena_test_other_table (id INT);
+                CREATE TABLE public.qualification_private_icp_sets (
+                  set_id BIGINT PRIMARY KEY,
+                  icps JSONB NOT NULL,
+                  active_from TIMESTAMPTZ,
+                  active_until TIMESTAMPTZ,
+                  is_active BOOLEAN NOT NULL DEFAULT FALSE
+                );
+                ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;
+                REVOKE ALL ON TABLE public.qualification_private_icp_sets
+                  FROM PUBLIC, anon, authenticated;
                 """
             )
             cursor.execute((SCRIPTS / "179-lab-arena-v1.sql").read_text(encoding="utf-8"))
+            cursor.execute((SCRIPTS / "180-public-baseline-rebenchmark.sql").read_text(encoding="utf-8"))
+            cursor.execute((SCRIPTS / "181-lab-arena-daily-icp-source.sql").read_text(encoding="utf-8"))
             cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'authenticator' ORDER BY 1")
             memberships = [row[0] for row in cursor.fetchall()]
         assert "lab_arena_service" in memberships, memberships

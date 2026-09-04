@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-import ipaddress
 import json
 import logging
 import os
@@ -12,12 +11,12 @@ from pathlib import Path
 import subprocess
 import time
 from typing import Any, Callable, Mapping
-from urllib.parse import urlsplit
 import uuid
 
-from research_lab.docker_operation_lock_v2 import (
-    DockerOperationLockError,
-    shared_docker_operation_lock,
+from qualification.competition_models import validate_companies
+from gateway.utils.docker_lifecycle import (
+    DockerLifecycleError,
+    shared_docker_lifecycle,
 )
 
 
@@ -32,7 +31,6 @@ PROVIDER_ENV_NAMES = (
     "OPENROUTER_API_KEY",
     "DEEPLINE_API_KEY",
     "SCRAPINGDOG_API_KEY",
-    "EXA_API_KEY",
 )
 DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 12 * 60
 DEFAULT_BUILD_TIMEOUT_SECONDS = 15 * 60
@@ -59,68 +57,6 @@ def _subprocess_execute(
         check=False,
     )
     return completed.returncode, completed.stdout, completed.stderr
-
-
-def _public_url(value: Any, *, allow_empty: bool = False) -> str:
-    text = str(value or "").strip()
-    if not text and allow_empty:
-        return ""
-    parsed = urlsplit(text)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-    ):
-        raise PublicBaselineRunError("baseline output contains an invalid public URL")
-    hostname = parsed.hostname.rstrip(".").lower()
-    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
-        raise PublicBaselineRunError("baseline output contains a non-public URL")
-    try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        address = None
-    if address is not None and not address.is_global:
-        raise PublicBaselineRunError("baseline output contains a non-public URL")
-    return text
-
-
-def _validate_company(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise PublicBaselineRunError("baseline company output must be an object")
-    row = dict(value)
-    required_strings = (
-        "company_name",
-        "company_website",
-        "industry",
-        "employee_count",
-        "company_stage",
-        "country",
-        "state",
-        "fit_summary",
-    )
-    if any(not isinstance(row.get(field), str) for field in required_strings):
-        raise PublicBaselineRunError("baseline company output has an invalid field")
-    _public_url(row.get("company_website"))
-    _public_url(row.get("company_linkedin"), allow_empty=True)
-    fit_urls = row.get("fit_evidence_urls")
-    if not isinstance(fit_urls, list):
-        raise PublicBaselineRunError("fit_evidence_urls must be a list")
-    for url in fit_urls:
-        _public_url(url)
-    signals = row.get("intent_signals")
-    if not isinstance(signals, list) or not signals:
-        raise PublicBaselineRunError("intent_signals must be a nonempty list")
-    for signal in signals:
-        if not isinstance(signal, Mapping):
-            raise PublicBaselineRunError("intent signal must be an object")
-        _public_url(signal.get("url"))
-    required_attribute = row.get("required_attribute")
-    if required_attribute is not None:
-        if not isinstance(required_attribute, Mapping):
-            raise PublicBaselineRunError("required_attribute must be an object")
-        _public_url(required_attribute.get("evidence_url"))
-    return row
 
 
 def _parse_result(stdout: str) -> dict[str, Any]:
@@ -213,7 +149,7 @@ class PublicBaselineDockerRunner:
             str(dockerfile_dir),
         ]
         lifecycle = (
-            shared_docker_operation_lock(timeout_seconds=self.build_timeout_seconds)
+            shared_docker_lifecycle(timeout_seconds=self.build_timeout_seconds)
             if self._uses_real_docker
             else nullcontext()
         )
@@ -222,7 +158,7 @@ class PublicBaselineDockerRunner:
                 code, _stdout, stderr = self._execute(
                     argv, "", float(self.build_timeout_seconds)
                 )
-        except (DockerOperationLockError, subprocess.TimeoutExpired) as exc:
+        except (DockerLifecycleError, subprocess.TimeoutExpired) as exc:
             raise PublicBaselineRunError("public baseline image build timed out") from exc
         if code != 0:
             raise PublicBaselineRunError(
@@ -258,7 +194,7 @@ class PublicBaselineDockerRunner:
         argv.append(self.image_tag)
         argv.extend(command)
         lifecycle = (
-            shared_docker_operation_lock(timeout_seconds=self.attempt_timeout_seconds)
+            shared_docker_lifecycle(timeout_seconds=self.attempt_timeout_seconds)
             if self._uses_real_docker
             else nullcontext()
         )
@@ -269,7 +205,7 @@ class PublicBaselineDockerRunner:
                     json.dumps(dict(payload), ensure_ascii=False, allow_nan=False),
                     float(self.attempt_timeout_seconds),
                 )
-        except (DockerOperationLockError, subprocess.TimeoutExpired) as exc:
+        except (DockerLifecycleError, subprocess.TimeoutExpired) as exc:
             if self._uses_real_docker:
                 _cleanup_container(container_name)
             raise PublicBaselineRunError("public baseline container timed out") from exc
@@ -323,7 +259,15 @@ class PublicBaselineDockerRunner:
         raw_companies = result.get("companies")
         if not isinstance(raw_companies, list) or len(raw_companies) > MAX_COMPANIES:
             raise PublicBaselineRunError("baseline returned an invalid company list")
-        companies = [_validate_company(value) for value in raw_companies]
+        try:
+            companies = validate_companies(
+                raw_companies,
+                max_companies=MAX_COMPANIES,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PublicBaselineRunError(
+                "baseline output contains a non-public URL or invalid field"
+            ) from exc
         usage = result.get("usage")
         provider_calls = result.get("provider_calls")
         if not isinstance(usage, Mapping) or not isinstance(provider_calls, list):

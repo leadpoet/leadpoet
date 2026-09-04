@@ -1,4 +1,4 @@
-"""Gateway startup supervisor for Research Lab worker fleets."""
+"""Gateway startup supervisor for the daily public-baseline worker fleet."""
 
 from __future__ import annotations
 
@@ -369,13 +369,15 @@ def build_research_lab_worker_autostart_plan(
         )
         and (hosted_legacy_count > 0 or bool(hosted_proxies))
     )
+    public_baseline_enabled = _truthy_env(
+        env,
+        "RESEARCH_LAB_PUBLIC_BASELINE_REBENCHMARK_ENABLED",
+        "true",
+    )
     scoring_enabled = (
         auto_start_enabled
         and _truthy_env(env, "RESEARCH_LAB_AUTO_START_SCORING_WORKERS", "true")
-        and (
-            _truthy_env(env, "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED")
-            or _truthy_env(env, "RESEARCH_LAB_SCORING_WORKER_ENABLED")
-        )
+        and public_baseline_enabled
         and (scoring_legacy_count > 0 or bool(scoring_proxies))
     )
 
@@ -390,8 +392,8 @@ def build_research_lab_worker_autostart_plan(
     scoring_reason = ""
     if not auto_start_enabled:
         scoring_reason = "auto_start_disabled"
-    elif not (_truthy_env(env, "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED") or _truthy_env(env, "RESEARCH_LAB_SCORING_WORKER_ENABLED")):
-        scoring_reason = "evaluation_bundles_disabled"
+    elif not public_baseline_enabled:
+        scoring_reason = "public_baseline_disabled"
     elif scoring_legacy_count <= 0 and not scoring_proxies:
         scoring_reason = "no_qualification_proxies"
 
@@ -461,15 +463,12 @@ class ResearchLabWorkerSupervisor:
             raise ResearchLabWorkerStartupError(
                 "authoritative V2 worker autostart cannot be disabled"
             )
-        for kind, fleet in {
-            "hosted": self.plan.hosted,
-            "scoring": self.plan.scoring,
-        }.items():
-            if not fleet.enabled or fleet.worker_count <= 0:
-                raise ResearchLabWorkerStartupError(
-                    "%s worker fleet must contain configured enabled workers; got %d (%s)"
-                    % (kind, fleet.worker_count, fleet.reason or "enabled")
-                )
+        fleet = self.plan.scoring
+        if not fleet.enabled or fleet.worker_count <= 0:
+            raise ResearchLabWorkerStartupError(
+                "scoring worker fleet must contain configured enabled workers; got %d (%s)"
+                % (fleet.worker_count, fleet.reason or "enabled")
+            )
 
     def start(self) -> None:
         self._validate_authoritative_plan()
@@ -477,9 +476,8 @@ class ResearchLabWorkerSupervisor:
             print("⚠️  Research Lab worker autostart disabled", flush=True)
             return
         print("=" * 80, flush=True)
-        print("🧪 STARTING RESEARCH LAB WORKER FLEETS", flush=True)
+        print("STARTING RESEARCH LAB PUBLIC BASELINE WORKERS", flush=True)
         print("=" * 80, flush=True)
-        self._start_fleet(self.plan.hosted)
         self._start_fleet(self.plan.scoring)
         if not self.children:
             print("   No Research Lab worker fleets started", flush=True)
@@ -509,11 +507,11 @@ class ResearchLabWorkerSupervisor:
             print("⚠️  Research Lab worker autostart disabled", flush=True)
             return dict(self.health())
         print("=" * 80, flush=True)
-        print("🧪 STARTING RESEARCH LAB WORKER FLEETS", flush=True)
+        print("STARTING RESEARCH LAB PUBLIC BASELINE WORKERS", flush=True)
         print("=" * 80, flush=True)
         configured_workers = sum(
             fleet.worker_count
-            for fleet in (self.plan.hosted, self.plan.scoring)
+            for fleet in (self.plan.scoring,)
             if fleet.enabled
             and WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
             not in self.deferred_worker_fleet_roles
@@ -525,7 +523,7 @@ class ResearchLabWorkerSupervisor:
         for attempt in range(1, WORKER_STARTUP_ATTEMPTS + 1):
             self._startup_attempts = attempt
             try:
-                for fleet in (self.plan.hosted, self.plan.scoring):
+                for fleet in (self.plan.scoring,):
                     await self._start_fleet_without_blocking_event_loop(
                         fleet,
                         fleet_deadline=fleet_deadline,
@@ -580,6 +578,12 @@ class ResearchLabWorkerSupervisor:
         return dict(self.health())
 
     def _start_fleet(self, fleet: ResearchLabWorkerFleetPlan) -> None:
+        if fleet.kind != "scoring":
+            raise ResearchLabWorkerStartupError(
+                "hosted Research Lab workers are retired",
+                reason="worker_kind_retired",
+                fleet_kind=fleet.kind,
+            )
         role = WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
         if role in self.deferred_worker_fleet_roles:
             print(
@@ -610,6 +614,12 @@ class ResearchLabWorkerSupervisor:
         *,
         fleet_deadline: float,
     ) -> None:
+        if fleet.kind != "scoring":
+            raise ResearchLabWorkerStartupError(
+                "hosted Research Lab workers are retired",
+                reason="worker_kind_retired",
+                fleet_kind=fleet.kind,
+            )
         role = WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
         if role in self.deferred_worker_fleet_roles:
             print(
@@ -871,6 +881,13 @@ class ResearchLabWorkerSupervisor:
         fleet: ResearchLabWorkerFleetPlan,
         index: int,
     ) -> tuple[subprocess.Popen[bytes], int]:
+        if fleet.kind != "scoring":
+            raise ResearchLabWorkerStartupError(
+                "hosted Research Lab workers are retired",
+                reason="worker_kind_retired",
+                fleet_kind=fleet.kind,
+                worker_index=index,
+            )
         env = build_research_lab_worker_environment()
         env.setdefault("PYTHONUNBUFFERED", "1")
         read_fd, write_fd = os.pipe()
@@ -884,14 +901,9 @@ class ResearchLabWorkerSupervisor:
             if fleet.proxy_values
             else ""
         )
-        if fleet.kind == "hosted":
-            env.setdefault("RESEARCH_LAB_HOSTED_WORKER_ENABLED", "true")
-            if proxy_value:
-                env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy_value
-        else:
-            env.setdefault("RESEARCH_LAB_SCORING_WORKER_ENABLED", "true")
-            if proxy_value:
-                env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = proxy_value
+        env.setdefault("RESEARCH_LAB_SCORING_WORKER_ENABLED", "true")
+        if proxy_value:
+            env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = proxy_value
         command = [
             sys.executable,
             str(self._worker_script),
@@ -956,11 +968,7 @@ class ResearchLabWorkerSupervisor:
         missing_ready = sorted(running - self._ready_children)
         hosted_running = sum(key.startswith("hosted:") for key in running)
         scoring_running = sum(key.startswith("scoring:") for key in running)
-        expected_hosted = (
-            0
-            if "gateway_autoresearch" in self.deferred_worker_fleet_roles
-            else self.plan.hosted.worker_count
-        )
+        expected_hosted = 0
         expected_scoring = (
             0
             if "gateway_scoring" in self.deferred_worker_fleet_roles

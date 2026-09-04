@@ -1,9 +1,8 @@
-"""Model output contract (labarena.md section 6.1).
+"""Public sourcing-competition output contract.
 
-A model writes ``/output/companies.json`` holding only the current
-``CompanyOutput`` structure. The Arena validates the bytes against its strict
-limits and every company against ``CompanyOutput`` (unknown fields rejected by
-the model itself). The validated document is stored by its service-owned run.
+A model writes ``/output/companies.json`` with the same company structure used
+by the daily public baseline. The validated document is stored by its
+service-owned run.
 """
 
 from __future__ import annotations
@@ -13,9 +12,10 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from lab_arena import contracts
 from lab_arena.contracts import ArenaContractError
+from qualification.competition_models import validate_companies as validate_public_companies
 
 MAX_OUTPUT_BYTES = 512 * 1024
-MAX_COMPANIES = 50
+MAX_COMPANIES = 5
 
 
 class OutputInvalid(ArenaContractError):
@@ -36,24 +36,12 @@ def parse_output_bytes(data: bytes) -> Any:
 
 
 def validate_companies(companies: Any) -> List[Dict[str, Any]]:
-    """Validate each company with the current ``CompanyOutput`` model."""
+    """Validate companies with the shared public competition model."""
 
-    from gateway.qualification.models import CompanyOutput
-
-    if not isinstance(companies, list):
-        raise OutputInvalid("companies must be a list")
-    if len(companies) > MAX_COMPANIES:
-        raise OutputInvalid("too many companies")
-    validated: List[Dict[str, Any]] = []
-    for index, item in enumerate(companies):
-        if not isinstance(item, Mapping):
-            raise OutputInvalid("company %d is not an object" % index)
-        try:
-            model = CompanyOutput(**dict(item))
-        except Exception as exc:  # pydantic ValidationError or the models' ValueError guards
-            raise OutputInvalid("company %d fails the CompanyOutput contract: %s" % (index, type(exc).__name__)) from exc
-        validated.append(model.model_dump(mode="json"))
-    return validated
+    try:
+        return validate_public_companies(companies, max_companies=MAX_COMPANIES)
+    except (TypeError, ValueError) as exc:
+        raise OutputInvalid("companies fail the public output contract") from exc
 
 
 def output_document_from_bytes(data: bytes) -> Dict[str, Any]:

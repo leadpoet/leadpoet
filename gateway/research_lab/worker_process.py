@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -34,12 +33,8 @@ except Exception as _sentry_exc:  # must never break the worker
     )
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
-from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402
-from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
-from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
 from gateway.research_lab.worker_autostart import (  # noqa: E402
-    HOSTED_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
     build_research_lab_worker_environment,
 )
@@ -57,12 +52,6 @@ def _signal_parent_ready() -> None:
         os.write(fd, b"ready\n")
     finally:
         os.close(fd)
-
-
-def _proxy_ref(proxy_url: str) -> str:
-    if not proxy_url:
-        return "none"
-    return "sha256:" + hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
 
 
 def _configure_logging(level: str) -> None:
@@ -87,21 +76,6 @@ def _proxy_for_worker(prefixes: tuple[str, ...], index: int) -> str:
     return ""
 
 
-def _configure_hosted_worker(index: int, total_workers: int, worker_prefix: str) -> str:
-    worker_id = f"{worker_prefix}-{index + 1}"
-    proxy = os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", "").strip() or _proxy_for_worker(
-        HOSTED_PROXY_PREFIXES,
-        index,
-    )
-    os.environ.setdefault("RESEARCH_LAB_HOSTED_WORKER_ENABLED", "true")
-    os.environ["RESEARCH_LAB_HOSTED_WORKER_ID"] = worker_id
-    os.environ["RESEARCH_LAB_HOSTED_WORKER_INDEX"] = str(index)
-    os.environ["RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS"] = str(total_workers)
-    if proxy:
-        os.environ["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy
-    return worker_id
-
-
 def _configure_scoring_worker(index: int, total_workers: int, worker_prefix: str) -> str:
     worker_id = f"{worker_prefix}-{index + 1}"
     proxy = os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", "").strip() or _proxy_for_worker(
@@ -117,46 +91,17 @@ def _configure_scoring_worker(index: int, total_workers: int, worker_prefix: str
     return worker_id
 
 
-def _print_hosted_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -> None:
-    tree_policy = TreePolicy.from_env()
-    print(
-        format_worker_block(
-            "RESEARCH LAB AUTO-RESEARCH WORKER",
-            (
-                ("Worker ID", worker_id),
-                ("Worker index", f"{config.hosted_worker_index + 1}/{config.hosted_worker_total_workers}"),
-                ("Poll seconds", config.hosted_worker_poll_seconds),
-                ("Dry run", config.hosted_worker_dry_run),
-                ("Proxy required", config.hosted_worker_require_proxy),
-                ("Proxy ref", _proxy_ref(config.hosted_worker_proxy_url)),
-                ("Runtime target", f"{config.auto_research_min_seconds}s-{config.auto_research_max_seconds}s"),
-                ("Iterations", f"{config.auto_research_min_iterations}-{config.auto_research_max_iterations}"),
-                ("Tree mode", tree_policy.mode),
-                ("Tree nodes", tree_policy.max_nodes),
-                ("Branch / beam", f"{tree_policy.branch_factor}/{tree_policy.beam_width}"),
-                ("Tree ICPs/node", tree_policy.live_max_icps_per_node),
-            ),
-        )
-        + "\n",
-        flush=True,
-    )
-
-
 def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -> None:
     baseline_owner = config.scoring_worker_index == 0
     print(
         format_worker_block(
-            "RESEARCH LAB QUALIFICATION SCORING WORKER",
+            "RESEARCH LAB PUBLIC BASELINE WORKER",
             (
                 ("Worker ID", worker_id),
                 ("Worker index", f"{config.scoring_worker_index + 1}/{config.scoring_worker_total_workers}"),
                 ("Poll seconds", config.scoring_worker_poll_seconds),
-                ("Proxy required", config.scoring_worker_require_proxy),
-                ("Proxy ref", _proxy_ref(config.scoring_worker_proxy_url)),
                 ("Public baseline daily", config.public_baseline_rebenchmark_enabled),
                 ("Baseline owner", baseline_owner),
-                ("Candidate batch", config.scoring_worker_max_candidates),
-                ("Model timeout", f"{config.scoring_worker_model_timeout_seconds}s"),
             ),
         )
         + "\n",
@@ -165,8 +110,10 @@ def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run one gateway-supervised Research Lab worker")
-    parser.add_argument("--kind", choices=("hosted", "scoring"), required=True)
+    parser = argparse.ArgumentParser(
+        description="Run one gateway-supervised daily public-baseline worker"
+    )
+    parser.add_argument("--kind", choices=("scoring",), required=True)
     parser.add_argument("--worker-index", type=int, required=True)
     parser.add_argument("--total-workers", type=int, required=True)
     parser.add_argument("--worker-prefix", default="")
@@ -183,18 +130,7 @@ def main() -> int:
     build_research_lab_worker_environment()
     _configure_logging(args.log_level)
 
-    if args.kind == "hosted":
-        worker_id = _configure_hosted_worker(
-            args.worker_index,
-            args.total_workers,
-            args.worker_prefix or os.getenv("RESEARCH_LAB_HOSTED_WORKER_PREFIX", "research-lab-worker"),
-        )
-        config = ResearchLabGatewayConfig.from_env()
-        _print_hosted_banner(config, worker_id=worker_id)
-        worker = ResearchLabHostedWorker(config, worker_ref=worker_id)
-        _signal_parent_ready()
-        asyncio.run(worker.run_forever())
-        return 0
+    from gateway.research_lab.daily_worker import DailyPublicRebenchmarkWorker
 
     worker_id = _configure_scoring_worker(
         args.worker_index,
@@ -203,7 +139,7 @@ def main() -> int:
     )
     config = ResearchLabGatewayConfig.from_env()
     _print_scoring_banner(config, worker_id=worker_id)
-    worker = ResearchLabGatewayScoringWorker(config, worker_ref=worker_id)
+    worker = DailyPublicRebenchmarkWorker(config, worker_ref=worker_id)
     _signal_parent_ready()
     asyncio.run(worker.run_forever())
     return 0

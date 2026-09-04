@@ -25,8 +25,8 @@ SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
 ARENA_REPOSITORY = "arena.example/lab-arena/models"  # every accepted image is mirrored here (private while a round runs)
 from lab_arena.store import ArenaStore, PsycopgTransport
 from lab_arena.images import RegistryClient
-from tests.lab_arena.lab_arena_benchmark_tape import TapeProvider, load_tape
-from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_benchmark_tape import batch_icps
+from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_images import FakeRegistry, layer_tar, public_test_resolver, simple_image
 
 # One registry per test module, persistent like the module database: a king published by an
@@ -187,7 +187,33 @@ class ModelSandbox:
             return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"crash")
         flavor = self.flavor_by_digest[digest]
         bucket = icp["employee_count"][0]
-        companies = [{"company_name": "%s Company %d" % (flavor, i), "company_website": "https://%s-%d.example.com" % (flavor.lower(), i), "industry": icp["industry"], "employee_count": bucket, "country": icp.get("country") or "United States", "intent_signals": [{"source": "news", "description": "Raised a round", "url": "https://news.example.com/%s/%d" % (flavor, i), "date": "2026-08-01", "snippet": "Funding announced", "matched_icp_signal": 0}]} for i in range(5)]
+        companies = [
+            {
+                "company_name": "%s Company %d" % (flavor, i),
+                "company_website": "https://%s-%d.example.com" % (flavor.lower(), i),
+                "company_linkedin": "",
+                "industry": icp["industry"],
+                "employee_count": bucket,
+                "company_stage": str(icp.get("company_stage") or ""),
+                "country": icp.get("country") or "United States",
+                "state": "",
+                "fit_summary": "The company matches the ICP.",
+                "fit_evidence_urls": [
+                    "https://%s-%d.example.com/about" % (flavor.lower(), i)
+                ],
+                "intent_signals": [
+                    {
+                        "description": "Raised a round",
+                        "url": "https://news.example.com/%s/%d" % (flavor, i),
+                        "date": "2026-08-01",
+                        "why_now": "The funding makes outreach timely.",
+                        "snippet": "Funding announced",
+                        "matched_icp_signal": 0,
+                    }
+                ],
+            }
+            for i in range(5)
+        ]
         spec.output_path.write_bytes(json.dumps({"companies": companies}).encode())
         return runtime.fake_result(exit_code=0, output_bytes=runtime.read_output(spec), stdout=b"done\n")
 
@@ -239,7 +265,7 @@ def submission_body(reference: str) -> Dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration((LAB_ARENA_MIGRATION,))
+    yield from database_with_lab_arena_migration()
 
 
 @pytest.fixture(scope="module")
@@ -301,7 +327,12 @@ class Harness:
 
         config = svc.ServiceConfig(
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
-            generation_provider=TapeProvider(load_tape("clean_run.json")), banned_hotkeys_source=lambda: list(harness.banned),
+            daily_icp_source=lambda **kwargs: {
+                "status": "ready",
+                "set_id": int(kwargs["set_id"]),
+                "icps": batch_icps()[0],
+            },
+            banned_hotkeys_source=lambda: list(harness.banned),
             broker_factory=broker_factory,
             defaults=svc.RoundDefaults(
                 runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
@@ -413,7 +444,6 @@ def test_full_round_publishes_compact_results_and_carries_the_king(connect, tmp_
     # competition state.
     harness.clock.now = datetime.now(timezone.utc)
     harness.chain.epoch = 24820
-    harness.service.config.generation_provider.__init__(load_tape("clean_run.json"))
     configuration = harness.service.create_round(
         datetime.now(timezone.utc) + timedelta(hours=12),
         round_id="arena-2026-10-02",
@@ -472,7 +502,6 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     # Model failure is a miner result. It records zeros when all infrastructure
     # work completes and does not cancel the round.
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service.config.generation_provider.__init__(load_tape("clean_run.json"))
     configuration = service.create_round(
         datetime.now(timezone.utc) + timedelta(hours=12),
         round_id="arena-2026-10-06-zero",
@@ -650,7 +679,6 @@ def test_a_reigning_king_that_submits_a_fresh_image_enters_as_the_king_without_a
     harness.round_id = configuration["round_id"]
     fresh = harness.submit(king_label + "-Fresh", harness.round_id, miner_label=king_label)
     harness.submit("Rival" if king_label == "Regal" else "Regal", harness.round_id)
-    harness.service.config.generation_provider.__init__(load_tape("clean_run.json"))  # a fresh benchmark tape for the second round
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert service.advance_round(harness.round_id)["status"] == "ok" and harness.status() == "committed"
     parts = service.store.get_round(harness.round_id)["participants"]

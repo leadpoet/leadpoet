@@ -47,7 +47,9 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
             numbered.setdefault(int(match.group(1)), []).append(path.name)
     assert numbered[178] == ["178-research-lab-source-add-miner-status.sql"]
     assert numbered[179] == ["179-lab-arena-v1.sql"]
-    assert max(numbered) == 179, "179 must sit directly above the production frontier"
+    assert numbered[180] == ["180-public-baseline-rebenchmark.sql"]
+    assert numbered[181] == ["181-lab-arena-daily-icp-source.sql"]
+    assert max(numbered) == 181, "181 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():

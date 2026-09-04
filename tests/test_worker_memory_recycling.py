@@ -200,11 +200,8 @@ async def test_real_supervisor_spawns_and_waits_sequentially_on_event_loop(
     health = await start_worker_supervisor_without_blocking_event_loop(supervisor)
 
     assert health["status"] == "ready"
-    assert popen_threads == [caller_thread, caller_thread]
+    assert popen_threads == [caller_thread]
     assert startup_events == [
-        "spawn",
-        "wait",
-        "ready",
         "spawn",
         "wait",
         "ready",
@@ -640,7 +637,7 @@ def _fleet(kind: str, count: int) -> ResearchLabWorkerFleetPlan:
     )
 
 
-def test_full_topology_worker_health_uses_configured_counts(monkeypatch):
+def test_full_topology_worker_health_uses_only_scoring_count(monkeypatch):
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
     hosted_workers = 3
     scoring_workers = 7
@@ -651,23 +648,24 @@ def test_full_topology_worker_health_uses_configured_counts(monkeypatch):
     )
     supervisor = ResearchLabWorkerSupervisor(plan)
     supervisor.children = {
-        **{"hosted:%d" % index: _StubChild(1000 + index) for index in range(hosted_workers)},
         **{"scoring:%d" % index: _StubChild(2000 + index) for index in range(scoring_workers)},
     }
     supervisor._ready_children = set(supervisor.children)
     health = supervisor.health()
-    assert health["hosted_running"] == hosted_workers
+    assert health["hosted_configured"] == hosted_workers
+    assert health["hosted_expected_running"] == 0
+    assert health["hosted_running"] == 0
     assert health["scoring_running"] == scoring_workers
 
 
-def test_full_topology_worker_health_rejects_empty_fleet(monkeypatch):
+def test_full_topology_worker_health_rejects_empty_scoring_fleet(monkeypatch):
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
     plan = ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=True,
-        hosted=_fleet("hosted", 0),
-        scoring=_fleet("scoring", 7),
+        hosted=_fleet("hosted", 7),
+        scoring=_fleet("scoring", 0),
     )
-    with pytest.raises(ResearchLabWorkerStartupError, match="configured enabled"):
+    with pytest.raises(ResearchLabWorkerStartupError, match="scoring worker fleet"):
         ResearchLabWorkerSupervisor(plan).health()
 
 
@@ -704,6 +702,38 @@ def test_explicit_worker_fleet_deferral_starts_no_host_workers(monkeypatch):
     assert health["scoring_configured"] == 7
     assert health["scoring_expected_running"] == 0
     assert health["scoring_running"] == 0
+
+
+def test_autoresearch_only_deferral_keeps_scoring_workers(monkeypatch):
+    monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", 3),
+        scoring=_fleet("scoring", 2),
+    )
+    supervisor = ResearchLabWorkerSupervisor(
+        plan,
+        environment={
+            "GATEWAY_V2_DEFER_WORKER_FLEETS": "gateway_autoresearch"
+        },
+    )
+    started: list[tuple[str, int]] = []
+
+    def start_child(fleet, index):
+        started.append((fleet.kind, index))
+        return _StubChild(3000 + index)
+
+    monkeypatch.setattr(supervisor, "_start_child", start_child)
+
+    supervisor.start()
+    health = supervisor.health()
+
+    assert started == [("scoring", 0), ("scoring", 1)]
+    assert set(supervisor.children) == {"scoring:0", "scoring:1"}
+    assert health["deferred_worker_fleet_roles"] == ["gateway_autoresearch"]
+    assert health["hosted_expected_running"] == 0
+    assert health["scoring_expected_running"] == 2
+    assert health["scoring_running"] == 2
 
 
 def test_invalid_worker_fleet_deferral_fails_closed():

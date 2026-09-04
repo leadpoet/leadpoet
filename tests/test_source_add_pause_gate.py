@@ -71,11 +71,6 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": False, "status": "active"}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value(
             {
@@ -86,12 +81,6 @@ async def test_public_status_exposes_effective_source_add_pause(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(_status_request())
 
     assert status["source_add"]["control"] == {
@@ -166,20 +155,9 @@ async def test_public_status_source_add_intake_gate_matches_admission_state(
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": values["autoresearch_paused"]}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value({"paused": values["source_add_paused"]}),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(
         _status_request(
             dispatcher_ready=values["source_add_dispatcher_ready"],
@@ -214,20 +192,9 @@ async def test_public_status_source_add_intake_fails_closed_without_any_authorit
     )
     monkeypatch.setattr(
         api,
-        "get_autoresearch_maintenance_state",
-        _async_value({"paused": True}),
-    )
-    monkeypatch.setattr(
-        api,
         "source_add_control_state",
         _async_value({"paused": False}),
     )
-    monkeypatch.setattr(
-        api,
-        "private_repo_head_alignment_status",
-        _async_value({"status": "aligned"}),
-    )
-
     status = await api.research_lab_status(
         _status_request(
             dispatcher_ready=False,

@@ -132,6 +132,89 @@ class PublicBaselineRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicBaselineRunError, "non-public"):
             runner.run_icp({}, evaluation_date="2026-09-03")
 
+    def test_rejects_reserved_or_internal_hostnames(self) -> None:
+        for url in (
+            "https://internal/news",
+            "https://source.localhost/news",
+            "https://source.invalid/news",
+            "https://source.test/news",
+            "http://127.1/private",
+        ):
+            with self.subTest(url=url):
+                call = 0
+
+                def execute(argv: list[str], _stdin: str, _timeout: float):
+                    nonlocal call
+                    call += 1
+                    if call == 1:
+                        return 0, "", ""
+                    if argv[-1] == "preflight":
+                        return 0, _line(
+                            {
+                                "ok": True,
+                                "selected_model": "openai/test",
+                                "model_pricing": {},
+                                "deepline": {"connected": True},
+                            }
+                        ), ""
+                    return 0, _line(
+                        {
+                            "ok": True,
+                            "companies": [_company(url)],
+                            "usage": {},
+                            "provider_calls": [],
+                            "estimated_provider_cost_usd": 0,
+                            "model_cost_usd": 0,
+                            "estimated_combined_cost_usd": 0,
+                            "latency_seconds": 0.1,
+                        }
+                    ), ""
+
+                runner = PublicBaselineDockerRunner(execute=execute)
+                runner.preflight()
+                with self.assertRaisesRegex(PublicBaselineRunError, "non-public"):
+                    runner.run_icp({}, evaluation_date="2026-09-03")
+
+    def test_allows_empty_optional_stage_and_state(self) -> None:
+        call = 0
+
+        def execute(argv: list[str], _stdin: str, _timeout: float):
+            nonlocal call
+            call += 1
+            if call == 1:
+                return 0, "", ""
+            if argv[-1] == "preflight":
+                return 0, _line(
+                    {
+                        "ok": True,
+                        "selected_model": "openai/test",
+                        "model_pricing": {},
+                        "deepline": {"connected": True},
+                    }
+                ), ""
+            company = _company()
+            company["company_stage"] = ""
+            company["state"] = ""
+            return 0, _line(
+                {
+                    "ok": True,
+                    "companies": [company],
+                    "usage": {},
+                    "provider_calls": [],
+                    "estimated_provider_cost_usd": 0,
+                    "model_cost_usd": 0,
+                    "estimated_combined_cost_usd": 0,
+                    "latency_seconds": 0.1,
+                }
+            ), ""
+
+        runner = PublicBaselineDockerRunner(execute=execute)
+        runner.preflight()
+        result = runner.run_icp({}, evaluation_date="2026-09-03")
+
+        self.assertEqual(result.companies[0]["company_stage"], "")
+        self.assertEqual(result.companies[0]["state"], "")
+
     def test_timeout_is_a_bounded_error(self) -> None:
         def execute(argv: list[str], _stdin: str, timeout: float):
             if argv[:2] == ["docker", "build"]:
@@ -141,6 +224,43 @@ class PublicBaselineRunnerTests(unittest.TestCase):
         runner = PublicBaselineDockerRunner(execute=execute)
         with self.assertRaisesRegex(PublicBaselineRunError, "timed out"):
             runner.preflight()
+
+    def test_rejects_incomplete_intent_evidence(self) -> None:
+        call = 0
+
+        def execute(argv: list[str], _stdin: str, _timeout: float):
+            nonlocal call
+            call += 1
+            if call == 1:
+                return 0, "", ""
+            if argv[-1] == "preflight":
+                return 0, _line(
+                    {
+                        "ok": True,
+                        "selected_model": "openai/test",
+                        "model_pricing": {},
+                        "deepline": {"connected": True},
+                    }
+                ), ""
+            company = _company()
+            company["intent_signals"][0]["why_now"] = ""
+            return 0, _line(
+                {
+                    "ok": True,
+                    "companies": [company],
+                    "usage": {},
+                    "provider_calls": [],
+                    "estimated_provider_cost_usd": 0,
+                    "model_cost_usd": 0,
+                    "estimated_combined_cost_usd": 0,
+                    "latency_seconds": 0.1,
+                }
+            ), ""
+
+        runner = PublicBaselineDockerRunner(execute=execute)
+        runner.preflight()
+        with self.assertRaisesRegex(PublicBaselineRunError, "invalid field"):
+            runner.run_icp({}, evaluation_date="2026-09-03")
 
 
 if __name__ == "__main__":

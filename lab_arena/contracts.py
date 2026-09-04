@@ -19,9 +19,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------------
 
 # Every participant runs the first ten ICPs. The ten best challengers then run
-# the remaining twenty ICPs; the incumbent always runs both stages.
+# the remaining ten ICPs; the incumbent always runs both stages. These are the
+# twenty ICPs in the organizer's current daily qualification set.
 STAGE_1_ICP_COUNT = 10
-STAGE_2_ICP_COUNT = 20
+STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
@@ -650,16 +651,6 @@ ROUND_CONFIGURATION_FIELDS = (
     F("mode", "str", choices=("shadow", "live")),
     F("rewards_enabled", "bool"),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
-    F(
-        "generator",
-        "object",
-        fields=(
-            F("model", "str", minimum=1, maximum=128),
-            F("settings", "object"),
-            F("batch_sizes", "list[int]", minimum=2, maximum=2),
-            F("max_generation_attempts", "int", minimum=3, maximum=64),
-        ),
-    ),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
     F("finalist_count", "int", minimum=1),
@@ -718,8 +709,6 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("providers and call quotas are fixed public constants")
     if dict(config["scoring_call_quotas"]) != dict(SCORING_CALL_QUOTAS_PER_WORK_ITEM):
         raise ArenaContractError("scoring call quotas are fixed public constants")
-    if tuple(config["generator"]["batch_sizes"]) != GENERATION_BATCH_SIZES:
-        raise ArenaContractError("generation batch sizes are fixed public constants")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")
     rewards = config["reward_constants"]

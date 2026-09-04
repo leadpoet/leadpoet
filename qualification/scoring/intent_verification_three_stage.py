@@ -2143,14 +2143,9 @@ async def _fetch_sd_then_exa(
 async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
 ) -> Dict[str, Any]:
-    # trajectoryimprovements.md P1/P8: the intent judge's exchanges are
-    # captured through the shared telemetry hook (encrypted S3, pointer-only
-    # provider_usage), and reasoning is requested by default with a
-    # retry-without-reasoning fallback. Capture never affects the verdict.
-    from research_lab.openrouter_telemetry import (
+    from qualification.scoring.openrouter_options import (
         include_reasoning_default,
         reasoning_request_unsupported,
-        record_openrouter_trace,
     )
 
     or_key = _get_openrouter_key()
@@ -2201,18 +2196,6 @@ async def _call_openrouter(
                     reasoning_dropped = True
                     body.pop("include_reasoning", None)
                     continue
-                record_openrouter_trace(
-                    channel="qualification",
-                    purpose="intent_three_stage_verify",
-                    stage="scorer_judgment",
-                    model_id=model,
-                    request_body=body,
-                    response_doc={
-                        "http_status": r.status_code,
-                        "error_excerpt": r.text[:400],
-                    },
-                    outcome="http_error",
-                )
                 return {
                     "_error": f"http_{r.status_code}",
                     "_body": r.text[:400],
@@ -2229,35 +2212,14 @@ async def _call_openrouter(
                     attempt + 1,
                     type(exc).__name__,
                 )
-                record_openrouter_trace(
-                    channel="qualification",
-                    purpose="intent_three_stage_verify",
-                    stage="scorer_judgment",
-                    model_id=model,
-                    request_body=body,
-                    response_doc={
-                        "http_status": r.status_code,
-                        "parse_error_class": type(exc).__name__,
-                    },
-                    outcome="invalid_json_envelope",
-                )
                 if attempt == 2:
                     return {"_error": "invalid_json_envelope"}
                 await asyncio.sleep(1)
                 continue
-            provider_usage = record_openrouter_trace(
-                channel="qualification",
-                purpose="intent_three_stage_verify",
-                stage="scorer_judgment",
-                model_id=model,
-                request_body=body,
-                response_doc=resp,
-                outcome="response",
-            )
-            if reasoning_dropped:
-                provider_usage.setdefault("reasoning_capture", {})[
-                    "request_dropped"
-                ] = True
+            provider_usage = {
+                "reasoning_requested": bool(request_reasoning),
+                "reasoning_request_dropped": bool(reasoning_dropped),
+            }
             choices = resp.get("choices")
             first_choice = choices[0] if isinstance(choices, list) and choices else {}
             message = first_choice.get("message") if isinstance(first_choice, Mapping) else {}

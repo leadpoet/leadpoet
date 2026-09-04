@@ -12,11 +12,23 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 )
 
 from .config import ResearchLabGatewayConfig
+from .daily_icp_set import DAILY_ICP_COUNT
 from .public_baseline_runner import BASELINE_ID
 from .public_baseline_store import load_completed_run
 
 
 logger = logging.getLogger(__name__)
+
+
+def _same_number(left: Any, right: Any) -> bool:
+    try:
+        first = float(left)
+        second = float(right)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(first) and math.isfinite(second) and math.isclose(
+        first, second, abs_tol=1e-6
+    )
 
 
 def _valid_completed_row(row: Mapping[str, Any]) -> bool:
@@ -33,7 +45,7 @@ def _valid_completed_row(row: Mapping[str, Any]) -> bool:
         str(row.get("status") or "") != "completed"
         or not math.isfinite(aggregate)
         or not 0.0 <= aggregate <= 100.0
-        or expected <= 0
+        or expected != DAILY_ICP_COUNT
         or completed != expected
         or not isinstance(results, list)
         or len(results) != expected
@@ -43,23 +55,72 @@ def _valid_completed_row(row: Mapping[str, Any]) -> bool:
         or not report
     ):
         return False
-    refs: set[str] = set()
+    summaries = summary.get("per_icp_summaries")
+    if not isinstance(summaries, list) or len(summaries) != expected:
+        return False
+    result_summaries: dict[str, Mapping[str, Any]] = {}
     for result in results:
         if not isinstance(result, Mapping):
             return False
         ref = str(result.get("icp_ref") or "")
         if (
             not ref
-            or ref in refs
+            or ref in result_summaries
             or str(result.get("status") or "") != "completed"
             or not isinstance(result.get("summary"), Mapping)
         ):
             return False
-        refs.add(ref)
+        result_summaries[ref] = result["summary"]
+    summary_by_ref: dict[str, Mapping[str, Any]] = {}
+    for item in summaries:
+        if not isinstance(item, Mapping):
+            return False
+        ref = str(item.get("icp_ref") or "")
+        try:
+            score = float(item.get("score"))
+        except (TypeError, ValueError):
+            return False
+        if (
+            not ref
+            or ref in summary_by_ref
+            or not math.isfinite(score)
+            or not 0.0 <= score <= 100.0
+            or ref not in result_summaries
+            or not _same_number(result_summaries[ref].get("score"), score)
+        ):
+            return False
+        summary_by_ref[ref] = item
+    if set(result_summaries) != set(summary_by_ref):
+        return False
+    calculated = sum(float(item["score"]) for item in summaries) / expected
+    report_rows = report.get("per_icp")
+    if not isinstance(report_rows, list) or len(report_rows) != expected:
+        return False
+    report_by_ref: dict[str, Mapping[str, Any]] = {}
+    for item in report_rows:
+        if not isinstance(item, Mapping):
+            return False
+        ref = str(item.get("icp_ref") or "")
+        if (
+            not ref
+            or ref in report_by_ref
+            or ref not in summary_by_ref
+            or not _same_number(item.get("score"), summary_by_ref[ref].get("score"))
+        ):
+            return False
+        report_by_ref[ref] = item
+    summary_baseline = summary.get("baseline")
+    report_baseline = report.get("baseline")
     return (
-        str(summary.get("baseline", {}).get("id") or "") == BASELINE_ID
-        if isinstance(summary.get("baseline"), Mapping)
-        else False
+        set(report_by_ref) == set(summary_by_ref)
+        and isinstance(summary_baseline, Mapping)
+        and isinstance(report_baseline, Mapping)
+        and str(summary_baseline.get("id") or "") == BASELINE_ID
+        and str(report_baseline.get("id") or "") == BASELINE_ID
+        and int(report.get("completed_icp_count") or 0) == expected
+        and _same_number(summary.get("aggregate_score"), aggregate)
+        and _same_number(report.get("aggregate_score"), aggregate)
+        and _same_number(calculated, aggregate)
     )
 
 
@@ -67,7 +128,6 @@ async def daily_public_baseline_readiness(
     config: ResearchLabGatewayConfig,
     *,
     now: datetime | None = None,
-    include_commitments: bool = False,
 ) -> dict[str, Any]:
     """Return whether today's public baseline has a complete durable result."""
 
@@ -103,29 +163,7 @@ async def daily_public_baseline_readiness(
         "benchmark_date": benchmark_date,
         "baseline_run_id": str(row.get("run_id") or ""),
         "baseline_id": BASELINE_ID,
-        "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
+        "aggregate_score": float(row.get("aggregate_score") or 0.0),
+        "completed_icp_count": int(row.get("completed_icp_count") or 0),
     }
-    if include_commitments:
-        summaries = row["score_summary_doc"].get("per_icp_summaries") or []
-        scores = [float(value.get("score") or 0.0) for value in summaries]
-        result["completion_commitments"] = {
-            "all_icp_count": len(summaries),
-            "minimum_icp_score": round(min(scores), 6) if scores else 0.0,
-            "maximum_icp_score": round(max(scores), 6) if scores else 0.0,
-        }
     return result
-
-
-async def autoresearch_daily_baseline_readiness(
-    config: ResearchLabGatewayConfig,
-    *,
-    now: datetime | None = None,
-    include_commitments: bool = False,
-) -> dict[str, Any]:
-    """Compatibility name for callers being replaced by the Arena service."""
-
-    return await daily_public_baseline_readiness(
-        config,
-        now=now,
-        include_commitments=include_commitments,
-    )

@@ -888,6 +888,22 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "closure_doc",
         ),
     ),
+    (
+        "scripts/180-public-baseline-rebenchmark.sql",
+        "research_lab_daily_rebenchmarks",
+        (
+            "run_id",
+            "benchmark_date",
+            "baseline_id",
+            "status",
+            "expected_icp_count",
+            "completed_icp_count",
+            "aggregate_score",
+            "per_icp_results",
+            "score_summary_doc",
+            "public_report_doc",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (

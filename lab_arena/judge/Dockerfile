@@ -40,10 +40,9 @@ COPY requirements.txt /model/requirements.txt
 RUN pip install --no-cache-dir -r /model/requirements.txt
 
 # The evaluator's packages at their repository paths (RUNBOOK section 6): the
-# import closure of lab_arena, research_lab, qualification, gateway, and
-# leadpoet_verifier, which reaches the five packages below as well.
+# import closure of lab_arena, qualification, gateway, and leadpoet_verifier,
+# which reaches the support packages below as well.
 COPY lab_arena/ /model/lab_arena/
-COPY research_lab/ /model/research_lab/
 COPY qualification/ /model/qualification/
 COPY gateway/ /model/gateway/
 COPY leadpoet_verifier/ /model/leadpoet_verifier/
@@ -58,7 +57,7 @@ COPY lab_arena/scorer_entrypoint.py /model/scorer_entrypoint.py
 RUN printf 'import lab_arena.shim as _lab_arena_shim\n_lab_arena_shim.install()\n' > /model/sitecustomize.py \
     && find /model -name '__pycache__' -type d -prune -exec rm -rf {} + \
     && chmod -R a+rX /model \
-    && python3 -c "import lab_arena.shim, lab_arena.scorer_entrypoint, research_lab.eval.evaluator, qualification.scoring.lead_scorer"
+    && python3 -c "import lab_arena.shim, lab_arena.scorer_entrypoint, qualification.scoring.competition, qualification.scoring.lead_scorer"
 
 USER 65534:65534
 ENTRYPOINT ["python3", "/model/scorer_entrypoint.py"]

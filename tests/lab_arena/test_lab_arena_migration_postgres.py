@@ -1,4 +1,4 @@
-"""Disposable-PostgreSQL behavior of scripts/179-lab-arena-v1.sql through
+"""Disposable-PostgreSQL behavior of the current Lab Arena migrations through
 ``lab_arena.store`` (labarena.md sections 18.1, 18.2, 18.3).
 
 Every write goes through the SECURITY DEFINER functions as ``lab_arena_service``
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pytest
@@ -26,7 +27,11 @@ from lab_arena.store import (
     hash_lease_token,
     new_lease_token,
 )
-from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import (
+    LAB_ARENA_DAILY_SOURCE_MIGRATION,
+    LAB_ARENA_MIGRATION,
+    database_with_lab_arena_migration,
+)
 from tests.test_source_add_end_to_end_postgres import SCRIPTS
 
 _KEYS: Dict[str, str] = {}
@@ -44,7 +49,7 @@ def sha(seed: str) -> str:
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration((LAB_ARENA_MIGRATION,))
+    yield from database_with_lab_arena_migration()
 
 
 @pytest.fixture(scope="module")
@@ -185,6 +190,9 @@ def expire_now(superuser, run_id: str) -> None:
 def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
     with superuser.cursor() as cursor:
         cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
+        cursor.execute(
+            (SCRIPTS / LAB_ARENA_DAILY_SOURCE_MIGRATION).read_text(encoding="utf-8")
+        )
         cursor.execute("SELECT rolname, rolsuper, rolbypassrls, rolcanlogin, rolinherit, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname IN ('lab_arena_owner', 'lab_arena_service') ORDER BY rolname")
         rows = cursor.fetchall()
         assert rows == [
@@ -200,6 +208,80 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
         cursor.execute("SELECT tablename, policyname FROM pg_policies WHERE tablename LIKE 'lab_arena_%' ORDER BY 1")
         policies = cursor.fetchall()
         assert len(policies) == 4 and all(name.endswith("_service_read") for _, name in policies)
+
+
+def test_daily_icp_function_is_current_only_and_source_table_is_private(database):
+    psycopg2, dsn = database
+    now = datetime.now(timezone.utc)
+    set_id = int(now.strftime("%Y%m%d"))
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    icps = [{"icp_id": "today-%d" % index} for index in range(20)]
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.research_lab_daily_rebenchmarks (
+                  run_id, benchmark_date, baseline_id, baseline_repository,
+                  baseline_entrypoint, window_doc, benchmark_input_doc,
+                  status, expected_icp_count, worker_ref
+                ) VALUES (
+                  gen_random_uuid(), %s, 'leadpoet/pydantic-harness',
+                  'https://github.com/leadpoet/pydantic-harness.git',
+                  'harness.run_icp', '{}'::jsonb,
+                  jsonb_build_object(
+                    'schema_version', 'research_lab_daily_icp_inputs.v1',
+                    'set_id', %s,
+                    'icps', %s::jsonb
+                  ),
+                  'running', 20, 'test-worker'
+                )
+                ON CONFLICT (benchmark_date, baseline_id) DO UPDATE
+                SET benchmark_input_doc = EXCLUDED.benchmark_input_doc,
+                    status = 'running'
+                """,
+                (
+                    now.date(),
+                    set_id,
+                    json.dumps(icps),
+                ),
+            )
+    finally:
+        connection.close()
+
+    transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    try:
+        daily_store = ArenaStore(transport)
+        assert daily_store.current_daily_icp_set(set_id) == {
+            "status": "ready",
+            "set_id": set_id,
+            "icps": icps,
+        }
+        assert daily_store.current_daily_icp_set(set_id - 1) == {
+            "status": "unavailable",
+            "set_id": set_id - 1,
+        }
+    finally:
+        transport.close()
+
+    direct = psycopg2.connect(**dsn)
+    direct.autocommit = True
+    try:
+        with direct.cursor() as cursor:
+            cursor.execute("SET ROLE lab_arena_service")
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "SELECT icps FROM public.qualification_private_icp_sets"
+                )
+            direct.rollback()
+            cursor.execute("SET ROLE lab_arena_service")
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "SELECT benchmark_input_doc "
+                    "FROM public.research_lab_daily_rebenchmarks"
+                )
+    finally:
+        direct.close()
 
 
 def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
@@ -253,6 +335,11 @@ def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
             "RETURNS JSONB LANGUAGE sql AS $$ SELECT '{}'::JSONB $$"
         )
         cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
+        cursor.execute(
+            (SCRIPTS / LAB_ARENA_DAILY_SOURCE_MIGRATION).read_text(
+                encoding="utf-8"
+            )
+        )
         cursor.execute(
             "SELECT table_name, column_name FROM information_schema.columns "
             "WHERE table_schema = 'public' AND ((table_name = 'lab_arena_rounds' AND column_name = ANY(%s)) "
@@ -870,14 +957,14 @@ def test_stage_two_opens_only_for_the_finalist_and_incumbent(store):
     with pytest.raises(ArenaStoreError):
         store.open_stage(round_id, 2, [parts[0]], stage_positions(2))
     opened = store.open_stage(round_id, 2, parts, stage_positions(2))
-    assert opened["status"] == "ok" and opened["assignments"] == 40
+    assert opened["status"] == "ok" and opened["assignments"] == 20
     king_stage_2 = store.list_runs(round_id, stage=2, submission_id=parts[1]["submission_id"])
-    assert len(king_stage_2) == 20 and {run["icp_position"] for run in king_stage_2} == set(range(10, 30))
+    assert len(king_stage_2) == 10 and {run["icp_position"] for run in king_stage_2} == set(range(10, 20))
     stage_2_executed = _execute_everything(store, round_id, runner_keys[0])
-    assert len(stage_2_executed) == 40
+    assert len(stage_2_executed) == 20
     assert store.close_stage(round_id, 2)["round_status"] == "stage2_closed"
     _commit_plan(store, round_id, 2)
-    assert store.open_scoring(round_id, 2, _scoring_items(stage_2_executed))["assignments"] == 40
+    assert store.open_scoring(round_id, 2, _scoring_items(stage_2_executed))["assignments"] == 20
     while True:
         response, token, _, _ = claim(store, round_id, runner_keys[0], parallelism=100, ceiling=100)
         if response["status"] != "leased":
@@ -887,7 +974,7 @@ def test_stage_two_opens_only_for_the_finalist_and_incumbent(store):
     assert store.close_scoring(round_id, 2)["round_status"] == "stage2_judged"
     stage_2_runs = store.list_runs(round_id, stage=2, kind="execute")
     stage_2_scores = [{"run_id": run["run_id"], "per_icp_score": 60.0} for run in stage_2_runs]
-    assert store.record_run_scores(round_id, 2, stage_2_scores)["recorded"] == 40
+    assert store.record_run_scores(round_id, 2, stage_2_scores)["recorded"] == 20
     assert store.transition_round(
         round_id,
         "stage2_judged",

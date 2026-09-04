@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import benchmark, broker as broker_module, contracts, images, rewards, scoring, signing, verify
+from lab_arena import broker as broker_module, contracts, images, rewards, scoring, signing, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -27,7 +27,6 @@ DEFAULT_STAGE_MINUTES = {
 }
 CANCEL_REASONS = {
     "benchmark_leak": "benchmark_leaked_before_cutoff",
-    "generation": "generation_could_not_fill_slots",
     "benchmark_invalid": "benchmark_data_invalid",
     "capacity": "runner_capacity",
     "scoring": "scoring_window_closed",
@@ -186,7 +185,7 @@ class ServiceConfig:
     signer: Optional[signing.ArenaSigner]
     chain: ChainReads
     verify_signature: Callable[[str, str, str], bool]
-    generation_provider: benchmark.GenerationProvider
+    daily_icp_source: Callable[..., Mapping[str, Any]]
     banned_hotkeys_source: Callable[[], Iterable[str]]
     broker_factory: Callable[["ArenaService", Mapping[str, Any]], broker_module.Broker]
     defaults: RoundDefaults = field(default_factory=RoundDefaults)
@@ -316,6 +315,13 @@ class ArenaService:
             except ArenaStoreError as exc:
                 if "lab_arena_round_missing" not in str(exc):
                     raise ServiceError("function_unavailable:%s" % function, 500) from exc
+        today = int(self.now().strftime("%Y%m%d"))
+        source = self._config.daily_icp_source(set_id=today, active_at=self.now())
+        if not isinstance(source, Mapping) or source.get("status") not in (
+            "ready",
+            "unavailable",
+        ):
+            raise ServiceError("daily_icp_source_invalid", 500)
         probe_ref = "arena/_startup/object-store.json"
         probe_bytes = contracts.canonical_json({"probe": "lab_arena_object_store_v1"}).encode("utf-8")
         try:
@@ -378,7 +384,6 @@ class ArenaService:
             "mode": self._config.mode,
             "rewards_enabled": bool(defaults.rewards_enabled and self._config.mode == "live"),
             "schedule": self.build_schedule(cutoff),
-            "generator": benchmark.generator_configuration(),
             "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
             "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
             "finalist_count": contracts.FINALIST_COUNT,
@@ -386,7 +391,7 @@ class ArenaService:
             "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
             "lease_ttl_seconds": contracts.LEASE_TTL_SECONDS,
-            "companies_per_icp": benchmark.apply_arena_contract({"company_stage": "Seed", "employee_count": ["11-50"]})["max_companies"],
+            "companies_per_icp": 5,
             "providers": list(contracts.PROVIDERS),
             "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
             "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
@@ -719,23 +724,61 @@ class ArenaService:
         round_row = self._round(round_id)
         if round_row["status"] != "open":
             return {"status": "existing", "round_status": round_row["status"]}
-        configuration = round_row["configuration_doc"]
-        participants = self.freeze_participants(round_id)
         started = self.now()
+        set_id = int(round_id.replace("arena-", "").replace("-", "")[:8])
+        source = self._config.daily_icp_source(set_id=set_id, active_at=started)
+        if not isinstance(source, Mapping) or source.get("status") not in (
+            "ready",
+            "unavailable",
+        ):
+            self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+            return {
+                "status": "cancelled",
+                "reason": CANCEL_REASONS["benchmark_invalid"],
+            }
+        if source.get("status") == "unavailable":
+            evaluation_date = round_id.replace("arena-", "")[:10]
+            if evaluation_date < started.date().isoformat():
+                self._store.cancel_round(
+                    round_id, CANCEL_REASONS["benchmark_invalid"]
+                )
+                return {
+                    "status": "cancelled",
+                    "reason": CANCEL_REASONS["benchmark_invalid"],
+                }
+            return {
+                "status": "retry",
+                "reason": "daily_icp_set_not_ready",
+                "set_id": set_id,
+            }
+        raw_icps = source.get("icps")
         try:
-            result = benchmark.generate_benchmark(
-                round_id=round_id,
-                set_id=int(round_id.replace("arena-", "").replace("-", "")[:8]),
-                provider=self._config.generation_provider,
-                clock=self._clock,
-                max_attempts=int(configuration["generator"]["max_generation_attempts"]),
-            )
-        except benchmark.BenchmarkGenerationFailed:
-            self._store.cancel_round(round_id, CANCEL_REASONS["generation"])
-            return {"status": "cancelled", "reason": CANCEL_REASONS["generation"]}
+            source_set_id = int(source.get("set_id") or 0)
+        except (TypeError, ValueError):
+            source_set_id = 0
+        if source_set_id != set_id or not isinstance(raw_icps, list):
+            self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+            return {
+                "status": "cancelled",
+                "reason": CANCEL_REASONS["benchmark_invalid"],
+            }
+        icps = [dict(icp) for icp in raw_icps if isinstance(icp, Mapping)]
+        icp_ids = [str(icp.get("icp_id") or "").strip() for icp in icps]
+        if (
+            len(icps) != contracts.BENCHMARK_ICP_COUNT
+            or len(icps) != len(raw_icps)
+            or any(not icp_id for icp_id in icp_ids)
+            or len(set(icp_ids)) != len(icp_ids)
+        ):
+            self._store.cancel_round(round_id, CANCEL_REASONS["benchmark_invalid"])
+            return {
+                "status": "cancelled",
+                "reason": CANCEL_REASONS["benchmark_invalid"],
+            }
+        participants = self.freeze_participants(round_id)
         evaluation_date = round_id.replace("arena-", "")[:10]
         benchmark_ref = "arena/%s/benchmark.json" % round_id
-        self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": list(result.icps)}).encode("utf-8"))
+        self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))
         transition = self._store.transition_round(round_id, "open", "committed", {
             "participants": participants,
             "benchmark_ref": benchmark_ref,

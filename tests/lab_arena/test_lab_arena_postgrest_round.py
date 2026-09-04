@@ -114,7 +114,7 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert len(publication["final_ranking"]) == 3
     assert publication["king_decision"]["outcome"] in ("crowned", "defended")
     execution_runs = service.store.list_runs(round_id, kind="execute")
-    assert len(execution_runs) == 90
+    assert len(execution_runs) == 60
     assert all(run["status"] == "accepted" and run["per_icp_score"] is not None for run in execution_runs)
     # Lease expiry runs on every driver tick; the round exercised it with nothing to expire.
     reached = set(harness.calls)
@@ -122,6 +122,10 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
+        if function == "lab_arena_current_daily_icp_set":
+            response = harness.transport.rpc(function, params)
+            assert response["status"] == "unavailable"
+            continue
         with pytest.raises(ArenaStoreError) as excinfo:
             harness.transport.rpc(function, params)
         message = str(excinfo.value)

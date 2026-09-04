@@ -1,7 +1,7 @@
 """Arena scoring: the plain scorer policy, scoring assignments, judge
 execution, and per-run score calculation.
 
-The Lab scorer (``QualificationStyleCompanyScorer``) is imported lazily inside
+The competition scorer is imported lazily inside
 the worker only after the policy has been applied to the process environment,
 because it reads credentials and behavior knobs at import time.
 """
@@ -216,15 +216,12 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
     Lab's reference model.
     """
 
-    from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+    from qualification.scoring.competition import CompetitionCompanyScorer
 
     validated = contracts.validate_scorer_policy(policy)
     adapter = validated["scoring_adapter_version"]
-    scorer = QualificationStyleCompanyScorer(
-        attested_provider_profile=validated["provider_profile"],
-        reference_scoring_adapter_version=_lab_adapter_version(adapter),
-        candidate_scoring_adapter_version=_lab_adapter_version(adapter),
-    )
+    _lab_adapter_version(adapter)
+    scorer = CompetitionCompanyScorer()
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
         return scorer.score_with_breakdowns(list(companies), dict(icp), bool(is_reference_model))
@@ -233,10 +230,10 @@ def lab_scorer(policy: Mapping[str, Any]) -> Scorer:
 
 
 def _lab_adapter_version(arena_version: str) -> str:
-    from research_lab.eval import evaluator
+    from qualification.scoring.competition import SCORING_ADAPTER_VERSION
 
     if arena_version == SCORING_ADAPTER_VERSION_V1:
-        return evaluator.QUALIFICATION_SCORING_ADAPTER_VERSION_V1
+        return SCORING_ADAPTER_VERSION
     raise ScoringError("unsupported scoring adapter version")
 
 
@@ -267,7 +264,9 @@ def score_work_item(
     recomputes; any other count is a scorer contract failure.
     """
 
-    from research_lab.eval.evaluator import scorer_breakdown_has_retryable_infrastructure_failure
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_retryable_infrastructure_failure,
+    )
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
     scored_indexes, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)

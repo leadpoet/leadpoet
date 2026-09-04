@@ -199,7 +199,7 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
         service._round("shadow-round")
 
 
-def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_twenty():
+def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
     calls = []
 
     class Store:
@@ -224,7 +224,7 @@ def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_twenty(
     assert [row["submission_id"] for row in calls[0][2]] == ["king", "c1", "c2"]
     assert calls[0][3] == list(range(10))
     assert [row["submission_id"] for row in calls[1][2]] == ["king", "c2"]
-    assert calls[1][3] == list(range(10, 30))
+    assert calls[1][3] == list(range(10, 20))
 
 
 def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
@@ -371,3 +371,103 @@ def test_image_admission_uses_one_absolute_tick_deadline(monkeypatch):
     assert calls[0][-1] == 110.0
     assert calls[1][0] == "mirror" and calls[1][1] is source_registry
     assert calls[1][4] is destination_registry and calls[1][-1] == 110.0
+
+
+def _daily_source_icps():
+    return [
+        {
+            "icp_id": "icp_20260903_%03d" % index,
+            "prompt": "ICP %d" % index,
+        }
+        for index in range(1, contracts.BENCHMARK_ICP_COUNT + 1)
+    ]
+
+
+def _daily_source_service(source):
+    class Objects:
+        def __init__(self):
+            self.values = {}
+
+        def put(self, ref, data):
+            self.values[ref] = bytes(data)
+
+    class Store:
+        def __init__(self):
+            self.cancelled = []
+            self.transitions = []
+
+        def cancel_round(self, round_id, reason):
+            self.cancelled.append((round_id, reason))
+
+        def transition_round(self, round_id, expected, next_status, patch):
+            self.transitions.append((round_id, expected, next_status, patch))
+            return {"status": "ok"}
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._objects = Objects()
+    service._config = SimpleNamespace(daily_icp_source=source)
+    service._clock = lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
+    service._round = lambda _round_id: {"status": "open"}
+    service.freeze_participants = lambda _round_id: [{"submission_id": "baseline"}]
+    return service
+
+
+def test_benchmark_commit_uses_the_exact_daily_icps_in_source_order():
+    expected = _daily_source_icps()
+    calls = []
+
+    def source(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ready", "set_id": kwargs["set_id"], "icps": expected}
+
+    service = _daily_source_service(source)
+    result = service.commit_benchmark("arena-2026-09-03")
+
+    assert result == {"status": "ok", "participants": 1}
+    assert calls == [
+        {
+            "set_id": 20260903,
+            "active_at": datetime(2026, 9, 3, 12, tzinfo=timezone.utc),
+        }
+    ]
+    stored = json.loads(
+        service._objects.values["arena/arena-2026-09-03/benchmark.json"]
+    )
+    assert stored["icps"] == expected
+
+
+def test_unavailable_daily_set_retries_before_participants_freeze():
+    service = _daily_source_service(
+        lambda **_kwargs: {"status": "unavailable"}
+    )
+    service.freeze_participants = lambda _round_id: (_ for _ in ()).throw(
+        AssertionError("participants froze before the daily set was ready")
+    )
+
+    assert service.commit_benchmark("arena-2026-09-03") == {
+        "status": "retry",
+        "reason": "daily_icp_set_not_ready",
+        "set_id": 20260903,
+    }
+    assert service._store.cancelled == []
+
+
+def test_duplicate_daily_icp_ids_cancel_the_round_as_invalid():
+    invalid = _daily_source_icps()
+    invalid[-1] = dict(invalid[-1], icp_id=invalid[0]["icp_id"])
+    service = _daily_source_service(
+        lambda **kwargs: {
+            "status": "ready",
+            "set_id": kwargs["set_id"],
+            "icps": invalid,
+        }
+    )
+
+    assert service.commit_benchmark("arena-2026-09-03") == {
+        "status": "cancelled",
+        "reason": "benchmark_data_invalid",
+    }
+    assert service._store.cancelled == [
+        ("arena-2026-09-03", "benchmark_data_invalid")
+    ]

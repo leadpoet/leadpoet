@@ -34,6 +34,16 @@ class ResearchLabRollingIcpWindow:
     set_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class ResearchLabDailyIcpSet:
+    """The current daily ICP inputs and their ordinary public references."""
+
+    set_id: int
+    public_doc: dict[str, Any]
+    benchmark_items: tuple[dict[str, Any], ...]
+    item_refs: tuple[str, ...]
+
+
 class RollingIcpWindowUnavailable(RuntimeError):
     """Raised when the configured Research Lab ICP window cannot be built."""
 
@@ -423,21 +433,33 @@ def select_daily_icp_window_from_set(
     *,
     required_set_id: int,
     active_at: datetime,
-) -> ResearchLabRollingIcpWindow:
+) -> ResearchLabDailyIcpSet:
     """Build one benchmark window from every ICP in the current daily set."""
 
-    normalized = _normalize_set_row(row)
-    if int(normalized["set_id"]) != int(required_set_id):
+    try:
+        row_set_id = int(row["set_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RollingIcpWindowUnavailable("daily_set_id_is_invalid") from exc
+    if row_set_id != int(required_set_id):
         raise RollingIcpWindowUnavailable(
             f"required_daily_set_{int(required_set_id)}_missing"
         )
-    if not _set_row_active_at(normalized, active_at):
+    if not _set_row_active_at(row, active_at):
         raise RollingIcpWindowUnavailable(
             f"required_daily_set_{int(required_set_id)}_not_active"
         )
-    records: list[dict[str, Any]] = []
+    raw_icps = row.get("icps") or []
+    if not isinstance(raw_icps, list):
+        raise RollingIcpWindowUnavailable(
+            f"daily_set_{int(required_set_id)}_icps_must_be_array"
+        )
+    benchmark_items: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for rank, raw_icp in enumerate(normalized["icps"], start=1):
+    for rank, raw_icp in enumerate(raw_icps, start=1):
+        if not isinstance(raw_icp, Mapping):
+            raise RollingIcpWindowUnavailable(
+                f"daily_set_{int(required_set_id)}_icp_{rank}_must_be_object"
+            )
         icp = dict(raw_icp)
         icp_id = str(icp.get("icp_id") or "").strip()
         if not icp_id:
@@ -449,36 +471,37 @@ def select_daily_icp_window_from_set(
                 f"daily_set_{int(required_set_id)}_duplicate_icp_id:{icp_id}"
             )
         seen_ids.add(icp_id)
-        records.append(
+        benchmark_items.append(
             {
-                "row": normalized,
                 "icp": icp,
-                "cohort": "daily",
-                "intent_signal_signature": intent_signal_signature(icp),
+                "icp_ref": (
+                    f"qualification_private_icp_sets:{row_set_id}:{icp_id}"
+                ),
+                "set_id": row_set_id,
+                "position": rank,
             }
         )
-    if not records:
+    if not benchmark_items:
         raise RollingIcpWindowUnavailable(
             f"daily_set_{int(required_set_id)}_has_no_icps"
         )
-    return _build_window_from_selected_records(
-        records,
-        required_days=1,
-        icps_per_day=len(records),
-        schema_version="daily_set.v1",
-        selection_policy="all_daily_icps_in_source_order:v1",
-        extra_doc={
-            "window_mode": WINDOW_MODE_DAILY_SET,
-            "fresh_set_id": int(required_set_id),
-            "fresh_icp_count": len(records),
-            "retained_icp_count": 0,
+    item_refs = tuple(str(item["icp_ref"]) for item in benchmark_items)
+    return ResearchLabDailyIcpSet(
+        set_id=row_set_id,
+        public_doc={
+            "schema_version": "research_lab_daily_icp_set.v1",
+            "set_id": row_set_id,
+            "icp_count": len(benchmark_items),
+            "icp_refs": list(item_refs),
         },
+        benchmark_items=tuple(benchmark_items),
+        item_refs=item_refs,
     )
 
 
 async def fetch_daily_icp_window(
     *, set_id: int, active_at: datetime
-) -> ResearchLabRollingIcpWindow:
+) -> ResearchLabDailyIcpSet:
     """Fetch the exact active UTC-day ICP set through the service-role client."""
 
     from gateway.db.client import get_write_client
@@ -487,7 +510,7 @@ async def fetch_daily_icp_window(
         return (
             get_write_client()
             .table("qualification_private_icp_sets")
-            .select("set_id,icps,icp_set_hash,active_from,active_until,is_active")
+            .select("set_id,icps,active_from,active_until,is_active")
             .eq("set_id", int(set_id))
             .limit(1)
             .execute()

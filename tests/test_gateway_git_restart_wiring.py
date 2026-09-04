@@ -1831,10 +1831,15 @@ fi
     assert result.returncode == 0, result.stderr
 
 
-def test_gateway_worker_deferral_is_restart_scoped() -> None:
+def test_gateway_restart_does_not_need_autoresearch_worker_deferral() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     assert script.count('"GATEWAY_V2_DEFER_WORKER_FLEETS"') == 3
+    reconciliation = _shell_function_source(
+        script,
+        "reconcile_gateway_rebenchmark_retry_runtime",
+    )
+    assert "GATEWAY_V2_DEFER_WORKER_FLEETS=gateway_autoresearch" not in reconciliation
 
 
 def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -> None:

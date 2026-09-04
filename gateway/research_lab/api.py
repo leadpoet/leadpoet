@@ -63,9 +63,6 @@ from .key_vault import (
 from .v2_credential_envelopes import (
     persist_openrouter_credential_envelope_v2,
 )
-from .maintenance import (
-    get_autoresearch_maintenance_state,
-)
 from .ticket_intake_validation import validate_ticket_direction
 from .ticket_lifecycle import (
     TERMINAL_TICKET_STATUSES,
@@ -130,8 +127,12 @@ from .public_activity import (
     safe_project_public_loop_activity,
 )
 from .chain import resolve_research_lab_evaluation_epoch
-from .promotion import private_repo_head_alignment_status
-from .daily_baseline_readiness import autoresearch_daily_baseline_readiness
+from .daily_baseline_readiness import daily_public_baseline_readiness
+from .public_baseline_runner import BASELINE_ID
+from .public_baseline_store import (
+    load_completed_run as load_completed_public_baseline,
+    load_latest_completed_run as load_latest_completed_public_baseline,
+)
 from .source_add_catalog import (
     ALREADY_SUBMITTED_DETAIL,
     SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
@@ -609,40 +610,16 @@ def _source_add_dispatcher_runtime_ready(request: Request) -> bool:
 @router.get("/status")
 async def research_lab_status(request: Request) -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
-    maintenance, source_add_control = await asyncio.gather(
-        get_autoresearch_maintenance_state(),
-        source_add_control_state(),
-    )
-    maintenance_public = {
-        key: maintenance.get(key)
-        for key in ("paused", "status", "reason", "status_at", "unavailable")
-        if key in maintenance
-    }
+    source_add_control = await source_add_control_state()
     latest_public_benchmark = None
-    private_model_repo_head = None
     if config.api_enabled and config.reports_enabled:
         try:
-            rows = await select_many(
-                "research_lab_public_benchmark_report_current",
-                filters=(("current_report_status", "published"),),
-                order_by=(("benchmark_date", True), ("created_at", True)),
-                limit=1,
+            latest_public_benchmark = await daily_public_baseline_readiness(
+                config,
             )
-            if rows:
-                latest_public_benchmark = {
-                    "benchmark_date": rows[0].get("benchmark_date"),
-                    "report_id": rows[0].get("report_id"),
-                    "aggregate_score": rows[0].get("aggregate_score"),
-                    "report_doc": rows[0].get("report_doc"),
-                }
         except Exception as exc:
             logger.warning("research_lab_public_benchmark_status_unavailable: %s", str(exc)[:200])
             latest_public_benchmark = {"status": "unavailable"}
-    try:
-        private_model_repo_head = await private_repo_head_alignment_status(config)
-    except Exception as exc:
-        logger.warning("research_lab_private_model_repo_head_status_unavailable: %s", str(exc)[:200])
-        private_model_repo_head = {"status": "unavailable"}
     public_status = config.public_status()
     source_add_public = dict(public_status.get("source_add") or {})
     source_add_public["control"] = {
@@ -673,9 +650,7 @@ async def research_lab_status(request: Request) -> dict[str, object]:
         "status": "configured" if config.api_enabled else "disabled",
         **public_status,
         "source_add": source_add_public,
-        "maintenance": maintenance_public,
         "latest_public_benchmark": latest_public_benchmark,
-        "private_model_repo_head": private_model_repo_head,
     }
 
 
@@ -3239,15 +3214,13 @@ async def get_latest_public_benchmark_report():
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
-    rows = await select_many(
-        "research_lab_public_benchmark_report_current",
-        filters=(("current_report_status", "published"),),
-        order_by=(("benchmark_date", True), ("created_at", True)),
-        limit=1,
+    row = await load_latest_completed_public_baseline(
+        baseline_id=BASELINE_ID,
     )
-    if not rows:
+    report = row.get("public_report_doc") if isinstance(row, Mapping) else None
+    if not isinstance(report, Mapping) or not report:
         raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
-    return rows[0]
+    return dict(report)
 
 
 @router.get("/benchmarks/public/{benchmark_date}")
@@ -3257,15 +3230,14 @@ async def get_public_benchmark_report_by_date(benchmark_date: str):
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", benchmark_date):
         raise HTTPException(status_code=400, detail="benchmark_date must be YYYY-MM-DD")
-    rows = await select_many(
-        "research_lab_public_benchmark_report_current",
-        filters=(("benchmark_date", benchmark_date), ("current_report_status", "published")),
-        order_by=(("created_at", True),),
-        limit=1,
+    row = await load_completed_public_baseline(
+        benchmark_date=benchmark_date,
+        baseline_id=BASELINE_ID,
     )
-    if not rows:
+    report = row.get("public_report_doc") if isinstance(row, Mapping) else None
+    if not isinstance(report, Mapping) or not report:
         raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
-    return rows[0]
+    return dict(report)
 
 
 @router.get("/reports/candidate-generation-failures")
@@ -4120,31 +4092,15 @@ def _require_enabled(enabled: bool, detail: str) -> None:
 async def _require_autoresearch_not_paused(
     config: ResearchLabGatewayConfig,
 ) -> None:
-    state = await get_autoresearch_maintenance_state()
-    if state.get("paused"):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "research_lab_maintenance_paused",
-                "message": "Research Lab auto-research is paused for maintenance",
-                "reason": state.get("reason"),
-                "status_at": state.get("status_at"),
-            },
-        )
-
-    readiness = await autoresearch_daily_baseline_readiness(config)
-    if readiness.get("available"):
-        return
+    del config
     raise HTTPException(
-        status_code=503,
+        status_code=410,
         detail={
-            "code": "research_lab_daily_baseline_not_ready",
+            "code": "research_lab_autoresearch_retired",
             "message": (
-                "Research Lab auto-research is waiting for the current daily "
-                "baseline publication"
+                "Research Lab auto-research is retired; submit an agent "
+                "bundle through the Arena"
             ),
-            "reason": readiness.get("reason"),
-            "benchmark_date": readiness.get("benchmark_date"),
         },
     )
 

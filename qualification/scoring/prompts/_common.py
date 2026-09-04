@@ -330,7 +330,9 @@ def build_final_judge_prompt(
             "NO CONTENT. STATUSES:\n"
             + json.dumps(contents.get("statuses") or [], indent=2)
         ]
-    today_str = date.today().isoformat()
+    from qualification.scoring.evaluation_clock import evaluation_date
+
+    today_str = evaluation_date().isoformat()
     verification = build_verification_prompt(row, extra_parts=extra_parts)
     return f"""{verification}
 

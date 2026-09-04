@@ -212,7 +212,7 @@ async def test_real_slow_children_start_sequentially_without_blocking_loop(
     assert health["status"] == "ready"
     assert health["startup_attempts"] == 1
     assert health["last_startup_failure"] is None
-    assert spawn_threads == [caller_thread] * 4
+    assert spawn_threads == [caller_thread] * 2
     assert ticks >= 10
     assert state_path.read_text(encoding="utf-8").strip() == "0 1"
     supervisor.stop()
@@ -254,7 +254,7 @@ async def test_timeout_retries_once_without_spawning_later_workers(
         "attempt": 2,
         "attempts": 2,
         "retrying": False,
-        "fleet": "hosted",
+        "fleet": "scoring",
         "worker_index": 1,
     }
 
@@ -368,12 +368,12 @@ async def test_retry_diagnostic_is_sanitized_and_retained(monkeypatch, capsys):
     async def flaky_start(fleet, *, fleet_deadline):  # noqa: ARG001
         calls.append(fleet.kind)
         if len(calls) == 1:
-            supervisor.children["hosted:0"] = first_child  # type: ignore[assignment]
-            supervisor._child_specs["hosted:0"] = (fleet, 0)
+            supervisor.children["scoring:0"] = first_child  # type: ignore[assignment]
+            supervisor._child_specs["scoring:0"] = (fleet, 0)
             raise ResearchLabWorkerStartupError(
                 "secret://must-not-be-logged",
                 reason="worker_readiness_timeout",
-                fleet_kind="hosted",
+                fleet_kind="scoring",
                 worker_index=0,
             )
         child = Child()
@@ -397,14 +397,14 @@ async def test_retry_diagnostic_is_sanitized_and_retained(monkeypatch, capsys):
 
     health = await supervisor.start_without_blocking_event_loop()
 
-    assert calls == ["hosted", "hosted", "scoring"]
+    assert calls == ["scoring", "scoring"]
     assert first_child.terminated is True
     assert first_child.waited is True
     assert health["startup_attempts"] == 2
     assert health["last_startup_failure"]["worker_index"] == 1
     output = capsys.readouterr().out
     assert "exception_class=ResearchLabWorkerStartupError" in output
-    assert "fleet=hosted" in output
+    assert "fleet=scoring" in output
     assert "worker_index=1" in output
     assert "secret://must-not-be-logged" not in output
 

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import io
 import json
-import urllib.request
 
 import pytest
 
-from lab_arena import benchmark, wiring
+from lab_arena import wiring
 from lab_arena.service import ServiceConfig, ServiceError
 
 
@@ -30,7 +28,7 @@ def test_service_config_requires_a_distinct_anonymous_source_registry():
         "signer": object(),
         "chain": object(),
         "verify_signature": lambda *_args: True,
-        "generation_provider": object(),
+        "daily_icp_source": lambda **_kwargs: {"status": "unavailable"},
         "banned_hotkeys_source": lambda: (),
         "broker_factory": lambda *_args: object(),
         "registry": destination,
@@ -40,58 +38,6 @@ def test_service_config_requires_a_distinct_anonymous_source_registry():
     with pytest.raises(ServiceError, match="anonymous_source_registry_required"):
         ServiceConfig(**required, source_registry=destination)
     assert ServiceConfig(**required, source_registry=object()).source_registry is not destination
-
-
-def test_generation_provider_maps_failures_and_redacts_key():
-    key = "sk-or-v1-" + "z" * 40
-
-    class Response:
-        def __init__(self, status, body):
-            self.status = status
-            self._body = body
-
-        def read(self, _n):
-            return self._body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    captured = {}
-
-    def urlopen(request, timeout):
-        captured["auth"] = request.get_header("Authorization")
-        captured["body"] = json.loads(request.data.decode())
-        return Response(200, json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode())
-
-    provider = wiring.OpenRouterGenerationProvider(key, urlopen=urlopen)
-    result = provider.chat(messages=[{"role": "user", "content": "hi"}], temperature=0.0, max_tokens=None, timeout_seconds=5)
-    assert result["choices"] and captured["auth"] == "Bearer " + key and "max_tokens" not in captured["body"]
-    assert key not in repr(provider)
-
-    def failing(request, timeout):
-        raise OSError("boom")
-
-    with pytest.raises(benchmark.ProviderFailure):
-        wiring.OpenRouterGenerationProvider(key, urlopen=failing).chat(messages=[], temperature=0.0, max_tokens=10, timeout_seconds=5)
-
-    def bad_status(request, timeout):
-        return Response(500, b"{}")
-
-    with pytest.raises(benchmark.ProviderFailure):
-        wiring.OpenRouterGenerationProvider(key, urlopen=bad_status).chat(messages=[], temperature=0.0, max_tokens=10, timeout_seconds=5)
-    with pytest.raises(ServiceError):
-        wiring.OpenRouterGenerationProvider("")
-
-
-def test_generation_provider_default_does_not_use_environment_proxies():
-    provider = wiring.OpenRouterGenerationProvider("sk-or-v1-" + "z" * 40)
-    opener = provider._urlopen.__self__
-    proxy_handlers = [handler for handler in opener.handlers if isinstance(handler, urllib.request.ProxyHandler)]
-    assert provider._urlopen is wiring._DIRECT_URLOPEN
-    assert proxy_handlers == []
 
 
 def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):

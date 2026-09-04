@@ -174,6 +174,7 @@ start_lab_arena_runner() {
     LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}" \
     LAB_ARENA_RUNNER_WORK_DIR="${LAB_ARENA_RUNNER_WORK_DIR:-/var/lib/lab-arena/runner}" \
     LAB_ARENA_RUNSC_PATH="$runsc_path" \
+    LAB_ARENA_REGISTRY_REPOSITORY="${LAB_ARENA_REGISTRY_REPOSITORY:-}" \
     LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}" \
     "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py \
       > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &

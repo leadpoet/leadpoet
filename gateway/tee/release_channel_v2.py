@@ -14,14 +14,21 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from gateway.tee.release_manifest_v2 import validate_release_manifest
+from gateway.tee.release_manifest_v2 import (
+    LOCAL_RELEASE_SCHEMA_VERSION,
+    validate_release_manifest,
+)
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
-from validator_tee.host.release_v2 import validate_validator_release_manifest
+from validator_tee.host.release_v2 import (
+    VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION,
+    validate_validator_release_manifest,
+)
 
 
 SCHEMA_VERSION = "leadpoet.attested_release_channel.v2"
@@ -31,6 +38,10 @@ DEFAULT_PREFIX = "attested-v2/releases"
 DEFAULT_RETENTION_DAYS = 365
 MAX_LINEAGE_RELEASES = 512
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_LOCAL_COMMIT_ENV = "LEADPOET_LOCAL_RELEASE_COMMIT_SHA"
+_LOCAL_GATEWAY_ENV = "LEADPOET_LOCAL_GATEWAY_RELEASE"
+_LOCAL_VALIDATOR_ENV = "LEADPOET_LOCAL_VALIDATOR_RELEASE"
+_LOCAL_PRIOR_LINEAGE_ENV = "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE"
 
 
 class ReleaseChannelV2Error(RuntimeError):
@@ -65,7 +76,23 @@ def build_release_channel_v2(
         "gateway_release_manifest": gateway,
         "validator_release_manifest": validator,
     }
-    return {**body, "channel_hash": sha256_json(body)}
+    gateway_is_local = gateway["schema_version"] == LOCAL_RELEASE_SCHEMA_VERSION
+    validator_is_local = (
+        validator["schema_version"] == VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION
+    )
+    if gateway_is_local != validator_is_local:
+        raise ReleaseChannelV2Error(
+            "gateway and validator release identity modes differ"
+        )
+    hash_body = body
+    if gateway_is_local:
+        hash_body = {
+            "schema_version": SCHEMA_VERSION,
+            "commit_sha": commit,
+            "gateway_release_hash": gateway["release_hash"],
+            "validator_release_hash": validator["release_manifest_hash"],
+        }
+    return {**body, "channel_hash": sha256_json(hash_body)}
 
 
 def validate_release_channel_v2(
@@ -98,10 +125,28 @@ def validate_release_channel_v2(
 
 
 def _load_json(path: Path, label: str) -> Dict[str, Any]:
+    descriptor = -1
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        descriptor = os.open(
+            str(Path(path)),
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 4 * 1024 * 1024:
+            raise ReleaseChannelV2Error(f"{label} is not a bounded regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(4 * 1024 * 1024 + 1)
+        if not 0 < len(payload) <= 4 * 1024 * 1024:
+            raise ReleaseChannelV2Error(f"{label} is not a bounded regular file")
+        value = json.loads(payload)
+    except ReleaseChannelV2Error:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReleaseChannelV2Error(f"{label} is unavailable or invalid") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if not isinstance(value, Mapping):
         raise ReleaseChannelV2Error(f"{label} must be an object")
     return dict(value)
@@ -173,6 +218,29 @@ def fetch_release_channel_v2(
     prefix: str = DEFAULT_PREFIX,
     s3_client: Any = None,
 ) -> Dict[str, Any]:
+    local_values = (
+        os.environ.get(_LOCAL_COMMIT_ENV),
+        os.environ.get(_LOCAL_GATEWAY_ENV),
+        os.environ.get(_LOCAL_VALIDATOR_ENV),
+    )
+    if any(local_values):
+        if not all(local_values):
+            raise ReleaseChannelV2Error(
+                "local release identity environment is incomplete"
+            )
+        local_commit, gateway_path, validator_path = local_values
+        if str(local_commit).lower() == str(commit_sha).lower():
+            gateway = _load_json(Path(str(gateway_path)), "local gateway release")
+            validator = _load_json(
+                Path(str(validator_path)), "local validator release"
+            )
+            return validate_release_channel_v2(
+                build_release_channel_v2(
+                    gateway_release_manifest=gateway,
+                    validator_release_manifest=validator,
+                ),
+                expected_commit=str(commit_sha).lower(),
+            )
     if s3_client is None:
         import boto3
 
@@ -246,6 +314,74 @@ def build_release_lineage_v2(
     return {**body, "lineage_hash": sha256_json(body)}
 
 
+def _local_release_lineage_entries(
+    *,
+    current_commit: str,
+    bucket: str,
+    prefix: str,
+    s3_client: Any,
+) -> Optional[Dict[str, Any]]:
+    local_commit = str(os.environ.get(_LOCAL_COMMIT_ENV) or "").lower()
+    if local_commit != current_commit:
+        return None
+    current_channel = fetch_release_channel_v2(
+        bucket=bucket,
+        commit_sha=current_commit,
+        prefix=prefix,
+        s3_client=s3_client,
+    )
+    current_lineage = build_release_lineage_v2(
+        [current_channel],
+        current_commit=current_commit,
+    )
+    releases = dict(current_lineage["releases"])
+    prior_path = str(os.environ.get(_LOCAL_PRIOR_LINEAGE_ENV) or "").strip()
+    if not prior_path:
+        return releases
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+    )
+
+    prior = validate_compact_release_lineage_v2(
+        _load_json(Path(prior_path), "installed prior release lineage")
+    )
+    for commit, release in prior["releases"].items():
+        if commit in releases and releases[commit] != release:
+            raise ReleaseChannelV2Error(
+                "local and installed release identities conflict"
+            )
+        releases[commit] = release
+    return releases
+
+
+def _compact_release_lineage_from_entries(
+    releases: Mapping[str, Any],
+    *,
+    current_commit: str,
+) -> Dict[str, Any]:
+    current = releases.get(current_commit)
+    if not isinstance(current, Mapping):
+        raise ReleaseChannelV2Error(
+            "current release is absent from local release lineage"
+        )
+    body = {
+        "schema_version": LINEAGE_SCHEMA_VERSION,
+        "current_commit_sha": current_commit,
+        "current_gateway_release_hash": current["gateway_release_hash"],
+        "releases": {
+            commit: releases[commit] for commit in sorted(releases)
+        },
+    }
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+    )
+
+    return validate_compact_release_lineage_v2(
+        {**body, "lineage_hash": sha256_json(body)},
+        expected_current_commit=current_commit,
+    )
+
+
 def fetch_release_lineage_v2(
     *,
     bucket: str,
@@ -263,10 +399,6 @@ def fetch_release_lineage_v2(
     that do not yet provide an explicit requirement set.
     """
 
-    if s3_client is None:
-        import boto3
-
-        s3_client = boto3.client("s3")
     normalized_prefix = str(prefix or "").strip("/")
     if not normalized_prefix or ".." in normalized_prefix.split("/"):
         raise ReleaseChannelV2Error("release channel prefix is invalid")
@@ -319,19 +451,42 @@ def fetch_release_lineage_v2(
             raise ReleaseChannelV2Error(
                 "required release lineage Git ancestry is invalid"
             )
-        channels = [
-            fetch_release_channel_v2(
-                bucket=bucket,
-                commit_sha=commit,
-                prefix=normalized_prefix,
-                s3_client=s3_client,
+        releases = _local_release_lineage_entries(
+            current_commit=current,
+            bucket=bucket,
+            prefix=normalized_prefix,
+            s3_client=s3_client,
+        ) or {}
+        missing = sorted(set(required) - set(releases))
+        if missing:
+            channels = [
+                fetch_release_channel_v2(
+                    bucket=bucket,
+                    commit_sha=commit,
+                    prefix=normalized_prefix,
+                    s3_client=s3_client,
+                )
+                for commit in missing
+            ]
+            fetched = build_release_lineage_v2(
+                channels,
+                current_commit=(current if current in missing else missing[0]),
             )
-            for commit in sorted(required)
-        ]
-        return build_release_lineage_v2(
-            channels,
+            for commit, release in fetched["releases"].items():
+                if commit in releases and releases[commit] != release:
+                    raise ReleaseChannelV2Error(
+                        "local and fetched release identities conflict"
+                    )
+                releases[commit] = release
+        selected = {commit: releases[commit] for commit in required}
+        return _compact_release_lineage_from_entries(
+            selected,
             current_commit=current,
         )
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
     key_pattern = re.compile(
         rf"^{re.escape(normalized_prefix)}/([0-9a-f]{{40}})/"
         r"release-channel-v2\.json$"

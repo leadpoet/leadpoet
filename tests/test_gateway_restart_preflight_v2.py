@@ -100,71 +100,31 @@ def _credential_envelopes(tmp_path: Path) -> list[Path]:
 
 
 def _verify(tmp_path: Path, monkeypatch, **overrides):
-    monkeypatch.setattr(
-        preflight,
-        "verify_required_worker_proxy_profiles_v2",
-        lambda **_kwargs: {
-            "schema_version": "leadpoet.worker_proxy_profile_set.v2",
-            "status": "ready",
-            "profile_count": 35,
-            "worker_counts": {
-                "gateway_autoresearch": 10,
-                "gateway_scoring": 25,
-            },
-        },
-    )
-    monkeypatch.setattr(
-        preflight,
-        "load_and_validate_acceptance_corpus_v2",
-        lambda *_args, **_kwargs: {
-            "manifest_hash": "sha256:" + "e" * 64,
-        },
-    )
+    del monkeypatch
     credential_envelopes = overrides.pop(
         "credential_envelope_paths",
         None,
     ) or _credential_envelopes(tmp_path)
-    custody_environment = {
-        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": (
-            "s3://leadpoet-private-model-artifacts-493765492819/"
-            "research-lab/rehearsal/incontainer-traces"
-        ),
-        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID": (
-            "alias/leadpoet-research-lab-trace-encryption"
-        ),
-    }
-    worker_environment = {
-        **custody_environment,
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
-        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
-    }
+    parent_environment = {}
     if "parent_environment" in overrides:
-        worker_environment = {
-            **custody_environment,
-            **dict(overrides.pop("parent_environment")),
-        }
+        parent_environment = dict(overrides.pop("parent_environment"))
     values = {
         "deploy_commit": COMMIT,
         "release_manifest": _release(),
         "topology_manifest": manifest_document(),
         "artifact_policy": POLICY,
         "credential_envelope_paths": credential_envelopes,
-        "config_dir": tmp_path,
         "topology_mode": "full",
         "instance_type": "r7i.4xlarge",
         "parent_vcpus": 16,
         "parent_memory_mib": 125000,
-        "parent_environment": worker_environment,
-        "acceptance_corpus_manifest_path": tmp_path / "acceptance.json",
-        "acceptance_corpus_root": tmp_path / "acceptance",
+        "parent_environment": parent_environment,
     }
     values.update(overrides)
     return preflight.verify_gateway_restart_preflight_v2(**values)
 
 
-def test_full_restart_preflight_accepts_only_complete_approved_release(
+def test_full_restart_preflight_accepts_complete_local_release(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -172,131 +132,12 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     assert result["status"] == "ready"
     assert result["deploy_commit"] == COMMIT
     assert result["instance_type"] == "r7i.4xlarge"
-    assert result["role_count"] == 3
+    assert result["role_count"] == len(ROLE_SPECS)
     assert result["boot_credential_slot_count"] == 7
     assert result["parent_plaintext_provider_slot_count"] == 0
-    assert result["worker_proxy_profile_count"] == 35
-    assert result["worker_counts"] == {
-        "gateway_autoresearch": 10,
-        "gateway_scoring": 25,
-    }
-    assert result["deferred_worker_fleet_roles"] == []
-    assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
-    assert result["official_baseline_custody"] == {
-        "bucket": "leadpoet-private-model-artifacts-493765492819",
-        "prefix": (
-            "research-lab/rehearsal/incontainer-traces/official-baseline-v1"
-        ),
-        "kms_key_id_sha256": preflight.sha256_text(
-            "alias/leadpoet-research-lab-trace-encryption"
-        ),
-    }
-
-
-@pytest.mark.parametrize(
-    "field",
-    (
-        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
-        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID",
-    ),
-)
-def test_restart_preflight_requires_official_baseline_custody_pair(
-    tmp_path: Path,
-    monkeypatch,
-    field: str,
-) -> None:
-    environment = {
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
-        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
-        field: "",
-    }
-    with pytest.raises(
-        preflight.GatewayRestartPreflightV2Error,
-        match="official baseline encrypted custody",
-    ):
-        _verify(
-            tmp_path,
-            monkeypatch,
-            parent_environment=environment,
-        )
-
-
-def test_full_restart_preflight_reports_explicit_worker_deferral(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    parent_environment = {
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
-        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
-        "GATEWAY_V2_DEFER_WORKER_FLEETS": (
-            "gateway_autoresearch,gateway_scoring"
-        ),
-    }
-
-    result = _verify(
-        tmp_path,
-        monkeypatch,
-        parent_environment=parent_environment,
-    )
-
-    assert result["status"] == "ready"
-    assert result["worker_counts"] == {
-        "gateway_autoresearch": 10,
-        "gateway_scoring": 25,
-    }
-    assert result["deferred_worker_fleet_roles"] == [
-        "gateway_autoresearch",
-        "gateway_scoring",
-    ]
-
-
-def test_full_restart_preflight_requires_explicit_worker_process_counts(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    # Worker/proxy decoupling must be explicit: a full restart without the
-    # *_PROCESS_COUNT variables silently falls back to one-worker-per-proxy and
-    # preserves the oversized fleet, so the preflight must reject it.
-    base_env = {
-        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
-        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
-    }
-
-    # Missing entirely.
-    missing = {k: v for k, v in base_env.items() if "PROCESS_COUNT" not in k}
-    with pytest.raises(preflight.GatewayRestartPreflightV2Error) as exc:
-        _verify(tmp_path, monkeypatch, parent_environment=missing)
-    assert "PROCESS_COUNT" in str(exc.value)
-
-    # Present but non-positive / non-integer are also rejected.
-    for bad in ("0", "-1", "", "auto"):
-        env = dict(base_env)
-        env["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = bad
-        with pytest.raises(preflight.GatewayRestartPreflightV2Error):
-            _verify(tmp_path, monkeypatch, parent_environment=env)
-
-
-def test_component_restart_preflight_does_not_require_process_counts(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    # The mandatory-count gate only applies to full (worker-spawning) restarts.
-    result = _verify(
-        tmp_path,
-        monkeypatch,
-        topology_mode="component",
-        parent_environment={
-            "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
-            "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        },
-    )
-    assert result["status"] == "ready"
+    assert "worker_proxy_profile_count" not in result
+    assert "acceptance_corpus_manifest_hash" not in result
+    assert "official_baseline_custody" not in result
 
 
 def test_capacity_detection_counts_cpus_reserved_by_nitro(monkeypatch) -> None:
@@ -370,24 +211,6 @@ def test_component_preflight_keeps_release_and_secret_gates_without_resize(
     )
     assert result["status"] == "ready"
     assert result["role_count"] == 1
-    assert result["worker_proxy_profile_count"] == 0
-    assert result["acceptance_corpus_manifest_hash"] == "component_only"
-
-
-def test_full_restart_preflight_rejects_missing_acceptance_corpus(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    with pytest.raises(
-        preflight.GatewayRestartPreflightV2Error,
-        match="requires the signed acceptance corpus",
-    ):
-        _verify(
-            tmp_path,
-            monkeypatch,
-            acceptance_corpus_manifest_path=None,
-            acceptance_corpus_root=None,
-        )
 
 
 def test_restart_preflight_rejects_protected_provider_key_in_parent_env(
@@ -1054,7 +877,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "scripts/156-production-parity-readonly-role.sql",
         "scripts/161-research-lab-exact-model-transitions.sql",
-        "scripts/168-research-lab-legacy-provider-terminal-custody.sql",
         "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
         "scripts/171-research-lab-source-add-duplicate-privacy.sql",

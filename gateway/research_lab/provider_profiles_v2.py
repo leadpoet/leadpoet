@@ -45,7 +45,6 @@ _PROFILE_FILES = {
 }
 _EXECUTION_PROXY_FILES = {
     "gateway_scoring": "scoring_proxy_{worker_index:02d}.json",
-    "gateway_autoresearch": "autoresearch_proxy_{worker_index:02d}.json",
 }
 _MAX_CONFIGURED_WORKERS = 500
 

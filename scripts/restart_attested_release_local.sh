@@ -21,6 +21,9 @@ GATEWAY_PYTHON_BIN="${LEADPOET_GATEWAY_PYTHON_BIN:-$PRODUCTION_GATEWAY_PYTHON_BI
 VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_PYTHON_BIN="${LEADPOET_VALIDATOR_PYTHON_BIN:-$PRODUCTION_VALIDATOR_PYTHON_BIN}"
 VALIDATOR_V2_HOTKEY_CONFIG_PATH="${LEADPOET_VALIDATOR_V2_HOTKEY_CONFIG_PATH:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
+VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH="${LEADPOET_VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
+VALIDATOR_LOCAL_RELEASE_PATH="${LEADPOET_VALIDATOR_LOCAL_RELEASE_PATH:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
+VALIDATOR_LOCAL_RELEASE_LINEAGE_PATH="${LEADPOET_VALIDATOR_LOCAL_RELEASE_LINEAGE_PATH:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_CHAIN_SIGNING_PROFILE_PATH="${LEADPOET_VALIDATOR_CHAIN_SIGNING_PROFILE_PATH:-$VALIDATOR_REPO_ROOT/validator_tee/enclave/chain_signing_profile_v2.json}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_DEPLOY_READINESS_PATH="${LEADPOET_GATEWAY_DEPLOY_READINESS_PATH:-$PRODUCTION_GATEWAY_DEPLOY_READINESS_PATH}"
@@ -393,11 +396,6 @@ case "$RELEASE_PREFIX" in
     exit 2
     ;;
 esac
-if [ "$disable_miner_submissions_before_restart" = "1" ] \
-    && [ "$RELEASE_PREFIX" != "attested-v2/releases" ]; then
-  echo "ERROR: miner-maintenance bootstrap requires the production release channel" >&2
-  exit 2
-fi
 if [ "$component" != "validator" ]; then
   unsafe_git_environment=(
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR
@@ -1134,6 +1132,10 @@ prepare_running_validator_release_requirements() {
      lineage_id=\$(LEADPOET_SUBNET_EPOCH_CUTOVER_PATH='$VALIDATOR_STATEFUL_CUTOVER_MANIFEST' PYTHONPATH='$VALIDATOR_REPO_ROOT' '$VALIDATOR_PYTHON_BIN' -c 'from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover; from leadpoet_canonical.ancestry_checkpoint_v2 import derive_ancestry_lineage_id_v2; cutover = load_subnet_epoch_cutover(); print(derive_ancestry_lineage_id_v2(cutover_mapping_hash=str(cutover.mapping_hash), network_genesis_hash=str(cutover.network_genesis_hash), netuid=int(cutover.netuid)))')
      sudo env PYTHONPATH='$VALIDATOR_REPO_ROOT' \
        AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
+       LEADPOET_LOCAL_RELEASE_COMMIT_SHA='$commit' \
+       LEADPOET_LOCAL_GATEWAY_RELEASE='$VALIDATOR_LOCAL_GATEWAY_RELEASE_PATH' \
+       LEADPOET_LOCAL_VALIDATOR_RELEASE='$VALIDATOR_LOCAL_RELEASE_PATH' \
+       LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE='$VALIDATOR_LOCAL_RELEASE_LINEAGE_PATH' \
        '$VALIDATOR_PYTHON_BIN' -m gateway.tee.prepare_active_release_lineage_v2 \
        --phase validator-initial \
        --candidate-commit '$commit' \
@@ -1754,7 +1756,7 @@ if str(health.get('commit_sha') or '').lower() != expected:
     raise SystemExit('gateway V2 authority commit differs')
 if str(build.get('git_commit') or '').lower() != expected:
     raise SystemExit('gateway build-info commit differs')
-if release.get('schema_version') != 'leadpoet.auditor_release_evidence.v2':
+if release.get('schema_version') != 'leadpoet.auditor_local_release_evidence.v1':
     raise SystemExit('gateway release evidence schema differs')
 if str(release.get('commit_sha') or '').lower() != expected:
     raise SystemExit('gateway release evidence commit differs')
@@ -1770,11 +1772,8 @@ from gateway.tee.provider_broker_v2 import (
     provider_registry_hash,
 )
 from gateway.tee.topology import ROLE_SPECS
-from gateway.tee.release_channel_v2 import fetch_release_channel_v2
+from gateway.tee.release_channel_v2 import build_release_channel_v2
 from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
-from gateway.research_lab.provider_profiles_v2 import (
-    verify_required_worker_proxy_profiles_v2,
-)
 from gateway.tee.research_lab_runtime_config_v2 import (
     build_research_lab_execution_config,
 )
@@ -1783,7 +1782,10 @@ from gateway.utils.tee_kms_provision_v2 import (
     load_provider_envelopes,
     provider_reference_hashes_from_envelopes,
 )
-from gateway.utils.tee_v2_bootstrap import runtime_configuration_documents
+from gateway.utils.tee_v2_bootstrap import (
+    configured_scoring_worker_count,
+    runtime_configuration_documents,
+)
 
 processes = []
 for candidate in Path('/proc').iterdir():
@@ -1814,6 +1816,10 @@ gateway_release_path = Path(
     runtime_environment.get('GATEWAY_V2_RELEASE_MANIFEST')
     or '/home/ec2-user/tee/gateway-v2-release-manifest.json'
 )
+validator_release_path = Path(
+    runtime_environment.get('GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST')
+    or '/home/ec2-user/tee/validator-v2-release-manifest.json'
+)
 lineage_path = Path(
     runtime_environment.get('GATEWAY_V2_RELEASE_LINEAGE')
     or '/home/ec2-user/tee/gateway-v2-release-lineage.json'
@@ -1827,21 +1833,16 @@ gateway_root = Path(
     or '$GATEWAY_REPO_ROOT/gateway'
 )
 gateway_release = json.loads(gateway_release_path.read_text(encoding='utf-8'))
+validator_release = json.loads(
+    validator_release_path.read_text(encoding='utf-8')
+)
 lineage = json.loads(lineage_path.read_text(encoding='utf-8'))
-channel = fetch_release_channel_v2(
-    bucket=(
-        runtime_environment.get('GATEWAY_V2_RELEASE_BUCKET')
-        or 'leadpoet-attested-v2-artifacts-493765492819'
-    ),
-    commit_sha=expected,
-    prefix=(
-        runtime_environment.get('GATEWAY_V2_RELEASE_PREFIX')
-        or 'attested-v2/releases'
-    ),
+channel = build_release_channel_v2(
+    gateway_release_manifest=gateway_release,
+    validator_release_manifest=validator_release,
 )
 if gateway_release != channel['gateway_release_manifest']:
-    raise SystemExit('active gateway release differs from immutable channel')
-validator_release = channel['validator_release_manifest']
+    raise SystemExit('active gateway release differs from local runtime identity')
 envelopes = load_provider_envelopes([
     config_dir / name
     for name in (
@@ -1866,7 +1867,7 @@ protected = json.loads(
     )
 )
 protected_hash = str(protected.get('manifest_hash') or '').lower()
-profiles = verify_required_worker_proxy_profiles_v2(config_dir=config_dir)
+scoring_worker_count = configured_scoring_worker_count(config_dir)
 execution_config = build_research_lab_execution_config(
     environment=runtime_environment
 )
@@ -1886,7 +1887,7 @@ documents = runtime_configuration_documents(
         artifact_envelopes[0]['credential_ref_hash']
     ),
     research_lab_execution_config=execution_config,
-    configured_worker_counts=profiles['worker_counts'],
+    configured_worker_counts={'gateway_scoring': scoring_worker_count},
 )
 
 async def collect_runtime():

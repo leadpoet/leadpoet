@@ -47,14 +47,19 @@ def main(argv=None) -> int:
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
         return 0
+    initial = drive_once(service)
+    if "failed" in initial:
+        print("initial driver tick", initial, file=sys.stderr)
+    elif initial != "idle":
+        print("initial driver tick", initial)
+
     stop = threading.Event()
 
     def driver() -> None:
-        while not stop.is_set():
+        while not stop.wait(max(5, int(args.tick_seconds))):
             outcome = drive_once(service)
             if "failed" in outcome:
                 print("driver tick", outcome, file=sys.stderr)
-            stop.wait(max(5, int(args.tick_seconds)))
 
     # The driver is one process's job: several API replicas run with
     # --no-driver and exactly one scheduler process runs with --driver-only.
@@ -64,12 +69,20 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             stop.set()
         return 0
+    driver_thread = None
     if not args.no_driver:
-        threading.Thread(target=driver, name="lab-arena-driver", daemon=True).start()
+        driver_thread = threading.Thread(
+            target=driver, name="lab-arena-driver", daemon=True
+        )
+        driver_thread.start()
     import uvicorn
 
-    uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
-    stop.set()
+    try:
+        uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
+    finally:
+        stop.set()
+        if driver_thread is not None:
+            driver_thread.join(timeout=5)
     return 0
 
 

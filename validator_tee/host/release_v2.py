@@ -14,6 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 VALIDATOR_RELEASE_SCHEMA_VERSION = "leadpoet.validator_release.v2"
 VALIDATOR_BUILD_EVIDENCE_SCHEMA_VERSION = "leadpoet.validator_build_evidence.v2"
 VALIDATOR_RELEASE_MANIFEST_SCHEMA_VERSION = "leadpoet.validator_release_manifest.v2"
+VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION = "leadpoet.validator_local_release.v1"
 VALIDATOR_BUILDER_DOMAINS = frozenset({"gateway", "validator"})
 VALIDATOR_BUILDS_PER_DOMAIN = 3
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -274,7 +275,52 @@ def build_validator_release_manifest(
     return {**body, "release_manifest_hash": _canonical_hash(body)}
 
 
+def build_local_validator_release_identity(
+    release: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Wrap one real local build without claiming external approval."""
+
+    normalized = validate_validator_release(release)
+    identity = {
+        key: value for key, value in normalized.items() if key != "eif_hash"
+    }
+    body = {
+        "schema_version": VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION,
+        "release": normalized,
+        "verified_build_count": 1,
+    }
+    hash_body = {
+        "schema_version": body["schema_version"],
+        "release_identity": identity,
+        "verified_build_count": 1,
+    }
+    return {**body, "release_manifest_hash": _canonical_hash(hash_body)}
+
+
+def _validate_local_validator_release_identity(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "release",
+        "verified_build_count",
+        "release_manifest_hash",
+    }:
+        raise ValidatorReleaseV2Error("local validator release fields are invalid")
+    if value.get("verified_build_count") != 1:
+        raise ValidatorReleaseV2Error("local validator build count is invalid")
+    rebuilt = build_local_validator_release_identity(value.get("release"))
+    if dict(value) != rebuilt:
+        raise ValidatorReleaseV2Error("local validator release hash mismatch")
+    return rebuilt
+
+
 def validate_validator_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == VALIDATOR_LOCAL_RELEASE_SCHEMA_VERSION
+    ):
+        return _validate_local_validator_release_identity(value)
     if not isinstance(value, Mapping) or set(value) != {
         "schema_version",
         "release",
@@ -348,6 +394,7 @@ def release_from_build_outputs(
     app_manifest_hash: str,
     dependency_lock_hash: str,
     normalized_image_hash: str,
+    commit_sha: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
         measurements = measurements_path.read_text(encoding="utf-8")
@@ -362,7 +409,7 @@ def release_from_build_outputs(
             "validator EIF PCR0 differs from its build output"
         )
     return build_validator_release(
-        commit_sha=_git_commit(repo_root),
+        commit_sha=(str(commit_sha).lower() if commit_sha is not None else _git_commit(repo_root)),
         pcr0=measured_pcr0,
         app_manifest_hash=app_manifest_hash,
         dependency_lock_hash=dependency_lock_hash,
@@ -381,6 +428,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--app-manifest-hash", required=True)
     parser.add_argument("--dependency-lock-hash", required=True)
     parser.add_argument("--normalized-image-hash", required=True)
+    parser.add_argument("--commit-sha")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     release = release_from_build_outputs(
@@ -390,6 +438,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         app_manifest_hash=args.app_manifest_hash,
         dependency_lock_hash=args.dependency_lock_hash,
         normalized_image_hash=args.normalized_image_hash,
+        commit_sha=args.commit_sha,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

@@ -272,17 +272,6 @@ def selected_validator_worker_ids(
     )
 
 
-def selected_validator_qualification_worker_ids(
-    candidate_roots: tuple[Path, ...],
-) -> tuple[int, ...]:
-    return selected_validator_worker_ids(
-        candidate_roots,
-        section_start="# Auto-detect QUALIFICATION proxies",
-        section_end="# Get enclave CID for TEE signing",
-        role="qualification",
-    )
-
-
 def selected_validator_fulfillment_worker_ids(
     candidate_roots: tuple[Path, ...],
 ) -> tuple[int, ...]:
@@ -316,13 +305,6 @@ def verify_validator_role_release_identity(
     expected_fulfillment = {
         f"leadpoet-ff-worker-{worker_id}" for worker_id in worker_ids
     }
-    qualification_ids = selected_validator_qualification_worker_ids(
-        candidate_roots
-    )
-    expected_qualification = {
-        f"leadpoet-qual-worker-{worker_id}"
-        for worker_id in qualification_ids
-    }
     containers = state.get("containers", {})
     if not isinstance(containers, dict):
         raise SystemExit("validator container evidence is unavailable")
@@ -331,14 +313,14 @@ def verify_validator_role_release_identity(
         for name in containers
         if re.fullmatch(r"leadpoet-ff-worker-[1-9][0-9]*", name)
     }
-    actual_qualification = {
+    retired_qualification = {
         name
         for name in containers
         if re.fullmatch(r"leadpoet-qual-worker-[1-9][0-9]*", name)
     }
     if (
         actual_fulfillment != expected_fulfillment
-        or actual_qualification != expected_qualification
+        or retired_qualification
     ):
         raise SystemExit(
             "candidate-derived validator worker fleet differs from the "
@@ -350,7 +332,7 @@ def verify_validator_role_release_identity(
         for name in containers
         if name == "leadpoet-validator-main"
         or re.fullmatch(
-            r"leadpoet-(?:validator|qual|ff)-worker-[1-9][0-9]*", name
+            r"leadpoet-(?:validator|ff)-worker-[1-9][0-9]*", name
         )
     }
     if "leadpoet-validator-main" not in role_names:
@@ -398,13 +380,12 @@ def verify_validator_role_release_identity(
             expected_worker_id = ""
         else:
             worker_match = re.fullmatch(
-                r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)", name
+                r"leadpoet-(validator|ff)-worker-([1-9][0-9]*)", name
             )
             assert worker_match is not None
             worker_kind, expected_worker_id = worker_match.groups()
             expected_role = {
                 "validator": "validator.sourcing_worker",
-                "qual": "validator.qualification_worker",
                 "ff": "validator.fulfillment_worker",
             }[worker_kind]
         if (

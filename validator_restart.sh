@@ -67,6 +67,7 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
+LAB_ARENA_RUNNER_LOG_FILE="${LAB_ARENA_RUNNER_LOG_FILE:-/home/ec2-user/logs/lab_arena_runner.log}"
 REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
 REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-}"
@@ -116,6 +117,72 @@ run_bounded_validator_restart_artifact_cleanup() {
       --allowed-owner-uid "$(id -u)"; then
     echo "WARNING: bounded validator restart artifact cleanup failed closed" >&2
   fi
+}
+
+stop_lab_arena_runner() {
+  sudo pkill -TERM -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+  sleep 1
+  sudo pkill -KILL -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+}
+
+start_lab_arena_runner() {
+  local mode api_base runsc_name runsc_path pid
+  mode="${LAB_ARENA_MODE:-off}"
+  case "$mode" in
+    off)
+      echo "Lab Arena runner is disabled"
+      return 0
+      ;;
+    shadow|live) ;;
+    *)
+      echo "ERROR: LAB_ARENA_MODE must be off, shadow, or live" >&2
+      return 1
+      ;;
+  esac
+  api_base="${LAB_ARENA_API_BASE_URL:-$VALIDATOR_V2_GATEWAY_URL}"
+  if [ -z "$api_base" ]; then
+    echo "ERROR: Lab Arena runner API URL is unavailable" >&2
+    return 1
+  fi
+  if [ ! -r "$VALIDATOR_ROOT/scripts/run_lab_arena_runner.py" ]; then
+    echo "ERROR: Lab Arena runner entrypoint is unavailable" >&2
+    return 1
+  fi
+  runsc_path="${LAB_ARENA_RUNSC_PATH:-}"
+  if [ -z "$runsc_path" ]; then
+    runsc_name="$(
+      "$VALIDATOR_PYTHON_BIN" -c \
+        'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["artifact_filename"])' \
+        "$VALIDATOR_ROOT/gateway/tee/runsc-runtime.lock.json"
+    )"
+    runsc_path="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/$runsc_name"
+  fi
+  if [ ! -x "$runsc_path" ]; then
+    echo "ERROR: verified Lab Arena runsc binary is unavailable" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$LAB_ARENA_RUNNER_LOG_FILE")"
+  cd "$VALIDATOR_ROOT"
+  setsid sudo env \
+    PYTHONPATH="$VALIDATOR_ROOT" \
+    LAB_ARENA_API_BASE_URL="$api_base" \
+    LAB_ARENA_WALLET_NAME="${LAB_ARENA_WALLET_NAME:-$VALIDATOR_WALLET_NAME}" \
+    LAB_ARENA_HOTKEY_NAME="${LAB_ARENA_HOTKEY_NAME:-$VALIDATOR_WALLET_HOTKEY}" \
+    LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}" \
+    LAB_ARENA_RUNNER_WORK_DIR="${LAB_ARENA_RUNNER_WORK_DIR:-/var/lib/lab-arena/runner}" \
+    LAB_ARENA_RUNSC_PATH="$runsc_path" \
+    LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-1}" \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py \
+      > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &
+  pid="$!"
+  sleep 3
+  if ! sudo kill -0 "$pid" 2>/dev/null; then
+    tail -120 "$LAB_ARENA_RUNNER_LOG_FILE" >&2 || true
+    echo "ERROR: Lab Arena runner exited during startup" >&2
+    wait "$pid" 2>/dev/null || true
+    return 1
+  fi
+  echo "Lab Arena runner started"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -1138,37 +1205,48 @@ else
   VALIDATOR_USE_CAPTURED_RESTART_START=1
 fi
 
-echo "Acquiring the independently built V2 release channel"
-VALIDATOR_DEPLOY_STAGE="release_acquisition"
-VALIDATOR_V2_RELEASE_READY=0
-for attempt in $(seq 1 300); do
-  VALIDATOR_RELEASE_ATTEMPTS_USED="$attempt"
-  if ! follow_superseding_validator_release; then
-    echo "Approved validator release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
-    sleep 12
-    continue
-  fi
-  if python3 -m gateway.tee.release_channel_v2 \
-      --ensure \
-      --expected-commit "$VALIDATOR_DEPLOY_SHA" \
-      --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
-      --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
-      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
-    if follow_superseding_validator_release; then
-      VALIDATOR_V2_RELEASE_READY=1
-      break
-    fi
-  fi
-  echo "Approved V2 release is not published yet; waiting inside the valid validator restart invocation (${attempt}/300)"
-  sleep 12
-done
-if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]; then
-  echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
+echo "Preparing exact local build inputs before production shutdown"
+VALIDATOR_DEPLOY_STAGE="local_release_inputs"
+export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
+if ! bash "$VALIDATOR_ROOT/gateway/tee/prepare_offline_artifacts_v2.sh"; then
+  echo "ERROR: exact local build inputs are unavailable" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
-record_validator_restart_timing "release_ready"
+if ! follow_superseding_validator_release; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+echo "Building the exact local gateway and validator runtime identities"
+VALIDATOR_DEPLOY_STAGE="local_release_build"
+if ! PYTHONPATH="$VALIDATOR_ROOT" \
+    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    bash "$VALIDATOR_ROOT/gateway/tee/build_local_release_v2.sh" \
+      --repository "$VALIDATOR_ROOT" \
+      --revision "$VALIDATOR_DEPLOY_SHA" \
+      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+  echo "ERROR: exact local runtime identity build failed" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$VALIDATOR_DEPLOY_SHA"
+export LEADPOET_LOCAL_GATEWAY_RELEASE="$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"
+export LEADPOET_LOCAL_VALIDATOR_RELEASE="$VALIDATOR_V2_RELEASE_MANIFEST"
+if [ -e "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ] \
+    || [ -L "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
+  export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+else
+  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+fi
+if ! follow_superseding_validator_release; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+record_validator_restart_timing "local_release_ready"
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
@@ -1189,7 +1267,6 @@ print(json.dumps({
     "production_shutdown_started": False,
     "missing_paths": sys.argv[1:],
     "required_external_approvals": [
-        "independent_gateway_and_validator_parent_build_evidence",
         "verified_validator_hotkey_envelope_and_offline_custody",
     ],
 }, sort_keys=True, indent=2))
@@ -1475,6 +1552,7 @@ VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
 record_validator_restart_timing "destructive_phase_started"
 echo "Stopping validator processes and containers"
+stop_lab_arena_runner
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
@@ -1648,6 +1726,9 @@ if ! verify_pinned_gateway_release \
   stop_pinned_validator_after_alignment_failure
   exit 1
 fi
+VALIDATOR_DEPLOY_STAGE="lab_arena_runner_start"
+start_lab_arena_runner
+record_validator_restart_timing "lab_arena_runner_ready"
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0

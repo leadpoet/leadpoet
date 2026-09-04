@@ -633,10 +633,10 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
         '"${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'
     )
 
-    assert deploy.count(env_arg) == 3
+    assert deploy.count(env_arg) == 2
     assert deploy.count(
         '-e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION"'
-    ) == 3
+    ) == 2
     fulfillment_section = deploy[
         deploy.index("# Auto-detect FULFILLMENT proxies"):
         deploy.index("# Wait for containers to start")
@@ -652,7 +652,6 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
     assert "from neurons.validator" not in deploy
     for container in (
         "leadpoet-validator-worker-$i",
-        "leadpoet-qual-worker-$i",
         "leadpoet-ff-worker-$i",
     ):
         assert f'queue_worker_epoch_authority "{container}"' in deploy

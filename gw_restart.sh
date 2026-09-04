@@ -6,6 +6,7 @@ LEADPOET_REPO_ROOT="${LEADPOET_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"
 GATEWAY_ROOT="${GATEWAY_ROOT:-$LEADPOET_REPO_ROOT/gateway}"
 GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
+LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
 GATEWAY_PRIVATE_KEY_PATH="${GATEWAY_PRIVATE_KEY_PATH:-$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem}"
 ARWEAVE_KEYFILE_PATH="${ARWEAVE_KEYFILE_PATH:-$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json}"
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
@@ -200,6 +201,61 @@ wait_for_gateway_v2_authority() {
   done
   tail -160 "$GATEWAY_LOG_FILE"
   echo "ERROR: authoritative V2 enclave/worker readiness did not become ready before the bounded deadline" >&2
+  return 1
+}
+
+stop_lab_arena_service() {
+  pkill -TERM -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f "scripts/run_lab_arena_service[.]py" 2>/dev/null || true
+}
+
+start_lab_arena_service() {
+  local mode pid
+  mode="${LAB_ARENA_MODE:-off}"
+  case "$mode" in
+    off)
+      echo "Lab Arena service is disabled"
+      return 0
+      ;;
+    shadow|live) ;;
+    *)
+      echo "ERROR: LAB_ARENA_MODE must be off, shadow, or live" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -r "$LEADPOET_REPO_ROOT/scripts/run_lab_arena_service.py" ]; then
+    echo "ERROR: Lab Arena service entrypoint is unavailable" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
+  cd "$LEADPOET_REPO_ROOT"
+  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
+    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
+    -u GATEWAY_RESTART_AUTHORITY_ROOT \
+    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+    setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+      --host 127.0.0.1 --port 8792 \
+      > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+  pid="$!"
+  for attempt in $(seq 1 30); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
+      echo "ERROR: Lab Arena service exited during startup" >&2
+      wait "$pid" 2>/dev/null || true
+      return 1
+    fi
+    if timeout 5 curl -fsS http://127.0.0.1:8792/arena/v1/current >/dev/null 2>&1; then
+      echo "Lab Arena service ready after attempt $attempt"
+      return 0
+    fi
+    sleep 2
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  tail -120 "$LAB_ARENA_SERVICE_LOG_FILE" >&2 || true
+  echo "ERROR: Lab Arena service did not become ready" >&2
   return 1
 }
 
@@ -3579,6 +3635,7 @@ pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
+stop_lab_arena_service
 stop_research_lab_private_model_containers
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
@@ -4196,6 +4253,10 @@ if ! wait_for_gateway_v2_authority; then
   exit 1
 fi
 record_gateway_restart_timing "gateway_v2_health_ready"
+GATEWAY_DEPLOY_STAGE="lab_arena_service_start"
+export GATEWAY_DEPLOY_STAGE
+start_lab_arena_service
+record_gateway_restart_timing "lab_arena_service_ready"
 echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
 export GATEWAY_DEPLOY_STAGE

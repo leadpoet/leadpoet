@@ -67,6 +67,7 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
+LAB_ARENA_RUNNER_LOG_FILE="${LAB_ARENA_RUNNER_LOG_FILE:-/home/ec2-user/logs/lab_arena_runner.log}"
 REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
 REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-}"
@@ -116,6 +117,72 @@ run_bounded_validator_restart_artifact_cleanup() {
       --allowed-owner-uid "$(id -u)"; then
     echo "WARNING: bounded validator restart artifact cleanup failed closed" >&2
   fi
+}
+
+stop_lab_arena_runner() {
+  sudo pkill -TERM -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+  sleep 1
+  sudo pkill -KILL -f "scripts/run_lab_arena_runner[.]py" 2>/dev/null || true
+}
+
+start_lab_arena_runner() {
+  local mode api_base runsc_name runsc_path pid
+  mode="${LAB_ARENA_MODE:-off}"
+  case "$mode" in
+    off)
+      echo "Lab Arena runner is disabled"
+      return 0
+      ;;
+    shadow|live) ;;
+    *)
+      echo "ERROR: LAB_ARENA_MODE must be off, shadow, or live" >&2
+      return 1
+      ;;
+  esac
+  api_base="${LAB_ARENA_API_BASE_URL:-$VALIDATOR_V2_GATEWAY_URL}"
+  if [ -z "$api_base" ]; then
+    echo "ERROR: Lab Arena runner API URL is unavailable" >&2
+    return 1
+  fi
+  if [ ! -r "$VALIDATOR_ROOT/scripts/run_lab_arena_runner.py" ]; then
+    echo "ERROR: Lab Arena runner entrypoint is unavailable" >&2
+    return 1
+  fi
+  runsc_path="${LAB_ARENA_RUNSC_PATH:-}"
+  if [ -z "$runsc_path" ]; then
+    runsc_name="$(
+      "$VALIDATOR_PYTHON_BIN" -c \
+        'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["artifact_filename"])' \
+        "$VALIDATOR_ROOT/gateway/tee/runsc-runtime.lock.json"
+    )"
+    runsc_path="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/$runsc_name"
+  fi
+  if [ ! -x "$runsc_path" ]; then
+    echo "ERROR: verified Lab Arena runsc binary is unavailable" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$LAB_ARENA_RUNNER_LOG_FILE")"
+  cd "$VALIDATOR_ROOT"
+  setsid sudo env \
+    PYTHONPATH="$VALIDATOR_ROOT" \
+    LAB_ARENA_API_BASE_URL="$api_base" \
+    LAB_ARENA_WALLET_NAME="${LAB_ARENA_WALLET_NAME:-$VALIDATOR_WALLET_NAME}" \
+    LAB_ARENA_HOTKEY_NAME="${LAB_ARENA_HOTKEY_NAME:-$VALIDATOR_WALLET_HOTKEY}" \
+    LAB_ARENA_WALLET_PATH="${LAB_ARENA_WALLET_PATH:-$VALIDATOR_WALLET_ROOT}" \
+    LAB_ARENA_RUNNER_WORK_DIR="${LAB_ARENA_RUNNER_WORK_DIR:-/var/lib/lab-arena/runner}" \
+    LAB_ARENA_RUNSC_PATH="$runsc_path" \
+    LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-1}" \
+    "$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py \
+      > "$LAB_ARENA_RUNNER_LOG_FILE" 2>&1 < /dev/null &
+  pid="$!"
+  sleep 3
+  if ! sudo kill -0 "$pid" 2>/dev/null; then
+    tail -120 "$LAB_ARENA_RUNNER_LOG_FILE" >&2 || true
+    echo "ERROR: Lab Arena runner exited during startup" >&2
+    wait "$pid" 2>/dev/null || true
+    return 1
+  fi
+  echo "Lab Arena runner started"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -1485,6 +1552,7 @@ VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
 record_validator_restart_timing "destructive_phase_started"
 echo "Stopping validator processes and containers"
+stop_lab_arena_runner
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
@@ -1658,6 +1726,9 @@ if ! verify_pinned_gateway_release \
   stop_pinned_validator_after_alignment_failure
   exit 1
 fi
+VALIDATOR_DEPLOY_STAGE="lab_arena_runner_start"
+start_lab_arena_runner
+record_validator_restart_timing "lab_arena_runner_ready"
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0

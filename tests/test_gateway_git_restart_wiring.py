@@ -1985,7 +1985,7 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         "GATEWAY_RESTART_AUTHORITY_ROOT",
         "GATEWAY_RESTART_AUTHORITY_COMMIT",
     ):
-        assert script.count(f"-u {key} \\") == 6
+        assert script.count(f"-u {key} \\") == 7
 
     for key in (
         "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",

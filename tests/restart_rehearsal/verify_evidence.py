@@ -39,16 +39,6 @@ VALIDATOR_GATEWAY_ACTIVATION_INVARIANT = (
     "validator_activation_requires_exact_gateway_release"
 )
 VALIDATOR_ROLE_RELEASE_INVARIANT = "validator_role_release_identity_exact"
-EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
-    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
-    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    ),
-    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-        "alias/leadpoet-research-lab-artifact-signing"
-    ),
-}
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
     "gateway.tee.prepare_gateway_envelopes_v2",
@@ -1183,28 +1173,6 @@ def verify_durable_boundary_state(
     }
 
 
-def verify_gateway_private_model_environment(rows: list[dict]) -> None:
-    gateway_processes = [
-        row
-        for row in rows
-        if row.get("kind") == "process"
-        and row.get("process") == "gateway.main"
-        and row.get("status") == "started"
-    ]
-    if len(gateway_processes) != 1:
-        raise SystemExit(
-            "gateway rehearsal did not launch exactly one gateway.main process"
-        )
-    if (
-        gateway_processes[0].get("environment_contract")
-        != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-    ):
-        raise SystemExit(
-            "gateway.main private-model source environment differs from "
-            "the canonical restart contract"
-        )
-
-
 def verify_gateway_provider_preflight(
     rows: list[dict],
     *,
@@ -1703,7 +1671,6 @@ def main() -> int:
             ]
         )
         require_order(labels, required_gateway_order)
-        verify_gateway_private_model_environment(rows)
         verify_gateway_provider_preflight(rows, transition=transition)
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")

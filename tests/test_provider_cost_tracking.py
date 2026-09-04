@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
 import threading
 import urllib.error
 import urllib.parse
@@ -13,14 +12,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from gateway.research_lab import provider_evidence_proxy
-from research_lab.canonical import sha256_json
-from research_lab.eval.private_runtime import (
-    DEFAULT_ENV_PASSTHROUGH,
-    DockerPrivateModelRunner,
-    DockerPrivateModelSpec,
-    PROVIDER_KEY_ENV_PASSTHROUGH,
-    PROVIDER_COST_EVALUATION_SCOPE_ENV,
-)
 from research_lab.eval.provider_costs import (
     DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     ProviderCostEstimate,
@@ -40,73 +31,11 @@ from research_lab.eval.provider_costs import (
 )
 
 
-def _docker_cost_scope_for_seed(monkeypatch, tmp_path, evaluation_scope: str) -> str:
-    captured_commands: list[list[str]] = []
-
-    def fake_run(command, **kwargs):  # noqa: ANN001
-        if list(command)[-1:] == ["info"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        captured_commands.append(list(command))
-        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
-
-    monkeypatch.setenv(
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
-        str(tmp_path / "docker-operation.lock"),
-    )
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "a" * 64
-    runner = DockerPrivateModelRunner(
-        DockerPrivateModelSpec(
-            image_digest=image_digest,
-            pull_before_run=False,
-            extra_env={PROVIDER_COST_EVALUATION_SCOPE_ENV: evaluation_scope},
-        )
-    )
-    stdin_payload = {"icp": {"id": "icp-1"}, "context": {"mode": "private_baseline"}}
-    runner._run_json(
-        bootstrap="print([])",
-        argv=("research_lab_adapter", "run_icp"),
-        stdin_payload=stdin_payload,
-    )
-    command = captured_commands[-1]
-    scope_args = [
-        value
-        for index, value in enumerate(command)
-        if index > 0
-        and command[index - 1] == "-e"
-        and value.startswith("RESEARCH_LAB_PROVIDER_COST_SCOPE=")
-    ]
-    assert len(scope_args) == 1
-    expected = sha256_json(
-        {
-            "image_digest": image_digest,
-            "argv": ["research_lab_adapter", "run_icp"],
-            "stdin_payload": stdin_payload,
-            "evaluation_scope": evaluation_scope,
-        }
-    )
-    assert scope_args[0] == f"RESEARCH_LAB_PROVIDER_COST_SCOPE={expected}"
-    return scope_args[0]
-
-
-def test_docker_provider_cost_scope_includes_evaluation_scope(monkeypatch, tmp_path):
-    first = _docker_cost_scope_for_seed(
-        monkeypatch, tmp_path, "sha256:" + "1" * 64
-    )
-    second = _docker_cost_scope_for_seed(
-        monkeypatch, tmp_path, "sha256:" + "2" * 64
-    )
-
-    assert first != second
-
-
 def test_default_provider_wiring_includes_deepline():
     registry = {entry.id: entry for entry in provider_evidence_proxy.seed_provider_registry()}
     assert registry["deepline"].base_url == "https://code.deepline.com"
     assert registry["deepline"].auth_kind == "bearer"
     assert "DEEPLINE_API_KEY" in registry["deepline"].credential_ref
-    assert "DEEPLINE_API_KEY" in DEFAULT_ENV_PASSTHROUGH
-    assert "DEEPLINE_API_KEY" in PROVIDER_KEY_ENV_PASSTHROUGH
 
 
 def test_scrapingdog_cost_map_uses_current_endpoint_credits():

@@ -2,8 +2,6 @@
 
 import asyncio
 import copy
-import hashlib
-import json
 import os
 import pickle
 from unittest import mock
@@ -11,16 +9,12 @@ from unittest import mock
 import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
-from gateway.qualification.company_fit_proof_receipt import (
-    COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
-    COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
-)
 from qualification.scoring.lead_scorer import (
     _llm_reverify_company,
     _matches_exclusion_list,
     _reverify_decision,
     _run_company_binary_fit_checks,
-    _run_autoresearch_binary_fit_checks,
+    _run_competition_binary_fit_checks,
     _verify_company_fit,
 )
 from qualification.scoring.company_fit_decision import (
@@ -36,51 +30,6 @@ from qualification.scoring.company_fit_decision import (
 )
 
 
-def _proof(name, website, linkedin):
-    body = {
-        "schema_version": "company-fit-proof-receipt:v1",
-        "contract_sha256": COMPANY_FIT_PROOF_RECEIPT_CONTRACT_SHA256,
-        "outcome_binding": COMPANY_FIT_PROOF_RECEIPT_OUTCOME_BINDING,
-        "decision": "match",
-        "company_binding": {
-            "company_name": name,
-            "company_website": website,
-            "company_linkedin": linkedin,
-        },
-        "icp_binding": {
-            "employee_count": "11-50|51-200",
-            "employee_count_required": True,
-            "company_stage": "",
-            "stage_required": False,
-        },
-        "dimensions": {
-            dimension: "match"
-            for dimension in (
-                "identity", "employee_size", "industry", "geography", "stage"
-            )
-        },
-        "employee_size_proof": {
-            "decision": "match",
-            "observed_employee_count": "51-200",
-            "evidence_source": "scrapingdog_linkedin_company_profile",
-            "evidence_url": linkedin,
-        },
-        "stage_proof": {
-            "decision": "not_required",
-            "observed_company_stage": "",
-            "evidence_url": "",
-            "evidence_quote": "",
-        },
-    }
-    canonical = json.dumps(
-        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return {
-        **body,
-        "receipt_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-    }
-
-
 def _company(name="Acme", website="https://acme.com", linkedin=""):
     return CompanyOutput(
         company_name=name, company_website=website, company_linkedin=linkedin,
@@ -88,9 +37,6 @@ def _company(name="Acme", website="https://acme.com", linkedin=""):
         intent_signals=[{"description": "raised", "source": "news",
                          "url": "https://n.example.com/a", "date": "2026-07-01",
                          "snippet": "Acme raised a round this month."}],
-        company_fit_proof_receipt=(
-            _proof(name, website, linkedin) if linkedin else None
-        ),
     )
 
 
@@ -124,10 +70,10 @@ def test_fit_gate_zeroes_excluded_company(monkeypatch):
         "qualification.scoring.lead_scorer._registrable_domain",
         lambda url: "acme.com" if "acme" in url.lower() else "other.com",
     )
-    ok, reason = _run_autoresearch_binary_fit_checks(
+    ok, reason = _run_competition_binary_fit_checks(
         _company(), _icp(excluded_companies=["acme.com"]))
     assert not ok and "exclusion list" in reason
-    ok2, _ = _run_autoresearch_binary_fit_checks(
+    ok2, _ = _run_competition_binary_fit_checks(
         _company(), _icp(excluded_companies=["other.com"]))
     assert ok2
 
@@ -307,7 +253,7 @@ def test_official_research_lab_scorer_accepts_only_match(monkeypatch):
     monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(scorer, "_run_company_binary_fit_checks", must_not_continue)
     result = asyncio.run(
-        scorer.score_company_autoresearch_intent_v2(
+        scorer.score_company_competition_intent(
             _company(), _icp(), 0.0, 1.0, set()
         )
     )
@@ -788,7 +734,7 @@ def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):
         scorer.score_company(_company(), _icp(), 0.0, 1.0, set())
     )
     research = asyncio.run(
-        scorer.score_company_autoresearch_intent_v2(
+        scorer.score_company_competition_intent(
             _company(), _icp(), 0.0, 1.0, set()
         )
     )

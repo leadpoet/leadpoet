@@ -55,7 +55,6 @@ ALWAYS_COMMITTED_PATHS = (
     "gateway/research_lab/api.py",
     "gateway/research_lab/key_vault.py",
     "gateway/research_lab/models.py",
-    "leadpoet_canonical/credential_recipient_v2.py",
     "neurons/miner.py",
     "research_lab/source_add_miner.py",
     "gw_restart.sh",
@@ -254,7 +253,6 @@ def _production_policy_commitments(
 ) -> dict[str, Any]:
     normalized = validate_research_lab_execution_config(execution_config)
     config = research_lab_config_from_document(normalized)
-    conditional_policy = config.conditional_validation_policy().to_dict()
     allocation_policy = config.reimbursement_policy_doc(enabled=True)
     chain_policy = chain_source_policy_document()
     return {
@@ -262,7 +260,6 @@ def _production_policy_commitments(
             "policy": chain_policy,
             "policy_hash": chain_source_policy_hash(),
         },
-        "conditional_icp": conditional_policy,
         "research_lab_allocation": {
             "policy": allocation_policy,
             "policy_hash": sha256_json(allocation_policy),

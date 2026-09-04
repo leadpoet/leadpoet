@@ -186,20 +186,12 @@ def _max_image_bytes_from_environment() -> int:
     return value
 
 
-def registry_client_from_environment(*, push: bool) -> images.RegistryClient:
-    """The registry client: anonymous pulls everywhere, one credential for the Arena registry.
-
-    The service (``push=True``) needs ``LAB_ARENA_REGISTRY_USERNAME`` and
-    ``LAB_ARENA_REGISTRY_PASSWORD`` for the host of
-    ``LAB_ARENA_REGISTRY_REPOSITORY``; a runner passes the same pair only when
-    the Arena registry is not readable anonymously.
-    """
+def registry_client_from_environment() -> images.RegistryClient:
+    """Create the read-only client for the organizer's trusted scorer image."""
 
     repository = os.environ.get("LAB_ARENA_REGISTRY_REPOSITORY", "").strip()
     username = os.environ.get("LAB_ARENA_REGISTRY_USERNAME", "").strip()
     password = os.environ.get("LAB_ARENA_REGISTRY_PASSWORD", "")
-    if push and (not repository or not username or not password):
-        raise ServiceError("LAB_ARENA_REGISTRY_REPOSITORY, LAB_ARENA_REGISTRY_USERNAME, and LAB_ARENA_REGISTRY_PASSWORD are required", 500)
     registry_host = images.parse_repository(repository)[0] if repository else ""
 
     def credentials_for(host: str):
@@ -307,7 +299,7 @@ def build_runner_from_environment(args):
     identity = runner_module.RunnerIdentity(hotkey=keypair.ss58_address, sign=lambda message: keypair.sign(message.encode("utf-8")).hex())
     # Only the common trusted Python/scorer image is materialized. Miner code
     # arrives as a bounded source archive under its active execution lease.
-    cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.registry_image_exporter(registry_client_from_environment(push=False)))
+    cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.registry_image_exporter(registry_client_from_environment()))
     api = runner_module.HttpArenaApiClient(args.api_base_url)
     source_cache = runner_module.SourceCache(
         Path(args.work_dir) / "sources", api.source

@@ -58,9 +58,6 @@ from gateway.tee.provider_semantics_v2 import (
     ProviderSemanticsAuthorityV2,
     ProviderSemanticsV2Error,
 )
-from gateway.tee.provider_evidence_v2 import (
-    validate_signed_provider_evidence_record,
-)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
     source_add_dynamic_retry_policy_hash,
@@ -398,7 +395,6 @@ class _Broker:
         self.queued = {}
         self.available_credentials = {
             "openrouter",
-            "openrouter_management",
             "exa",
             "scrapingdog",
             "deepline",
@@ -407,7 +403,6 @@ class _Broker:
             provider: sha256_json({"retry": provider})
             for provider in (
                 "openrouter",
-                "openrouter_management",
                 "exa",
                 "scrapingdog",
                 "deepline",
@@ -588,163 +583,6 @@ def _authority(
         outcome_store=outcome_store,
     )
     return authority, broker, cache, artifacts
-
-
-def test_routing_provider_call_bypasses_cache_and_returns_signed_terminal_record():
-    key = Ed25519PrivateKey.generate()
-    pubkey = key.public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
-    ).hex()
-    boot = {
-        "boot_identity_hash": _hash("b"),
-        "signing_pubkey": pubkey,
-    }
-    authority, broker, cache, _artifacts = _authority(
-        signing_key=key,
-        boot_identity=boot,
-    )
-    request = _request(
-        provider="deepline",
-        url="https://code.deepline.com/api/v2/integrations/example/execute",
-        body=b'{"operation":"example","payload":{}}',
-        purpose="research_lab.routing_provider_evidence.v2",
-    )
-    request["routing_authorization"] = {"signed": "proof"}
-
-    first = authority.execute(request)
-    second = authority.execute(
-        {**request, "logical_operation_id": "routing-provider-operation-retry"}
-    )
-
-    assert len(broker.calls) == 2
-    assert cache.load_count == 0
-    assert cache.persist_count == 0
-    for result in (first, second):
-        record = validate_signed_provider_evidence_record(
-            result["routing_provider_record"],
-            boot_identity=boot,
-        )
-        assert record["body_hash"] == result["transport_attempt"]["response_hash"]
-        assert record["request_hash"] == result["transport_attempt"]["request_hash"]
-        assert record["transport_attempt_hash"] == result["transport_attempt"]["attempt_hash"]
-        assert record["request_fingerprint"] == canonical_request_fingerprint(
-            request["method"], request["url"],
-            base64.b64decode(request["body_b64"], validate=True),
-        )
-        assert record["record_hash"] in result["evidence_artifact_hashes"]
-
-    with pytest.raises(
-        ProviderSemanticsV2Error,
-        match="routing authorization scope is invalid",
-    ):
-        authority.execute({key: value for key, value in request.items() if key != "routing_authorization"})
-    with pytest.raises(
-        ProviderSemanticsV2Error,
-        match="routing authorization scope is invalid",
-    ):
-        authority.execute(
-            {
-                **_request(provider="deepline"),
-                "routing_authorization": {"signed": "proof"},
-            }
-        )
-    assert len(broker.calls) == 2
-
-
-def _routing_budget_reservation_request():
-    body = {
-        "p_event_key": _hash("1"),
-        "p_reservation_id": "routing-reservation:test",
-        "p_experiment_hash": _hash("2"),
-        "p_binding_id": "binding-deepline-bloomberry-jobs-v2",
-        "p_claim_key": _hash("3"),
-        "p_claim_generation": 1,
-        "p_credit_microunits": 90_000,
-        "p_lease_seconds": 60,
-        "p_event_doc": {
-            "schema_version": "leadpoet.research_lab.routing_budget_event.v2",
-            "reservation_id": "routing-reservation:test",
-        },
-    }
-    return _request(
-        provider="supabase",
-        url=(
-            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
-            "research_lab_routing_reserve_budget_v3"
-        ),
-        body=canonical_json(body).encode("utf-8"),
-        logical_operation_id="job-routing-dispatch:routing-budget-reservation:test",
-        job_id="job-routing-dispatch",
-        purpose="research_lab.routing_provider_evidence.v2",
-    )
-
-
-def test_routing_budget_reservation_sidecar_is_fixed_and_needs_no_routing_authorization():
-    authority, broker, cache, _artifacts = _authority()
-    request = _routing_budget_reservation_request()
-
-    assert "routing_authorization" not in request
-    result = authority.execute(request)
-
-    assert len(broker.calls) == 1
-    assert {
-        field: broker.calls[0][field]
-        for field in (
-            "provider_id",
-            "method",
-            "url",
-            "body_b64",
-            "logical_operation_id",
-            "job_id",
-            "purpose",
-        )
-    } == {
-        field: request[field]
-        for field in (
-            "provider_id",
-            "method",
-            "url",
-            "body_b64",
-            "logical_operation_id",
-            "job_id",
-            "purpose",
-        )
-    }
-    assert cache.load_count == 0
-    assert result["terminal_status"] == "authenticated_response"
-    assert result["transport_attempt"]["provider_id"] == "supabase"
-    assert result["transport_attempt"]["purpose"] == (
-        "research_lab.routing_provider_evidence.v2"
-    )
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda request: request.update(
-            url=request["url"].replace(
-                "research_lab_routing_reserve_budget_v3",
-                "research_lab_routing_reserve_budget_v2",
-            )
-        ),
-        lambda request: request.update(
-            logical_operation_id="job-routing-dispatch:provider-operation"
-        ),
-    ],
-    ids=("wrong-rpc-path", "wrong-logical-operation-namespace"),
-)
-def test_routing_budget_reservation_sidecar_tampering_fails_before_broker(mutate):
-    authority, broker, _cache, _artifacts = _authority()
-    request = _routing_budget_reservation_request()
-    mutate(request)
-
-    with pytest.raises(
-        ProviderSemanticsV2Error,
-        match="routing authorization scope is invalid",
-    ):
-        authority.execute(request)
-    assert broker.calls == []
 
 
 def _request(
@@ -2613,7 +2451,7 @@ def test_dynamic_source_add_keeps_daily_cache_and_enforces_measured_quota():
     assert broker.calls[0]["dynamic_route"]["route_hash"] == route["route_hash"]
 
 
-def test_openrouter_reconciliation_uses_management_then_runtime_and_exact_cost():
+def test_openrouter_reconciliation_uses_organizer_key_and_exact_cost():
     authority, broker, _cache, _artifacts = _authority()
     broker.queued["openrouter"] = [
         (
@@ -2626,9 +2464,6 @@ def test_openrouter_reconciliation_uses_management_then_runtime_and_exact_cost()
             b'{"data":{"cost":0.0027,"tokens_prompt":13,"tokens_completion":4}}',
             "authenticated_response",
         ),
-    ]
-    broker.queued["openrouter_management"] = [
-        (403, b'{"error":"forbidden"}', "authenticated_response")
     ]
     request_body = json.dumps(
         {
@@ -2652,12 +2487,11 @@ def test_openrouter_reconciliation_uses_management_then_runtime_and_exact_cost()
     )
     assert [item["provider_id"] for item in broker.calls] == [
         "openrouter",
-        "openrouter_management",
         "openrouter",
     ]
     upstream_doc = json.loads(base64.b64decode(broker.calls[0]["body_b64"]))
     assert upstream_doc["usage"]["include"] is True
-    assert len(result["additional_transport_attempts"]) == 2
+    assert len(result["additional_transport_attempts"]) == 1
     event = decode_cost_event_header(
         result["headers"]["X-Research-Lab-Provider-Cost-Event"]
     )

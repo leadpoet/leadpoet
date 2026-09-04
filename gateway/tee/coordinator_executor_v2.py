@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from gateway.research_lab.config import ResearchLabGatewayConfig
-
 from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD,
     ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
@@ -17,8 +15,6 @@ from gateway.tee.execution_job_manager_v2 import (
     ExecutionResultV2,
 )
 from gateway.tee.scoring_executor import (
-    OP_PROMOTION_GATE_DECISION,
-    OP_PROMOTION_IMPROVEMENT,
     OP_RESEARCH_LAB_ALLOCATION,
     ScoringExecutionResult,
     execute_scoring_operation,
@@ -72,7 +68,6 @@ OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
 OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
 OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
 OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
-OP_ATTEST_ACTIVE_PRIVATE_MODEL = "attest_active_private_model"
 OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
 OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
@@ -192,10 +187,6 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2: frozenset(
         {"research_lab.ancestry_checkpoint_bootstrap.v2"}
     ),
-    OP_PROMOTION_IMPROVEMENT: frozenset({"research_lab.ranking.v2"}),
-    OP_PROMOTION_GATE_DECISION: frozenset(
-        {"research_lab.promotion_decision.v2"}
-    ),
     OP_RESEARCH_LAB_ALLOCATION: frozenset({"research_lab.allocation.v2"}),
     OP_RESEARCH_LAB_REWARD_DECISION: frozenset(
         {"research_lab.reward_decision.v2"}
@@ -238,9 +229,6 @@ COORDINATOR_OPERATIONS_V2 = {
     ),
     OP_ATTEST_WEIGHT_PUBLICATION: frozenset(
         {"gateway.weights.publication.v2"}
-    ),
-    OP_ATTEST_ACTIVE_PRIVATE_MODEL: frozenset(
-        {"research_lab.active_private_model.v2"}
     ),
 }
 
@@ -368,12 +356,6 @@ class CoordinatorExecutorV2:
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
         provider_outcome_supplier: Optional[Callable[[], Mapping[str, Any]]] = None,
-        active_private_model_resolver: Optional[
-            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
-        ] = None,
-        config_supplier: Callable[[], ResearchLabGatewayConfig] = (
-            ResearchLabGatewayConfig
-        ),
     ) -> None:
         self._artifact_evidence_supplier = artifact_evidence_supplier
         self._weight_source_resolver = weight_source_resolver
@@ -401,8 +383,6 @@ class CoordinatorExecutorV2:
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
-        self._active_private_model_resolver = active_private_model_resolver
-        self._config = config_supplier()
 
     async def __call__(
         self,
@@ -464,18 +444,6 @@ class CoordinatorExecutorV2:
             return self._attest_weight_input(payload, context)
         if operation == OP_ATTEST_WEIGHT_PUBLICATION:
             return self._attest_weight_publication(payload, context)
-        if operation == OP_ATTEST_ACTIVE_PRIVATE_MODEL:
-            if self._active_private_model_resolver is None:
-                raise ValueError("active private model source is unavailable")
-            document = dict(self._active_private_model_resolver(payload, context))
-            return ExecutionResultV2(
-                output=document,
-                artifact_hashes=(
-                    str(document["artifact"]["model_artifact_hash"]),
-                    str(document["artifact"]["manifest_hash"]),
-                    str(document["source_state_hash"]),
-                ),
-            )
         if operation == OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2:
             if self._legacy_settlement_source_resolver is None:
                 raise ValueError("measured legacy settlement source is unavailable")
@@ -669,30 +637,7 @@ class CoordinatorExecutorV2:
                 receipt_output=coordinator_receipt_output_v2(operation, output),
                 artifact_hashes=(sha256_json(output),),
             )
-        if operation == OP_PROMOTION_GATE_DECISION:
-            try:
-                threshold = float(payload.get("threshold_points"))
-            except (TypeError, ValueError) as exc:
-                raise ValueError("promotion threshold is invalid") from exc
-            if (
-                threshold != float(self._config.improvement_threshold_points)
-                or payload.get("auto_promotion_enabled")
-                is not bool(self._config.auto_promotion_enabled)
-            ):
-                raise ValueError(
-                    "promotion policy differs from measured configuration"
-                )
-        result = await execute_scoring_operation(operation, payload)
-        evidence_hashes = []
-        if isinstance(result, ScoringExecutionResult):
-            output = dict(result.result)
-            evidence_hashes = list(result.evidence_roots.values())
-        else:
-            output = dict(result)
-        return ExecutionResultV2(
-            output=output,
-            artifact_hashes=tuple(evidence_hashes),
-        )
+        raise ValueError("unsupported V2 coordinator operation")
 
     @staticmethod
     def _ancestry_checkpoint_bootstrap(

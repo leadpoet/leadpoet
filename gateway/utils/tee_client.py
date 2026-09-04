@@ -641,16 +641,6 @@ class TEEClient:
             {"envelope": envelope},
         )
 
-    async def v2_provision_job_sealed_openrouter_secret(
-        self,
-        *,
-        envelope: Dict,
-    ) -> Dict:
-        return await self._send_rpc(
-            "v2_provision_job_sealed_openrouter_secret",
-            {"envelope": envelope},
-        )
-
     async def v2_release_job_credentials(self, job_id: str) -> Dict:
         return await self._send_rpc(
             "v2_release_job_credentials",

@@ -81,16 +81,6 @@ REHEARSAL_GATEWAY_BOOT_GENERATION_ENV = (
 _DEFAULT_GATEWAY_BOOT_GENERATION = hashlib.sha256(
     b"leadpoet-local-gateway-bootstrap-generation-v1"
 ).hexdigest()[:32]
-_PRIVATE_MODEL_BUCKET = "leadpoet-private-model-artifacts-493765492819"
-_PRIVATE_MODEL_PREFIX = "research-lab/sourcing-model/"
-_PRIVATE_MODEL_POINTER_KEY = (
-    _PRIVATE_MODEL_PREFIX + "branches/leadpoet-lab/current.json"
-)
-_PRIVATE_MODEL_SIGNING_KEY_ID = (
-    "alias/leadpoet-research-lab-artifact-signing"
-)
-_PRIVATE_MODEL_OBJECTS: dict[tuple[str, str], bytes] = {}
-_PRIVATE_MODEL_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
@@ -1301,7 +1291,6 @@ def _call_persistent_gateway_enclave(
     if method not in {
         "rehearsal_inter_enclave_artifact_call",
         "rehearsal_inter_enclave_provider_execute",
-        "rehearsal_inter_enclave_provider_probe_resolve",
     }:
         raise ValueError("persistent inter-enclave method is not authorized")
     if not isinstance(params, Mapping):
@@ -2278,73 +2267,6 @@ def _artifact_record_path(bucket: str, key: str) -> Path:
     return STATE_ROOT / "s3-artifacts" / (digest + ".json")
 
 
-def _private_model_signing_key() -> Any:
-    """Return a deterministic local P-256 equivalent of the production key."""
-
-    from cryptography.hazmat.primitives.asymmetric import ec
-
-    order = int(
-        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
-        16,
-    )
-    seed = hashlib.sha256(
-        b"leadpoet-local-private-model-signing-key-v1"
-    ).digest()
-    scalar = (int.from_bytes(seed, "big") % (order - 1)) + 1
-    return ec.derive_private_key(scalar, ec.SECP256R1())
-
-
-def _sign_private_model_manifest_hash(manifest_hash: str) -> bytes:
-    """Sign one canonical manifest hash through the strict local boundary."""
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
-
-    normalized = str(manifest_hash)
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
-        raise ValueError("local private model manifest hash is invalid")
-    return _private_model_signing_key().sign(
-        normalized.encode("utf-8"),
-        ec.ECDSA(hashes.SHA256()),
-    )
-
-
-def _install_private_model_s3_object(
-    *,
-    bucket: str,
-    key: str,
-    body: bytes,
-) -> None:
-    """Install an immutable artifact or the one mutable branch pointer."""
-
-    normalized_bucket = str(bucket)
-    normalized_key = str(key)
-    payload = bytes(body)
-    if (
-        normalized_bucket != _PRIVATE_MODEL_BUCKET
-        or not normalized_key.startswith(_PRIVATE_MODEL_PREFIX)
-        or not payload
-    ):
-        raise ValueError("local private model S3 fixture contract differs")
-    identity = (normalized_bucket, normalized_key)
-    with _PRIVATE_MODEL_OBJECTS_LOCK:
-        existing = _PRIVATE_MODEL_OBJECTS.get(identity)
-        if (
-            existing is not None
-            and existing != payload
-            and normalized_key != _PRIVATE_MODEL_POINTER_KEY
-        ):
-            raise ValueError("local private model immutable object differs")
-        _PRIVATE_MODEL_OBJECTS[identity] = payload
-
-
-def _clear_private_model_s3_objects() -> None:
-    """Reset only test-owned private-model fixtures between scenarios."""
-
-    with _PRIVATE_MODEL_OBJECTS_LOCK:
-        _PRIVATE_MODEL_OBJECTS.clear()
-
-
 def _local_artifact_transport(
     *,
     method: str,
@@ -2511,32 +2433,23 @@ def _gateway_runtime_objects(
         tee_service.v2_artifact_persistence_verifier = persistence
         tee_service.v2_scoring_job_manager = None
         tee_service.v2_coordinator_job_manager = None
-        tee_service.v2_autoresearch_job_manager = None
         tee_service.v2_provider_semantics_authority = None
         tee_service.v2_kms_recipient = None
         tee_service.v2_inter_enclave_client = None
         tee_service.sign_data = lambda data: _local_signing_private_key(
             role
         ).sign(bytes(data))
-        # Candidate job managers still execute unchanged. Scoring and
-        # autoresearch cross the same coordinator-owned provider authority
-        # boundary as production; the coordinator is the only process that
-        # receives the measured job credential lease.
+        # Candidate job managers still execute unchanged. Scoring crosses the
+        # same coordinator-owned provider authority boundary as production;
+        # the coordinator is the only process that receives the measured job
+        # credential lease.
         if role == "gateway_coordinator":
             tee_service.execute_v2_provider_request = broker.execute
-            tee_service.execute_v2_provider_probe_request = broker.execute
         else:
             tee_service.execute_v2_provider_request = (
                 lambda request: _call_persistent_gateway_enclave(
                     "gateway_coordinator",
                     "rehearsal_inter_enclave_provider_execute",
-                    {"peer_role": role, "request": dict(request)},
-                )
-            )
-            tee_service.execute_v2_provider_probe_request = (
-                lambda request: _call_persistent_gateway_enclave(
-                    "gateway_coordinator",
-                    "rehearsal_inter_enclave_provider_probe_resolve",
                     {"peer_role": role, "request": dict(request)},
                 )
             )
@@ -2885,7 +2798,7 @@ def _handle_gateway_enclave_rpc(
         channel_id = str(params.get("channel_id") or "")
         peer_state = state.get("roles", {}).get(peer_role)
         if (
-            peer_role not in {"gateway_scoring", "gateway_autoresearch"}
+            peer_role != "gateway_scoring"
             or target_method
             not in {
                 "artifact_seal_begin",
@@ -2911,37 +2824,24 @@ def _handle_gateway_enclave_rpc(
                 ),
             },
         )
-    if role == "gateway_coordinator" and method in {
-        "rehearsal_inter_enclave_provider_execute",
-        "rehearsal_inter_enclave_provider_probe_resolve",
-    }:
+    if role == "gateway_coordinator" and method == (
+        "rehearsal_inter_enclave_provider_execute"
+    ):
         if set(params) != {"peer_role", "request"}:
             raise ValueError("local inter-enclave provider fields differ")
         peer_role = str(params.get("peer_role") or "")
         request = params.get("request")
-        target_method = {
-            "rehearsal_inter_enclave_provider_execute": "provider_execute",
-            "rehearsal_inter_enclave_provider_probe_resolve": (
-                "provider_probe_resolve"
-            ),
-        }[method]
-        allowed_peers = (
-            {"gateway_scoring", "gateway_autoresearch"}
-            if target_method == "provider_execute"
-            else {"gateway_autoresearch"}
-        )
-        if peer_role not in allowed_peers or not isinstance(request, Mapping):
+        if peer_role != "gateway_scoring" or not isinstance(request, Mapping):
             raise ValueError("local inter-enclave provider peer differs")
         objects = _gateway_runtime_objects(role, role_state)
         return objects["tee_service"].handle_inter_enclave_rpc(
-            target_method,
+            "provider_execute",
             dict(request),
             {"physical_role": peer_role},
         )
     execution_prefix = {
         "gateway_coordinator": "coordinator_v2_",
         "gateway_scoring": "scoring_v2_",
-        "gateway_autoresearch": "autoresearch_v2_",
     }[role]
     if method.startswith(execution_prefix):
         if role == "gateway_coordinator":
@@ -2959,12 +2859,9 @@ def _handle_gateway_enclave_rpc(
         "v2_get_job_kms_recipient",
         "v2_provision_job_encrypted_secret",
         "v2_provision_job_sealed_source_add_secret",
-        "v2_provision_job_sealed_openrouter_secret",
         "v2_release_job_credentials",
         "v2_get_source_add_ingress_recipient",
         "v2_seal_source_add_ingress_credential",
-        "v2_get_openrouter_ingress_recipient",
-        "v2_seal_openrouter_ingress_credential",
     }:
         objects = _gateway_runtime_objects(role, role_state)
         return _unwrap_candidate_rpc(
@@ -3810,30 +3707,6 @@ class _LocalS3:
         Key: str,
         VersionId: str | None = None,
     ) -> dict[str, Any]:
-        private_model_identity = (str(Bucket), str(Key))
-        with _PRIVATE_MODEL_OBJECTS_LOCK:
-            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
-                private_model_identity
-            )
-        if private_model_body is not None:
-            private_version = "local-private-model-" + hashlib.sha256(
-                private_model_body
-            ).hexdigest()[:24]
-            if VersionId is not None and VersionId != private_version:
-                raise ValueError("local S3 private-model version differs")
-            _external_event(
-                "aws_s3_object_lock",
-                "get_object",
-                service="s3",
-                bucket=Bucket,
-                key=Key,
-                private_model_artifact=True,
-            )
-            return {
-                "Body": io.BytesIO(private_model_body),
-                "ContentLength": len(private_model_body),
-                "VersionId": private_version,
-            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -3886,29 +3759,6 @@ class _LocalS3:
         Key: str,
         VersionId: str | None = None,
     ) -> dict[str, Any]:
-        private_model_identity = (str(Bucket), str(Key))
-        with _PRIVATE_MODEL_OBJECTS_LOCK:
-            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
-                private_model_identity
-            )
-        if private_model_body is not None:
-            private_version = "local-private-model-" + hashlib.sha256(
-                private_model_body
-            ).hexdigest()[:24]
-            if VersionId is not None and VersionId != private_version:
-                raise ValueError("local S3 private-model version differs")
-            _external_event(
-                "aws_s3_object_lock",
-                "head_object",
-                service="s3",
-                bucket=Bucket,
-                key=Key,
-                private_model_artifact=True,
-            )
-            return {
-                "ContentLength": len(private_model_body),
-                "VersionId": private_version,
-            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -4236,62 +4086,6 @@ def _validate_local_boto3_client_options(
 
 
 class _LocalKMS:
-    def verify(
-        self,
-        *,
-        KeyId: str,
-        Message: bytes,
-        MessageType: str,
-        Signature: bytes,
-        SigningAlgorithm: str,
-    ) -> dict[str, Any]:
-        """Verify the production private-model ECDSA request contract."""
-
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import ec
-
-        if (
-            str(KeyId) != _PRIVATE_MODEL_SIGNING_KEY_ID
-            or str(MessageType) != "RAW"
-            or str(SigningAlgorithm) != "ECDSA_SHA_256"
-            or not isinstance(Message, (bytes, bytearray))
-            or not re.fullmatch(
-                rb"sha256:[0-9a-f]{64}", bytes(Message)
-            )
-            or not isinstance(Signature, (bytes, bytearray))
-            or not Signature
-        ):
-            raise ValueError("local KMS verify contract differs")
-        try:
-            _private_model_signing_key().public_key().verify(
-                bytes(Signature),
-                bytes(Message),
-                ec.ECDSA(hashes.SHA256()),
-            )
-        except (InvalidSignature, ValueError):
-            valid = False
-        else:
-            valid = True
-        _external_event(
-            "aws_kms",
-            "verify",
-            key_id_hash=_sha256(str(KeyId)),
-            message_hash=(
-                "sha256:" + hashlib.sha256(bytes(Message)).hexdigest()
-            ),
-            signature_hash=(
-                "sha256:" + hashlib.sha256(bytes(Signature)).hexdigest()
-            ),
-            signature_valid=valid,
-            signing_algorithm=str(SigningAlgorithm),
-        )
-        return {
-            "KeyId": str(KeyId),
-            "SignatureValid": valid,
-            "SigningAlgorithm": str(SigningAlgorithm),
-        }
-
     def encrypt(
         self,
         *,

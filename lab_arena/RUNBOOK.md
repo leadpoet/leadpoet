@@ -95,7 +95,7 @@ python3 scripts/run_lab_arena_service.py --check-only
 Start the service:
 
 ```bash
-python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791
+python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8792
 ```
 
 The service creates a daily round at 00:00 UTC by default. Set

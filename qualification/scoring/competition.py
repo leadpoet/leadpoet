@@ -236,7 +236,7 @@ def _ensure_provider_environment() -> None:
 
 
 class CompetitionCompanyScorer:
-    """Use the production qualification judge without private-model plumbing."""
+    """Use the production company judge for baseline and miner outputs."""
 
     async def __call__(
         self,
@@ -279,7 +279,6 @@ class CompetitionCompanyScorer:
                 run_time_seconds=0.0,
                 seen_companies=seen_companies,
                 is_reference_model=bool(is_reference_model),
-                require_company_fit_proof_receipt=False,
             )
             breakdowns.append(
                 result.model_dump(mode="json")

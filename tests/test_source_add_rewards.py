@@ -22,11 +22,7 @@ from research_lab.source_add_rewards import (
     stop_reward_forward,
     validate_source_add_reward_record,
 )
-from research_lab.validator_integration import (
-    allocation_can_proceed_without_score_bundles,
-    allocation_can_skip_score_bundle_verification,
-    verify_research_lab_allocation_bundle,
-)
+from research_lab.validator_integration import verify_research_lab_allocation_bundle
 
 
 def _allocation_authority_outcome(
@@ -608,57 +604,6 @@ class TestAllocationRails:
             flags={"fetch_enabled": True, "reimbursements_enabled": True},
         )
         assert verification["passed"], verification["errors"]
-
-    @pytest.mark.parametrize(
-        ("allocation_doc", "expected"),
-        [
-            ({"source_add_allocations": [{"paid_alpha_percent": 1.0}]}, True),
-            ({"reimbursement_allocations": [{"paid_alpha_percent": 1.0}]}, True),
-            (
-                {
-                    "source_add_allocations": [{"paid_alpha_percent": 1.0}],
-                    "reimbursement_allocations": [{"paid_alpha_percent": 2.0}],
-                },
-                True,
-            ),
-            ({"champion_allocations": [{"paid_alpha_percent": 1.0}]}, False),
-            (
-                {
-                    "reimbursement_allocations": [],
-                    "champion_allocations": [],
-                    "queued_champion_allocations": [],
-                },
-                True,
-            ),
-            ({}, False),
-        ],
-    )
-    def test_only_evaluation_independent_rewards_can_skip_empty_score_bundle_page(
-        self,
-        allocation_doc,
-        expected,
-    ):
-        assert allocation_can_skip_score_bundle_verification(allocation_doc) is expected
-
-    def test_source_add_skip_is_limited_to_the_exact_empty_bundle_failure(self):
-        allocation_doc = {
-            "source_add_allocations": [{"paid_alpha_percent": 1.0}],
-            "reimbursement_allocations": [],
-            "champion_allocations": [],
-            "queued_champion_allocations": [],
-        }
-        assert allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["no_verified_evaluation_score_bundles"],
-        )
-        assert not allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["score_bundle_hash_diverged"],
-        )
-        assert not allocation_can_proceed_without_score_bundles(
-            allocation_doc,
-            ["no_verified_evaluation_score_bundles", "score_bundle_hash_diverged"],
-        )
 
     @pytest.mark.asyncio
     async def test_attested_allocator_uses_the_same_source_add_contract(self):

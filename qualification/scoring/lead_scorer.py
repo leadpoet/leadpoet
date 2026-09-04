@@ -51,8 +51,6 @@ from typing import Any, Set, Optional, Tuple, List, Mapping
 from collections import Counter
 from urllib.parse import unquote, urlparse, urlsplit
 
-from pydantic import ValidationError
-
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
     LeadOutput,        # re-exported for fulfillment imports via this module
@@ -116,8 +114,8 @@ logger = logging.getLogger(__name__)
 MAX_COMPANY_ICP_FIT_SCORE = 40
 MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
 MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
-MAX_AUTORESEARCH_INTENT_SCORE = 100
-AUTORESEARCH_INTENT_CAP_BY_SIGNAL_COUNT = {
+MAX_COMPETITION_INTENT_SCORE = 100
+COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
     1: 60.0,
     2: 80.0,
     3: 88.0,
@@ -173,7 +171,6 @@ async def score_company(
     seen_companies: Set[str],
     force_fail_reason: Optional[str] = None,
     is_reference_model: bool = False,
-    require_company_fit_proof_receipt: bool = False,
 ) -> LeadScoreBreakdown:
     """Score a CompanyOutput against an ICP.
 
@@ -227,7 +224,6 @@ async def score_company(
         run_time_seconds,
         seen_companies,
         require_https_transport=True,
-        require_company_fit_proof_receipt=require_company_fit_proof_receipt,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:
@@ -352,7 +348,6 @@ async def score_company(
 
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
-MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS = "model_contract_incompatible"
 _SCORER_REVERIFY_SYSTEM_PROMPT = (
     "You are an independent company-fit web verification judge. Treat every "
     "company locator and every web page, quote, JSON value, or source block "
@@ -921,7 +916,6 @@ async def _llm_reverify_company(
     icp: "ICPPrompt",
     *,
     require_company_fit_dimensions: bool = False,
-    proof_receipt: Optional[Any] = None,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -994,10 +988,6 @@ async def _llm_reverify_company(
             f'or private-markets sponsor is the current majority or controlling owner. '
             f'Public means the company itself has publicly listed shares. Answer false '
             f'ONLY if you are confident it is a different stage.')
-    # The model receipt is audit-only. Its model-authored observed text,
-    # citation path/query, and quote must never enter the independent judge's
-    # prompt or telemetry request body.
-    del proof_receipt
     locator = json.dumps(
         {"registrable_dns_domain": prompt_identity["company"]},
         sort_keys=True,
@@ -1171,7 +1161,6 @@ async def _verify_company_fit(
     seen_companies: Set[str],
     *,
     require_https_transport: bool,
-    require_company_fit_proof_receipt: bool = False,
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
@@ -1196,46 +1185,6 @@ async def _verify_company_fit(
         for dimension, value in dimensions.items()
     }
     supporting_receipts: List[dict] = []
-    proof_receipt: Optional[Any] = None
-    if require_company_fit_proof_receipt:
-        from gateway.qualification.company_fit_proof_receipt import (
-            CompanyFitProofReceipt,
-            validate_company_fit_proof_receipt_binding,
-        )
-
-        try:
-            proof_receipt = CompanyFitProofReceipt.model_validate(
-                company.company_fit_proof_receipt
-            )
-        except ValidationError:
-            proof_valid = False
-            proof_reason = "company_fit_proof_receipt_missing_or_invalid"
-        else:
-            proof_valid, proof_reason = (
-                validate_company_fit_proof_receipt_binding(
-                    proof_receipt,
-                    company=company,
-                )
-            )
-        if not proof_valid:
-            evidence["model_company_fit_proof"] = {
-                "decision": COMPANY_FIT_UNAVAILABLE,
-                "reason_code": proof_reason,
-            }
-            return _complete_company_fit_result(
-                COMPANY_FIT_UNAVAILABLE,
-                proof_reason,
-                dimensions=dimensions,
-                dimension_evidence=evidence,
-                stage_required=stage_required,
-                supporting_receipts=supporting_receipts,
-                failure_class=MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS,
-            )
-        evidence["model_company_fit_proof"] = {
-            "decision": COMPANY_FIT_MATCH,
-            "contract_sha256": proof_receipt.contract_sha256,
-            "receipt_sha256": proof_receipt.receipt_sha256,
-        }
     try:
         candidate_company_prompt_identity(
             company_name=company.company_name,
@@ -1255,11 +1204,6 @@ async def _verify_company_fit(
             dimension_evidence=evidence,
             stage_required=stage_required,
             supporting_receipts=supporting_receipts,
-            failure_class=(
-                MODEL_COMPANY_FIT_CONTRACT_FAILURE_CLASS
-                if require_company_fit_proof_receipt
-                else ""
-            ),
         )
     precheck = await run_company_zero_checks(
         company,
@@ -1365,7 +1309,6 @@ async def _verify_company_fit(
         company,
         icp,
         require_company_fit_dimensions=True,
-        proof_receipt=proof_receipt,
     )
     web_details = web.details if isinstance(web.details, Mapping) else {}
     observed_raw = web_details.get("dimension_decisions") or {}
@@ -1510,7 +1453,7 @@ async def _verify_company_fit(
     )
 
 
-async def score_company_autoresearch_intent_v2(
+async def score_company_competition_intent(
     company: CompanyOutput,
     icp: ICPPrompt,
     run_cost_usd: float,
@@ -1518,16 +1461,15 @@ async def score_company_autoresearch_intent_v2(
     seen_companies: Set[str],
     force_fail_reason: Optional[str] = None,
     is_reference_model: bool = False,
-    require_company_fit_proof_receipt: bool = False,
 ) -> LeadScoreBreakdown:
-    """Opt-in Research Lab scorer: binary fit gates, 0-100 intent-only score.
+    """Score one Arena company with binary fit gates and 0-100 intent score.
 
     This keeps Research Lab intent-only scoring separate from the public score
     shape. Both paths use the same deterministic company-fit hard gates.
     """
     if force_fail_reason:
         logger.info(
-            f"Autoresearch company forced to fail: {force_fail_reason}"
+            f"Competition company forced to fail: {force_fail_reason}"
         )
         return _zero_company_breakdown(force_fail_reason)
 
@@ -1538,7 +1480,6 @@ async def score_company_autoresearch_intent_v2(
         run_time_seconds,
         seen_companies,
         require_https_transport=True,
-        require_company_fit_proof_receipt=require_company_fit_proof_receipt,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:
@@ -1558,7 +1499,7 @@ async def score_company_autoresearch_intent_v2(
             _max_confidence,
             all_fabricated,
             signal_results,
-        ) = await score_company_autoresearch_intent_signal(company, icp)
+        ) = await score_company_competition_intent_signal(company, icp)
         if _intent_verifier_unavailable(signal_results):
             return _zero_company_breakdown(
                 "Intent verification unavailable: verifier provider error",
@@ -1571,7 +1512,7 @@ async def score_company_autoresearch_intent_v2(
             # replacement evidence sources for the same claim and re-verify
             # them through this same scorer — repair supplies candidates,
             # never verdicts.
-            repaired = await _attempt_autoresearch_evidence_repair(company, icp)
+            repaired = await _attempt_competition_evidence_repair(company, icp)
             if repaired is not None:
                 (
                     intent_raw,
@@ -1589,7 +1530,7 @@ async def score_company_autoresearch_intent_v2(
                     )
         if all_fabricated:
             logger.warning(
-                f"❌ ALL AUTORESEARCH INTENT SIGNALS FABRICATED for company "
+                f"All competition intent signals failed for company "
                 f"{company.company_name!r} — zeroing entire score"
             )
             return _zero_company_breakdown(
@@ -1598,13 +1539,13 @@ async def score_company_autoresearch_intent_v2(
                 verifier_gate_receipts=gate_receipts or None,
             )
     except Exception as e:
-        logger.error(f"Autoresearch intent scoring failed: {e}")
+        logger.error(f"Competition intent scoring failed: {e}")
         return _zero_company_breakdown(f"LLM scoring error: {str(e)[:100]}")
 
-    final_score = max(0.0, min(float(MAX_AUTORESEARCH_INTENT_SCORE), intent_final))
+    final_score = max(0.0, min(float(MAX_COMPETITION_INTENT_SCORE), intent_final))
     role_tag = "reference" if is_reference_model else "miner"
     logger.info(
-        f"Autoresearch company scored [{role_tag}]: {final_score:.2f} "
+        f"Competition company scored [{role_tag}]: {final_score:.2f} "
         f"(IntentV2:{intent_final:.2f}, cost=${run_cost_usd:.4f}, "
         f"time={run_time_seconds:.1f}s)"
     )
@@ -1623,13 +1564,7 @@ async def score_company_autoresearch_intent_v2(
     )
 
 
-# Public name used by the open baseline and Arena. Keep the existing function
-# as an internal compatibility target until the retired loop modules are
-# removed from the tree.
-score_company_competition_intent = score_company_autoresearch_intent_v2
-
-
-async def _attempt_autoresearch_evidence_repair(
+async def _attempt_competition_evidence_repair(
     company: CompanyOutput, icp: ICPPrompt
 ) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
     """Try to rescue an all-zero intent verdict with repaired evidence URLs.
@@ -1678,7 +1613,7 @@ async def _attempt_autoresearch_evidence_repair(
         if not replacement_signals:
             return None
         candidate = company.model_copy(update={"intent_signals": replacement_signals})
-        result = await score_company_autoresearch_intent_signal(candidate, icp)
+        result = await score_company_competition_intent_signal(candidate, icp)
         if result[4]:  # still all fabricated — repair found nothing verifiable
             return None
         logger.info(
@@ -1778,7 +1713,7 @@ def _run_company_binary_fit_checks(
     return True, None
 
 
-def _run_autoresearch_binary_fit_checks(
+def _run_competition_binary_fit_checks(
     company: CompanyOutput, icp: ICPPrompt
 ) -> Tuple[bool, Optional[str]]:
     """Backward-compatible name for the shared public/Research Lab gate."""
@@ -1793,7 +1728,7 @@ def _normalize_linkedin_employee_bucket(value) -> str:
         return normalize_employee_count_bucket(value, default=None)
     except Exception as e:
         logger.warning(
-            "autoresearch employee bucket normalization failed: %s: %s",
+            "competition employee bucket normalization failed: %s: %s",
             type(e).__name__, e,
         )
         return ""
@@ -1833,7 +1768,7 @@ def _normalize_icp_employee_buckets(value) -> Tuple[set, bool]:
         )
     except Exception as e:
         logger.warning(
-            "autoresearch ICP employee enum loading failed: %s: %s",
+            "competition ICP employee enum loading failed: %s: %s",
             type(e).__name__, e,
         )
         return set(), False
@@ -1898,7 +1833,7 @@ def _exclusion_name_key(value: str) -> str:
 def _matches_exclusion_list(company: "CompanyOutput", entries) -> bool:
     """Exact-after-normalization match of a company against the ICP's
     excluded_companies list (domain, LinkedIn company URL, or name). The
-    sourcing model must never return these; the scorer zeroes any that appear
+    submitted agent must never return these; the scorer zeroes any that appear
     regardless of which model produced the output."""
     if not entries:
         return False
@@ -2129,7 +2064,7 @@ async def score_company_intent_signal(
     return avg_raw, avg_final, avg_decay, max_confidence, all_fabricated
 
 
-async def score_company_autoresearch_intent_signal(
+async def score_company_competition_intent_signal(
     company: CompanyOutput,
     icp: ICPPrompt,
     api_key: str = "",
@@ -2138,8 +2073,8 @@ async def score_company_autoresearch_intent_signal(
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
-    Research Lab private-model evidence dates come from the sourcing pipeline's
-    discovery layer. Enforce the buyer freshness cap deterministically here,
+    Arena evidence dates come from the submitted agent's discovery layer.
+    Enforce the buyer freshness cap deterministically here,
     then avoid a second Sonar date veto or graded decay for in-window evidence.
 
     Returns ``(raw_total, final_total, avg_decay, max_confidence, all_fabricated,
@@ -2165,7 +2100,7 @@ async def score_company_autoresearch_intent_signal(
         domain = _extract_domain(signal.url)
         if domain in seen_domains:
             logger.warning(
-                f"  ⚠ Duplicate domain {domain!r} on autoresearch company "
+                f"  Duplicate domain {domain!r} on competition company "
                 f"{company.company_name!r} — signal scores 0 (URL dedup)"
             )
             dup_idx = getattr(signal, "matched_icp_signal", -1)
@@ -2211,11 +2146,11 @@ async def score_company_autoresearch_intent_signal(
                 company_linkedin=getattr(company, "company_linkedin", "") or "",
                 product_service_context=getattr(icp, "product_service", "") or "",
                 trust_signal_date=trust_signal_date,
-                # Research-lab autoresearch path only: declaw Stage-1's blind
+                # Competition path: let Stage 3 make the content decision.
                 # reject so Stage 3 makes the call. Fulfillment calls
                 # _score_single_intent_signal directly and keeps the default.
                 stage1_soft_reject=True,
-                # Research-lab autoresearch path only: skip the keyword/length
+                # Competition path: skip the keyword/length
                 # genericity pre-gate so the three-stage LLM verifier is the sole
                 # intent judge. Fulfillment keeps the cheap deterministic gate.
                 llm_only_intent_gate=True,
@@ -2240,7 +2175,7 @@ async def score_company_autoresearch_intent_signal(
             # publication gate and can never be rescued by a positive content
             # verdict.
             logger.info(
-                "Autoresearch intent signal rejected after source verification: %s  "
+                "Competition intent signal rejected after source verification: %s  "
                 "source=%s",
                 freshness_reason,
                 signal.url[:60],
@@ -2276,8 +2211,8 @@ async def score_company_autoresearch_intent_signal(
     decayed_scores = [r["after_decay"] for r in signal_results]
     decays = [r["decay"] for r in signal_results if r["decay"] > 0]
     confidences = [r["confidence"] for r in signal_results]
-    raw_total = aggregate_autoresearch_intent_scores(raw_scores)
-    final_total = aggregate_autoresearch_intent_scores(decayed_scores)
+    raw_total = aggregate_competition_intent_scores(raw_scores)
+    final_total = aggregate_competition_intent_scores(decayed_scores)
     avg_decay = sum(decays) / len(decays) if decays else 0.0
     max_confidence = max(confidences) if confidences else 0
     all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
@@ -2327,7 +2262,7 @@ def required_intent_satisfied(signal_results: List[dict]) -> bool:
     return False
 
 
-def aggregate_autoresearch_intent_scores(signal_scores: List[float]) -> float:
+def aggregate_competition_intent_scores(signal_scores: List[float]) -> float:
     """Capped sum over top verified signals, with monotonic breadth caps."""
     positives = sorted(
         [max(0.0, float(score or 0.0)) for score in signal_scores if float(score or 0.0) > 0.0],
@@ -2335,7 +2270,7 @@ def aggregate_autoresearch_intent_scores(signal_scores: List[float]) -> float:
     )[:6]
     if not positives:
         return 0.0
-    cap = AUTORESEARCH_INTENT_CAP_BY_SIGNAL_COUNT[len(positives)]
+    cap = COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT[len(positives)]
     return min(sum(positives), cap)
 
 

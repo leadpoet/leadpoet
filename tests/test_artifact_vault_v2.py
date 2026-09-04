@@ -17,7 +17,6 @@ from gateway.tee.artifact_vault_v2 import (
 )
 from gateway.tee.topology import COORDINATOR_ROLE, ROLE_SPECS, topology_document
 from leadpoet_canonical.attested_v2 import build_transport_attempt, sha256_json
-from research_lab.eval.private_runtime import SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS
 
 
 FIXED_NOW = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
@@ -46,9 +45,6 @@ def _sealed(vault: EncryptedArtifactVaultV2):
 def test_artifact_capacity_is_bounded_by_measured_coordinator_memory() -> None:
     coordinator_bytes = int(ROLE_SPECS[COORDINATOR_ROLE]["memory_mib"]) * 1024 * 1024
     assert artifact_vault_v2.MAX_IN_MEMORY_ARTIFACT_BYTES == coordinator_bytes // 4
-    assert artifact_vault_v2.ACTIVE_JOB_ARTIFACT_LEASE_SECONDS >= (
-        SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS + 120
-    )
 
 
 def _headers(**overrides):
@@ -170,7 +166,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
             descriptor = vault.seal(
                 f"provider-{job_index}-{artifact_index}".encode(),
                 job_id=f"scoring-job-{job_index}",
-                purpose="research_lab.private_model_run.v2",
+                purpose="research_lab.source_add_judge.v2",
                 artifact_kind="provider_response",
             )
             if artifact_index == 0:
@@ -193,7 +189,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
             vault.seal(
                 b"failed checkpoint",
                 job_id="scoring-job-0",
-                purpose="research_lab.private_model_run.v2",
+                purpose="research_lab.source_add_judge.v2",
                 artifact_kind="provider_outcome_checkpoint",
             )
             raise RuntimeError("checkpoint failed")
@@ -216,7 +212,7 @@ def test_measured_scoring_pool_crosses_old_byte_ceiling_and_recovers_after_persi
     recovered = vault.seal(
         b"recovered checkpoint",
         job_id="scoring-job-recovery",
-        purpose="research_lab.private_model_run.v2",
+        purpose="research_lab.source_add_judge.v2",
         artifact_kind="provider_outcome_checkpoint",
     )
     assert recovered["persisted"] is False

@@ -13,12 +13,13 @@ from typing import Mapping
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from lab_arena import contracts
-
 
 router = APIRouter(prefix="/arena", tags=["agent-competition"])
 
 _MAX_REQUEST_BYTES = 1_100_000
+# A completion can contain the judge's accepted 2 MiB scoring output plus the
+# small signed-request wrapper. The sidecar performs the exact schema checks.
+_MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
 _SIDECAR_URL = "http://127.0.0.1:8792"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
 _FORWARDED_RESPONSE_HEADERS = ("content-type", "cache-control")
@@ -81,7 +82,7 @@ async def proxy_arena_request(arena_path: str, request: Request) -> Response:
 
     parts = arena_path.split("/")
     request_limit = (
-        contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+        _MAX_COMPLETION_REQUEST_BYTES
         if request.method == "POST"
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]

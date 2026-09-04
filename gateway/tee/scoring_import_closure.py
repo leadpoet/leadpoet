@@ -28,7 +28,7 @@ except Exception:
     from normalize_attested_runtime import normalized_file_mode
 
 
-SCHEMA_VERSION = "leadpoet.gateway_execution_import_closure.v2"
+SCHEMA_VERSION = "leadpoet.gateway_execution_import_closure.v3"
 MANIFEST_RELATIVE_PATH = "_attested_runtime/scoring_import_closure.json"
 
 MEASURED_DATA_PATHS = (
@@ -43,35 +43,9 @@ MEASURED_DATA_PATHS = (
     "leadpoet_verifier/identity/public_suffix_list.dat",
     "leadpoet_verifier/leadpoet_industry_taxonomy.json",
     "leadpoet_canonical/subtensor_events_profile_v2.json",
-    "research_lab/sourcing_model_contract.json",
-    "research_lab/sourcing_model_contract_v11.json",
-    "research_lab/sourcing_model_contract_v12.json",
-    "research_lab/sourcing_model_contract_v13.json",
-    "research_lab/sourcing_model_contract_v26.json",
-    "research_lab/sourcing_model_contract_v46.json",
-    "research_lab/sourcing_model_contract_v47.json",
-    "research_lab/sourcing_model_contract_v52.json",
-    "research_lab/sourcing_model_contract_v52_82c.json",
-    "research_lab/sourcing_model_contract_v66_37b.json",
-    "research_lab/sourcing_model_contract_v7.json",
-    "research_lab/sourcing_model_parity_fixtures.json",
-    "research_lab/sourcing_model_parity_fixtures_v11.json",
-    "research_lab/sourcing_model_parity_fixtures_v12.json",
-    "research_lab/sourcing_model_parity_fixtures_v13.json",
-    "research_lab/sourcing_model_parity_fixtures_v26.json",
-    "research_lab/sourcing_model_parity_fixtures_v46.json",
-    "research_lab/sourcing_model_parity_fixtures_v47.json",
-    "research_lab/sourcing_model_parity_fixtures_v52.json",
-    "research_lab/sourcing_model_parity_fixtures_v52_82c.json",
-    "research_lab/sourcing_model_parity_fixtures_v66_37b.json",
-    "research_lab/sourcing_model_parity_fixtures_v7.json",
-    "research_lab/sourcing_model_semantic_compatibility_v1.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
-    "schemas/research_evaluation_score_bundle.schema.json",
-    "schemas/research_loop_start_contract.schema.json",
     "schemas/research_reimbursement.schema.json",
-    "schemas/research_trajectory.schema.json",
     "schemas/results_ledger_row.schema.json",
 )
 
@@ -88,14 +62,14 @@ PACKAGE_NAMES = (
 ENTRYPOINT_MODULES = (
     "gateway.tee.tee_service",
     "gateway.tee.scoring_executor",
-    "research_lab.eval.evaluator",
     "qualification.scoring.lead_scorer",
     "leadpoet_canonical.attested_receipts",
     "leadpoet_canonical.attested_v2",
     "gateway.tee.protected_workflows",
 )
 
-# The evaluator loads these with importlib so AST imports cannot discover them.
+# The qualification path loads these with importlib, so AST imports cannot
+# discover them.
 DYNAMIC_IMPORT_MODULES = (
     "gateway.qualification.models",
     "gateway.qualification.config",
@@ -355,7 +329,6 @@ def discover_scoring_modules(index: Dict[str, Path]) -> Tuple[str, ...]:
     return discover_modules(
         index,
         ENTRYPOINT_MODULES
-        + AUTORESEARCH_ENTRYPOINT_MODULES
         + DYNAMIC_IMPORT_MODULES,
     )
 
@@ -494,7 +467,6 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     body = {
         "schema_version": SCHEMA_VERSION,
         "entrypoint_modules": list(ENTRYPOINT_MODULES),
-        "autoresearch_entrypoint_modules": list(AUTORESEARCH_ENTRYPOINT_MODULES),
         "dynamic_import_modules": list(DYNAMIC_IMPORT_MODULES),
         "role_manifests": role_manifests,
         "environment_variables": sorted(environment_variables),
@@ -532,10 +504,6 @@ def verify_staged_manifest(
         raise ScoringClosureError("unsupported scoring import manifest schema")
     if manifest.get("entrypoint_modules") != list(ENTRYPOINT_MODULES):
         raise ScoringClosureError("scoring import manifest entrypoints are invalid")
-    if manifest.get("autoresearch_entrypoint_modules") != list(
-        AUTORESEARCH_ENTRYPOINT_MODULES
-    ):
-        raise ScoringClosureError("auto-research import manifest entrypoints are invalid")
     if manifest.get("dynamic_import_modules") != list(DYNAMIC_IMPORT_MODULES):
         raise ScoringClosureError("scoring dynamic import manifest roots are invalid")
     role_manifests = manifest.get("role_manifests")

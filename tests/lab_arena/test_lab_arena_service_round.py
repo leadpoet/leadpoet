@@ -161,15 +161,19 @@ class ModelSandbox:
         import os
 
         scoring_run = input_document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION
-        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
-        try:
-            status, _headers, body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": icp["prompt"][:200]}}, 5000)
-            if not scoring_run and status != 200:
-                # A caller-caused provider error makes this model run fail.
-                return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"provider error %d" % status)
-            assert status == 200
-        finally:
-            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        # Production sandboxes are separate processes. This in-process fake
+        # shares os.environ across worker threads, so serialize only the fake
+        # environment switch to prevent one run from using another run's socket.
+        with self.lock:
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                status, _headers, body = shim.dispatch("deepline.execute", {"tool": "exa_search", "payload": {"query": icp["prompt"][:200]}}, 5000)
+                if not scoring_run and status != 200:
+                    # A caller-caused provider error makes this model run fail.
+                    return runtime.fake_result(exit_code=1, output_bytes=None, stderr=b"provider error %d" % status)
+                assert status == 200
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
         if scoring_run:
             # A scoring assignment: the validator's judge sandbox (the pinned scorer image, trusted mode).
             assert runtime_digest == SCORER_IMAGE_DIGEST and spec.extra_environment.get(shim.TRUSTED_SCORER_ENV) == "1" and spec.entry_command == runtime.SCORER_ENTRY_COMMAND

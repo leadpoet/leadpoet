@@ -31,12 +31,6 @@ SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION = (
 SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE = (
     "leadpoet.source_add_credential_ingress.v2"
 )
-OPENROUTER_INGRESS_RECIPIENT_SCHEMA_VERSION = (
-    "leadpoet.openrouter_ingress_recipient.v2"
-)
-OPENROUTER_INGRESS_RECIPIENT_PURPOSE = (
-    "leadpoet.openrouter_credential_ingress.v2"
-)
 KMS_KEY_ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
 MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
@@ -104,7 +98,6 @@ class KMSRecipientV2:
         self._requests = {}  # type: Dict[str, Dict[str, Any]]
         self._job_requests = {}  # type: Dict[str, Dict[str, Any]]
         self._source_add_requests = {}  # type: Dict[str, Dict[str, Any]]
-        self._openrouter_requests = {}  # type: Dict[str, Dict[str, Any]]
         self._provisioned = set()
         self._lock = threading.Lock()
 
@@ -162,7 +155,6 @@ class KMSRecipientV2:
             and normalized_slot not in self._job_slots
             and not source_add_dynamic_job_slot(normalized_slot)
             and normalized_slot != "source_add_ingress"
-            and normalized_slot != "openrouter_ingress"
         ):
             raise KMSRecipientV2Error("credential slot is not measured")
         try:
@@ -302,128 +294,6 @@ class KMSRecipientV2:
             "adapter_ref": adapter_ref,
             "credential_ref": str(request["credential_ref"]),
             "key_ref_hash": str(request["key_ref_hash"]),
-            "credential_value_hash": credential_value_hash(credential),
-            "credential": credential,
-        }
-
-    def openrouter_ingress_recipient_request(
-        self,
-        *,
-        miner_hotkey: str,
-        credential_kind: str,
-    ) -> Dict[str, Any]:
-        """Create a one-use recipient for one miner OpenRouter credential."""
-
-        normalized_miner = str(miner_hotkey or "")
-        normalized_kind = str(credential_kind or "")
-        if not normalized_miner or normalized_kind not in {"runtime", "management"}:
-            raise KMSRecipientV2Error("OpenRouter ingress scope is invalid")
-        slot = (
-            "openrouter"
-            if normalized_kind == "runtime"
-            else "openrouter_management"
-        )
-        boot = dict(self._boot_identity_supplier())
-        public_hash = "sha256:" + hashlib.sha256(self._public_der).hexdigest()
-        claim = {
-            "schema_version": OPENROUTER_INGRESS_RECIPIENT_SCHEMA_VERSION,
-            "purpose": OPENROUTER_INGRESS_RECIPIENT_PURPOSE,
-            "boot_identity_hash": str(boot["boot_identity_hash"]),
-            "miner_hotkey_hash": "sha256:"
-            + hashlib.sha256(normalized_miner.encode("utf-8")).hexdigest(),
-            "credential_kind": normalized_kind,
-            "credential_slot": slot,
-            "recipient_public_key_hash": public_hash,
-            "request_nonce": secrets.token_hex(16),
-        }
-        request_id = sha256_json(claim)
-        user_data = canonical_json(
-            {
-                "schema_version": OPENROUTER_INGRESS_RECIPIENT_SCHEMA_VERSION,
-                "purpose": OPENROUTER_INGRESS_RECIPIENT_PURPOSE,
-                "claim_hash": request_id,
-            }
-        ).encode("utf-8")
-        document = self._attestation_supplier(
-            user_data=user_data,
-            signing_pubkey=self._public_der,
-        )
-        if not isinstance(document, (bytes, bytearray)) or not document:
-            raise KMSRecipientV2Error(
-                "OpenRouter ingress recipient attestation is unavailable"
-            )
-        request = {
-            **claim,
-            "request_id": request_id,
-            "recipient_public_key_der_b64": base64.b64encode(
-                self._public_der
-            ).decode("ascii"),
-            "attestation_document_b64": base64.b64encode(bytes(document)).decode(
-                "ascii"
-            ),
-            "key_encryption_algorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
-        }
-        with self._lock:
-            if len(self._openrouter_requests) >= MAX_JOB_RECIPIENT_REQUESTS:
-                raise KMSRecipientV2Error(
-                    "OpenRouter ingress recipient capacity is full"
-                )
-            self._openrouter_requests[request_id] = {
-                "request": dict(request),
-                "miner_hotkey": normalized_miner,
-                "used": False,
-            }
-        return request
-
-    def unwrap_openrouter_ingress_credential(
-        self,
-        *,
-        request_id: str,
-        ciphertext_b64: str,
-    ) -> Dict[str, str]:
-        normalized_request_id = str(request_id or "").lower()
-        with self._lock:
-            record = self._openrouter_requests.get(normalized_request_id)
-            if record is None:
-                raise KMSRecipientV2Error(
-                    "OpenRouter ingress recipient request was not found"
-                )
-            if record["used"]:
-                raise KMSRecipientV2Error(
-                    "OpenRouter ingress recipient request was already used"
-                )
-            request = dict(record["request"])
-            miner_hotkey = str(record["miner_hotkey"])
-        plaintext = self._unwrap(
-            slot="openrouter_ingress",
-            ciphertext_for_recipient_b64=str(ciphertext_b64 or ""),
-        )
-        try:
-            raw_credential = plaintext.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise KMSRecipientV2Error(
-                "OpenRouter ingress credential is not UTF-8"
-            ) from exc
-        from gateway.research_lab.key_vault import validate_openrouter_key_format
-
-        try:
-            credential = validate_openrouter_key_format(raw_credential)
-        except Exception as exc:
-            raise KMSRecipientV2Error(
-                "OpenRouter ingress credential format is invalid"
-            ) from exc
-        with self._lock:
-            current = self._openrouter_requests.get(normalized_request_id)
-            if current is None or current["used"]:
-                raise KMSRecipientV2Error(
-                    "OpenRouter ingress recipient changed"
-                )
-            current["used"] = True
-        return {
-            "request_id": normalized_request_id,
-            "miner_hotkey": miner_hotkey,
-            "credential_kind": str(request["credential_kind"]),
-            "credential_slot": str(request["credential_slot"]),
             "credential_value_hash": credential_value_hash(credential),
             "credential": credential,
         }

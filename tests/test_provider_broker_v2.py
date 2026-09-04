@@ -2556,10 +2556,8 @@ def test_provider_registry_hash_binds_measured_https_routes():
         "truelist",
     )
     assert set(measured_retry_policy_hashes(HASH)) == set(BUILTIN_PROVIDER_ROUTES)
-    assert set(expected_job_credential_slot_ref_hashes()) == {
-        "egress_proxy",
-        "openrouter_management",
-    }
+    assert set(expected_job_credential_slot_ref_hashes()) == {"egress_proxy"}
+    assert "openrouter_management" not in BUILTIN_PROVIDER_ROUTES
 
 
 def test_provider_registry_hash_rejects_direct_only_policy_tampering():
@@ -3150,47 +3148,6 @@ def test_supabase_service_role_is_injected_only_for_measured_project():
         )
 
 
-def test_routing_budget_sidecar_is_the_only_authless_routing_supabase_call():
-    transport = FakeTransport()
-    broker = _broker(transport)
-    job_id = "routing-dispatch:" + "a" * 32
-    request = _request(
-        logical_operation_id=(
-            f"{job_id}:routing-budget-reservation:" + "b" * 32
-        ),
-        job_id=job_id,
-        purpose="research_lab.routing_provider_evidence.v2",
-        provider_id="supabase",
-        method="POST",
-        url=(
-            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
-            "research_lab_routing_reserve_budget_v3"
-        ),
-        headers={
-            "accept": "application/json",
-            "content-type": "application/json",
-        },
-        body_b64=base64.b64encode(b'{"p_event_key":"safe"}').decode("ascii"),
-        timeout_ms=5_000,
-    )
-    result = broker.execute(request)
-    assert result["terminal_status"] == "authenticated_response"
-    assert len(transport.calls) == 1
-    assert transport.calls[0]["headers"]["Authorization"] == (
-        "Bearer supabase-service-role-secret"
-    )
-
-    for changed in (
-        {**request, "url": request["url"].replace("reserve_budget_v3", "promote_v3")},
-        {**request, "method": "GET"},
-        {**request, "logical_operation_id": "routing-budget-reservation:forged"},
-    ):
-        rejected_transport = FakeTransport()
-        with pytest.raises(ProviderBrokerV2Error, match="authorization"):
-            _broker(rejected_transport).execute(changed)
-        assert rejected_transport.calls == []
-
-
 def test_kms_unwrapped_slots_are_provisioned_individually_and_immutably():
     credentials = {
         "openrouter": "openrouter-secret",
@@ -3618,40 +3575,3 @@ def test_job_scoped_proxy_rejects_invalid_or_incomplete_routes(proxy_url):
 
     with pytest.raises(ProviderBrokerV2Error, match="proxy"):
         broker.execute(_request())
-
-
-def test_openrouter_management_route_requires_job_scoped_management_key():
-    transport = FakeTransport()
-    broker = _broker(transport)
-    request = _request(
-        provider_id="openrouter_management",
-        method="GET",
-        url="https://openrouter.ai/api/v1/workspaces",
-        logical_operation_id="management-operation",
-        body_b64=base64.b64encode(b"").decode("ascii"),
-    )
-    with pytest.raises(ProviderBrokerV2Error, match="credential slot"):
-        broker.execute(request)
-
-    management_key = "miner-management-key"
-    broker.provision_job_credential(
-        job_id="job-1",
-        slot="openrouter_management",
-        credential=management_key,
-        credential_value_hash_expected=credential_value_hash(management_key),
-    )
-    broker.execute(request)
-    assert transport.calls[-1]["headers"]["Authorization"] == (
-        "Bearer " + management_key
-    )
-
-    with pytest.raises(ProviderBrokerV2Error, match="method"):
-        broker.execute(
-            _request(
-                provider_id="openrouter_management",
-                method="POST",
-                url="https://openrouter.ai/api/v1/workspaces",
-                logical_operation_id="management-post",
-                body_b64=base64.b64encode(b"{}").decode("ascii"),
-            )
-        )

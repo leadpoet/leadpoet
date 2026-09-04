@@ -280,7 +280,7 @@ def test_probe_rejects_gateway_and_release_sha_mismatches():
     "mutation",
     ["missing", "extra", "duplicate", "wrong_service_role", "wrong_build_count"],
 )
-def test_probe_rejects_non_exact_four_by_six_release_inventory(mutation):
+def test_probe_rejects_non_exact_release_role_inventory(mutation):
     identity_cache = _release_identity_cache()
     entries = identity_cache["entries"]
     if mutation == "missing":
@@ -1642,14 +1642,14 @@ def _load_locked(**overrides):
     )
 
 
-def test_immutable_release_loader_succeeds_with_exact_four_by_six_identities():
+def test_immutable_release_loader_succeeds_with_exact_release_identities():
     cache, calls = _load_locked()
     assert calls[0][1] == "HEAD"
     assert calls[1][1] == "GET"
     assert {item["physical_role"] for item in cache["entries"]} == set(
         probe._EXPECTED_RELEASE_IDENTITY_ROLES
     )
-    assert len(cache["entries"]) == 4
+    assert len(cache["entries"]) == len(probe._EXPECTED_RELEASE_IDENTITY_ROLES)
     assert {item["verified_build_count"] for item in cache["entries"]} == {6}
     assert {item["commit_sha"] for item in cache["entries"]} == {CANDIDATE}
 

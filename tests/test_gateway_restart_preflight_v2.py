@@ -812,6 +812,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/181-lab-arena-source-submissions.sql",
         "scripts/182-lab-arena-source-execution.sql",
         "scripts/183-lab-arena-miner-reward-basis.sql",
+        "scripts/184-lab-arena-scoring-failure-isolation.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 
@@ -1261,6 +1262,10 @@ def test_required_supabase_v2_schema_covers_retained_and_arena_contracts() -> No
         (
             "scripts/183-lab-arena-miner-reward-basis.sql",
             "lab_arena_activate_reward",
+        ),
+        (
+            "scripts/184-lab-arena-scoring-failure-isolation.sql",
+            "lab_arena_schema_version_v1",
         ),
     }.issubset(rpc_contract)
 

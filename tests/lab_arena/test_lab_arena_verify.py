@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from leadpoet_verifier.research_evaluation import compute_evaluation_aggregates
-from research_lab.eval import evaluator
+from qualification.scoring import competition as evaluator
 
 from lab_arena import contracts, scoring, verify
 from lab_arena.contracts import ArenaContractError

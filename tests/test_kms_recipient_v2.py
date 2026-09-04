@@ -569,25 +569,23 @@ def test_job_only_slot_does_not_become_a_boot_global_credential():
             "openrouter": credential_reference_hash("provider-secret")
         },
         expected_job_slot_ref_hashes={
-            "openrouter_management": sha256_json(
-                {"slot": "openrouter_management"}
-            )
+            "egress_proxy": sha256_json({"slot": "egress_proxy"})
         },
         attestation_supplier=lambda **_kwargs: b"nitro-attestation",
     )
-    secret = "management-key"
+    secret = "https://proxy-user:proxy-key@proxy.example.com:443"
     request = manager.job_recipient_request(
-        job_id="autoresearch-v2:job-2",
-        slot="openrouter_management",
+        job_id="qualification-v2:job-2",
+        slot="egress_proxy",
         credential_value_hash_expected=credential_value_hash(secret),
-        key_ref_hash=sha256_json({"key_ref": "management"}),
+        key_ref_hash=sha256_json({"key_ref": "egress-proxy"}),
     )
     assert manager.unwrap_job_credential(
         request_id=request["request_id"],
         ciphertext_for_recipient_b64=_encrypt(request, secret),
-    )["credential_slot"] == "openrouter_management"
+    )["credential_slot"] == "egress_proxy"
     with pytest.raises(KMSRecipientV2Error, match="not measured"):
-        manager.recipient_request("openrouter_management")
+        manager.recipient_request("egress_proxy")
 
 
 def test_dynamic_source_add_slot_is_job_only_and_hash_bound():

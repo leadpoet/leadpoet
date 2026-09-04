@@ -560,6 +560,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "lab_arena_activate_reward",
     ),
     (
+        "scripts/184-lab-arena-scoring-failure-isolation.sql",
+        "lab_arena_schema_version_v1",
+    ),
+    (
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "persist_research_lab_chain_realized_settlement_v1",
     ),

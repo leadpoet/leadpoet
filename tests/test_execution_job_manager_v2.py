@@ -874,58 +874,43 @@ def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
         )
 
 
-def test_large_dev_evaluation_input_is_scoped_to_measured_candidate_jobs():
-    production_shaped_size = 101 * 1024 * 1024
-    allowed_scopes = {
-        "run_dev_replay_v2": "research_lab.candidate_test.v2",
-        "run_dev_hybrid_v2": "research_lab.candidate_hybrid_test.v2",
-    }
+@pytest.mark.parametrize(
+    "operation,purpose",
+    [
+        ("run_dev_replay_v2", "research_lab.candidate_test.v2"),
+        ("run_dev_hybrid_v2", "research_lab.candidate_hybrid_test.v2"),
+    ],
+)
+def test_retired_dev_evaluation_operations_have_the_ordinary_input_limit(
+    operation,
+    purpose,
+):
+    operations = {operation: {purpose}}
+    normalized = job_manager_v2._manifest(
+        _manifest(
+            b"{}",
+            operation=operation,
+            purpose=purpose,
+            payload_size_bytes=job_manager_v2.MAX_INPUT_BYTES,
+        ),
+        role="gateway_scoring",
+        operations=operations,
+    )
+    assert normalized["payload_size_bytes"] == job_manager_v2.MAX_INPUT_BYTES
 
-    for operation, purpose in allowed_scopes.items():
-        normalized = job_manager_v2._manifest(
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
             _manifest(
                 b"{}",
                 operation=operation,
                 purpose=purpose,
-                payload_size_bytes=production_shaped_size,
+                payload_size_bytes=job_manager_v2.MAX_INPUT_BYTES + 1,
             ),
             role="gateway_scoring",
-            operations={operation: {purpose}},
-        )
-        assert normalized["payload_size_bytes"] == production_shaped_size
-
-    with pytest.raises(
-        ExecutionJobV2Error,
-        match="payload size is outside limit",
-    ):
-        job_manager_v2._manifest(
-            _manifest(
-                b"{}",
-                operation="score",
-                purpose="research_lab.candidate_score.v2",
-                payload_size_bytes=production_shaped_size,
-            ),
-            role="gateway_scoring",
-            operations={"score": {"research_lab.candidate_score.v2"}},
-        )
-
-    with pytest.raises(
-        ExecutionJobV2Error,
-        match="payload size is outside limit",
-    ):
-        job_manager_v2._manifest(
-            _manifest(
-                b"{}",
-                operation="run_dev_replay_v2",
-                purpose="research_lab.candidate_test.v2",
-                payload_size_bytes=(
-                    job_manager_v2.MAX_DEV_EVALUATION_INPUT_BYTES + 1
-                ),
-            ),
-            role="gateway_scoring",
-            operations={
-                "run_dev_replay_v2": {"research_lab.candidate_test.v2"}
-            },
+            operations=operations,
         )
 
 
@@ -1195,102 +1180,6 @@ def test_stage_receipts_form_a_measured_chain_before_root_receipt():
     assert stage["purpose"] == "research_lab.baseline_score.v2"
     assert root["parent_receipt_hashes"] == [stage["receipt_hash"]]
     assert stage["parent_receipt_hashes"] == []
-
-
-def test_routing_authorization_manager_accepts_and_preserves_semantic_parent_order(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        job_manager_v2,
-        "validate_receipt_graphs",
-        lambda *args, **kwargs: None,
-    )
-    parents = [HASH_B, HASH]
-    observed = []
-
-    def _executor(_operation, payload, context):
-        observed.append((payload, context.parent_receipt_hashes))
-        return {"accepted": True}
-
-    manager, _ = _manager(
-        _executor,
-        operations={
-            "attest_routing_provider_call_v2": {
-                "research_lab.routing_provider_evidence.v2"
-            }
-        },
-    )
-    payload = json.dumps(
-        {
-            "input": 3,
-            "parent_receipt_hashes": parents,
-            PARENT_RECEIPT_GRAPHS_FIELD: [
-                {
-                    "root_receipt_hash": HASH_B,
-                    "receipts": [{"receipt_hash": HASH_B}],
-                },
-                {
-                    "root_receipt_hash": HASH,
-                    "receipts": [{"receipt_hash": HASH}],
-                },
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    manifest = _manifest(
-        payload,
-        operation="attest_routing_provider_call_v2",
-        purpose="research_lab.routing_provider_evidence.v2",
-        parent_receipt_hashes=parents,
-    )
-
-    assert _run(manager, payload, manifest)["state"] == "succeeded"
-    assert observed == [
-        (
-            {"input": 3},
-            tuple(parents),
-        )
-    ]
-    assert manager.receipt("score-job-1")["parent_receipt_hashes"] == parents
-
-
-@pytest.mark.parametrize(
-    "payload_parents, manifest_parents",
-    [
-        (None, [HASH_B, HASH]),
-        ([HASH, HASH_B], [HASH_B, HASH]),
-        ([HASH_B, HASH], [HASH, HASH_B]),
-    ],
-)
-def test_routing_authorization_manager_rejects_missing_or_substituted_parent_order_before_executor(
-    payload_parents,
-    manifest_parents,
-):
-    executed = []
-    manager, _ = _manager(
-        lambda *_args: executed.append(True) or {"accepted": True},
-        operations={
-            "attest_routing_provider_call_v2": {
-                "research_lab.routing_provider_evidence.v2"
-            }
-        },
-    )
-    payload_doc = {"input": 3}
-    if payload_parents is not None:
-        payload_doc["parent_receipt_hashes"] = payload_parents
-    payload = json.dumps(
-        payload_doc, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    manifest = _manifest(
-        payload,
-        operation="attest_routing_provider_call_v2",
-        purpose="research_lab.routing_provider_evidence.v2",
-        parent_receipt_hashes=manifest_parents,
-    )
-
-    assert _run(manager, payload, manifest)["state"] == "failed"
-    assert executed == []
 
 
 def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():

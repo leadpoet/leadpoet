@@ -94,15 +94,15 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
     assert policy["env_bindings"]["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"] == "10" and policy["max_scored_companies"] == 0
     environ = {}
     credentials = {name: "secret-" + name for name in scoring.CREDENTIAL_ENV_NAMES}
-    applied = scoring.apply_policy_to_environment(policy, environ=environ, cache_dir="/tmp/cache", credentials=credentials)
-    assert applied == policy["scoring_adapter_version"] and environ["RESEARCH_LAB_SCORING_CACHE_DIR"] == "/tmp/cache"
+    applied = scoring.apply_policy_to_environment(
+        policy, environ=environ, credentials=credentials
+    )
+    assert applied == policy["scoring_adapter_version"]
     assert environ["RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE"] == "0" and environ["OPENROUTER_API_KEY"] == credentials["OPENROUTER_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, cache_dir="/tmp/cache", credentials=credentials)
+        scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, credentials=credentials)
     with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={}, cache_dir="", credentials=credentials)
-    with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={}, cache_dir="/tmp/cache", credentials=dict(credentials, EXA_API_KEY=""))
+        scoring.apply_policy_to_environment(policy, environ={}, credentials=dict(credentials, EXA_API_KEY=""))
 
 
 def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_rows():

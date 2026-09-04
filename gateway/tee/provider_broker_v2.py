@@ -293,16 +293,6 @@ _EGRESS_PROXY_SLOT_REF_HASH = sha256_json(
 )
 
 
-def _job_credential_slot_ref_hash(slot: str) -> str:
-    return sha256_json(
-        {
-            "schema_version": "leadpoet.job_credential_slot.v2",
-            "credential_slot": str(slot),
-            "scope": "job",
-        }
-    )
-
-
 @dataclass(frozen=True)
 class ProviderRouteV2:
     provider_id: str
@@ -330,21 +320,6 @@ BUILTIN_PROVIDER_ROUTES = {
         credential_location="header",
         credential_name="Authorization",
         credential_prefix="Bearer ",
-    ),
-    "openrouter_management": ProviderRouteV2(
-        provider_id="openrouter_management",
-        hosts=("openrouter.ai",),
-        path_prefixes=(
-            "/api/v1/generation",
-            "/api/v1/workspaces",
-            "/api/v1/keys",
-        ),
-        credential_slot="openrouter_management",
-        credential_location="header",
-        credential_name="Authorization",
-        credential_prefix="Bearer ",
-        allowed_methods=("GET", "PATCH"),
-        job_scoped_only=True,
     ),
     "exa": ProviderRouteV2(
         provider_id="exa",
@@ -578,12 +553,7 @@ def expected_provider_credential_slots() -> Tuple[str, ...]:
 
 
 def expected_job_credential_slot_ref_hashes() -> Dict[str, str]:
-    return {
-        EGRESS_PROXY_CREDENTIAL_SLOT: _EGRESS_PROXY_SLOT_REF_HASH,
-        "openrouter_management": _job_credential_slot_ref_hash(
-            "openrouter_management"
-        ),
-    }
+    return {EGRESS_PROXY_CREDENTIAL_SLOT: _EGRESS_PROXY_SLOT_REF_HASH}
 
 
 def measured_retry_policy_hashes(

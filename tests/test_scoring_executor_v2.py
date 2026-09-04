@@ -5,11 +5,6 @@ import httpx
 import pytest
 
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-from gateway.tee.scoring_executor import (
-    OP_BENCHMARK_ICP_SCORE,
-    OP_QUALIFICATION_COMPANY_SCORES,
-    execute_scoring_operation,
-)
 from gateway.tee.scoring_executor_v2 import (
     OP_PROVIDER_PREFLIGHT_V2,
     OP_SOURCE_ADD_LEG2_JUDGE_V2,
@@ -101,123 +96,24 @@ def test_scoring_executor_installs_openrouter_broker_sentinels(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_company_scoring_preserves_handled_signed_transport_failure(
-    monkeypatch,
-):
-    from research_lab.eval import evaluator
-
-    class HandledEvidenceFailureScorer:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def score_with_breakdowns(
-            self,
-            _companies,
-            _icp,
-            _is_reference_model,
-        ):
-            try:
-                async with httpx.AsyncClient() as client:
-                    await client.get("https://example.com/evidence")
-            except httpx.TransportError:
-                return [
-                    {
-                        "final_score": 0.0,
-                        "failure_reason": (
-                            "Company verification failed: website unreachable: "
-                            "connection reset"
-                        ),
-                    }
-                ]
-            raise AssertionError("transport failure was not delivered to the scorer")
-
-    monkeypatch.setattr(
-        evaluator,
-        "QualificationStyleCompanyScorer",
-        HandledEvidenceFailureScorer,
-    )
-    context = ExecutionContextV2(
-        job_id="company-score-handled-transport",
-        purpose="research_lab.company_score.v2",
-        epoch_id=1,
-    )
+async def test_scoring_executor_rejects_retired_company_score_operation():
     executor = ScoringExecutorV2(
-        provider_execute=_transport_failure_result,
-        retry_policy_hashes={"public_web": HASH},
+        provider_execute=lambda _request: pytest.fail("no request expected"),
+        retry_policy_hashes={"openrouter": HASH},
     )
     try:
-        result = await executor(
-            OP_QUALIFICATION_COMPANY_SCORES,
-            {
-                "companies": [{"company_name": "Example"}],
-                "icp": {"industry": "Software"},
-                "is_reference_model": True,
-                "scoring_adapter_version": "qualification-company-scorer:v1",
-                "provider_execution_mode": "live_enclave",
-            },
-            context,
-        )
-    finally:
-        executor.close()
-
-    assert result.output["scores"] == [0.0]
-    assert result.output["breakdowns"][0]["failure_reason"] == (
-        "Company verification failed: website unreachable: connection reset"
-    )
-    assert evaluator.scorer_breakdown_has_retryable_infrastructure_failure(
-        result.output["breakdowns"][0]
-    )
-    assert len(context.transport_attempts) == 1
-    assert context.transport_attempts[0]["terminal_status"] == (
-        "transport_failure"
-    )
-
-
-@pytest.mark.asyncio
-async def test_non_company_scoring_still_rejects_handled_transport_failure(
-    monkeypatch,
-):
-    from gateway.tee import scoring_executor_v2
-
-    async def handled_transport_failure(_operation, _payload):
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.get("https://example.com/evidence")
-        except httpx.TransportError:
-            return {"score": 0.0}
-        raise AssertionError("transport failure was not delivered to the operation")
-
-    monkeypatch.setattr(
-        scoring_executor_v2,
-        "execute_scoring_operation",
-        handled_transport_failure,
-    )
-    context = ExecutionContextV2(
-        job_id="benchmark-score-handled-transport",
-        purpose="research_lab.benchmark.v2",
-        epoch_id=1,
-    )
-    executor = ScoringExecutorV2(
-        provider_execute=_transport_failure_result,
-        retry_policy_hashes={"public_web": HASH},
-    )
-    try:
-        with pytest.raises(
-            ProviderClientV2Error,
-            match="provider transport did not authenticate",
-        ):
+        with pytest.raises(ValueError, match="unsupported V2 scoring operation"):
             await executor(
-                OP_BENCHMARK_ICP_SCORE,
-                {"scores": [0.0]},
-                context,
+                "qualification_company_scores",
+                {},
+                ExecutionContextV2(
+                    job_id="retired-company-score",
+                    purpose="research_lab.company_score.v2",
+                    epoch_id=1,
+                ),
             )
     finally:
         executor.close()
-
-    assert len(context.transport_attempts) == 1
-    assert context.transport_attempts[0]["terminal_status"] == (
-        "transport_failure"
-    )
 
 
 @pytest.mark.asyncio
@@ -587,107 +483,6 @@ async def test_v2_preflight_rejects_invalid_measurement_identity(
             )
     finally:
         executor.close()
-
-
-@pytest.mark.asyncio
-async def test_v2_adapter_calls_exact_existing_pure_scoring_function():
-    payload = {"scores": [100.0, 80.0, 60.0, 40.0, 20.0, 1.0]}
-    expected = await execute_scoring_operation(OP_BENCHMARK_ICP_SCORE, payload)
-    executor = ScoringExecutorV2(
-        provider_execute=lambda _request: {},
-        retry_policy_hashes={"public_web": HASH},
-    )
-    try:
-        result = await executor(
-            OP_BENCHMARK_ICP_SCORE,
-            payload,
-            ExecutionContextV2(
-                job_id="score-job-1",
-                purpose="research_lab.benchmark.v2",
-                epoch_id=24000,
-            ),
-        )
-    finally:
-        executor.close()
-    assert dict(result.output) == dict(expected)
-
-
-@pytest.mark.asyncio
-async def test_v2_adapter_routes_provider_call_and_collects_terminal(monkeypatch):
-    observed = []
-
-    def _provider_execute(request):
-        observed.append(request)
-        body = b'{"ok":true}'
-        attempt = build_transport_attempt(
-            request_id="1" * 32,
-            logical_operation_id=request["logical_operation_id"],
-            job_id=request["job_id"],
-            purpose=request["purpose"],
-            provider_id=request["provider_id"],
-            attempt_number=request["attempt_number"],
-            method=request["method"],
-            destination_host="openrouter.ai",
-            destination_port=443,
-            path_hash=HASH,
-            nonsecret_headers_hash=HASH,
-            body_hash=HASH,
-            credential_ref_hash=HASH,
-            retry_policy_hash=HASH,
-            timeout_ms=request["timeout_ms"],
-            started_at="2026-07-10T20:00:00Z",
-            terminal_status="authenticated_response",
-            http_status=200,
-            response_hash=HASH,
-            request_artifact_hash=HASH,
-            response_artifact_hash=HASH,
-            tls_peer_chain_hash=HASH,
-            tls_protocol="TLSv1.3",
-            failure_code=None,
-            completed_at="2026-07-10T20:00:00Z",
-        )
-        return {
-            "terminal_status": "authenticated_response",
-            "http_status": 200,
-            "headers": {"content-type": "application/json"},
-            "body_b64": base64.b64encode(body).decode("ascii"),
-            "encrypted_request_artifact_id": HASH,
-            "encrypted_artifact_id": HASH,
-            "transport_attempt": attempt,
-        }
-
-    async def _existing_scoring(_operation, _payload):
-        async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                json={"model": "model-1"},
-            )
-        return {"provider_result": response.json()}
-
-    monkeypatch.setattr(
-        "gateway.tee.scoring_executor_v2.execute_scoring_operation",
-        _existing_scoring,
-    )
-    context = ExecutionContextV2(
-        job_id="score-job-1",
-        purpose="research_lab.candidate_score.v2",
-        epoch_id=24000,
-    )
-    executor = ScoringExecutorV2(
-        provider_execute=_provider_execute,
-        retry_policy_hashes={"openrouter": HASH},
-    )
-    try:
-        result = await executor(
-            "qualification_company_scores",
-            {},
-            context,
-        )
-    finally:
-        executor.close()
-    assert result.output == {"provider_result": {"ok": True}}
-    assert len(observed) == 1
-    assert len(context.transport_attempts) == 1
 
 
 @pytest.mark.asyncio

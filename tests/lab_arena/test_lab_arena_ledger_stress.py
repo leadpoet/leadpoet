@@ -11,13 +11,13 @@ from bittensor_wallet import Keypair
 
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token, new_lease_token
-from tests.lab_arena.lab_arena_pg_harness import LAB_ARENA_MIGRATION, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, open_round, sha
 
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration((LAB_ARENA_MIGRATION,))
+    yield from database_with_lab_arena_migration()
 
 
 def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock(database):

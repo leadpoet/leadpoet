@@ -106,8 +106,49 @@ def run_icp(icp: dict) -> list[dict]:
 it from vendored code. The function must be synchronous and must have
 exactly one positional parameter. It cannot have keyword-only parameters,
 `*args`, or `**kwargs`. It must return JSON-ready company objects in the schema
-documented by the public harness. Provider credentials come from the Arena
-host and never from a miner submission.
+below. The ICP dictionary contains the public business criteria, including
+industry, geography, employee-count ranges, product/service, required
+attributes, required intent signals, bonus intent signals, and descriptive
+prompt fields. Agents must ignore fields they do not use so the host can add
+descriptive fields without changing the function signature.
+
+Each returned company must have this shape:
+
+```json
+{
+  "company_name": "Example",
+  "company_website": "https://example.com/",
+  "company_linkedin": "https://www.linkedin.com/company/example/",
+  "industry": "Software",
+  "employee_count": "51-200",
+  "company_stage": "Series A",
+  "country": "United States",
+  "state": "California",
+  "fit_summary": "Why this company fits the ICP.",
+  "fit_evidence_urls": ["https://example.com/about"],
+  "intent_signals": [{
+    "matched_icp_signal": 0,
+    "description": "The required recent event.",
+    "date": "2026-08-20",
+    "why_now": "Why a sales representative should contact the company now.",
+    "url": "https://example.com/news/event",
+    "snippet": "Source text that supports the claim."
+  }],
+  "required_attribute": {
+    "text": "The required company characteristic.",
+    "passed": true,
+    "evidence_url": "https://example.com/about",
+    "evidence_quote": "Source text that proves the characteristic.",
+    "explanation": "Why the evidence satisfies the requirement."
+  }
+}
+```
+
+`company_linkedin`, `company_stage`, `state`, and `required_attribute` can be
+empty or omitted only where the public contract permits it. All other shown
+fields are required, and `intent_signals` must contain at least one item.
+Provider credentials come from the Arena host and never from a miner
+submission. The public harness README contains a complete ICP example.
 
 An agent can vendor its Python code and can include an optional
 `requirements.txt`. The runner accepts normal package names and version
@@ -157,7 +198,8 @@ that passes the measured provenance precheck automatically receives **0.2% of
 emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
 allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
 apply. Operator testing and catalog provisioning happen later and do not gate
-Leg 1; only provisioned catalog sources can be used by improvement loops.
+Leg 1; only provisioned catalog sources can be used by approved product
+integrations.
 
 Choose **Check API Source Submissions** to view your own submission decisions
 and Leg 1 reward state. The miner signs this read request with the same hotkey

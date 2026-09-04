@@ -11,14 +11,6 @@ import time
 import pytest
 
 from research_lab import docker_operation_lock_v2 as docker_lock
-from research_lab.eval import private_runtime
-
-
-IMAGE_REF = "example.invalid/model@sha256:" + ("a" * 64)
-ECR_IMAGE_REF = (
-    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model"
-    "@sha256:" + ("b" * 64)
-)
 
 
 @pytest.mark.parametrize("timeout_seconds", (0, -1, float("nan"), float("inf")))
@@ -32,60 +24,10 @@ def test_shared_lifecycle_rejects_non_positive_or_non_finite_timeout(
         str(tmp_path / "docker-operation.lock"),
     )
     with pytest.raises(docker_lock.DockerOperationLockError, match="positive"):
-        with docker_lock.shared_docker_operation_lock(timeout_seconds=timeout_seconds):
+        with docker_lock.shared_docker_operation_lock(
+            timeout_seconds=timeout_seconds
+        ):
             pass
-
-
-def test_parallel_private_model_lifecycles_hold_shared_access(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock_file = tmp_path / "docker-operation.lock"
-    monkeypatch.setenv("LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_file))
-    entered = threading.Barrier(3)
-    release = threading.Event()
-    errors: list[BaseException] = []
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[-1:] == ["info"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        assert command[:2] == ["docker", "run"]
-        entered.wait(timeout=3)
-        assert release.wait(timeout=5)
-        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
-
-    monkeypatch.setattr(private_runtime.subprocess, "run", run)
-    spec = private_runtime.DockerPrivateModelSpec(
-        image_digest=IMAGE_REF,
-        timeout_seconds=5,
-        pull_before_run=False,
-    )
-
-    def invoke() -> None:
-        try:
-            private_runtime.DockerPrivateModelRunner(spec)._run_json(
-                bootstrap="print([])",
-                argv=("research_lab_adapter", "run_icp"),
-                stdin_payload={"icp": {}, "context": {}},
-            )
-        except BaseException as exc:  # pragma: no cover - asserted below
-            errors.append(exc)
-
-    threads = [threading.Thread(target=invoke, daemon=True) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    entered.wait(timeout=3)
-    exclusive_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
-    with pytest.raises(BlockingIOError):
-        fcntl.flock(exclusive_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    release.set()
-    for thread in threads:
-        thread.join(timeout=3)
-        assert thread.is_alive() is False
-    assert errors == []
-    fcntl.flock(exclusive_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    fcntl.flock(exclusive_fd, fcntl.LOCK_UN)
-    os.close(exclusive_fd)
 
 
 def test_queued_writer_turnstile_blocks_late_shared_reader(
@@ -206,192 +148,9 @@ async def test_cancelled_to_thread_keeps_shared_lock_until_worker_exits(
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
-                pytest.fail("worker thread did not release its shared lifecycle lock")
+                pytest.fail(
+                    "worker thread did not release its shared lifecycle lock"
+                )
             await asyncio.sleep(0.01)
     fcntl.flock(exclusive_fd, fcntl.LOCK_UN)
     os.close(exclusive_fd)
-
-
-def test_private_model_daemon_readiness_failure_is_bounded_and_retryable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
-        str(tmp_path / "docker-operation.lock"),
-    )
-    monkeypatch.setenv("LEADPOET_DOCKER_DAEMON_READY_TIMEOUT_SECONDS", "1")
-    monkeypatch.setattr(docker_lock, "DOCKER_DAEMON_READY_POLL_SECONDS", 0.0)
-    monkeypatch.setattr(
-        private_runtime.subprocess,
-        "run",
-        lambda command, **_kwargs: subprocess.CompletedProcess(
-            command, 1, stdout="", stderr="daemon unavailable"
-        ),
-    )
-    runner = private_runtime.DockerPrivateModelRunner(
-        private_runtime.DockerPrivateModelSpec(
-            image_digest=IMAGE_REF,
-            timeout_seconds=2,
-            pull_before_run=False,
-        )
-    )
-    started = time.monotonic()
-    with pytest.raises(
-        private_runtime.PrivateModelRuntimeError,
-        match="Docker daemon did not become ready",
-    ):
-        runner._run_json(
-            bootstrap="print([])",
-            argv=("research_lab_adapter", "run_icp"),
-            stdin_payload={"icp": {}, "context": {}},
-        )
-    assert time.monotonic() - started < 2
-
-
-def test_private_model_pull_refreshes_expired_ecr_auth_ephemerally(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
-        str(tmp_path / "docker-operation.lock"),
-    )
-    calls: list[tuple[list[str], dict[str, object]]] = []
-    auth_config_dirs: list[Path] = []
-
-    def run(
-        command: list[str],
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append((list(command), dict(kwargs)))
-        if command[-1:] == ["info"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[:2] == ["docker", "pull"]:
-            return subprocess.CompletedProcess(
-                command,
-                1,
-                stdout="",
-                stderr="denied: Your authorization token has expired",
-            )
-        if command[:4] == ["aws", "ecr", "get-login-password", "--region"]:
-            assert command[4] == "us-east-1"
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="ephemeral-password\n",
-                stderr="",
-            )
-        if command[0:2] == ["docker", "--config"]:
-            config_dir = Path(command[2])
-            auth_config_dirs.append(config_dir)
-            assert config_dir.is_dir()
-            if command[3] == "login":
-                assert kwargs.get("input") == "ephemeral-password\n"
-                return subprocess.CompletedProcess(
-                    command, 0, stdout="Login Succeeded", stderr=""
-                )
-            assert command[3] == "pull"
-            assert command[-1] == ECR_IMAGE_REF
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        raise AssertionError(command)
-
-    monkeypatch.setattr(private_runtime.subprocess, "run", run)
-    private_runtime.DockerPrivateModelRunner(
-        private_runtime.DockerPrivateModelSpec(
-            image_digest=ECR_IMAGE_REF,
-            timeout_seconds=5,
-        )
-    )
-
-    assert [call[0][0] for call in calls] == [
-        "docker",
-        "docker",
-        "aws",
-        "docker",
-        "docker",
-    ]
-    assert len(set(auth_config_dirs)) == 1
-    assert auth_config_dirs[0].exists() is False
-    assert all("ephemeral-password" not in " ".join(call[0]) for call in calls)
-
-
-def test_private_model_pull_does_not_refresh_unrecognized_or_non_ecr_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
-        str(tmp_path / "docker-operation.lock"),
-    )
-    calls: list[list[str]] = []
-
-    def run(
-        command: list[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        calls.append(list(command))
-        if command[-1:] == ["info"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        return subprocess.CompletedProcess(
-            command,
-            1,
-            stdout="",
-            stderr="manifest digest mismatch",
-        )
-
-    monkeypatch.setattr(private_runtime.subprocess, "run", run)
-    with pytest.raises(
-        private_runtime.PrivateModelRuntimeError,
-        match="docker pull failed with code 1",
-    ):
-        private_runtime.DockerPrivateModelRunner(
-            private_runtime.DockerPrivateModelSpec(
-                image_digest=ECR_IMAGE_REF,
-                timeout_seconds=5,
-            )
-        )
-    assert [command[0] for command in calls] == ["docker", "docker"]
-
-
-def test_private_model_timeout_removes_named_container_before_unlock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock_file = tmp_path / "docker-operation.lock"
-    monkeypatch.setenv("LEADPOET_DOCKER_OPERATION_LOCK_FILE", str(lock_file))
-    removed: list[str] = []
-
-    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[-1:] == ["info"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if command[1:3] == ["rm", "-f"]:
-            exclusive_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                with pytest.raises(BlockingIOError):
-                    fcntl.flock(exclusive_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            finally:
-                os.close(exclusive_fd)
-            removed.append(command[-1])
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        raise subprocess.TimeoutExpired(command, timeout=kwargs.get("timeout", 1))
-
-    monkeypatch.setattr(private_runtime.subprocess, "run", run)
-    runner = private_runtime.DockerPrivateModelRunner(
-        private_runtime.DockerPrivateModelSpec(
-            image_digest=IMAGE_REF,
-            timeout_seconds=2,
-            pull_before_run=False,
-        )
-    )
-    with pytest.raises(
-        private_runtime.PrivateModelRuntimeError,
-        match="adapter timed out",
-    ):
-        runner._run_json(
-            bootstrap="print([])",
-            argv=("research_lab_adapter", "run_icp"),
-            stdin_payload={"icp": {}, "context": {}},
-        )
-    assert len(removed) == 1
-    assert removed[0].startswith("leadpoet-private-model-")

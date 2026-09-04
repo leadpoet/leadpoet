@@ -53,64 +53,6 @@ def test_miner_maintenance_protected_inventory_is_complete():
         )
 
 
-def test_sourcing_model_profile_authority_is_protected():
-    protected = set(
-        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
-    )
-    assert {
-        "REVIEWED_CONSUMER_SNAPSHOT_SPECS",
-        "REVIEWED_CONSUMER_ALTERNATE_SNAPSHOT_SPECS",
-        "_reviewed_consumer_snapshot_from_spec",
-        "reviewed_consumer_snapshots",
-        "reviewed_consumer_profiles",
-    } <= protected
-
-
-def test_qualification_branch_control_authority_is_protected():
-    protected = set(
-        PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"]
-    )
-    assert {
-        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_POLICY_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_EXTENSION_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_SCHEMA_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_FAILURE_PROOF_FIELDS_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MATCH_MODES_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_MAX_BRANCH_NUMBER_V1",
-        "QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_REASON_V1",
-        "_QUALIFICATION_OUTCOME_BRANCH_CONTROL_TERMINAL_POLICY_V1",
-        "_qualification_outcome_sha256",
-        "validate_qualification_branch_control_failure_v1",
-        "validate_qualification_route_completion_receipt_v1",
-        "validate_qualification_outcome_envelope_v2",
-    } <= protected
-
-
-def test_typed_dispatch_custody_v3_authority_is_protected():
-    contract_symbols = set(
-        PROTECTED_SYMBOLS["research_lab/sourcing_model_contract_check.py"]
-    )
-    assert {
-        "CONTRACT_V68_PATH",
-        "PARITY_FIXTURE_V28_PATH",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_ID",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_CONTRACT_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_PARITY_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_METADATA_SHA256",
-        "ADDITIVE_DISPATCH_CUSTODY_V3_ROUTING_COMPILER_VERSION",
-        "_same_json_literal",
-        "approved_typed_dispatch_custody_v3_metadata_v1",
-        "validate_typed_dispatch_custody_v3_metadata_v1",
-        "validate_typed_dispatch_custody_v3_runtime_metadata_v1",
-        "_typed_dispatch_custody_v3_requested",
-        "_merge_typed_dispatch_policy",
-        "_typed_dispatch_metadata_violations",
-    } <= contract_symbols
-    assert "EXPECTED_SOURCING_ADAPTER_VERSIONS" in PROTECTED_SYMBOLS[
-        "research_lab/eval/private_runtime.py"
-    ]
-
-
 def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
@@ -160,18 +102,7 @@ def test_committed_protected_workflow_manifest_matches_source(tmp_path: Path):
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 
-def test_rebenchmark_runtime_retry_reconciliation_is_protected():
-    assert {
-        "reconcile_gateway_rebenchmark_runtime_environment",
-        "reconcile_gateway_rebenchmark_runtime_environment_file",
-    } <= set(
-        PROTECTED_SYMBOLS[
-            "gateway/tee/update_gateway_rebenchmark_retry_secret.py"
-        ]
-    )
-
-
-def test_shared_docker_host_veto_and_snapshot_lifecycle_are_protected():
+def test_shared_docker_host_veto_and_source_add_lifecycle_are_protected():
     assert {
         "ATTESTED_RUNTIME_DIR",
         "ATTESTED_RUNTIME_PACKAGES",
@@ -294,19 +225,12 @@ def test_external_protected_source_staging_rejects_mismatched_existing_file(
 def test_scoring_receipt_failure_policy_is_protected():
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
-        "_DEV_EVALUATION_JOB_SCOPES",
         "_job_input_limit_bytes",
         "ExecutionContextV2.record_transport",
-        "MAX_DEV_EVALUATION_INPUT_BYTES",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/execution_job_manager_v2.py"])
     assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
         "gateway/research_lab/attested_scoring_v2.py"
     ]
-    assert {
-        "_PROVIDER_OUTAGE_TEXT_MARKERS",
-        "_provider_error_line_is_loop_ending",
-        "_raise_on_empty_provider_error",
-    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
 
 
 def test_ancestry_unknown_commit_recovery_is_protected():
@@ -508,16 +432,16 @@ def test_protected_manifest_detects_logic_change(tmp_path: Path):
         destination = copied_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    target = copied_root / "research_lab" / "eval" / "promotion_metric.py"
+    target = copied_root / "research_lab" / "employee_buckets.py"
     target.write_text(
         target.read_text(encoding="utf-8").replace(
-            "return PromotionGateDecision(",
-            "assert threshold_points >= 0\n    return PromotionGateDecision(",
+            "if isinstance(value, bool):",
+            "if value is None:\n        return str(default or \"\")\n    if isinstance(value, bool):",
             1,
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ProtectedWorkflowError, match="promotion_metric.py"):
+    with pytest.raises(ProtectedWorkflowError, match="employee_buckets.py"):
         verify_manifest(copied_root, manifest)
 
 

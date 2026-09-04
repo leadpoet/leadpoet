@@ -20,14 +20,6 @@ from gateway.tee.qualification_executor_v2 import (
 )
 from gateway.tee.qualification_network_v2 import SecureQualificationNetworkV2
 from gateway.tee.qualification_epoch_guard_v2 import QualificationEpochGuardV2
-from gateway.tee.scoring_executor import (
-    OP_BENCHMARK_ICP_SCORE,
-    OP_BUILD_BASELINE_SCORE_SUMMARY,
-    OP_BUILD_SCORE_BUNDLE,
-    OP_QUALIFICATION_COMPANY_SCORES,
-    ScoringExecutionResult,
-    execute_scoring_operation,
-)
 from leadpoet_canonical.attested_v2 import sha256_json
 from gateway.research_lab.provider_preflight import ProviderPreflight
 from gateway.research_lab.config import ResearchLabGatewayConfig
@@ -36,23 +28,6 @@ from gateway.tee.research_lab_runtime_config_v2 import (
     validate_research_lab_execution_config,
 )
 
-
-SCORE_PURPOSES_V2 = frozenset(
-    {
-        "research_lab.company_score.v2",
-        "research_lab.candidate_score.v2",
-        "research_lab.baseline_score.v2",
-        "research_lab.benchmark.v2",
-        "research_lab.rebenchmark.v2",
-        "research_lab.confirmation_score.v2",
-    }
-)
-
-# These names remain importable while old durable records are read during the
-# transition. They are deliberately absent from ``SCORING_OPERATIONS_V2``, so
-# the retired closed-model sandbox operation cannot execute.
-OP_RUN_MODEL_SANDBOX_V2 = "run_model_sandbox_v2"
-MODEL_COMPATIBILITY_PURPOSE_V2 = "research_lab.model_compatibility.v2"
 
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
@@ -73,24 +48,6 @@ SCORING_OPERATIONS_V2 = {
     ),
     OP_SOURCE_ADD_LEG2_JUDGE_V2: frozenset(
         {"research_lab.source_add_judge.v2"}
-    ),
-    OP_QUALIFICATION_COMPANY_SCORES: SCORE_PURPOSES_V2,
-    OP_BENCHMARK_ICP_SCORE: SCORE_PURPOSES_V2,
-    OP_BUILD_SCORE_BUNDLE: frozenset(
-        {
-            "research_lab.candidate_score.v2",
-            "research_lab.baseline_score.v2",
-            "research_lab.benchmark.v2",
-            "research_lab.rebenchmark.v2",
-            "research_lab.confirmation_score.v2",
-        }
-    ),
-    OP_BUILD_BASELINE_SCORE_SUMMARY: frozenset(
-        {
-            "research_lab.baseline_score.v2",
-            "research_lab.benchmark.v2",
-            "research_lab.rebenchmark.v2",
-        }
     ),
 }
 
@@ -170,8 +127,6 @@ class ScoringExecutorV2:
         allowed_profiles = {"default"}
         if operation == OP_PROVIDER_PREFLIGHT_V2:
             allowed_profiles.add("provider_preflight")
-        elif operation == OP_QUALIFICATION_COMPANY_SCORES:
-            allowed_profiles.add("benchmark_scorer")
         elif operation == OP_SOURCE_ADD_LEG2_JUDGE_V2:
             allowed_profiles.add("source_add_judge")
         if credential_profile not in allowed_profiles:
@@ -198,9 +153,7 @@ class ScoringExecutorV2:
             retry_policy_hashes=self._retry_policy_hashes,
             terminal_sink=context.record_transport,
             artifact_sink=context.record_artifact,
-            allow_transport_failures=(
-                operation == OP_QUALIFICATION_COMPANY_SCORES
-            ),
+            allow_transport_failures=False,
         ):
             if operation == OP_QUALIFICATION_EMAIL_EVIDENCE_V2:
                 return await self._qualification_executor.execute_email_evidence(
@@ -208,17 +161,7 @@ class ScoringExecutorV2:
                 )
             if operation == OP_QUALIFICATION_BATCH_V2:
                 return await self._qualification_executor.execute_batch(payload, context)
-            result = await execute_scoring_operation(operation, payload)
-        evidence_hashes = []
-        if isinstance(result, ScoringExecutionResult):
-            evidence_hashes = list(result.evidence_roots.values())
-            output = dict(result.result)
-        else:
-            output = dict(result)
-        return ExecutionResultV2(
-            output=output,
-            artifact_hashes=tuple(evidence_hashes),
-        )
+        raise ValueError("unsupported V2 scoring operation")
 
     async def _execute_source_add_judge(
         self,

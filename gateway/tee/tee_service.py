@@ -1433,27 +1433,6 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
                 credential_value_hash_expected=lease["credential_value_hash"],
             )
         }
-    if method == "v2_provision_job_sealed_openrouter_secret":
-        if not isinstance(params, dict) or set(params) != {"envelope"}:
-            raise ValueError(
-                "V2 sealed OpenRouter job credential fields are invalid"
-            )
-        from gateway.tee.openrouter_credential_v2 import (
-            unseal_openrouter_job_credential_v2,
-        )
-
-        lease = unseal_openrouter_job_credential_v2(
-            params.get("envelope") or {},
-            vault=get_v2_artifact_vault(),
-        )
-        return {
-            "result": get_v2_provider_broker().provision_job_credential(
-                job_id=lease["job_id"],
-                slot=lease["credential_slot"],
-                credential=lease["credential"],
-                credential_value_hash_expected=lease["credential_value_hash"],
-            )
-        }
     if method == "v2_release_job_credentials":
         if not isinstance(params, dict) or set(params) != {"job_id"}:
             raise ValueError("V2 job credential release fields are invalid")

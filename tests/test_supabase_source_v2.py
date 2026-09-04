@@ -546,6 +546,9 @@ def test_source_add_functional_probe_query_binds_approval_config():
 
 def test_unmeasured_policy_and_inverted_epoch_range_fail_before_network():
     provider = FakeProvider([{"rows": []}])
+    assert "active_private_model_current" not in QUERY_POLICIES
+    with pytest.raises(SupabaseSourceV2Error, match="not measured"):
+        _read(provider, policy_id="active_private_model_current")
     with pytest.raises(SupabaseSourceV2Error, match="not measured"):
         _read(provider, policy_id="host_selected_table")
     with pytest.raises(SupabaseSourceV2Error, match="inverted"):

@@ -2,9 +2,10 @@
 
 This is the implementation contract for the incident inventory in
 `leadpoet_restart_weight_sentry_issue_inventory.md`. Sentry is a sanitized,
-best-effort diagnostic projection. It is never an authority or prerequisite:
-release manifests, attestation, PCR0, immutable V2 receipts, canonical bundle
-hashes, and finalized chain state remain authoritative.
+best-effort diagnostic projection. It is never an authority or prerequisite.
+Gateway and validator restarts use the selected source plus locally built
+runtime identity, PCR0, canonical bundle hashes, and finalized chain state.
+They do not wait for GitHub attestation or GitHub test completion.
 
 ## Correlation contract
 

@@ -25,7 +25,6 @@ GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-us
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
 GATEWAY_RESTART_AUTHORITY_ROOT="${GATEWAY_RESTART_AUTHORITY_ROOT:-}"
 GATEWAY_RESTART_AUTHORITY_COMMIT="${GATEWAY_RESTART_AUTHORITY_COMMIT:-}"
-GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="${GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER:-}"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
 GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="${GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED:-0}"
 GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="${GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT:-standalone}"
@@ -231,13 +230,12 @@ start_lab_arena_service() {
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
       --host 127.0.0.1 --port 8792 \
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   pid="$!"
   for attempt in $(seq 1 30); do
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -476,15 +474,10 @@ fi
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
   if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
       || [ "$GATEWAY_MINER_MAINTENANCE_PROOF_FD" != "190" ] \
-      || [ ! -r "/proc/$$/fd/190" ] \
-      || [ "$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" != "/proc/self/fd/195" ] \
-      || [ ! -r "/proc/$$/fd/195" ]; then
+      || [ ! -r "/proc/$$/fd/190" ]; then
     echo "ERROR: miner-maintenance invocation proof descriptor is invalid" >&2
     exit 2
   fi
-elif [ -n "$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" ]; then
-  echo "ERROR: retry reconciliation helper lacks miner-maintenance authority" >&2
-  exit 2
 fi
 if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
   if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
@@ -679,7 +672,6 @@ stop_failed_miner_maintenance_runtime() {
     wait "$process_pid" 2>/dev/null || true
   done
   sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
-  stop_research_lab_private_model_containers
   if [ -r "$GATEWAY_ROOT/tee/stop_enclave.sh" ]; then
     sudo bash "$GATEWAY_ROOT/tee/stop_enclave.sh" >/dev/null 2>&1 || true
   else
@@ -717,7 +709,6 @@ start_gateway_offline_artifact_prepare() {
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -747,7 +738,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
     >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- &
   GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
@@ -870,7 +861,6 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
     GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
-    GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
     GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
     GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
@@ -1057,7 +1047,6 @@ exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
   process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
   rm -f -- "$process_group_marker"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -1087,7 +1076,7 @@ with os.fdopen(marker, "w", encoding="ascii") as handle:
 os.execvp(sys.argv[3], sys.argv[3:])
 ' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
     >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 \
-    190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+    190>&- 191>&- 192>&- 193>&- 194>&- &
   GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
@@ -2402,23 +2391,6 @@ emergency_disk_preflight() {
   df -h / /var/lib/docker 2>/dev/null || df -h /
 }
 
-stop_research_lab_private_model_containers() {
-  local ids
-  ids="$(
-    sudo docker ps --format '{{.ID}} {{.Image}}' 2>/dev/null \
-      | awk '$2 ~ /(^|[./])leadpoet\/sourcing-model([:@]|$)/ {print $1}' \
-      || true
-  )"
-
-  if [ -z "$ids" ]; then
-    echo "No running Research Lab private-model containers found"
-    return 0
-  fi
-
-  echo "Stopping running Research Lab private-model containers before Docker prune"
-  echo "$ids" | xargs -r sudo docker stop -t 10
-}
-
 acquire_gateway_restart_lock() {
   local lock_holder_found=0
   local lock_holder_is_stale=1
@@ -2478,81 +2450,6 @@ acquire_gateway_restart_lock() {
   exec 8>&-
 }
 
-reconcile_gateway_rebenchmark_retry_runtime() {
-  local reconciliation_helper reconciliation_root
-  reconciliation_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
-  reconciliation_helper="$reconciliation_root/gateway/tee/update_gateway_rebenchmark_retry_secret.py"
-  if [ -n "${GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER:-}" ]; then
-    reconciliation_helper="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER"
-  fi
-  if [ ! -r "$reconciliation_helper" ]; then
-    echo "ERROR: exact retry reconciliation authority is unavailable" >&2
-    return 1
-  fi
-  if [ "$reconciliation_helper" != "/proc/self/fd/195" ] \
-      && [ -L "$reconciliation_helper" ]; then
-    echo "ERROR: exact retry reconciliation authority is unavailable" >&2
-    return 1
-  fi
-  (
-    cd /
-    PYTHONDONTWRITEBYTECODE=1 "$GATEWAY_PYTHON_BIN" -I -S - \
-      "$reconciliation_helper" "$ENV_CLONE" "$GATEWAY_ENV_FILE" <<'PY'
-import fcntl
-import os
-from pathlib import Path
-import stat
-import sys
-
-helper_path = sys.argv[1]
-if helper_path == "/proc/self/fd/195":
-    metadata = os.fstat(195)
-    required_seals = sum(
-        int(getattr(fcntl, name))
-        for name in ("F_SEAL_WRITE", "F_SEAL_GROW", "F_SEAL_SHRINK", "F_SEAL_SEAL")
-    )
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o400
-        or not 2 <= metadata.st_size <= 4 * 1024 * 1024
-        or int(fcntl.fcntl(195, fcntl.F_GET_SEALS)) & required_seals
-        != required_seals
-    ):
-        raise SystemExit("sealed retry reconciliation helper is invalid")
-source = Path(helper_path).read_bytes()
-if not 2 <= len(source) <= 4 * 1024 * 1024:
-    raise SystemExit("retry reconciliation helper size is invalid")
-namespace = dict(
-    __name__="_leadpoet_retry_reconciliation_helper",
-    __file__=helper_path,
-    __package__=None,
-)
-exec(compile(source, helper_path, "exec"), namespace)
-reconcile = namespace.get("reconcile_gateway_rebenchmark_runtime_environment_file")
-if not callable(reconcile):
-    raise SystemExit("retry reconciliation helper contract is unavailable")
-
-result = reconcile(
-    runtime_environment_path=Path(sys.argv[2]),
-    authoritative_environment_path=Path(sys.argv[3]),
-)
-print(
-    "Reconciled secret-authoritative rebenchmark retry controls: "
-    "managed=%d present=%d absent=%d"
-    % (
-        result["managed_name_count"],
-        result["present_name_count"],
-        result["absent_name_count"],
-    )
-)
-PY
-  )
-  # Absence in the durable secret restores the model-compatible defaults.
-  # Clear inherited controller values before any reconciled clone is sourced.
-  unset RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS
-  unset RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY
-}
-
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
   mkdir -p \
     "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" \
@@ -2585,9 +2482,6 @@ elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
   fi
   . "$DOCKER_LOCK_HELPER"
   leadpoet_ensure_post_activation_docker_operation_lock_v2
-  # The N-1 controller prepared this clone. Reconcile it again from the
-  # durable secret with the activated candidate before any runtime relaunch.
-  reconcile_gateway_rebenchmark_retry_runtime
 else
   echo "ERROR: unsupported GATEWAY_RESTART_PHASE=$GATEWAY_RESTART_PHASE" >&2
   exit 1
@@ -2705,7 +2599,6 @@ restart_only_keys = {
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
-    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
@@ -2862,7 +2755,6 @@ skip_keys = {
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
-    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -3022,7 +2914,6 @@ skip_keys = {
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
-    "GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -3144,11 +3035,6 @@ if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   printf 'export LEADPOET_RESTART_START_PATH=%q\n' \
     "$GATEWAY_RESTART_START_PATH" >> "$ENV_CLONE"
 fi
-
-# Reconcile after every authoritative overlay has been assembled and before
-# the first environment load. The activated candidate repeats this operation
-# to repair a clone prepared by its N-1 controller.
-reconcile_gateway_rebenchmark_retry_runtime
 
 grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   echo "ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY"
@@ -3636,11 +3522,10 @@ pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
 stop_lab_arena_service
-stop_research_lab_private_model_containers
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
-echo "Stopping stuck private-model Docker builds or pip installs"
+echo "Stopping stuck local validator Docker builds or pip installs"
 stop_local_stale_build_processes TERM
 sleep 3
 stop_local_stale_build_processes KILL
@@ -3697,7 +3582,6 @@ exec env \
   GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
   GATEWAY_RESTART_AUTHORITY_ROOT="$GATEWAY_RESTART_AUTHORITY_ROOT" \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
-  GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER="$GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
   GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED="$GATEWAY_PAIRED_ACTIVE_RELEASE_REQUIRED" \
   GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT="$GATEWAY_ACTIVE_RELEASE_FALLBACK_CONTEXT" \
@@ -3965,7 +3849,6 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -3982,7 +3865,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
     >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -3994,7 +3877,6 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
   env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_EXACT_COMMIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -4011,7 +3893,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     PYTHONPATH="$LEADPOET_REPO_ROOT" \
     setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -4190,7 +4072,6 @@ leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
 env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-  -u GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER \
   -u GATEWAY_GIT_HELPER \
   -u GATEWAY_EXACT_COMMIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -4206,7 +4087,7 @@ env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
   -u GATEWAY_COUNTERPART_RELEASE_LINEAGE \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
-  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""
@@ -4304,9 +4185,8 @@ GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
+  exec 190>&- 191>&- 192>&- 193>&- 194>&-
   unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
-  unset GATEWAY_REBENCHMARK_RETRY_RECONCILIATION_HELPER
   unset GATEWAY_GIT_HELPER GATEWAY_EXACT_COMMIT_HELPER
   unset GATEWAY_HOST_MEMORY_GUARD_PATH
 fi

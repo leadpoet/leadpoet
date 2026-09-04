@@ -44,9 +44,6 @@ from leadpoet_canonical.weight_computation import (
 from leadpoet_canonical.weight_authority_v2 import (
     gateway_weight_input_value_documents_v2,
 )
-from research_lab.eval.promotion_metric import promotion_improvement_metric
-
-
 def test_reward_ancestry_accepts_checkpointed_source_add_parents() -> None:
     provenance_parent_hash = "sha256:" + "1" * 64
     precheck_doc = {
@@ -416,29 +413,10 @@ async def test_coordinator_chain_realized_authorities_are_measured_and_bound():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_calls_unchanged_promotion_metric():
-    score_bundle = {"aggregates": {"mean_delta": 1.75}}
-    expected = promotion_improvement_metric(score_bundle)
-    result = await CoordinatorExecutorV2()(
-        "promotion_improvement",
-        {"score_bundle": score_bundle},
-        ExecutionContextV2(
-            job_id="promotion:test",
-            purpose="research_lab.ranking.v2",
-            epoch_id=1,
-        ),
-    )
-    assert result.output == {
-        "improvement_points": expected.improvement_points,
-        "event_doc": expected.event_doc(),
-    }
-
-
-@pytest.mark.asyncio
 async def test_coordinator_rejects_operation_outside_measured_authority():
     with pytest.raises(ValueError, match="unsupported"):
         await CoordinatorExecutorV2()(
-            "qualification_company_scores",
+            "promotion_improvement",
             {},
             ExecutionContextV2(
                 job_id="score:test",

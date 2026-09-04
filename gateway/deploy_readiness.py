@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from gateway.build_info import UNKNOWN, get_build_info
+from gateway.tee.topology import ROLE_SPECS
 
 
 DEFAULT_DEPLOY_READINESS_MANIFEST = "/home/ec2-user/gateway/deploy_readiness.json"
@@ -43,11 +44,7 @@ VALIDATOR_READINESS_OBSERVATION_V2_SCHEMA_VERSION = (
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
-_V2_GATEWAY_ROLES = (
-    "gateway_autoresearch",
-    "gateway_coordinator",
-    "gateway_scoring",
-)
+_V2_GATEWAY_ROLES = tuple(sorted(ROLE_SPECS))
 _V2_REQUIRED_CHECKS = (
     "gateway_source_commit_matches_expected",
     "gateway_build_commit_matches_expected",
@@ -433,8 +430,6 @@ def _runtime_readiness_boot_hashes(value: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(rows, list) or len(rows) != len(_V2_GATEWAY_ROLES):
         raise RuntimeError("gateway runtime readiness roles are incomplete")
     hashes: dict[str, str] = {}
-    from gateway.tee.topology import ROLE_SPECS
-
     for row in rows:
         if not isinstance(row, Mapping) or set(row) != {
             "physical_role",

@@ -1,10 +1,8 @@
-"""Images by tag or digest: resolution and safe root filesystem materialization.
+"""Common runtime image resolution and safe root filesystem materialization.
 
-A fake OCI registry (one per host, served through ``httpx.MockTransport``)
-exercises the anonymous bearer flow for pulls, the credentialed flow for the
-Arena's pushes, blob redirects to a content store, cross-repository mounts,
-and byte-identical manifest mirroring. The extractor tests apply real layer
-tarballs, including whiteouts and hostile members.
+A fake OCI registry served through ``httpx.MockTransport`` exercises
+anonymous and credentialed reads plus blob redirects. The extractor tests
+apply real layer tarballs, including whiteouts and hostile members.
 """
 
 from __future__ import annotations
@@ -18,7 +16,6 @@ import os
 import re
 import stat
 import tarfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs
 
@@ -29,10 +26,10 @@ from lab_arena import images
 from lab_arena.images import ImageError, ImageReference, ImageRules, RegistryClient
 
 SOURCE = "registry.example"
-ARENA = "arena.example"
+RUNTIME_REGISTRY = "runtime.example"
 CDN = "cdn.example"
 AUTH = "https://auth.example/token"
-PUSH_CREDENTIAL = ("arena", "push-secret")
+READ_CREDENTIAL = ("organizer", "read-secret")
 PUBLIC_TEST_ADDRESS = "93.184.216.34"
 
 
@@ -137,23 +134,19 @@ def simple_image(**overrides: Any) -> Dict[str, Any]:
 # Fake registry
 # ---------------------------------------------------------------------------
 
-_UPLOAD_RE = re.compile(r"^/v2/(.+)/blobs/uploads/(.*)$")
 _MANIFEST_RE = re.compile(r"^/v2/(.+)/manifests/(.+)$")
 _BLOB_RE = re.compile(r"^/v2/(.+)/blobs/(sha256:[0-9a-f]{64})$")
 
 
 class FakeRegistry:
-    """In-memory registries keyed by host; optional bearer auth and blob redirects."""
+    """In-memory read-only registries with optional bearer auth and redirects."""
 
-    def __init__(self, *, bearer_hosts: Tuple[str, ...] = (), redirect_blobs: bool = False, refuse_mounts: bool = False) -> None:
+    def __init__(self, *, bearer_hosts: Tuple[str, ...] = (), redirect_blobs: bool = False) -> None:
         self.repos: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self.uploads: Dict[str, Tuple[str, str]] = {}
         self.bearer_hosts = bearer_hosts
         self.redirect_blobs = redirect_blobs
-        self.refuse_mounts = refuse_mounts
         self.requests: List[Tuple[str, str, str, Optional[str]]] = []
         self.token_requests: List[Tuple[str, Optional[str]]] = []
-        self._upload_counter = 0
 
     def repo(self, host: str, name: str) -> Dict[str, Any]:
         return self.repos.setdefault((host, name), {"manifests": {}, "blobs": {}})
@@ -185,21 +178,14 @@ class FakeRegistry:
             blob = self.repo(source_host, name)["blobs"].get(digest)
             return httpx.Response(200 if blob is not None else 404, content=blob or b"")
         if host in self.bearer_hosts:
-            # Tokens are scoped like a real registry's: a pull token never authorizes a push.
-            scope_match = _UPLOAD_RE.match(path) or _MANIFEST_RE.match(path) or _BLOB_RE.match(path)
+            scope_match = _MANIFEST_RE.match(path) or _BLOB_RE.match(path)
             name = scope_match.group(1) if scope_match else "unknown"
-            action = "push" if request.method in ("POST", "PUT", "PATCH", "DELETE") else "pull"
             granted = authorization[len("Bearer tok:"):] if authorization and authorization.startswith("Bearer tok:") else ""
             parts = granted.split(":", 2)
-            allowed = len(parts) == 3 and parts[0] == "repository" and parts[1] == name and action in parts[2].split(",")
+            allowed = len(parts) == 3 and parts[0] == "repository" and parts[1] == name and "pull" in parts[2].split(",")
             if not allowed:
-                actions = "pull,push" if action == "push" else "pull"
-                realm = "https://%s/token" % host if action == "push" else AUTH
-                challenge = 'Bearer realm="%s",service="registry",scope="repository:%s:%s"' % (realm, name, actions)
+                challenge = 'Bearer realm="%s",service="registry",scope="repository:%s:pull"' % (AUTH, name)
                 return httpx.Response(401, headers={"WWW-Authenticate": challenge})
-        upload = _UPLOAD_RE.match(path)
-        if upload:
-            return self._upload(request, host, upload.group(1), upload.group(2))
         manifest = _MANIFEST_RE.match(path)
         if manifest:
             return self._manifest(request, host, manifest.group(1), manifest.group(2))
@@ -213,68 +199,29 @@ class FakeRegistry:
         scope = (query.get("scope") or [None])[0]
         authorization = request.headers.get("authorization")
         self.token_requests.append((scope or "", authorization))
-        if scope and "push" in scope:
-            expected = "Basic " + base64.b64encode(("%s:%s" % PUSH_CREDENTIAL).encode()).decode()
-            if authorization != expected:
-                return httpx.Response(401)
         return httpx.Response(200, json={"token": "tok:" + (scope or "")})
 
     def _manifest(self, request: httpx.Request, host: str, name: str, reference: str) -> httpx.Response:
         repo = self.repo(host, name)
-        if request.method in ("GET", "HEAD"):
+        if request.method == "GET":
             stored = repo["manifests"].get(reference)
             if stored is None:
                 return httpx.Response(404)
             body, media = stored
-            return httpx.Response(200, headers={"Content-Type": media, "Docker-Content-Digest": digest_of(body)}, content=body if request.method == "GET" else b"")
-        if request.method == "PUT":
-            body = request.content
-            digest = digest_of(body)
-            if digest != reference:
-                return httpx.Response(400)
-            repo["manifests"][reference] = (body, request.headers.get("content-type", ""))
-            return httpx.Response(201, headers={"Docker-Content-Digest": digest})
+            return httpx.Response(200, headers={"Content-Type": media, "Docker-Content-Digest": digest_of(body)}, content=body)
         return httpx.Response(405)
 
     def _blob(self, request: httpx.Request, host: str, name: str, digest: str) -> httpx.Response:
         blob = self.repo(host, name)["blobs"].get(digest)
         if blob is None:
             return httpx.Response(404)
-        if request.method == "HEAD":
-            return httpx.Response(200, headers={"Content-Length": str(len(blob))})
         if self.redirect_blobs:
             return httpx.Response(307, headers={"Location": "https://%s/blob/%s/%s?repo=%s" % (CDN, host, digest, name)})
         return httpx.Response(200, content=blob)
 
-    def _upload(self, request: httpx.Request, host: str, name: str, upload_id: str) -> httpx.Response:
-        query = parse_qs(request.url.query.decode("utf-8"))
-        if request.method == "POST" and not upload_id:
-            mount = (query.get("mount") or [None])[0]
-            source = (query.get("from") or [None])[0]
-            if mount and source:
-                if self.refuse_mounts:
-                    return httpx.Response(405)
-                blob = self.repo(host, source)["blobs"].get(mount)
-                if blob is not None:
-                    self.repo(host, name)["blobs"][mount] = blob
-                    return httpx.Response(201)
-            self._upload_counter += 1
-            identifier = "upload-%d" % self._upload_counter
-            self.uploads[identifier] = (host, name)
-            return httpx.Response(202, headers={"Location": "/v2/%s/blobs/uploads/%s" % (name, identifier)})
-        if request.method == "PUT" and upload_id in self.uploads:
-            expected = (query.get("digest") or [""])[0]
-            body = request.read()
-            if digest_of(body) != expected or request.headers.get("content-length") != str(len(body)):
-                return httpx.Response(400)
-            self.repo(host, name)["blobs"][expected] = body
-            del self.uploads[upload_id]
-            return httpx.Response(201)
-        return httpx.Response(404)
-
 
 def client_for(registry: FakeRegistry) -> RegistryClient:
-    credentials = lambda host: PUSH_CREDENTIAL if host == ARENA else None  # noqa: E731
+    credentials = lambda host: READ_CREDENTIAL if host == RUNTIME_REGISTRY else None  # noqa: E731
     return RegistryClient(
         http=httpx.Client(transport=httpx.MockTransport(registry.handler)),
         credentials=credentials,
@@ -298,7 +245,10 @@ def test_reference_parsing_requires_a_registry_host_and_a_tag_or_digest():
     assert hub.repository == "library/python" and hub.api_registry == images.DOCKER_HUB_REGISTRY
     local = images.parse_reference("localhost:5000/team/model@" + digest)
     assert local.registry == "localhost:5000" and local.tag is None
-    assert images.parse_repository("Arena.Example/lab-arena/models") == ("arena.example", "lab-arena/models")
+    assert images.parse_repository("Runtime.Example/organizer/runtime") == (
+        "runtime.example",
+        "organizer/runtime",
+    )
     for bad in ("acme/agent@" + digest, "ghcr.io/acme/agent", "ghcr.io/acme/agent@sha256:short", "ghcr.io/Acme/Agent@" + digest, "ghcr.io/acme/agent@" + digest + " ", "", None, "ghcr.io/acme/agent:bad tag@" + digest):
         with pytest.raises(ImageError) as excinfo:
             images.parse_reference(bad)
@@ -324,17 +274,17 @@ def test_registry_client_refuses_non_public_literal_hosts_before_a_request(host)
     assert requests == []
 
 
-def test_registry_client_refuses_a_public_name_that_resolves_to_a_private_address():
+def test_registry_client_refuses_a_name_that_resolves_to_a_private_address():
     requests = []
 
     def resolver(host, _port):
-        return (PUBLIC_TEST_ADDRESS, "10.0.0.8") if host == "miner.example" else (PUBLIC_TEST_ADDRESS,)
+        return (PUBLIC_TEST_ADDRESS, "10.0.0.8") if host == SOURCE else (PUBLIC_TEST_ADDRESS,)
 
     client = RegistryClient(
         http=httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500))),
         address_resolver=resolver,
     )
-    reference = images.parse_reference("miner.example/acme/agent@sha256:%s" % ("a" * 64))
+    reference = images.parse_reference("%s/acme/agent@sha256:%s" % (SOURCE, "a" * 64))
     with pytest.raises(ImageError, match="not public") as excinfo:
         client.get_manifest(reference)
     assert excinfo.value.rule_id == images.RULE_UNAVAILABLE
@@ -354,7 +304,7 @@ def test_registry_client_refuses_a_private_connected_peer_after_public_dns():
         http=httpx.Client(transport=httpx.MockTransport(handler)),
         address_resolver=public_test_resolver,
     )
-    reference = images.parse_reference("miner.example/acme/agent@sha256:%s" % ("a" * 64))
+    reference = images.parse_reference("%s/acme/agent@sha256:%s" % (SOURCE, "a" * 64))
     with pytest.raises(ImageError, match="peer is not public") as excinfo:
         client.get_manifest(reference)
     assert excinfo.value.rule_id == images.RULE_UNAVAILABLE
@@ -466,24 +416,6 @@ def test_blob_redirect_to_a_private_host_is_refused_before_a_request():
     assert "169.254.169.254" not in requests
 
 
-def test_cross_origin_upload_never_receives_the_registry_credential():
-    requests = []
-
-    def handler(request):
-        requests.append(request)
-        return httpx.Response(201)
-
-    client = RegistryClient(
-        http=httpx.Client(transport=httpx.MockTransport(handler)),
-        credentials=lambda host: PUSH_CREDENTIAL if host == ARENA else None,
-        address_resolver=public_test_resolver,
-    )
-    response = client._send("PUT", ARENA, "", absolute_url="https://uploads.example/object", content=b"blob")
-    response.close()
-    assert len(requests) == 1 and requests[0].url.host == "uploads.example"
-    assert requests[0].headers.get("authorization") is None
-
-
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -499,9 +431,6 @@ def test_resolve_pins_the_amd64_child_of_an_index():
     descriptor = images.resolve_image(client_for(registry), reference, ImageRules())
     assert descriptor.image_digest == amd64["digest"]
     assert descriptor.reference == ImageReference(SOURCE, "acme/agent", amd64["digest"])
-    assert descriptor.image_size_bytes == len(amd64["config"]) + sum(len(layer) for layer in amd64["layers"])
-    document = descriptor.to_document()
-    assert document["layer_count"] == 1 and "manifest_bytes" not in document and "entry_command" not in document
     # Anonymous pull: the bearer came from the challenge, the blob fetch followed the redirect without it.
     assert registry.token_requests and all(auth is None for _scope, auth in registry.token_requests)
     assert any(host == CDN for _method, host, _path, _auth in registry.requests)
@@ -516,7 +445,7 @@ def test_a_single_platform_manifest_resolves_directly_and_a_docker_manifest_is_a
     assert descriptor.image_digest == image["digest"]
 
 
-def test_a_public_tag_is_resolved_once_to_the_manifest_digest():
+def test_a_tag_is_resolved_once_to_the_manifest_digest():
     registry = FakeRegistry()
     image = simple_image(entrypoint=None, cmd=None, env=["LAB_ARENA_OUTPUT_PATH=/ignored"], workdir="relative")
     registry.put_image(SOURCE, "acme/agent", image)
@@ -526,7 +455,6 @@ def test_a_public_tag_is_resolved_once_to_the_manifest_digest():
     assert descriptor.image_digest == image["digest"]
     assert descriptor.reference == ImageReference(SOURCE, "acme/agent", image["digest"])
     assert str(descriptor.reference) == "%s/acme/agent@%s" % (SOURCE, image["digest"])
-    assert descriptor.to_document()["image_digest"] == image["digest"]
 
 
 @pytest.mark.parametrize(
@@ -541,7 +469,7 @@ def test_a_public_tag_is_resolved_once_to_the_manifest_digest():
         ("tampered", images.RULE_DIGEST_MISMATCH),
     ],
 )
-def test_resolve_refuses_images_outside_the_public_rules(case, rule):
+def test_resolve_refuses_images_outside_the_rules(case, rule):
     registry = FakeRegistry()
     rules = ImageRules()
     if case == "zstd_layer":
@@ -577,88 +505,13 @@ def test_resolve_refuses_images_outside_the_public_rules(case, rule):
     assert excinfo.value.rule_id == rule
 
 
-def test_image_rules_round_trip_through_their_public_document():
+def test_image_rules_round_trip_through_their_document():
     rules = ImageRules(max_image_bytes=123, max_layers=4)
     document = rules.to_document()
     assert document["schema_version"] == images.IMAGE_RULES_SCHEMA_VERSION and document["platform"] == {"os": "linux", "architecture": "amd64"}
     assert ImageRules.from_document(document) == rules
     with pytest.raises(ImageError):
         ImageRules(max_layers=0)
-
-
-# ---------------------------------------------------------------------------
-# Mirroring
-# ---------------------------------------------------------------------------
-
-
-def test_mirror_copies_blobs_into_the_arena_repository_and_preserves_the_manifest_digest():
-    registry = FakeRegistry(bearer_hosts=(SOURCE, ARENA), redirect_blobs=True)
-    image = simple_image(layers=[layer_tar([("a", "file", b"first")]), layer_tar([("b", "file", b"second")])])
-    reference = images.parse_reference(registry.put_image(SOURCE, "acme/agent", image))
-    client = client_for(registry)
-    descriptor = images.resolve_image(client, reference, ImageRules())
-    mirrored = images.mirror_image(client, descriptor, "%s/lab-arena/models" % ARENA)
-    assert mirrored == ImageReference(ARENA, "lab-arena/models", image["digest"])
-    arena_repo = registry.repo(ARENA, "lab-arena/models")
-    assert arena_repo["manifests"][image["digest"]] == (image["manifest"], images.MANIFEST_OCI)
-    assert set(arena_repo["blobs"]) == {digest_of(image["config"])} | {digest_of(layer) for layer in image["layers"]}
-    # The push credential reached only the Arena registry's token endpoint, for a push scope.
-    push_tokens = [(scope, auth) for scope, auth in registry.token_requests if "push" in scope]
-    assert push_tokens and all(auth and auth.startswith("Basic ") for _scope, auth in push_tokens)
-    assert all("lab-arena/models" in scope for scope, _auth in push_tokens)
-    assert all(auth is None for scope, auth in registry.token_requests if "acme/agent" in scope)  # the source is pulled anonymously
-    assert not any(host == SOURCE and auth and auth.startswith("Basic") for _m, host, _p, auth in registry.requests)
-    # A second mirror finds every blob and the manifest already present.
-    uploads_before = len([r for r in registry.requests if r[0] == "PUT"])
-    again = images.mirror_image(client, descriptor, "%s/lab-arena/models" % ARENA)
-    assert again == mirrored
-    puts_after = [r for r in registry.requests if r[0] == "PUT"]
-    assert len(puts_after) == uploads_before + 1  # only the (idempotent) manifest write repeats
-    # The mirrored image resolves from the Arena repository with the same bytes.
-    resolved = images.resolve_image(client, mirrored, ImageRules())
-    assert resolved.image_digest == image["digest"]
-
-
-def test_same_host_source_is_anonymous_and_destination_credential_is_scoped_to_writes():
-    registry = FakeRegistry(bearer_hosts=(ARENA,))
-    image = simple_image()
-    reference = images.parse_reference(registry.put_image(ARENA, "miners/alice", image))
-    transport = httpx.MockTransport(registry.handler)
-    source = RegistryClient(
-        http=httpx.Client(transport=transport),
-        address_resolver=public_test_resolver,
-    )
-    destination = RegistryClient(
-        http=httpx.Client(transport=transport),
-        credentials=lambda host: PUSH_CREDENTIAL if host == ARENA else None,
-        address_resolver=public_test_resolver,
-    )
-    descriptor = images.resolve_image(source, reference, ImageRules())
-    mirrored = images.mirror_image(source, descriptor, "%s/lab-arena/models" % ARENA, destination_client=destination)
-    assert mirrored.repository == "lab-arena/models"
-    assert registry.repo(ARENA, "lab-arena/models")["manifests"][image["digest"]][0] == image["manifest"]
-    source_requests = [entry for entry in registry.requests if "/miners/alice/" in entry[2]]
-    assert source_requests and all(not (auth or "").startswith("Basic ") for _method, _host, _path, auth in source_requests)
-    source_tokens = [(scope, auth) for scope, auth in registry.token_requests if "miners/alice" in scope]
-    destination_tokens = [(scope, auth) for scope, auth in registry.token_requests if "lab-arena/models" in scope and "push" in scope]
-    assert source_tokens and all(auth is None for _scope, auth in source_tokens)
-    assert destination_tokens and all((auth or "").startswith("Basic ") for _scope, auth in destination_tokens)
-
-
-def test_mirror_fails_closed_when_the_destination_refuses_the_credential():
-    registry = FakeRegistry(bearer_hosts=(ARENA,))
-    image = simple_image()
-    reference = images.parse_reference(registry.put_image(SOURCE, "acme/agent", image))
-    client = RegistryClient(
-        http=httpx.Client(transport=httpx.MockTransport(registry.handler)),
-        credentials=lambda host: ("arena", "wrong") if host == ARENA else None,
-        address_resolver=public_test_resolver,
-    )
-    descriptor = images.resolve_image(client, reference, ImageRules())
-    with pytest.raises(ImageError) as excinfo:
-        images.mirror_image(client, descriptor, "%s/lab-arena/models" % ARENA)
-    assert excinfo.value.rule_id == images.RULE_UNAVAILABLE
-    assert image["digest"] not in registry.repo(ARENA, "lab-arena/models")["manifests"]
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +546,7 @@ def test_materialize_rootfs_applies_layers_whiteouts_and_hardening(tmp_path):
     manifest["layers"][1]["mediaType"] = images.LAYER_TAR_MEDIA_TYPES[0]
     image["manifest"] = json.dumps(manifest, sort_keys=True).encode("utf-8")
     image["digest"] = digest_of(image["manifest"])
-    reference = images.parse_reference(registry.put_image(ARENA, "lab-arena/models", image))
+    reference = images.parse_reference(registry.put_image(RUNTIME_REGISTRY, "organizer/runtime", image))
     result = images.materialize_rootfs(client_for(registry), reference, tmp_path / "image", rules=ImageRules())
     rootfs = tmp_path / "image" / "rootfs"
     assert result["layers"] == 2 and result["image_digest"] == image["digest"]
@@ -706,6 +559,15 @@ def test_materialize_rootfs_applies_layers_whiteouts_and_hardening(tmp_path):
     assert os.readlink(rootfs / "bin" / "sh") == "/bin/busybox"
     assert not (rootfs / "dev" / "null").exists() and (rootfs / "dev").is_dir()
     assert not list((tmp_path / "image").glob("lab-arena-layers-*"))  # the spool is gone
+    expected_auth = "Basic " + base64.b64encode(
+        ("%s:%s" % READ_CREDENTIAL).encode("utf-8")
+    ).decode("ascii")
+    runtime_requests = [
+        authorization
+        for _method, host, _path, authorization in registry.requests
+        if host == RUNTIME_REGISTRY
+    ]
+    assert runtime_requests and set(runtime_requests) == {expected_auth}
 
 
 def test_materialize_rootfs_bounds_total_tar_members_across_layers(tmp_path, monkeypatch):
@@ -715,7 +577,7 @@ def test_materialize_rootfs_bounds_total_tar_members_across_layers(tmp_path, mon
         layer_tar([("three", "dir")]),
     ]
     image = build_image(layers=layers, entrypoint=["/bin/app"])
-    reference = images.parse_reference(registry.put_image(ARENA, "lab-arena/models", image))
+    reference = images.parse_reference(registry.put_image(RUNTIME_REGISTRY, "organizer/runtime", image))
     monkeypatch.setattr(images, "MAX_IMAGE_TAR_MEMBERS", 2)
     with pytest.raises(ImageError, match="tar-member budget") as excinfo:
         images.materialize_rootfs(client_for(registry), reference, tmp_path / "image", rules=ImageRules())
@@ -750,9 +612,9 @@ def test_materialize_rootfs_refuses_hostile_layers(tmp_path, case, rule):
     else:
         layers = [gzip.compress(b"this is not a tar archive", mtime=0)]
     image = build_image(layers=layers, entrypoint=["/bin/app"])
-    reference = images.parse_reference(registry.put_image(ARENA, "lab-arena/models", image))
+    reference = images.parse_reference(registry.put_image(RUNTIME_REGISTRY, "organizer/runtime", image))
     if case == "corrupt_blob":
-        registry.repo(ARENA, "lab-arena/models")["blobs"][digest_of(layers[0])] = layers[0][:-1] + b"?"
+        registry.repo(RUNTIME_REGISTRY, "organizer/runtime")["blobs"][digest_of(layers[0])] = layers[0][:-1] + b"?"
     with pytest.raises(ImageError) as excinfo:
         images.materialize_rootfs(client_for(registry), reference, tmp_path / "image", rules=rules)
     assert excinfo.value.rule_id == rule

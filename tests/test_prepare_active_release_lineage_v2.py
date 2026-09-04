@@ -11,6 +11,7 @@ from gateway.tee.active_release_requirements_v2 import (
 )
 from gateway.tee import prepare_active_release_lineage_v2 as prepare
 from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
+from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from tests.test_validator_hotkey_authority_v2 import _profile
 
@@ -52,11 +53,10 @@ def _lineage(commits, *, current_commit=CANDIDATE):
     releases = {}
     for index, commit in enumerate(sorted(commits), start=1):
         role_expectations = {}
+        current_roles = (*sorted(ROLE_SPECS), "validator_weights")
+        historical_roles = ("gateway_autoresearch", *current_roles)
         for role in (
-            "gateway_autoresearch",
-            "gateway_coordinator",
-            "gateway_scoring",
-            "validator_weights",
+            current_roles if commit == current_commit else historical_roles
         ):
             role_expectations[role] = {
                 "commit_sha": commit,

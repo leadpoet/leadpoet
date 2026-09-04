@@ -158,8 +158,8 @@ async def publish_research_lab_epoch_audit(
         epoch=epoch,
         netuid=netuid,
         audit_kind=audit_kind,
-        audit_bundle_id=payload["audit_bundle"].get("audit_bundle_id"),
-        audit_bundle_hash=payload["audit_bundle"].get("audit_bundle_hash"),
+        audit_bundle_id=None,
+        audit_bundle_hash=None,
         allocation_hash=payload["lab_allocation"].get("allocation_hash"),
         weights_hash=payload["weights"].get("weights_hash"),
         payload_hash=payload_hash,
@@ -184,33 +184,9 @@ async def build_research_lab_epoch_audit_payload(
     actor_hotkey: str | None = None,
     weight_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    audit_bundle = await _latest_signed_audit_bundle(epoch)
     allocation = await _latest_lab_allocation(epoch=epoch, netuid=netuid)
     weight_bundle = dict(weight_bundle or await _latest_weight_bundle(epoch=epoch, netuid=netuid) or {})
     actor_hotkey = actor_hotkey or weight_bundle.get("validator_hotkey") or "system"
-    score_bundles = await _audit_select_all(
-        "research_evaluation_score_bundle_current",
-        filters=(("evaluation_epoch", epoch),),
-        order_by=(("created_at", True),),
-    )
-    benchmarks = await _audit_select_all(
-        "research_lab_private_model_benchmark_current",
-        filters=(("evaluation_epoch", epoch),),
-        order_by=(("created_at", True),),
-    )
-    windows = await _audit_select_all("research_lab_rolling_icp_windows", order_by=(("created_at", True),))
-    model_versions = await _audit_select_all(
-        "research_lab_private_model_version_current",
-        order_by=(("created_at", True),),
-    )
-    promotions = await _audit_select_all(
-        "research_lab_candidate_promotion_events",
-        order_by=(("created_at", True),),
-    )
-    public_reports = await _audit_select_all(
-        "research_lab_public_benchmark_report_current",
-        order_by=(("created_at", True),),
-    )
     champion_rewards = await _audit_select_all(
         "research_lab_champion_reward_current",
         order_by=(("created_at", True),),
@@ -227,35 +203,19 @@ async def build_research_lab_epoch_audit_payload(
         "epoch": int(epoch),
         "netuid": int(netuid),
         "audit_kind": audit_kind,
-        "audit_bundle": _audit_bundle_ref(audit_bundle),
         "weights": _weight_ref(weight_bundle),
         "lab_allocation": _allocation_ref(allocation),
-        "score_bundles": [_score_bundle_ref(row) for row in score_bundles],
-        "private_baseline_benchmarks": [_benchmark_ref(row) for row in benchmarks],
-        "rolling_icp_windows": [_rolling_window_ref(row) for row in windows],
-        "private_model_versions": [_model_version_ref(row) for row in model_versions],
-        "promotion_events": [_promotion_ref(row) for row in promotions],
-        "public_benchmark_reports": [_public_report_ref(row) for row in public_reports],
         "champion_rewards": [_champion_reward_ref(row) for row in champion_rewards],
         "reimbursement_awards": [_reimbursement_ref(row) for row in reimbursement_awards],
         "observability": {
-            "score_bundle_count": len(score_bundles),
-            "private_baseline_benchmark_count": len(benchmarks),
-            "rolling_icp_window_count": len(windows),
-            "private_model_version_count": len(model_versions),
-            "promotion_event_count": len(promotions),
-            "public_benchmark_report_count": len(public_reports),
             "champion_reward_count": len(champion_rewards),
             "reimbursement_award_count": len(reimbursement_awards),
         },
         "verifier_contract": {
             "arweave_payload": "compact_hash_refs_only",
-            "private_model_recompute": "forbidden_for_main_validators_v1",
             "required_checks": [
                 "no_secret_material",
-                "audit_bundle_hash_matches",
                 "allocation_hash_matches",
-                "score_bundle_hashes_match",
                 "weights_hash_matches",
                 "transparency_event_in_arweave_checkpoint",
             ],
@@ -670,16 +630,6 @@ async def _existing_anchor_for_payload(
     return await select_one("research_lab_arweave_epoch_audit_anchors", filters=(("anchor_id", anchor_id),))
 
 
-async def _latest_signed_audit_bundle(epoch: int) -> dict[str, Any]:
-    rows = await select_many(
-        "research_lab_signed_audit_bundle_current",
-        filters=(("epoch", epoch),),
-        order_by=(("created_at", True),),
-        limit=1,
-    )
-    return rows[0] if rows else {}
-
-
 async def _latest_lab_allocation(epoch: int, netuid: int) -> dict[str, Any]:
     rows = await select_many(
         "research_lab_emission_allocation_current",
@@ -713,21 +663,6 @@ async def _latest_weight_bundle(epoch: int, netuid: int) -> dict[str, Any] | Non
     response = await asyncio.to_thread(_call)
     data = getattr(response, "data", None) or []
     return dict(data[0]) if data else None
-
-
-def _audit_bundle_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_ref(
-        row,
-        (
-            "audit_bundle_id",
-            "audit_bundle_hash",
-            "epoch",
-            "signature_ref",
-            "current_audit_status",
-            "current_event_hash",
-            "anchored_hash",
-        ),
-    )
 
 
 def _weight_ref(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -775,139 +710,6 @@ def _allocation_ref(row: Mapping[str, Any]) -> dict[str, Any]:
             "champions": allocation_doc.get("champion_allocations", []),
             "queued_champions": allocation_doc.get("queued_champion_allocations", []),
         },
-    }
-
-
-def _score_bundle_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
-    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
-    return {
-        **_compact_ref(
-            row,
-            (
-                "score_bundle_id",
-                "run_id",
-                "ticket_id",
-                "receipt_id",
-                "miner_hotkey",
-                "island",
-                "evaluation_epoch",
-                "bundle_status",
-                "parent_artifact_hash",
-                "candidate_artifact_hash",
-                "private_model_manifest_hash",
-                "candidate_patch_hash",
-                "icp_set_hash",
-                "score_bundle_hash",
-                "anchored_hash",
-                "signature_ref",
-                "current_event_status",
-            ),
-        ),
-        "aggregates": _compact_ref(
-            aggregates,
-            ("mean_base_score", "mean_candidate_score", "mean_delta", "delta_lcb", "icp_count"),
-        ),
-    }
-
-
-def _benchmark_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_ref(
-        row,
-        (
-            "benchmark_bundle_id",
-            "benchmark_date",
-            "private_model_artifact_hash",
-            "private_model_manifest_hash",
-            "rolling_window_hash",
-            "evaluation_epoch",
-            "aggregate_score",
-            "scoring_worker_ref",
-            "proxy_ref_hash",
-            "signature_ref",
-            "benchmark_bundle_hash",
-            "anchored_hash",
-            "current_benchmark_status",
-        ),
-    )
-
-
-def _rolling_window_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_ref(
-        row,
-        (
-            "rolling_window_hash",
-            "required_days",
-            "icps_per_day",
-            "selected_set_count",
-            "selected_icp_count",
-            "anchored_hash",
-        ),
-    )
-
-
-def _model_version_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_ref(
-        row,
-        (
-            "private_model_version_id",
-            "model_artifact_hash",
-            "private_model_manifest_hash",
-            "git_commit_sha",
-            "config_hash",
-            "component_registry_version",
-            "scoring_adapter_version",
-            "source_candidate_id",
-            "source_score_bundle_id",
-            "source_benchmark_bundle_id",
-            "version_hash",
-            "anchored_hash",
-            "current_version_status",
-        ),
-    )
-
-
-def _promotion_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_ref(
-        row,
-        (
-            "promotion_event_id",
-            "candidate_id",
-            "derived_candidate_id",
-            "source_score_bundle_id",
-            "derived_score_bundle_id",
-            "private_model_version_id",
-            "event_type",
-            "promotion_status",
-            "active_parent_artifact_hash",
-            "candidate_parent_artifact_hash",
-            "rolling_window_hash",
-            "improvement_points",
-            "threshold_points",
-            "anchored_hash",
-        ),
-    )
-
-
-def _public_report_ref(row: Mapping[str, Any]) -> dict[str, Any]:
-    report_doc = row.get("report_doc") if isinstance(row.get("report_doc"), Mapping) else {}
-    return {
-        **_compact_ref(
-            row,
-            (
-                "report_id",
-                "benchmark_date",
-                "benchmark_bundle_id",
-                "private_model_artifact_hash",
-                "private_model_manifest_hash",
-                "rolling_window_hash",
-                "aggregate_score",
-                "report_hash",
-                "anchored_hash",
-                "current_report_status",
-            ),
-        ),
-        "public_summary_hash": sha256_json(report_doc) if report_doc else None,
     }
 
 

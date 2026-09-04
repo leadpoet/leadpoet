@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-import subprocess
-import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,25 +75,19 @@ def test_validator_has_no_retired_qualification_worker_path() -> None:
     assert "QUALIFICATION_WEBSHARE_PROXY" not in deploy
 
 
-def test_scoring_package_does_not_eagerly_load_retired_modules() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys; import qualification.scoring; "
-                "retired = {'qualification.scoring.baseline', "
-                "'qualification.scoring.champion', "
-                "'qualification.scoring.emissions'}; "
-                "assert retired.isdisjoint(sys.modules)"
-            ),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def test_retired_qualification_runtime_is_removed() -> None:
+    for path in (
+        ROOT / "gateway" / "qualification" / "api",
+        ROOT / "qualification" / "validator",
+        ROOT / "miner_models" / "qualification_model",
+        ROOT / "miner_models" / "qualification_research_arm_b",
+    ):
+        assert not any(path.glob("*.py"))
 
-    assert result.returncode == 0, result.stderr
-    for name in ("baseline.py", "champion.py", "emissions.py"):
-        assert (ROOT / "qualification" / "scoring" / name).is_file()
+    for name in (
+        "baseline.py",
+        "baseline_arms.py",
+        "champion.py",
+        "emissions.py",
+    ):
+        assert not (ROOT / "qualification" / "scoring" / name).exists()

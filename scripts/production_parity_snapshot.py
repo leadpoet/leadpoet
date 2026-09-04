@@ -1446,19 +1446,21 @@ SELECT json_build_object(
   'capture_utc_timestamp', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::text || '+00:00',
   'capture_utc_date', (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text,
   'latest_completed_benchmark_date', (
-    SELECT MAX(benchmark_date)::text
-    FROM public.research_lab_private_model_benchmark_bundles
+    SELECT MAX(evaluation_date)::text
+    FROM public.lab_arena_rounds
+    WHERE status = 'published'
   ),
   'current_day_rebenchmark_run_count', (
     SELECT COUNT(*)
-    FROM public.research_lab_scoring_runs
-    WHERE run_type = 'private_baseline_rebenchmark'
-      AND benchmark_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
+    FROM public.lab_arena_rounds
+    WHERE evaluation_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text
+      AND status <> 'cancelled'
   ),
   'current_day_benchmark_bundle_count', (
     SELECT COUNT(*)
-    FROM public.research_lab_private_model_benchmark_bundles
-    WHERE benchmark_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date
+    FROM public.lab_arena_rounds
+    WHERE evaluation_date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date::text
+      AND status = 'published'
   ),
   'weight_history_scope', (
     SELECT json_build_object(

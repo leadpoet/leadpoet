@@ -28,8 +28,7 @@ from lab_arena.store import (
     new_lease_token,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    LAB_ARENA_DAILY_COMPETITION_MIGRATION,
-    LAB_ARENA_MIGRATION,
+    DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.test_source_add_end_to_end_postgres import SCRIPTS
@@ -45,6 +44,20 @@ def hotkey(label: str) -> str:
 
 def sha(seed: str) -> str:
     return contracts.document_hash({"seed": seed})
+
+
+def source_doc(
+    round_id: str, submission_id: str, seed: str, *, is_king: bool = False
+) -> Dict[str, Any]:
+    doc: Dict[str, Any] = {
+        "source_ref": "arena/%s/sources/%s.tar.gz" % (round_id, submission_id),
+        "source_sha256": sha(seed),
+        "source_size_bytes": 4096,
+        "consent": {"public_rerun": True},
+    }
+    if is_king:
+        doc["is_king"] = True
+    return doc
 
 
 @pytest.fixture(scope="module")
@@ -119,10 +132,16 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
     for index in range(count):
         miner = hotkey("%s-miner-%d" % (prefix, index))
         submission_id = "%s-sub-%d" % (prefix, index)
-        image_digest = "sha256:" + sha(submission_id + "img")[7:]
-        result = store.register_submission(round_id, submission_id, miner, {"submitted_reference": "source.example/%s@%s" % (submission_id, image_digest), "consent": {"public_rerun": True}})
+        result = store.register_submission(
+            round_id,
+            submission_id,
+            miner,
+            source_doc(round_id, submission_id, submission_id),
+        )
         assert result["status"] == "registered"
-        result = store.update_submission(round_id, submission_id, "uploaded", "accepted", {"image_digest": image_digest, "image_reference": "arena.example/lab-arena/models@" + image_digest, "image_size_bytes": 4096})
+        result = store.update_submission(
+            round_id, submission_id, "uploading", "accepted"
+        )
         assert result["status"] == "ok", result
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
         assert result["status"] == "ok"
@@ -189,10 +208,8 @@ def expire_now(superuser, run_id: str) -> None:
 
 def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
     with superuser.cursor() as cursor:
-        cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
-        cursor.execute(
-            (SCRIPTS / LAB_ARENA_DAILY_COMPETITION_MIGRATION).read_text(encoding="utf-8")
-        )
+        for migration in DEFAULT_MIGRATIONS:
+            cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         cursor.execute("SELECT rolname, rolsuper, rolbypassrls, rolcanlogin, rolinherit, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname IN ('lab_arena_owner', 'lab_arena_service') ORDER BY rolname")
         rows = cursor.fetchall()
         assert rows == [
@@ -341,12 +358,8 @@ def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
             "CREATE FUNCTION public.lab_arena_append_events(TEXT, TEXT, JSONB, INTEGER) "
             "RETURNS JSONB LANGUAGE sql AS $$ SELECT '{}'::JSONB $$"
         )
-        cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
-        cursor.execute(
-            (SCRIPTS / LAB_ARENA_DAILY_COMPETITION_MIGRATION).read_text(
-                encoding="utf-8"
-            )
-        )
+        for migration in DEFAULT_MIGRATIONS:
+            cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         cursor.execute(
             "SELECT table_name, column_name FROM information_schema.columns "
             "WHERE table_schema = 'public' AND ((table_name = 'lab_arena_rounds' AND column_name = ANY(%s)) "
@@ -402,11 +415,10 @@ def test_service_refuses_to_start_as_superuser(connect):
         transport.close()
 
 
-def test_same_resolved_image_does_not_reject_a_second_miner(store):
+def test_same_source_bytes_do_not_reject_a_second_miner(store):
     round_id = "arena-2026-09-02-shared"
     runner = hotkey("shared-runner")
     assert store.create_round(round_id, round_config(round_id, [runner]))["status"] == "created"
-    image_digest = sha("shared-image")
     for index in range(2):
         miner = hotkey("shared-miner-%d" % index)
         submission_id = "shared-sub-%d" % index
@@ -414,21 +426,13 @@ def test_same_resolved_image_does_not_reject_a_second_miner(store):
             round_id,
             submission_id,
             miner,
-            {
-                "submitted_reference": "source.example/shared",
-                "consent": {"public_rerun": True},
-            },
+            source_doc(round_id, submission_id, "shared-source"),
         )["status"] == "registered"
         accepted = store.update_submission(
             round_id,
             submission_id,
-            "uploaded",
+            "uploading",
             "accepted",
-            {
-                "image_digest": image_digest,
-                "image_reference": "arena.example/models@" + image_digest,
-                "image_size_bytes": 4096,
-            },
         )
         assert accepted["status"] == "ok"
 
@@ -448,7 +452,7 @@ def test_database_refuses_submissions_outside_the_half_open_window(store, round_
         round_id,
         round_id + "-submission",
         hotkey(round_id + "-miner"),
-        {"submitted_reference": "source.example/model:latest", "consent": {"public_rerun": True}},
+        source_doc(round_id, round_id + "-submission", round_id),
     )
     assert result["status"] == "window_closed"
 
@@ -465,25 +469,26 @@ def test_service_can_add_only_the_round_baseline_after_miner_cutoff(store):
         round_id,
         "late-miner",
         hotkey("late-miner"),
-        {
-            "submitted_reference": "source.example/miner:latest",
-            "consent": {"public_rerun": True},
-        },
+        source_doc(round_id, "late-miner", "late-miner"),
     )
     assert ordinary["status"] == "window_closed"
     baseline = store.register_submission(
         round_id,
         "baseline-2026-09-02-baseline",
         hotkey("public-baseline"),
-        {
-            "submitted_reference": "ghcr.io/leadpoet/pydantic-harness:latest",
-            "consent": {"public_rerun": True},
-            "is_king": True,
-        },
+        source_doc(
+            round_id,
+            "baseline-2026-09-02-baseline",
+            "public-baseline",
+            is_king=True,
+        ),
     )
     assert baseline == {
         "status": "registered",
-        "submission_status": "uploaded",
+        "submission_status": "uploading",
+        "submission_id": "baseline-2026-09-02-baseline",
+        "source_ref": "arena/%s/sources/baseline-2026-09-02-baseline.tar.gz"
+        % round_id,
     }
 
 
@@ -518,19 +523,47 @@ def test_append_only_ledger_and_write_once_rounds_resist_owner_level_mutation(st
             superuser.rollback() if not superuser.autocommit else None
 
 
-def _compact_publication(round_id: str, published_at: str, king_key: str) -> Dict[str, Any]:
+def _compact_publication(
+    round_id: str, published_at: str, baseline_key: str, winner_key: str
+) -> Dict[str, Any]:
+    baseline_id = round_id + "-baseline"
+    winner_id = round_id + "-winner"
     return {
         "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
         "round_id": round_id,
-        "participants": [],
+        "participants": [
+            {
+                "submission_id": baseline_id,
+                "miner_hotkey": baseline_key,
+                "is_baseline": True,
+            },
+            {
+                "submission_id": winner_id,
+                "miner_hotkey": winner_key,
+                "is_baseline": False,
+            },
+        ],
         "stage1_ranking": [],
         "finalists": [],
-        "final_ranking": [],
+        "final_ranking": [
+            {
+                "rank": 1,
+                "submission_id": winner_id,
+                "final_score": 60,
+                "is_baseline": False,
+            },
+            {
+                "rank": 2,
+                "submission_id": baseline_id,
+                "final_score": 50,
+                "is_baseline": True,
+            },
+        ],
         "king_decision": {
             "outcome": "crowned",
-            "king_submission_id": "winner",
-            "king_hotkey": king_key,
-            "winner_submission_id": "winner",
+            "king_submission_id": winner_id,
+            "king_hotkey": winner_key,
+            "winner_submission_id": winner_id,
         },
         "published_at": published_at,
     }
@@ -540,14 +573,31 @@ def _publish_compact(store: ArenaStore, superuser, round_id: str, *, rewards_ena
     runner = hotkey(round_id + "-runner")
     config = round_config(round_id, [runner], mode=mode, rewards_enabled=rewards_enabled)
     assert store.create_round(round_id, config)["status"] == "created"
+    baseline_key = config["baseline_hotkey"]
+    winner_key = hotkey(round_id + "-king")
+    participants = [
+        {
+            "submission_id": round_id + "-baseline",
+            "miner_hotkey": baseline_key,
+            "is_king": True,
+        },
+        {
+            "submission_id": round_id + "-winner",
+            "miner_hotkey": winner_key,
+            "is_king": False,
+        },
+    ]
     with superuser.cursor() as cursor:
         cursor.execute(
-            "UPDATE public.lab_arena_rounds SET status = 'scored', finalists = '[]'::jsonb WHERE round_id = %s",
-            (round_id,),
+            "UPDATE public.lab_arena_rounds SET status = 'scored', "
+            "participants = %s::jsonb, finalists = '[]'::jsonb WHERE round_id = %s",
+            (json.dumps(participants), round_id),
         )
     published_at = "2026-09-02T00:00:00Z"
     result = store.transition_round(round_id, "scored", "published", {
-        "publication_doc": _compact_publication(round_id, published_at, hotkey(round_id + "-king")),
+        "publication_doc": _compact_publication(
+            round_id, published_at, baseline_key, winner_key
+        ),
         "published_at": published_at,
     })
     assert result["status"] == "ok"

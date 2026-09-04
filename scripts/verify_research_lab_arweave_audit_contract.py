@@ -10,10 +10,14 @@ import sys
 import types
 from typing import Any
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.bundles import sha256_json
+from leadpoet_canonical.events import compute_event_hash
 
 store_stub = types.ModuleType("gateway.research_lab.store")
 store_stub.canonical_hash = lambda payload: sha256_json(payload)  # type: ignore[attr-defined]
@@ -25,6 +29,40 @@ store_stub.select_one = None
 sys.modules.setdefault("gateway.research_lab.store", store_stub)
 
 from gateway.research_lab import arweave_audit
+
+
+def _signed_rebuffer_fixture() -> tuple[dict[str, Any], str, str]:
+    payload = {
+        "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
+        "epoch": 123,
+        "netuid": 401,
+        "audit_kind": "shadow",
+    }
+    signed_event = {
+        "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "boot_id": "boot",
+        "monotonic_seq": 1,
+        "prev_event_hash": None,
+        "payload": payload,
+    }
+    private_key = Ed25519PrivateKey.generate()
+    event_hash = compute_event_hash(signed_event)
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ).hex()
+    signed_log_entry = {
+        "signed_event": signed_event,
+        "event_hash": event_hash,
+        "enclave_pubkey": public_key,
+        "enclave_signature": private_key.sign(bytes.fromhex(event_hash)).hex(),
+    }
+    payload_hash = sha256_json(payload)
+    return signed_log_entry, event_hash, payload_hash
+
+
+_REBUFFER_LOG_ENTRY, _REBUFFER_EVENT_HASH, _REBUFFER_PAYLOAD_HASH = _signed_rebuffer_fixture()
 
 
 async def main() -> int:
@@ -47,8 +85,10 @@ async def main() -> int:
         assert payload["weights"]["weights_hash"] == "weights:abc"
         assert payload["lab_allocation"]["allocation_hash"] == "sha256:" + "1" * 64
         assert payload["lab_allocation"]["allocations"]["reimbursements"][0]["miner_hotkey"] == "hk1"
-        assert payload["score_bundles"][0]["aggregates"]["mean_delta"] == 1.25
         assert payload["observability"]["champion_reward_count"] == 1
+        assert "audit_bundle" not in payload
+        assert "private_baseline_benchmarks" not in payload
+        assert "private_model_versions" not in payload
 
         secret_row = _allocation()
         secret_row["allocation_doc"]["reimbursement_allocations"][0]["proxy_url"] = "http://user:pass@example.test:8080"
@@ -115,15 +155,15 @@ async def main() -> int:
         assert appended_events == [
             {
                 "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
-                "event_hash": "f" * 64,
-                "payload_hash": "sha256:" + "9" * 64,
-                "signed_log_entry": {"signed_event": {"payload": {"ok": True}}},
+                "event_hash": _REBUFFER_EVENT_HASH,
+                "payload_hash": _REBUFFER_PAYLOAD_HASH,
+                "signed_log_entry": _REBUFFER_LOG_ENTRY,
             }
         ]
 
         appended_events.clear()
         tee_stub = types.SimpleNamespace(
-            get_buffer=lambda: _fake_get_buffer([{"event_hash": "f" * 64}]),
+            get_buffer=lambda: _fake_get_buffer([{"event_hash": _REBUFFER_EVENT_HASH}]),
             append_event=lambda event: _capture_append_event(appended_events, event),
         )
         sys.modules["gateway.utils.tee_client"] = types.SimpleNamespace(tee_client=tee_stub)
@@ -143,22 +183,8 @@ async def main() -> int:
 
 
 async def _fake_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
-    if table == "research_lab_signed_audit_bundle_current":
-        return [_audit_bundle()]
     if table == "research_lab_emission_allocation_current":
         return [_allocation()]
-    if table == "research_evaluation_score_bundle_current":
-        return [_score_bundle()]
-    if table == "research_lab_private_model_benchmark_current":
-        return [_benchmark()]
-    if table == "research_lab_rolling_icp_windows":
-        return [_window()]
-    if table == "research_lab_private_model_version_current":
-        return [_model_version()]
-    if table == "research_lab_candidate_promotion_events":
-        return [_promotion()]
-    if table == "research_lab_public_benchmark_report_current":
-        return [_public_report()]
     if table == "research_lab_champion_reward_current":
         return [_champion()]
     if table == "research_reimbursement_award_current":
@@ -171,8 +197,11 @@ async def _fake_rebuffer_select_many(table: str, **kwargs: Any) -> list[dict[str
         return [
             {
                 "anchor_id": "research_lab_arweave_anchor:" + "f" * 64,
-                "payload_hash": "sha256:" + "8" * 64,
-                "current_transparency_event_hash": "f" * 64,
+                "epoch": 123,
+                "netuid": 401,
+                "audit_kind": "shadow",
+                "payload_hash": _REBUFFER_PAYLOAD_HASH,
+                "current_transparency_event_hash": _REBUFFER_EVENT_HASH,
                 "current_anchor_status": "buffered",
             }
         ]
@@ -183,9 +212,10 @@ async def _fake_rebuffer_select_one(table: str, **kwargs: Any) -> dict[str, Any]
     if table == "transparency_log":
         return {
             "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
-            "event_hash": "f" * 64,
-            "payload_hash": "sha256:" + "9" * 64,
-            "signed_log_entry": {"signed_event": {"payload": {"ok": True}}},
+            "event_hash": _REBUFFER_EVENT_HASH,
+            "payload_hash": _REBUFFER_PAYLOAD_HASH,
+            "enclave_pubkey": _REBUFFER_LOG_ENTRY["enclave_pubkey"],
+            "signed_log_entry": _REBUFFER_LOG_ENTRY,
         }
     return None
 
@@ -213,18 +243,6 @@ def _weight_bundle() -> dict[str, Any]:
     }
 
 
-def _audit_bundle() -> dict[str, Any]:
-    return {
-        "audit_bundle_id": "research_lab_audit:" + "a" * 64,
-        "audit_bundle_hash": "sha256:" + "a" * 64,
-        "epoch": 123,
-        "signature_ref": "kms:signature",
-        "current_audit_status": "created",
-        "current_event_hash": "sha256:" + "b" * 64,
-        "anchored_hash": "sha256:" + "a" * 64,
-    }
-
-
 def _allocation() -> dict[str, Any]:
     return {
         "allocation_id": "lab_allocation:sha256:" + "1" * 64,
@@ -245,41 +263,6 @@ def _allocation() -> dict[str, Any]:
             "queued_champion_allocations": [],
         },
     }
-
-
-def _score_bundle() -> dict[str, Any]:
-    return {
-        "score_bundle_id": "score_bundle:" + "6" * 64,
-        "run_id": "run",
-        "ticket_id": "ticket",
-        "miner_hotkey": "hk2",
-        "island": "generalist",
-        "evaluation_epoch": 123,
-        "bundle_status": "scored",
-        "score_bundle_hash": "sha256:" + "6" * 64,
-        "anchored_hash": "sha256:" + "6" * 64,
-        "score_bundle_doc": {"aggregates": {"mean_delta": 1.25, "icp_count": 60}},
-    }
-
-
-def _benchmark() -> dict[str, Any]:
-    return {"benchmark_bundle_id": "private_benchmark:" + "7" * 64, "aggregate_score": 50}
-
-
-def _window() -> dict[str, Any]:
-    return {"rolling_window_hash": "sha256:" + "8" * 64, "selected_icp_count": 60}
-
-
-def _model_version() -> dict[str, Any]:
-    return {"private_model_version_id": "private_model_version:" + "9" * 64, "version_hash": "sha256:" + "9" * 64}
-
-
-def _promotion() -> dict[str, Any]:
-    return {"promotion_event_id": "promotion", "promotion_status": "promoted", "improvement_points": 1.25}
-
-
-def _public_report() -> dict[str, Any]:
-    return {"report_id": "public_benchmark:" + "c" * 64, "report_doc": {"summary": "sanitized"}}
 
 
 def _champion() -> dict[str, Any]:

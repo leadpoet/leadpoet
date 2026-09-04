@@ -1,16 +1,8 @@
-"""Provider evidence cache: pin candidate provider I/O to baseline evidence.
+"""Canonical provider request fingerprints and response-cache helpers.
 
-The daily baseline run already records every in-container provider call
-(request and response) in its trace artifact. This module turns those trace
-entries into a per-ICP request-fingerprint -> canonical-response cache. When
-a cache is handed to a candidate container (see the provider diagnostics
-bootstrap in private_runtime.py), a candidate that issues the same provider
-request as the baseline receives the recorded canonical baseline response
-instead of a fresh live call, so provider result variance between the
-baseline run and a later candidate run cannot change the comparison. Requests
-without a recorded response fall through to a live call and are marked in the
-trace as cache misses, which downstream scoring uses to distinguish
-same-evidence evaluations from fresh-evidence evaluations.
+The current provider boundary uses these functions to identify equivalent
+requests without storing credentials in keys or logs. A successful response
+is preferred when retries produced more than one result for the same request.
 
 Each fingerprint maps to exactly one canonical response: the baseline's
 settled outcome for that request. When the baseline recorded several outcomes
@@ -22,18 +14,7 @@ returns the same response, transient failures the baseline retried through
 are never replayed, and repeated sampling of one prompt cannot reintroduce
 output variance.
 
-Caches are built per ICP and must be mounted per ICP: a single cache spanning
-the whole window would hand every candidate container the recorded evidence
-for all sealed ICPs at once, which candidate code could read directly. A
-per-ICP cache only ever exposes evidence the running candidate could obtain
-itself by issuing the same requests live.
-
-The fingerprint canonicalization here MUST stay in sync with the inline
-implementation inside _PROVIDER_DIAGNOSTICS_BOOTSTRAP (private_runtime.py):
-the bootstrap computes fingerprints on raw in-container request values, this
-module computes them on sanitized trace values, and the two only agree
-because credential-bearing query parameters are dropped and provider request
-bodies carry no secrets.
+Credential-bearing query parameters are removed before hashing.
 """
 
 from __future__ import annotations

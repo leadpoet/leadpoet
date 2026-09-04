@@ -69,7 +69,7 @@ RUN test -f "/app/gateway/_attested_runtime/gateway_enclave_build_identities/${L
 RUN python3 /app/gateway/tee/build_identity.py verify \
     --gateway-root /app/gateway \
     --role "${LEADPOET_ENCLAVE_ROLE}"
-RUN python3 -c "from bittensor_wallet import Keypair; import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import research_lab.eval.evaluator; import research_lab.eval.http_tape; import validator_models.automated_checks"
+RUN python3 -c "from bittensor_wallet import Keypair; import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import validator_models.automated_checks"
 # Dynamic model inputs are staged under this measured, root-owned parent.
 # The sandbox receives one unpredictable child path and sees the rootfs
 # read-only; mode 0711 prevents it from enumerating concurrent job names.

@@ -25,7 +25,7 @@ from lab_arena.driver import drive_once  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Leadpoet Lab Arena service")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--port", type=int, default=8792)
     parser.add_argument("--tick-seconds", type=int, default=60)
     parser.add_argument("--check-only", action="store_true", help="run startup checks and exit")
     mode = parser.add_mutually_exclusive_group()

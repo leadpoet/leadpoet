@@ -9,7 +9,7 @@ from gateway.qualification.models import (
     IntentSignal,
     IntentSignalSource,
 )
-from qualification.scoring.lead_scorer import score_company_autoresearch_intent_v2
+from qualification.scoring.lead_scorer import score_company_competition_intent
 from qualification.scoring.company_fit_decision import company_fit_match
 
 
@@ -78,7 +78,7 @@ class FreshnessSourceOrderTests(unittest.IsolatedAsyncioTestCase):
             "qualification.scoring.lead_scorer._verify_company_fit",
             fit_verifier,
         ):
-            result = await score_company_autoresearch_intent_v2(
+            result = await score_company_competition_intent(
                 company,
                 icp,
                 run_cost_usd=0,

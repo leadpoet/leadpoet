@@ -85,7 +85,7 @@ def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
     monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
     client = _app()
     body = b"x" * (arena_proxy._MAX_REQUEST_BYTES + 1)
-    assert len(body) < arena_proxy.contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+    assert len(body) < arena_proxy._MAX_COMPLETION_REQUEST_BYTES
 
     complete = client.post("/arena/v1/runs/r1/complete", content=body)
     assert complete.status_code == 200
@@ -100,7 +100,7 @@ def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
         content=b"{}",
         headers={
             "content-length": str(
-                arena_proxy.contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes + 1
+                arena_proxy._MAX_COMPLETION_REQUEST_BYTES + 1
             )
         },
     ).status_code == 413

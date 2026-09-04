@@ -18,7 +18,6 @@ import subprocess
 import tempfile
 import time
 from typing import Any, Mapping, Sequence
-from uuid import UUID
 
 from gateway.research_lab import store as research_lab_store
 from gateway.research_lab.champion_settlement_v2 import (
@@ -57,14 +56,10 @@ from gateway.tee.coordinator_executor_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
-    ROLE_PURPOSES,
     build_receipt_graph,
     build_transport_attempt,
     merkle_root,
     sha256_json,
-)
-from tests.historical_sql_purpose_contract import (
-    canonical_purposes_before_routing_experiment_v2,
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
@@ -112,9 +107,6 @@ ALLOCATION_SCORING_AUDIT_MIGRATION = (
 )
 ALLOCATION_PROMOTION_MIGRATION = (
     "37-research-lab-promotion-and-public-benchmarks.sql"
-)
-ONE_ACTIVE_PRIVATE_MODEL_MIGRATION = (
-    "60-research-lab-one-active-version-guard.sql"
 )
 ATOMIC_CLAIM_GUARDS_MIGRATION = (
     "42-research-lab-atomic-claim-guards.sql"
@@ -185,9 +177,6 @@ PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
 PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
     "134-research-lab-provider-outcome-head-contention.sql"
 )
-ACTIVE_MODEL_RESULT_REPLAY_MIGRATION = (
-    "135-research-lab-active-model-result-replay.sql"
-)
 ANCESTRY_CHECKPOINT_MIGRATION = (
     "136-research-lab-ancestry-checkpoint-sidecars.sql"
 )
@@ -218,9 +207,6 @@ PROVIDER_PERSISTENCE_BATCH_MIGRATION = (
 SOURCE_ADD_ADMISSION_CONTROL_MIGRATION = (
     "145-research-lab-source-add-admission-control.sql"
 )
-PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION = (
-    "146-research-lab-private-benchmark-schema-v11.sql"
-)
 SOURCE_CATALOG_AUTH_METADATA_MIGRATION = (
     "147-research-lab-source-catalog-auth-metadata.sql"
 )
@@ -230,53 +216,11 @@ ATOMIC_CREDIT_RESUME_MIGRATION = (
 COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION = (
     "149-research-lab-compact-weight-settlement-authority.sql"
 )
-CANDIDATE_HYBRID_PURPOSES_MIGRATION = (
-    "152-research-lab-candidate-hybrid-purposes.sql"
-)
-PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION = (
-    "153-research-lab-private-model-lineage-generation.sql"
-)
-MODEL_COMPATIBILITY_PURPOSE_MIGRATION = (
-    "154-research-lab-model-compatibility-purpose.sql"
-)
 ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION = (
     "155-research-lab-ancestry-disclosure-root-fast-path.sql"
 )
 PRODUCTION_PARITY_READER_MIGRATION = (
     "156-production-parity-readonly-role.sql"
-)
-ROUTING_EXPERIMENT_AUTHORITY_MIGRATION = (
-    "157-research-lab-routing-experiment-authority.sql"
-)
-ROUTING_EXPERIMENT_PURPOSES_MIGRATION = (
-    "158-research-lab-routing-experiment-purposes.sql"
-)
-ROUTING_EXECUTION_QUEUE_MIGRATION = (
-    "159-research-lab-routing-execution-queue.sql"
-)
-ROUTING_ADAPTER_FAILURES_MIGRATION = (
-    "160-research-lab-routing-adapter-failures.sql"
-)
-EXACT_MODEL_TRANSITIONS_MIGRATION = (
-    "161-research-lab-exact-model-transitions.sql"
-)
-CANDIDATE_WATERFALL_SIDECARS_MIGRATION = (
-    "162-research-lab-candidate-routing-experiments.sql"
-)
-MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION = (
-    "163-research-lab-model-transition-artifact-custody.sql"
-)
-OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION = (
-    "164-research-lab-official-baseline-action-authority.sql"
-)
-CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION = (
-    "165-research-lab-candidate-derived-artifact-event.sql"
-)
-ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION = (
-    "166-research-lab-zero-call-verifier-timeout.sql"
-)
-PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION = (
-    "167-research-lab-provider-request-attempt-scope.sql"
 )
 SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION = (
     "169-research-lab-source-add-post-accept-leg1.sql"
@@ -308,8 +252,13 @@ SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "178-research-lab-source-add-miner-status.sql"
 )
-LAB_ARENA_MIGRATION = (
-    "179-lab-arena-v1.sql"
+LAB_ARENA_MIGRATIONS = (
+    "179-lab-arena-v1.sql",
+    "180-lab-arena-daily-competition.sql",
+    "181-lab-arena-source-submissions.sql",
+    "182-lab-arena-source-execution.sql",
+    "183-lab-arena-miner-reward-basis.sql",
+    "184-lab-arena-scoring-failure-isolation.sql",
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -328,7 +277,6 @@ EXPECTED_APPLIED_MIGRATIONS = (
     PAUSED_CAPACITY_AGING_MIGRATION,
     ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
     RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
-    ONE_ACTIVE_PRIVATE_MODEL_MIGRATION,
     HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
     *SOURCE_ADD_PRE_V2_MIGRATIONS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX[0],
@@ -348,7 +296,6 @@ EXPECTED_APPLIED_MIGRATIONS = (
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
     PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
-    ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
@@ -359,26 +306,11 @@ EXPECTED_APPLIED_MIGRATIONS = (
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     PROVIDER_PERSISTENCE_BATCH_MIGRATION,
     SOURCE_ADD_ADMISSION_CONTROL_MIGRATION,
-    PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION,
     SOURCE_CATALOG_AUTH_METADATA_MIGRATION,
     ATOMIC_CREDIT_RESUME_MIGRATION,
     COMPACT_WEIGHT_SETTLEMENT_AUTHORITY_MIGRATION,
-    CANDIDATE_HYBRID_PURPOSES_MIGRATION,
-    PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION,
-    MODEL_COMPATIBILITY_PURPOSE_MIGRATION,
     ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION,
     PRODUCTION_PARITY_READER_MIGRATION,
-    ROUTING_EXPERIMENT_AUTHORITY_MIGRATION,
-    ROUTING_EXPERIMENT_PURPOSES_MIGRATION,
-    ROUTING_EXECUTION_QUEUE_MIGRATION,
-    ROUTING_ADAPTER_FAILURES_MIGRATION,
-    EXACT_MODEL_TRANSITIONS_MIGRATION,
-    CANDIDATE_WATERFALL_SIDECARS_MIGRATION,
-    MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION,
-    OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION,
-    CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION,
-    ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION,
-    PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION,
     SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION,
     SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION,
     SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION,
@@ -389,7 +321,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
     SOURCE_ADD_MINER_STATUS_MIGRATION,
-    LAB_ARENA_MIGRATION,
+    *LAB_ARENA_MIGRATIONS,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -403,7 +335,6 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_133_provider_outcome_contract_valid",
     "pre_134_provider_outcome_head_contract_rejected",
     "post_134_provider_outcome_head_contract_valid",
-    "post_135_active_model_replay_contract_valid",
     "post_136_ancestry_checkpoint_contract_valid",
     "post_137_allocation_settlement_frontier_contract_valid",
     "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
@@ -414,31 +345,21 @@ EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "post_144_provider_persistence_batch_contract_valid",
     "post_096_source_add_functional_workflow_valid",
     "post_145_source_add_admission_control_contract_valid",
-    "post_146_private_benchmark_schema_contract_valid",
     "post_147_source_catalog_auth_metadata_contract_valid",
     "post_148_atomic_credit_resume_contract_valid",
     "post_149_compact_weight_settlement_contract_valid",
-    "post_152_candidate_hybrid_purpose_contract_valid",
-    "post_153_private_model_lineage_generation_contract_valid",
-    "post_154_model_compatibility_purpose_contract_valid",
     "post_155_ancestry_disclosure_lookup_contract_valid",
     "post_156_production_parity_reader_contract_valid",
-    "post_161_exact_model_transition_contract_valid",
-    "post_162_candidate_waterfall_sidecars_valid",
-    "post_163_model_transition_artifact_custody_valid",
-    "post_164_official_baseline_action_authority_valid",
-    "post_165_candidate_derived_artifact_event_valid",
-    "post_166_zero_call_verifier_timeout_valid",
-    "post_167_provider_request_attempt_scope_valid",
-    "post_168_source_add_post_accept_leg1_valid",
-    "post_169_source_add_provider_origin_contract_valid",
-    "post_170_source_add_duplicate_privacy_valid",
+    "post_169_source_add_post_accept_leg1_valid",
+    "post_170_source_add_provider_origin_contract_valid",
+    "post_171_source_add_duplicate_privacy_valid",
     "post_172_source_add_claim_control_valid",
     "post_173_source_add_leg1_release_policy_valid",
     "post_174_source_add_restart_state_restore_valid",
     "post_175_source_add_provenance_leg1_valid",
     "post_176_source_add_provenance_origin_repair_valid",
     "post_178_source_add_miner_status_valid",
+    "post_184_lab_arena_schema_valid",
     "credit_resume_identical_replay_idempotent",
     "credit_resume_differing_replay_rejected",
     "credit_resume_invalid_heads_rejected",
@@ -555,6 +476,16 @@ CREATE TABLE public.research_loop_start_payments (
 CREATE TABLE public.research_reimbursement_awards (
     award_id TEXT PRIMARY KEY
 );
+CREATE TABLE public.qualification_private_icp_sets (
+    set_id BIGINT PRIMARY KEY,
+    icps JSONB NOT NULL,
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE
+);
+ALTER TABLE public.qualification_private_icp_sets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.qualification_private_icp_sets
+    FROM PUBLIC, anon, authenticated;
 """
 GIT_TREE_CANDIDATE_PREREQUISITES_SQL = """
 ALTER TABLE public.research_lab_candidate_artifacts
@@ -3678,62 +3609,6 @@ def _allocation_settlement_frontier_bootstrap_contract(
     }
 
 
-def _private_model_seed_rows(
-    *,
-    suffix: str,
-    artifact_hash: str,
-    manifest_hash: str,
-    event_status: str,
-    event_seq: int = 0,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    version_id = "private_model_version:%s" % artifact_hash
-    version_hash = sha256_json(
-        {
-            "contract": "git-tree-postgres-rehearsal",
-            "version_id": version_id,
-            "suffix": suffix,
-        }
-    )
-    version = {
-        "private_model_version_id": version_id,
-        "schema_version": "1.0",
-        "model_artifact_hash": artifact_hash,
-        "private_model_manifest_hash": manifest_hash,
-        "private_model_manifest_uri": (
-            "s3://leadpoet-rehearsal/private-model-%s.json" % suffix
-        ),
-        "git_commit_sha": suffix * 64,
-        "config_hash": sha256_json({"config": suffix}),
-        "component_registry_version": "rehearsal-v1",
-        "scoring_adapter_version": "rehearsal-v1",
-        "source_candidate_id": None,
-        "source_score_bundle_id": None,
-        "source_benchmark_bundle_id": None,
-        "signature_ref": "rehearsal-signature-%s" % suffix,
-        "build_id": "rehearsal-build-%s" % suffix,
-        "redacted_version_doc": {"fixture": "git-tree-%s" % suffix},
-        "version_hash": version_hash,
-        "anchored_hash": version_hash,
-    }
-    event_payload = {
-        "private_model_version_id": version_id,
-        "seq": event_seq,
-        "event_type": event_status,
-        "version_status": event_status,
-        "reason": "restart_rehearsal",
-        "event_doc": {"fixture": "git-tree-%s" % suffix},
-    }
-    event = {
-        "event_id": str(
-            UUID("00000000-0000-4000-8000-%012d" % (100 + ord(suffix)))
-        ),
-        "schema_version": "1.0",
-        **event_payload,
-        "anchored_hash": sha256_json(event_payload),
-    }
-    return version, event
-
-
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     declaration_counts = _validate_required_migration_declarations(args.source_root)
     coordinator_release_identity = _load_coordinator_release_identity(
@@ -3768,7 +3643,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             PAUSED_CAPACITY_AGING_MIGRATION,
             ALLOCATION_IMAGE_BUILD_MIGRATIONS[2],
             RESUME_REQUEUE_HOTKEY_GUARD_MIGRATION,
-            ONE_ACTIVE_PRIVATE_MODEL_MIGRATION,
             HOTKEY_ACTIVE_LOOP_CAP_MIGRATION,
         ):
             database.apply_migration(scripts / name)
@@ -4320,55 +4194,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-134 provider outcome head contract differs"
             )
-        database.apply_migration(
-            scripts / ACTIVE_MODEL_RESULT_REPLAY_MIGRATION
-        )
-        applied.append(ACTIVE_MODEL_RESULT_REPLAY_MIGRATION)
-        active_model_replay_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_active_model_replay_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        replay_constraints = active_model_replay_contract.get("constraints")
-        replay_constraint_definitions = (
-            "\n".join(
-                str(constraint.get("constraint_definition") or "")
-                for constraint in replay_constraints.values()
-            )
-            if isinstance(replay_constraints, Mapping)
-            else ""
-        )
-        if (
-            active_model_replay_contract.get("schema_version")
-            != "leadpoet.active_model_replay_contract.v2"
-            or active_model_replay_contract.get("operation")
-            != "attest_active_private_model"
-            or active_model_replay_contract.get("purpose")
-            != "research_lab.active_private_model.v2"
-            or not isinstance(replay_constraints, Mapping)
-            or set(replay_constraints)
-            != {
-                "research_lab_attested_execution_results_v2_operation_check",
-                "research_lab_attested_execution_results_v2_purpose_check",
-                "research_lab_attested_exec_results_v2_op_purpose_check",
-            }
-            or any(
-                constraint.get("constraint_valid") is not True
-                for constraint in replay_constraints.values()
-            )
-            or "attest_active_private_model"
-            not in replay_constraint_definitions
-            or "research_lab.active_private_model.v2"
-            not in replay_constraint_definitions
-        ):
-            raise PostgresContractProbeError(
-                "post-135 active-model replay contract differs"
-            )
-
         database.apply_migration(scripts / ANCESTRY_CHECKPOINT_MIGRATION)
         applied.append(ANCESTRY_CHECKPOINT_MIGRATION)
         checkpoint_catalog = _relation_contract(database)
@@ -4571,30 +4396,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-145 source-add admission-control contract differs"
             )
         database.apply_migration(
-            scripts / PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION
-        )
-        applied.append(PRIVATE_BENCHMARK_SCHEMA_V11_MIGRATION)
-        private_benchmark_schema_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_private_benchmark_schema_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if private_benchmark_schema_contract != {
-            "schema_version": "leadpoet.private_benchmark_schema_contract.v1",
-            "constraint_name": "rl_private_benchmark_schema_version_check",
-            "accepted_schema_versions": ["1.0", "1.1"],
-            "schema_constraint_count": 1,
-            "legacy_constraint_count": 0,
-            "constraint_valid": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-146 private benchmark schema contract differs"
-            )
-        database.apply_migration(
             scripts / SOURCE_CATALOG_AUTH_METADATA_MIGRATION
         )
         # The migration drops and recreates one validated CHECK; rerunning it
@@ -4742,180 +4543,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-149 compact weight settlement contract differs"
             )
-        database.apply_migration(scripts / CANDIDATE_HYBRID_PURPOSES_MIGRATION)
-        applied.append(CANDIDATE_HYBRID_PURPOSES_MIGRATION)
-        candidate_hybrid_purpose_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        expected_pairs = {
-            str(role): frozenset(
-                canonical_purposes_before_routing_experiment_v2(str(role))
-            )
-            for role in ROLE_PURPOSES
-        }
-        expected_pairs["gateway_scoring"] = expected_pairs[
-            "gateway_scoring"
-        ] - frozenset({"research_lab.model_compatibility.v2"})
-        definition = candidate_hybrid_purpose_contract.get(
-            "constraint_definition"
-        )
-        clauses = re.findall(
-            r"\(role = '([^']+)'::text\)\s+AND\s+"
-            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
-            definition if isinstance(definition, str) else "",
-            flags=re.DOTALL,
-        )
-        observed_pairs = {
-            role: frozenset(
-                re.findall(r"'([^']+)'::text", encoded_purposes)
-            )
-            for role, encoded_purposes in clauses
-        }
-        if (
-            candidate_hybrid_purpose_contract.get("schema_version")
-            != "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
-            or candidate_hybrid_purpose_contract.get("constraint_name")
-            != "research_lab_attested_execution_receipts_v2_role_purpose_check"
-            or candidate_hybrid_purpose_contract.get("constraint_valid")
-            is not True
-            or observed_pairs != expected_pairs
-        ):
-            raise PostgresContractProbeError(
-                "post-152 candidate hybrid purpose contract differs"
-            )
-        database.apply_migration(
-            scripts / PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION
-        )
-        applied.append(PRIVATE_MODEL_LINEAGE_GENERATION_MIGRATION)
-        private_model_lineage_generation_contract = json.loads(
-            database.psql(
-                """
-                WITH guard AS (
-                    SELECT pg_catalog.pg_get_functiondef(p.oid) AS definition
-                      FROM pg_catalog.pg_proc p
-                     WHERE p.oid =
-                        'public.guard_research_lab_one_active_private_model_version()'
-                            ::regprocedure
-                ), generation AS (
-                    SELECT p.oid, p.prosecdef
-                      FROM pg_catalog.pg_proc p
-                     WHERE p.oid =
-                        'public.research_lab_private_model_lineage_generation()'
-                            ::regprocedure
-                )
-                SELECT pg_catalog.jsonb_build_object(
-                    'schema_version',
-                        'leadpoet.private-model-lineage-generation-contract.v1',
-                    'generation_matches_event_count',
-                        (SELECT value.generation
-                           FROM public.research_lab_private_model_lineage_generation()
-                                value)
-                        = (SELECT pg_catalog.count(*)::BIGINT
-                             FROM public.research_lab_private_model_version_events),
-                    'security_invoker', NOT (SELECT prosecdef FROM generation),
-                    'service_role_execute',
-                        pg_catalog.has_function_privilege(
-                            'service_role', (SELECT oid FROM generation), 'EXECUTE'
-                        ),
-                    'untrusted_execute_denied',
-                        NOT pg_catalog.has_function_privilege(
-                            'anon', (SELECT oid FROM generation), 'EXECUTE'
-                        )
-                        AND NOT pg_catalog.has_function_privilege(
-                            'authenticated', (SELECT oid FROM generation), 'EXECUTE'
-                        ),
-                    'trigger_enabled', EXISTS (
-                        SELECT 1
-                          FROM pg_catalog.pg_trigger
-                         WHERE tgrelid =
-                            'public.research_lab_private_model_version_events'
-                                ::regclass
-                           AND tgname =
-                            'guard_research_lab_one_active_version_insert'
-                           AND NOT tgisinternal
-                           AND tgenabled <> 'D'
-                    ),
-                    'protocol_marker_required',
-                        pg_catalog.strpos(
-                            (SELECT definition FROM guard),
-                            'leadpoet.private-model-activation.v1'
-                        ) > 0,
-                    'global_generation_required',
-                        pg_catalog.strpos(
-                            (SELECT definition FROM guard),
-                            'expected_global_lineage_generation'
-                        ) > 0
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if private_model_lineage_generation_contract != {
-            "schema_version": (
-                "leadpoet.private-model-lineage-generation-contract.v1"
-            ),
-            "generation_matches_event_count": True,
-            "security_invoker": True,
-            "service_role_execute": True,
-            "untrusted_execute_denied": True,
-            "trigger_enabled": True,
-            "protocol_marker_required": True,
-            "global_generation_required": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-153 private model lineage generation contract differs"
-            )
-        database.apply_migration(
-            scripts / MODEL_COMPATIBILITY_PURPOSE_MIGRATION
-        )
-        applied.append(MODEL_COMPATIBILITY_PURPOSE_MIGRATION)
-        candidate_hybrid_purpose_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        definition = candidate_hybrid_purpose_contract.get(
-            "constraint_definition"
-        )
-        clauses = re.findall(
-            r"\(role = '([^']+)'::text\)\s+AND\s+"
-            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
-            definition if isinstance(definition, str) else "",
-            flags=re.DOTALL,
-        )
-        observed_pairs = {
-            role: frozenset(
-                re.findall(r"'([^']+)'::text", encoded_purposes)
-            )
-            for role, encoded_purposes in clauses
-        }
-        expected_pairs = {
-            str(role): frozenset(
-                canonical_purposes_before_routing_experiment_v2(str(role))
-            )
-            for role in ROLE_PURPOSES
-        }
-        expected_pairs["gateway_scoring"] = expected_pairs[
-            "gateway_scoring"
-        ] | frozenset({"research_lab.model_compatibility.v2"})
-        if (
-            candidate_hybrid_purpose_contract.get("constraint_valid")
-            is not True
-            or observed_pairs != expected_pairs
-        ):
-            raise PostgresContractProbeError(
-                "post-154 model compatibility purpose contract differs"
-            )
         database.apply_migration(
             scripts / ANCESTRY_DISCLOSURE_ROOT_FAST_PATH_MIGRATION
         )
@@ -4975,399 +4602,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-156 production parity reader contract differs"
             )
         database.apply_migration(
-            scripts / ROUTING_EXPERIMENT_AUTHORITY_MIGRATION
-        )
-        applied.append(ROUTING_EXPERIMENT_AUTHORITY_MIGRATION)
-        database.apply_migration(
-            scripts / ROUTING_EXPERIMENT_PURPOSES_MIGRATION
-        )
-        applied.append(ROUTING_EXPERIMENT_PURPOSES_MIGRATION)
-        database.apply_migration(
-            scripts / ROUTING_EXECUTION_QUEUE_MIGRATION
-        )
-        applied.append(ROUTING_EXECUTION_QUEUE_MIGRATION)
-        database.apply_migration(
-            scripts / ROUTING_ADAPTER_FAILURES_MIGRATION
-        )
-        applied.append(ROUTING_ADAPTER_FAILURES_MIGRATION)
-        database.apply_migration(
-            scripts / EXACT_MODEL_TRANSITIONS_MIGRATION
-        )
-        applied.append(EXACT_MODEL_TRANSITIONS_MIGRATION)
-        exact_model_transition_contract = json.loads(
-            database.psql(
-                """
-                SELECT pg_catalog.jsonb_build_object(
-                    'event_constraint', pg_catalog.pg_get_constraintdef(oid),
-                    'v3_append_callable', pg_catalog.has_function_privilege(
-                        'service_role',
-                        'public.research_lab_routing_append_fenced_event_v3(text,text,text,text,bigint,jsonb)',
-                        'EXECUTE'
-                    ),
-                    'retired_v2_mutations', (
-                        SELECT pg_catalog.bool_and(
-                            NOT pg_catalog.has_function_privilege(
-                                'service_role', rpc, 'EXECUTE'
-                            )
-                        )
-                        FROM pg_catalog.unnest(ARRAY[
-                            'public.research_lab_routing_claim_experiment_v2(text,text,text,text,integer,jsonb,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_renew_claim_v2(text,text,text,bigint,text,integer,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_close_claim_v2(text,text,text,bigint,text,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_append_fenced_event_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_append_provider_attempt_v2(text,text,text,text,text,text,text,text,text,text,text,text,text,text,bigint,text,text,text,bigint,bigint,text,text,bigint,text,text,text,text,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_append_decision_receipt_v2(text,text,text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_append_evaluation_v2(text,text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_reserve_budget_v2(text,text,text,text,text,bigint,text,bigint,integer,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_settle_budget_v2(text,text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_mark_budget_uncertain_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_recover_budget_v2(text,text,text,bigint,text,jsonb)'::REGPROCEDURE,
-                            'public.research_lab_routing_promote_v2(text,text,text,text,text,jsonb,text,jsonb)'::REGPROCEDURE
-                        ]) AS retired(rpc)
-                    ),
-                    'bootstrap_recovery_callable',
-                        pg_catalog.has_function_privilege(
-                            'service_role',
-                            'public.research_lab_routing_recover_claim_v2(text,text,text,jsonb,text,jsonb)',
-                            'EXECUTE'
-                        ),
-                    'queue_claim_callable',
-                        pg_catalog.has_function_privilege(
-                            'service_role',
-                            'public.research_lab_routing_claim_execution_requests_v2(text,integer,integer)',
-                            'EXECUTE'
-                        )
-                )::text
-                  FROM pg_catalog.pg_constraint
-                 WHERE conrelid =
-                       'public.research_lab_routing_experiment_events_v2'::REGCLASS
-                   AND conname =
-                       'research_lab_routing_experiment_events_v2_event_type_check';
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if (
-            "model_transition_completed"
-            not in str(exact_model_transition_contract.get("event_constraint"))
-            or exact_model_transition_contract.get("v3_append_callable") is not True
-            or exact_model_transition_contract.get("retired_v2_mutations") is not True
-            or exact_model_transition_contract.get("bootstrap_recovery_callable") is not True
-            or exact_model_transition_contract.get("queue_claim_callable") is not True
-        ):
-            raise PostgresContractProbeError(
-                "post-161 exact Model transition contract differs"
-            )
-        database.apply_migration(
-            scripts / CANDIDATE_WATERFALL_SIDECARS_MIGRATION
-        )
-        applied.append(CANDIDATE_WATERFALL_SIDECARS_MIGRATION)
-        candidate_sidecar_contract = json.loads(
-            database.psql(
-                """
-                SELECT pg_catalog.jsonb_build_object(
-                    'forced_rls', (
-                        SELECT pg_catalog.bool_and(
-                            relation_meta.relrowsecurity
-                            AND relation_meta.relforcerowsecurity
-                        )
-                        FROM pg_catalog.pg_class relation_meta
-                        JOIN pg_catalog.pg_namespace namespace_meta
-                          ON namespace_meta.oid = relation_meta.relnamespace
-                        WHERE namespace_meta.nspname = 'public'
-                          AND relation_meta.relname IN (
-                              'research_lab_candidate_model_unit_terminals',
-                              'research_lab_candidate_waterfall_receipts',
-                              'research_lab_candidate_waterfall_metrics'
-                          )
-                    ),
-                    'relation_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_class relation_meta
-                        JOIN pg_catalog.pg_namespace namespace_meta
-                          ON namespace_meta.oid = relation_meta.relnamespace
-                        WHERE namespace_meta.nspname = 'public'
-                          AND relation_meta.relkind = 'r'
-                          AND relation_meta.relname IN (
-                              'research_lab_candidate_model_unit_terminals',
-                              'research_lab_candidate_waterfall_receipts',
-                              'research_lab_candidate_waterfall_metrics'
-                          )
-                    ),
-                    'foreign_key_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_constraint constraint_meta
-                        WHERE constraint_meta.contype = 'f'
-                          AND constraint_meta.conrelid IN (
-                              'public.research_lab_candidate_model_unit_terminals'::regclass,
-                              'public.research_lab_candidate_waterfall_receipts'::regclass,
-                              'public.research_lab_candidate_waterfall_metrics'::regclass
-                          )
-                    ),
-                    'composite_lineage_foreign_key_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_constraint constraint_meta
-                        WHERE constraint_meta.contype = 'f'
-                          AND pg_catalog.array_length(constraint_meta.conkey, 1) = 2
-                          AND constraint_meta.conrelid IN (
-                              'public.research_lab_candidate_model_unit_terminals'::regclass,
-                              'public.research_lab_candidate_waterfall_receipts'::regclass,
-                              'public.research_lab_candidate_waterfall_metrics'::regclass
-                          )
-                    ),
-                    'content_hash_check_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_constraint constraint_meta
-                        WHERE constraint_meta.contype = 'c'
-                          AND constraint_meta.conrelid IN (
-                              'public.research_lab_candidate_model_unit_terminals'::regclass,
-                              'public.research_lab_candidate_waterfall_receipts'::regclass,
-                              'public.research_lab_candidate_waterfall_metrics'::regclass
-                          )
-                          AND pg_catalog.pg_get_constraintdef(
-                              constraint_meta.oid
-                          ) LIKE '%research_lab_routing_jsonb_hash_v2%'
-                    ),
-                    'append_only_trigger_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_trigger trigger_meta
-                        WHERE NOT trigger_meta.tgisinternal
-                          AND trigger_meta.tgrelid IN (
-                              'public.research_lab_candidate_model_unit_terminals'::regclass,
-                              'public.research_lab_candidate_waterfall_receipts'::regclass,
-                              'public.research_lab_candidate_waterfall_metrics'::regclass
-                          )
-                          AND trigger_meta.tgname LIKE '%no_mutation'
-                    ),
-                    'provider_receipt_unique', EXISTS (
-                        SELECT 1
-                        FROM pg_catalog.pg_indexes index_meta
-                        WHERE index_meta.schemaname = 'public'
-                          AND index_meta.tablename =
-                              'research_lab_candidate_waterfall_receipts'
-                          AND index_meta.indexname =
-                              'idx_research_lab_candidate_waterfall_provider_receipt'
-                          AND index_meta.indexdef LIKE 'CREATE UNIQUE INDEX%'
-                          AND index_meta.indexdef LIKE '%provider_receipt_ref%'
-                          AND index_meta.indexdef LIKE '%WHERE%'
-                    )
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if candidate_sidecar_contract != {
-            "forced_rls": True,
-            "relation_count": 3,
-            "foreign_key_count": 7,
-            "composite_lineage_foreign_key_count": 4,
-            "content_hash_check_count": 4,
-            "append_only_trigger_count": 3,
-            "provider_receipt_unique": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-162 candidate waterfall sidecar contract differs"
-            )
-        database.apply_migration(
-            scripts / MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION
-        )
-        applied.append(MODEL_TRANSITION_ARTIFACT_CUSTODY_MIGRATION)
-        model_transition_artifact_custody_contract = json.loads(
-            database.psql(
-                """
-                SELECT pg_catalog.jsonb_build_object(
-                    'contract',
-                        public.research_lab_routing_exact_model_transition_contract_v2(),
-                    'service_role_callable',
-                        pg_catalog.has_function_privilege(
-                            'service_role',
-                            'public.research_lab_routing_exact_model_transition_contract_v2()',
-                            'EXECUTE'
-                        ),
-                    'lookup_service_role_callable',
-                        pg_catalog.has_function_privilege(
-                            'service_role',
-                            'public.research_lab_routing_load_model_transition_v2(text,text,text,text)',
-                            'EXECUTE'
-                        )
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if model_transition_artifact_custody_contract != {
-            "contract": {
-                "schema_version": (
-                    "leadpoet.research_lab."
-                    "exact_model_transition_contract.v2"
-                ),
-                "event_type": "model_transition_completed",
-                "marker_schema_version": (
-                    "leadpoet.research_lab.model_transition.v2"
-                ),
-                "artifact_identity_required": True,
-                "logical_identity_conflict_guard": True,
-                "logical_identity_lookup_rpc": (
-                    "research_lab_routing_load_model_transition_v2"
-                ),
-                "legacy_v1_eligible": False,
-            },
-            "service_role_callable": True,
-            "lookup_service_role_callable": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-163 Model transition artifact custody contract differs"
-            )
-        database.apply_migration(
-            scripts / OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION
-        )
-        applied.append(OFFICIAL_BASELINE_ACTION_AUTHORITY_MIGRATION)
-        official_baseline_contract = json.loads(
-            database.psql(
-                """
-                SELECT pg_catalog.jsonb_build_object(
-                    'relation_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_class relation_meta
-                        JOIN pg_catalog.pg_namespace namespace_meta
-                          ON namespace_meta.oid = relation_meta.relnamespace
-                        WHERE namespace_meta.nspname = 'public'
-                          AND relation_meta.relname IN (
-                              'research_lab_official_baseline_runs_v1',
-                              'research_lab_official_baseline_action_attempts_v1',
-                              'research_lab_official_baseline_action_terminals_v1',
-                              'research_lab_official_baseline_unit_closures_v1'
-                          )
-                    ),
-                    'forced_rls_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.pg_class relation_meta
-                        JOIN pg_catalog.pg_namespace namespace_meta
-                          ON namespace_meta.oid = relation_meta.relnamespace
-                        WHERE namespace_meta.nspname = 'public'
-                          AND relation_meta.relname IN (
-                              'research_lab_official_baseline_runs_v1',
-                              'research_lab_official_baseline_action_attempts_v1',
-                              'research_lab_official_baseline_action_terminals_v1',
-                              'research_lab_official_baseline_unit_closures_v1'
-                          )
-                          AND relation_meta.relrowsecurity
-                          AND relation_meta.relforcerowsecurity
-                    ),
-                    'service_rpc_count', (
-                        SELECT pg_catalog.count(*)
-                        FROM pg_catalog.unnest(ARRAY[
-                            'public.research_lab_official_baseline_register_run_v1(jsonb)',
-                            'public.research_lab_official_baseline_reserve_action_v1(jsonb)',
-                            'public.research_lab_official_baseline_record_terminal_known_v1(jsonb)',
-                            'public.research_lab_official_baseline_record_terminal_uncertain_v1(jsonb)',
-                            'public.research_lab_official_baseline_load_replay_v1(jsonb)',
-                            'public.research_lab_official_baseline_close_unit_v1(jsonb)',
-                            'public.research_lab_official_baseline_load_frontier_v1(text,text)'
-                        ]) function_name
-                        WHERE pg_catalog.to_regprocedure(function_name) IS NOT NULL
-                          AND pg_catalog.has_function_privilege(
-                              'service_role', function_name, 'EXECUTE'
-                          )
-                    )
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if official_baseline_contract != {
-            "relation_count": 4,
-            "forced_rls_count": 4,
-            "service_rpc_count": 7,
-        }:
-            raise PostgresContractProbeError(
-                "post-164 official baseline action authority differs"
-            )
-        database.apply_migration(
-            scripts / CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION
-        )
-        applied.append(CANDIDATE_DERIVED_ARTIFACT_EVENT_MIGRATION)
-        candidate_derived_event_enabled = database.psql(
-            """
-            SELECT pg_catalog.bool_and(
-                constraint_meta.convalidated
-                AND pg_catalog.pg_get_constraintdef(constraint_meta.oid)
-                    LIKE '%candidate_derived_artifact_failed%'
-            )
-            FROM pg_catalog.pg_constraint constraint_meta
-            WHERE constraint_meta.conrelid =
-                'public.research_lab_auto_research_loop_events'::regclass
-              AND constraint_meta.conname =
-                'research_lab_auto_research_loop_events_event_type_check';
-            """,
-            tuples_only=True,
-        ).stdout.strip()
-        if candidate_derived_event_enabled != "t":
-            raise PostgresContractProbeError(
-                "post-165 candidate-derived artifact event differs"
-            )
-        database.apply_migration(
-            scripts / ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION
-        )
-        applied.append(ZERO_CALL_VERIFIER_TIMEOUT_MIGRATION)
-        zero_call_timeout_contract = json.loads(
-            database.psql(
-                """
-                SELECT pg_catalog.jsonb_build_object(
-                    'constraint_valid', COALESCE((
-                        SELECT constraint_meta.convalidated
-                           AND pg_catalog.pg_get_constraintdef(
-                               constraint_meta.oid
-                           ) LIKE '%timeout_ms = 0%'
-                        FROM pg_catalog.pg_constraint constraint_meta
-                        WHERE constraint_meta.conrelid =
-                            'public.research_lab_official_baseline_action_attempts_v1'::regclass
-                          AND constraint_meta.conname =
-                            'research_lab_official_baseline_action_timeout_by_type_v1'
-                    ), FALSE),
-                    'reserve_rpc_service_callable',
-                        pg_catalog.has_function_privilege(
-                            'service_role',
-                            'public.research_lab_official_baseline_reserve_action_v1(jsonb)',
-                            'EXECUTE'
-                        )
-                )::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if zero_call_timeout_contract != {
-            "constraint_valid": True,
-            "reserve_rpc_service_callable": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-166 zero-call verifier timeout contract differs"
-            )
-        database.apply_migration(
-            scripts / PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION
-        )
-        applied.append(PROVIDER_REQUEST_ATTEMPT_SCOPE_MIGRATION)
-        provider_request_scope_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_official_baseline_request_scope_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if provider_request_scope_contract != {
-            "schema_version": (
-                "leadpoet.research_lab.official_baseline_provider_request.v2"
-            ),
-            "identity_scope": "protected_preparation_and_dispatch",
-            "legacy_replay": "same_run_exact_provider_response_only",
-            "new_identity_unique": True,
-        }:
-            raise PostgresContractProbeError(
-                "post-167 provider request attempt scope differs"
-            )
-        database.apply_migration(
             scripts / SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION
         )
         applied.append(SOURCE_ADD_POST_ACCEPT_LEG1_MIGRATION)
@@ -5414,7 +4648,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             },
         }:
             raise PostgresContractProbeError(
-                "post-167 SOURCE_ADD post-accept Leg 1 contract differs"
+                "post-169 SOURCE_ADD post-accept Leg 1 contract differs"
             )
         database.apply_migration(
             scripts / SOURCE_ADD_PROVIDER_ORIGIN_UNIQUENESS_MIGRATION
@@ -5450,7 +4684,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "service_role_policy_enabled": True,
         }:
             raise PostgresContractProbeError(
-                "post-168 SOURCE_ADD provider-origin contract differs"
+                "post-170 SOURCE_ADD provider-origin contract differs"
             )
         database.apply_migration(
             scripts / SOURCE_ADD_DUPLICATE_PRIVACY_MIGRATION
@@ -5509,7 +4743,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             },
         }:
             raise PostgresContractProbeError(
-                "post-169 SOURCE_ADD duplicate-privacy contract differs"
+                "post-171 SOURCE_ADD duplicate-privacy contract differs"
             )
         database.apply_migration(
             scripts / SOURCE_ADD_CLAIM_CONTROL_MIGRATION
@@ -6280,51 +5514,24 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-178 SOURCE_ADD miner status contract differs"
             )
-        # The Lab Arena schema follows the existing migration 178.
-        database.apply_migration(scripts / LAB_ARENA_MIGRATION)
-        applied.append(LAB_ARENA_MIGRATION)
-        routing_purpose_contract = json.loads(
+        # The active agent competition schema follows SOURCE_ADD migration 178.
+        for migration in LAB_ARENA_MIGRATIONS:
+            database.apply_migration(scripts / migration)
+            applied.append(migration)
+        lab_arena_schema_contract = json.loads(
             database.psql(
                 """
-                SELECT public.research_lab_candidate_hybrid_purpose_contract_v1()
-                       ::text;
+                SELECT public.lab_arena_schema_version_v1()::text;
                 """,
                 tuples_only=True,
             ).stdout.strip()
         )
-        routing_definition = routing_purpose_contract.get(
-            "constraint_definition"
-        )
-        routing_clauses = re.findall(
-            r"\(role = '([^']+)'::text\)\s+AND\s+"
-            r"\(purpose = ANY \(ARRAY\[(.*?)\]\)\)",
-            routing_definition if isinstance(routing_definition, str) else "",
-            flags=re.DOTALL,
-        )
-        routing_pairs = {
-            role: frozenset(
-                re.findall(r"'([^']+)'::text", encoded_purposes)
-            )
-            for role, encoded_purposes in routing_clauses
-        }
-        expected_routing_pairs = {
-            str(role): frozenset(str(purpose) for purpose in purposes)
-            for role, purposes in ROLE_PURPOSES.items()
-        }
-        expected_routing_pairs["gateway_scoring"] = expected_routing_pairs[
-            "gateway_scoring"
-        ] | frozenset(
-            {
-                "research_lab.routing_experiment.v2",
-                "research_lab.routing_provider_evidence.v2",
-            }
-        )
-        if (
-            routing_purpose_contract.get("constraint_valid") is not True
-            or routing_pairs != expected_routing_pairs
-        ):
+        if lab_arena_schema_contract != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 184,
+        }:
             raise PostgresContractProbeError(
-                "post-158 routing experiment purpose contract differs"
+                "post-184 Lab Arena schema contract differs"
             )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
@@ -6441,12 +5648,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "compact_weight_settlement_contract": (
                 compact_weight_settlement_contract
             ),
-            "candidate_hybrid_purpose_contract": (
-                candidate_hybrid_purpose_contract
-            ),
-            "private_model_lineage_generation_contract": (
-                private_model_lineage_generation_contract
-            ),
+            "lab_arena_schema_contract": lab_arena_schema_contract,
             "source_add_miner_status_contract": (
                 source_add_miner_status_contract
             ),

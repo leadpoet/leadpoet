@@ -42,12 +42,6 @@ from gateway.tee.source_add_runtime_v2 import (
     source_add_route_for_url_v2,
     validate_source_add_runtime_catalog_v2,
 )
-from research_lab.eval.private_runtime import (
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
-    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2,
-)
-
-
 class ProviderClientV2Error(RuntimeError):
     """A runner request lacks an authenticated coordinator terminal record."""
 
@@ -251,15 +245,6 @@ _CREDENTIAL_HEADERS = {
     "x-api-key",
     "x-auth-token",
 }
-_QUALIFICATION_ROUTE_COMMITMENT_HEADER = (
-    "x-leadpoet-qualification-route-commitment"
-)
-_QUALIFICATION_ROUTE_COMMITMENT_RE = re.compile(
-    QUALIFICATION_OUTCOME_REQUIRED_ROUTE_COMMITMENT_PATTERN_V2
-)
-_MAX_QUALIFICATION_ROUTE_COMMITMENTS = (
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
-)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -267,11 +252,6 @@ def _provider_id(url: str) -> str:
     parsed = urlsplit(str(url))
     if parsed.scheme != "https" or not parsed.hostname:
         raise ProviderClientV2Error("runner external request must use HTTPS")
-    if parsed.hostname.lower() == "openrouter.ai" and (
-        (parsed.path or "").startswith("/api/v1/workspaces")
-        or (parsed.path or "").startswith("/api/v1/keys")
-    ):
-        return "openrouter_management"
     return _PROVIDER_BY_HOST.get(parsed.hostname.lower(), "public_web")
 
 
@@ -284,28 +264,8 @@ def _headers_without_credentials(headers: Mapping[str, Any]) -> Dict[str, str]:
     return {
         str(name): str(value)
         for name, value in headers.items()
-        if str(name).lower()
-        not in _CREDENTIAL_HEADERS
-        | {_QUALIFICATION_ROUTE_COMMITMENT_HEADER}
+        if str(name).lower() not in _CREDENTIAL_HEADERS
     }
-
-
-def _qualification_route_commitment(headers: Mapping[str, Any]) -> str:
-    values = [
-        str(value or "").strip()
-        for name, value in headers.items()
-        if str(name).strip().lower()
-        == _QUALIFICATION_ROUTE_COMMITMENT_HEADER
-    ]
-    if not values:
-        return ""
-    if len(values) != 1 or not _QUALIFICATION_ROUTE_COMMITMENT_RE.fullmatch(
-        values[0]
-    ):
-        raise ProviderClientV2Error(
-            "qualification route commitment header is invalid"
-        )
-    return values[0]
 
 
 def _timeout_ms(value: Any, default_ms: int) -> int:
@@ -396,11 +356,6 @@ class _ExecutionScope:
         self.terminals = {}
         self.terminal_http_statuses = {}
         self.terminal_attempt_hashes = {}
-        self.route_commitments = {}
-        self.known_route_commitments = set()
-        self.inflight_route_commitments = set()
-        self.intent_sequences = {}
-        self.next_intent_sequence = 0
         self.lock = threading.Lock()
 
     def next_attempt(self, fingerprint: str) -> int:
@@ -413,39 +368,12 @@ class _ExecutionScope:
         self,
         logical_operation_id: str,
         attempt_number: int,
-        qualification_route_commitment: str = "",
     ) -> None:
         with self.lock:
             key = (str(logical_operation_id), int(attempt_number))
             if key in self.request_intents:
                 raise ProviderClientV2Error("provider attempt intent is duplicated")
-            commitment = str(qualification_route_commitment or "")
-            if commitment and not _QUALIFICATION_ROUTE_COMMITMENT_RE.fullmatch(
-                commitment
-            ):
-                raise ProviderClientV2Error(
-                    "qualification route commitment is invalid"
-                )
-            if commitment and commitment in self.inflight_route_commitments:
-                raise ProviderClientV2Error(
-                    "qualification route commitment already has an in-flight intent"
-                )
-            if (
-                commitment
-                and commitment not in self.known_route_commitments
-                and len(self.known_route_commitments)
-                >= _MAX_QUALIFICATION_ROUTE_COMMITMENTS
-            ):
-                raise ProviderClientV2Error(
-                    "qualification route commitment limit is exceeded"
-                )
             self.request_intents.add(key)
-            self.route_commitments[key] = commitment
-            if commitment:
-                self.known_route_commitments.add(commitment)
-                self.inflight_route_commitments.add(commitment)
-            self.intent_sequences[key] = self.next_intent_sequence
-            self.next_intent_sequence += 1
 
     def record_terminal(
         self,
@@ -487,9 +415,6 @@ class _ExecutionScope:
             self.terminals[key] = str(terminal_status)
             self.terminal_http_statuses[key] = normalized_http_status
             self.terminal_attempt_hashes[key] = normalized_attempt_hash
-            commitment = self.route_commitments.get(key)
-            if commitment:
-                self.inflight_route_commitments.discard(commitment)
 
     def assert_accepted_result_is_complete(self) -> None:
         with self.lock:
@@ -556,42 +481,6 @@ class _ExecutionScope:
                 and type(http_status) is int
                 and 200 <= http_status <= 299
             )
-            latest_by_route: Dict[
-                str, tuple[int, str, Any, str]
-            ] = {}
-            for key, commitment in self.route_commitments.items():
-                if not commitment or key not in self.terminals:
-                    continue
-                sequence = int(self.intent_sequences[key])
-                current = latest_by_route.get(commitment)
-                if current is None or sequence > current[0]:
-                    latest_by_route[commitment] = (
-                        sequence,
-                        self.terminals[key],
-                        self.terminal_http_statuses.get(key),
-                        self.terminal_attempt_hashes.get(key, ""),
-                    )
-            required_route_terminals = [
-                {
-                    "route_commitment": commitment,
-                    "attempt_hash": attempt_hash,
-                    "terminal_status": status,
-                    "http_status": http_status,
-                }
-                for commitment, (
-                    _sequence,
-                    status,
-                    http_status,
-                    attempt_hash,
-                ) in sorted(latest_by_route.items())
-            ]
-            successful_required_count = sum(
-                1
-                for item in required_route_terminals
-                if item["terminal_status"] in _ACCEPTED_RESPONSE_TERMINALS
-                and type(item["http_status"]) is int
-                and 200 <= item["http_status"] <= 299
-            )
             return {
                 "schema_version": "leadpoet.provider-terminal-observation.v1",
                 "request_intent_count": len(self.request_intents),
@@ -605,17 +494,6 @@ class _ExecutionScope:
                 "successful_latest_terminal_attempt_hashes": (
                     successful_attempt_hashes
                 ),
-                "required_route_commitments": [
-                    item["route_commitment"]
-                    for item in required_route_terminals
-                ],
-                "required_route_count": len(required_route_terminals),
-                "successful_required_route_count": successful_required_count,
-                "unresolved_required_route_count": (
-                    len(required_route_terminals)
-                    - successful_required_count
-                ),
-                "required_route_terminals": required_route_terminals,
             }
 
 
@@ -766,7 +644,6 @@ class BrokeredProviderTransportV2:
             if dynamic_route is not None
             else _provider_id(normalized_url)
         )
-        commitment = _qualification_route_commitment(headers)
         sanitized_headers = _headers_without_credentials(headers)
         body_bytes = bytes(body)
         fingerprint = sha256_bytes(
@@ -797,7 +674,6 @@ class BrokeredProviderTransportV2:
         scope.record_intent(
             logical_operation_id,
             attempt_number,
-            commitment,
         )
         resolved = dict(
             resolver(
@@ -877,7 +753,6 @@ class BrokeredProviderTransportV2:
             "schema_version": "leadpoet.attested-local-request.v1",
             "authority_sha256": authority_hash,
             "request_fingerprint": fingerprint,
-            "route_commitment": commitment,
         }
         request_artifact_hash = sha256_bytes(
             canonical_json(request_artifact).encode("utf-8")
@@ -1178,9 +1053,6 @@ class BrokeredProviderTransportV2:
             if dynamic_route is not None
             else _provider_id(url)
         )
-        qualification_route_commitment = _qualification_route_commitment(
-            headers
-        )
         sanitized_headers = _headers_without_credentials(headers)
         fingerprint = sha256_bytes(
             (
@@ -1208,7 +1080,6 @@ class BrokeredProviderTransportV2:
         scope.record_intent(
             logical_operation_id,
             attempt_number,
-            qualification_route_commitment,
         )
         broker_request = {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,

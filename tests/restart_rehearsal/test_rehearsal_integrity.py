@@ -66,7 +66,6 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
-    ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     COMPACT_ANCESTRY_CHECKPOINT_MIGRATION,
     DisposablePostgres,
@@ -1574,8 +1573,13 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_model_unit_terminals",
             "research_lab_candidate_waterfall_receipts",
             "research_lab_candidate_waterfall_metrics",
-            "research_lab_source_add_provenance_leg1_authority_v1",
-            "research_lab_source_add_miner_status_v1",
+                "research_lab_source_add_provenance_leg1_authority_v1",
+                "research_lab_source_add_miner_status_v1",
+                "lab_arena_rounds",
+                "lab_arena_submissions",
+                "lab_arena_runs",
+                "lab_arena_ledger",
+                "lab_arena_reward_basis_v1",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1646,8 +1650,14 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_add_reconcile_provenance_leg1_v1",
             "research_lab_source_add_reserve_leg1_slot_v4",
             "research_lab_source_add_reserve_leg1_slot_v3",
-            "research_lab_source_add_finalize_leg1_v3",
-            "research_lab_routing_exact_model_transition_contract_v1",
+                "research_lab_source_add_finalize_leg1_v3",
+                "lab_arena_current_daily_icp_set",
+                "lab_arena_register_submission",
+                "lab_arena_update_submission",
+                "lab_arena_claim_assignment",
+                "lab_arena_activate_reward",
+                "lab_arena_schema_version_v1",
+                "research_lab_routing_exact_model_transition_contract_v1",
             "research_lab_routing_exact_model_transition_contract_v2",
             "research_lab_routing_load_model_transition_v2",
             "research_lab_candidate_append_model_unit_terminal_v1",
@@ -3377,26 +3387,29 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     repository_root = Path(__file__).resolve().parents[2]
     tables, rpcs = _schema_contract(repository_root)
     assert {
+        "research_lab_gateway_control_current",
+        "lab_arena_rounds",
+        "lab_arena_submissions",
+        "lab_arena_runs",
+        "lab_arena_ledger",
+        "lab_arena_reward_basis_v1",
+    } <= tables
+    assert {
+        "research_lab_source_add_claim_work",
+        "lab_arena_current_daily_icp_set",
+        "lab_arena_register_submission",
+        "lab_arena_update_submission",
+        "lab_arena_claim_assignment",
+        "lab_arena_activate_reward",
+        "lab_arena_schema_version_v1",
+    } <= rpcs
+    assert {
         "research_lab_candidate_evaluation_current",
         "research_lab_candidate_promotion_events",
-        "research_lab_gateway_control_current",
         "research_lab_public_benchmark_report_current",
-    } <= tables
-    assert "research_lab_source_add_claim_work" in rpcs
+    }.isdisjoint(tables)
     assert "research_lab_gateway_control_current" in (
         repository_root / "scripts/44-research-lab-maintenance-pause.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_public_benchmark_report_current" in (
-        repository_root
-        / "scripts/53-research-lab-benchmark-quality-current-views.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_candidate_evaluation_current" in (
-        repository_root
-        / "scripts/52-research-lab-image-build-candidate-current-view.sql"
-    ).read_text(encoding="utf-8")
-    assert "research_lab_candidate_promotion_events" in (
-        repository_root
-        / "scripts/37-research-lab-promotion-and-public-benchmarks.sql"
     ).read_text(encoding="utf-8")
     assert "research_lab_source_add_claim_work" in (
         repository_root
@@ -4505,99 +4518,6 @@ def test_local_gateway_kms_boundary_unwraps_boot_credential_in_candidate(
             decrypted["CiphertextForRecipient"]
         ).decode("ascii"),
     ) == credential
-
-
-def test_local_nitro_boundary_preserves_optional_recipient_key_binding(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    from gateway.tee.kms_recipient_v2 import KMSRecipientV2
-    from leadpoet_canonical import credential_recipient_v2
-    from leadpoet_canonical.attested_v2 import canonical_json
-
-    pcr0_value = pcr0(COMMIT)
-    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(
-        rehearsal_sitecustomize,
-        "EVENT_PATH",
-        tmp_path / "events.jsonl",
-    )
-    boot = {
-        "boot_identity_hash": "sha256:" + "3" * 64,
-        "pcr0": pcr0_value,
-    }
-
-    def attestation_supplier(
-        *,
-        user_data: bytes,
-        signing_pubkey: bytes,
-    ) -> bytes:
-        return canonical_json(
-            {
-                "schema_version": "leadpoet.local_nitro_document.v1",
-                "pcr0": pcr0_value,
-                "public_key_b64": base64.b64encode(signing_pubkey).decode(
-                    "ascii"
-                ),
-                "user_data_b64": base64.b64encode(user_data).decode("ascii"),
-                "nonce_b64": "",
-            }
-        ).encode("ascii")
-
-    recipient_authority = KMSRecipientV2(
-        boot_identity_supplier=lambda: dict(boot),
-        expected_credential_ref_hashes={
-            "openrouter": "sha256:" + "4" * 64,
-        },
-        attestation_supplier=attestation_supplier,
-    )
-    miner_hotkey = "5" + "M" * 47
-    recipient = recipient_authority.openrouter_ingress_recipient_request(
-        miner_hotkey=miner_hotkey,
-        credential_kind="runtime",
-    )
-    monkeypatch.setattr(
-        credential_recipient_v2,
-        "verify_nitro_attestation_full",
-        rehearsal_sitecustomize._local_verify_nitro_attestation_full,
-    )
-
-    encrypted = (
-        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
-            recipient,
-            "sanitized-local-recipient-credential",
-            miner_hotkey=miner_hotkey,
-            credential_kind="runtime",
-            verified_coordinator_boot_identity=boot,
-        )
-    )
-
-    assert encrypted["request_id"] == recipient["request_id"]
-    assert base64.b64decode(encrypted["ciphertext_b64"], validate=True)
-
-    tampered = dict(recipient)
-    attestation = json.loads(
-        base64.b64decode(
-            tampered["attestation_document_b64"], validate=True
-        )
-    )
-    attestation["public_key_b64"] = base64.b64encode(
-        b"different-attested-key"
-    ).decode("ascii")
-    tampered["attestation_document_b64"] = base64.b64encode(
-        canonical_json(attestation).encode("utf-8")
-    ).decode("ascii")
-    with pytest.raises(
-        credential_recipient_v2.CredentialRecipientV2Error,
-        match="not bound",
-    ):
-        credential_recipient_v2.verify_and_encrypt_openrouter_credential_v2(
-            tampered,
-            "sanitized-local-recipient-credential",
-            miner_hotkey=miner_hotkey,
-            credential_kind="runtime",
-            verified_coordinator_boot_identity=boot,
-        )
 
 
 def test_local_vsock_listener_enforces_the_production_contract(
@@ -6404,26 +6324,10 @@ def test_behavior_contract_tracks_candidate_runtime_policies(
         epoch_count=1,
     )
 
-    monkeypatch.setenv(
-        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
-        "18",
-    )
-    changed = build_rehearsal_behavior_contract_v2(
-        source_root=source_root,
-        candidate_sha=COMMIT,
-        profile="prepush",
-        epoch_count=1,
-    )
-
-    assert (
-        changed["policy_commitments"]["conditional_icp"]["total_icps"]
-        == baseline["policy_commitments"]["conditional_icp"]["total_icps"] - 2
-    )
-    assert changed["policy_commitments"]["chain_source"] == {
+    assert baseline["policy_commitments"]["chain_source"] == {
         "policy": chain_source_policy_document(),
         "policy_hash": chain_source_policy_hash(),
     }
-    assert changed["contract_hash"] != baseline["contract_hash"]
 
     monkeypatch.setattr(
         chain_source,
@@ -6439,10 +6343,10 @@ def test_behavior_contract_tracks_candidate_runtime_policies(
     assert layout_changed["policy_commitments"]["chain_source"][
         "policy"
     ]["selective_result_last_fields"] == [73, 76, 80]
-    assert layout_changed["contract_hash"] != changed["contract_hash"]
+    assert layout_changed["contract_hash"] != baseline["contract_hash"]
 
 
-def test_candidate_behavior_scenarios_follow_nondefault_policy(
+def test_candidate_behavior_scenario_follows_chain_source_policy(
     monkeypatch,
 ) -> None:
     from leadpoet_canonical.chain_source_v2 import (
@@ -6456,25 +6360,10 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
         "SOURCE_ROOT",
         source_root,
     )
-    monkeypatch.setenv(
-        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
-        "18",
-    )
-
-    assignment = (
-        production_workflow_runner._exercise_conditional_icp_policy()
-    )
-    candidate_gate = (
-        production_workflow_runner._exercise_conditional_candidate_gate()
-    )
     historical_layouts = (
         production_workflow_runner._exercise_historical_metagraph_layouts()
     )
 
-    assert assignment["category_counts"]["conditional"] == 18
-    assert candidate_gate["initial_count"] == 20
-    assert candidate_gate["conditional_count"] == 18
-    assert candidate_gate["final_count"] == 38
     assert historical_layouts["policy_hash"] == chain_source_policy_hash()
     assert historical_layouts["accepted_layouts"] == (
         chain_source_policy_document()["selective_result_last_fields"]
@@ -7065,12 +6954,10 @@ def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> Non
     ]
 
     assert "rehearsal_inter_enclave_provider_execute" in runtime
-    assert "rehearsal_inter_enclave_provider_probe_resolve" in runtime
     assert "seal_artifact_over_attested_tls_v2" in runtime
     assert "_PersistentInterEnclaveArtifactClient" in runtime
     assert "handle_inter_enclave_rpc(" in handler
     assert '"provider_execute"' in handler
-    assert '"provider_probe_resolve"' in handler
     assert '"rehearsal_inter_enclave_artifact_call"' in handler
     assert '"artifact_seal_finish"' in handler
 
@@ -7357,14 +7244,6 @@ def test_rehearsal_routes_credential_ingress_to_candidate_runtime(
         },
         "v2_seal_source_add_ingress_credential": {
             "request_id": "sha256:" + "3" * 64,
-            "ciphertext_b64": "Y2lwaGVydGV4dA==",
-        },
-        "v2_get_openrouter_ingress_recipient": {
-            "miner_hotkey": "miner",
-            "credential_kind": "runtime",
-        },
-        "v2_seal_openrouter_ingress_credential": {
-            "request_id": "sha256:" + "4" * 64,
             "ciphertext_b64": "Y2lwaGVydGV4dA==",
         },
     }
@@ -7940,8 +7819,6 @@ def test_workflow_runner_continues_across_failed_release_epochs(
             "candidate_identity_exact",
             "protected_source_identity_exact",
             "chain_settlement_state_space_complete",
-            "conditional_icp_policy_config_bound",
-            "conditional_candidate_advancement_exact",
             "canonical_vector_primary_auditor_equal",
             "receipt_ancestry_verified",
             "sdk_signing_bridge_verified",
@@ -7950,9 +7827,7 @@ def test_workflow_runner_continues_across_failed_release_epochs(
             "boundary_cleanup_complete",
             "unknown_boundaries_rejected",
         ],
-        "policy_commitments": {
-            "conditional_icp": {},
-        },
+        "policy_commitments": {},
         "contract_hash": "sha256:" + "a" * 64,
     }
     monkeypatch.setattr(

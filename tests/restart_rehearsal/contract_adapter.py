@@ -62,16 +62,6 @@ _PCR0_CACHE_RAW_TAG = re.compile(r"validator-enclave-build-[1-9][0-9]*\Z")
 _PCR0_CACHE_NORMALIZED_TAG = re.compile(
     r"validator-enclave-build-[1-9][0-9]*-normalized:latest\Z"
 )
-EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
-    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
-    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    ),
-    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-        "alias/leadpoet-research-lab-artifact-signing"
-    ),
-}
 RUNSC_LOCK_PATH = Path("/opt/leadpoet/runsc-runtime.lock.json")
 EXTERNAL_ARTIFACT_ROOT = Path("/opt/leadpoet/external-artifacts")
 GITHUB_GIT_FIXTURE_REMOTE = Path("/srv/origin.git")
@@ -510,16 +500,6 @@ def _gateway_secret() -> dict[str, str]:
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "RESEARCH_LAB_TEE_PROTOCOL": "v2",
         "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "true",
-        # Exercise an installed N-1 secret with stale source values. The
-        # candidate restart must replace all three before gateway.main starts.
-        "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "main",
-        "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
-            "s3://leadpoet-private-model-artifacts-493765492819/"
-            "research-lab/sourcing-model/current.json"
-        ),
-        "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
-            "alias/rehearsal-stale-private-model-signing"
-        ),
         "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": (
             "s3://leadpoet-private-model-artifacts-493765492819/"
             "research-lab/rehearsal/raw-traces"
@@ -703,12 +683,7 @@ def _validator_secret() -> dict[str, str]:
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
         "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED": "true",
-        "RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED": "true",
-        "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": "true",
-        "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT": "true",
-        "RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
-        "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID": "rehearsal-kms",
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED": "true",
         "LEADPOET_SENTRY_RELEASE": "stale-n-minus-one-release",
@@ -2417,18 +2392,6 @@ def command_pkill(argv: list[str]) -> int:
 
 def _long_lived_process(key: str, argv: list[str]) -> int:
     environment_contract: dict[str, str] = {}
-    if key == "gateway.main":
-        environment_contract = {
-            name: os.environ.get(name, "")
-            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-        }
-        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
-            return _fail(
-                "process",
-                argv,
-                "gateway private-model source environment differs from "
-                "the canonical restart contract",
-            )
     if _record_internal_substitution(
         kind="process",
         argv=argv,
@@ -2464,18 +2427,6 @@ def _exec_long_lived_production_module(
     argv: list[str],
 ) -> int:
     environment_contract: dict[str, str] = {}
-    if key == "gateway.main":
-        environment_contract = {
-            name: os.environ.get(name, "")
-            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
-        }
-        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
-            return _fail(
-                "process",
-                argv,
-                "gateway private-model source environment differs from "
-                "the canonical restart contract",
-            )
     handle, state = _locked_state()
     state.setdefault("processes", {})[key] = os.getpid()
     _save_state(handle, state)

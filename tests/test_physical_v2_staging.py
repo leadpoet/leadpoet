@@ -1168,7 +1168,6 @@ def test_fast_contract_binds_every_exact_miner_intake_source():
         "gateway/research_lab/api.py",
         "gateway/research_lab/models.py",
         "gateway/research_lab/key_vault.py",
-        "leadpoet_canonical/credential_recipient_v2.py",
         "neurons/miner.py",
         "research_lab/source_add_miner.py",
     ):

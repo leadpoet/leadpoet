@@ -35,8 +35,6 @@ BEHAVIOR_SCENARIOS = (
     "measured-coordinator-raw-transport",
     "artifact-egress-sustained-readback",
     "chain-settlement-state-space",
-    "conditional-icp-policy",
-    "conditional-candidate-gate",
     "historical-metagraph-layouts",
     "receipt-graph-aggregate-pagination",
     "receipt-graph-transport-deduplication",
@@ -70,8 +68,6 @@ BEHAVIORAL_INVARIANTS = (
     "measured_coordinator_raw_transport_verified",
     "artifact_egress_sustained_readback_verified",
     "chain_settlement_state_space_complete",
-    "conditional_icp_policy_config_bound",
-    "conditional_candidate_advancement_exact",
     "historical_metagraph_layouts_policy_bound",
     "receipt_graph_aggregate_evidence_paged",
     "receipt_graph_transport_deduplicated_and_verified",
@@ -125,19 +121,6 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/tee_service.py",
     "gateway/tee/topology.py",
     "gateway/utils/tee_egress_forwarder.py",
-    "research_lab/eval/baseline_summary.py",
-    "research_lab/eval/conditional_validation.py",
-    "research_lab/eval/dev_eval.py",
-    "research_lab/eval/private_runtime.py",
-    "research_lab/eval/snapshot_store.py",
-    "research_lab/sourcing_model_contract.json",
-    "research_lab/sourcing_model_contract_check.py",
-    "research_lab/sourcing_model_contract_v7.json",
-    "research_lab/sourcing_model_contract_v68_a6f.json",
-    "research_lab/sourcing_model_parity_fixtures.json",
-    "research_lab/sourcing_model_parity_fixtures_v7.json",
-    "research_lab/sourcing_model_parity_fixtures_v28_a6f.json",
-    "research_lab/sourcing_model_semantic_compatibility_v1.json",
     "gateway/research_lab/champion_settlement_v2.py",
     "gateway/research_lab/allocations.py",
     "gateway/research_lab/stateful_epoch_authority_v1.py",
@@ -149,19 +132,6 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/research_lab/store.py",
     "gateway/research_lab/v2_authority.py",
     "research_lab/docker_operation_lock_v2.py",
-    "scripts/95-research-lab-git-tree-autoresearch.sql",
-    "scripts/115-research-lab-git-tree-root-replacement.sql",
-    "scripts/157-research-lab-routing-experiment-authority.sql",
-    "scripts/158-research-lab-routing-experiment-purposes.sql",
-    "scripts/159-research-lab-routing-execution-queue.sql",
-    "scripts/160-research-lab-routing-adapter-failures.sql",
-    "scripts/161-research-lab-exact-model-transitions.sql",
-    "scripts/162-research-lab-candidate-routing-experiments.sql",
-    "scripts/163-research-lab-model-transition-artifact-custody.sql",
-    "scripts/164-research-lab-official-baseline-action-authority.sql",
-    "scripts/166-research-lab-zero-call-verifier-timeout.sql",
-    "scripts/167-research-lab-provider-request-attempt-scope.sql",
-    "scripts/168-research-lab-legacy-provider-terminal-custody.sql",
     "gateway/api/weights.py",
     "gateway/tee/coordinator_chain_realized_settlement_v1.py",
     "gateway/tee/coordinator_chain_source_v2.py",
@@ -276,11 +246,6 @@ def _policy_commitments() -> dict[str, Any]:
         chain_source_policy_hash,
     )
 
-    conditional_policy = (
-        ResearchLabGatewayConfig.from_env()
-        .conditional_validation_policy()
-        .to_dict()
-    )
     allocation_policy = ResearchLabGatewayConfig.from_env().reimbursement_policy_doc(
         enabled=True
     )
@@ -290,7 +255,6 @@ def _policy_commitments() -> dict[str, Any]:
             "policy": chain_source_policy,
             "policy_hash": chain_source_policy_hash(),
         },
-        "conditional_icp": conditional_policy,
         "research_lab_allocation": {
             "policy": allocation_policy,
             "policy_hash": _sha256_json(allocation_policy),

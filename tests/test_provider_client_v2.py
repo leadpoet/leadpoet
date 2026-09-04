@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import concurrent.futures
 import json
-import threading
 import urllib.error
 import urllib.request
 
@@ -12,7 +10,6 @@ import aiohttp
 import httpx
 import pytest
 import requests
-from multidict import CIMultiDict
 
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
@@ -37,11 +34,6 @@ from leadpoet_verifier.semantic_gates import (
     SemanticGateEvaluator,
 )
 from qualification.scoring.company_verification import verify_company_exists
-from research_lab.eval.private_runtime import (
-    QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2,
-)
-
-
 HASH = "sha256:" + "a" * 64
 
 
@@ -136,176 +128,49 @@ def _scope(router):
     )
 
 
-def test_qualification_route_header_is_consumed_and_excluded_from_identity():
-    transport = Transport(status=200)
-    router, observed = _router(transport)
-    first_commitment = "1" * 64
-    second_commitment = "2" * 64
-    header = "X-Leadpoet-Qualification-Route-Commitment"
-    try:
-        with _scope(router) as scope:
-            first = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={header: first_commitment},
-                data=b"same-body",
-                timeout=1,
-            )
-            second = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={header: second_commitment},
-                data=b"same-body",
-                timeout=1,
-            )
-
-        assert first.status_code == second.status_code == 200
-        assert all(
-            header.lower()
-            not in {str(name).lower() for name in call["headers"]}
-            for call in transport.calls
-        )
-        attempts = [item["transport_attempt"] for item in observed]
-        assert attempts[0]["logical_operation_id"] == attempts[1][
-            "logical_operation_id"
-        ]
-        assert attempts[0]["provider_id"] == attempts[1]["provider_id"]
-        observation = scope.completion_observation()
-        assert observation["required_route_commitments"] == [
-            first_commitment,
-            second_commitment,
-        ]
-    finally:
-        router.restore()
-
-
-def test_high_cardinality_route_accounting_never_scans_prior_commitments():
-    class NoScanDict(dict):
-        def items(self):
-            raise AssertionError("intent admission scanned prior routes")
-
-        def values(self):
-            raise AssertionError("intent admission scanned prior routes")
-
+def test_execution_scope_keeps_request_intents_and_terminal_observation():
     scope = _ExecutionScope(
-        job_id="job-high-cardinality",
+        job_id="job-observation",
         purpose="research_lab.provider_evidence.v2",
-        logical_operation_id="score-high-cardinality",
+        logical_operation_id="score-observation",
         retry_policy_hashes={},
         default_timeout_ms=1000,
         terminal_sink=None,
     )
-    scope.route_commitments = NoScanDict()
-    for index in range(QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2):
-        commitment = f"{index:064x}"
-        scope.record_intent("same-operation", index, commitment)
-        scope.record_terminal(
-            "same-operation",
-            index,
-            "authenticated_response",
-            200,
-            "sha256:" + f"{index:064x}",
-        )
-
-    assert len(scope.known_route_commitments) == (
-        QUALIFICATION_OUTCOME_MAX_REQUIRED_ROUTE_OUTCOMES_V2
+    scope.record_intent("operation-1", 0)
+    scope.record_terminal(
+        "operation-1",
+        0,
+        "authenticated_response",
+        200,
+        "sha256:" + "b" * 64,
     )
-    assert scope.inflight_route_commitments == set()
-
-
-def test_simultaneous_identical_requests_keep_distinct_route_identities():
-    barrier = threading.Barrier(2)
-
-    class ConcurrentTransport(Transport):
-        def __call__(self, **request):
-            self.calls.append(request)
-            barrier.wait(timeout=3)
-            return {
-                "http_status": 200,
-                "headers": {"content-type": "application/json"},
-                "body": b'{"ok":true}',
-                "tls_peer_chain_hash": "sha256:" + "b" * 64,
-                "tls_protocol": "TLSv1.3",
-            }
-
-    transport = ConcurrentTransport(status=200)
-    router, observed = _router(transport)
-    scope = router.create_scope(
-        job_id="job-1",
-        purpose="research_lab.provider_evidence.v2",
-        logical_operation_id="score-icp-1",
-        retry_policy_hashes={
-            provider: HASH for provider in BUILTIN_PROVIDER_ROUTES
-        },
+    scope.record_intent("operation-2", 0)
+    scope.record_terminal(
+        "operation-2",
+        0,
+        "transport_failure",
+        None,
+        "sha256:" + "c" * 64,
     )
-    header = "X-Leadpoet-Qualification-Route-Commitment"
 
-    def dispatch(commitment):
-        with router.activate_scope(scope):
-            return router._execute_request(
-                method="POST",
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers={header: commitment},
-                body=b"same-body",
-                timeout_ms=1000,
-            )
-
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(
-                pool.map(dispatch, ("3" * 64, "4" * 64))
-            )
-        assert [item["http_status"] for item in results] == [200, 200]
-        attempts = [item["transport_attempt"] for item in observed]
-        assert len({item["logical_operation_id"] for item in attempts}) == 1
-        observation = scope.completion_observation()
-        assert observation["required_route_commitments"] == [
-            "3" * 64,
-            "4" * 64,
-        ]
-        assert observation["successful_required_route_count"] == 2
-        assert len(observation["required_route_terminals"]) == 2
-    finally:
-        router.restore()
-
-
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {"X-Leadpoet-Qualification-Route-Commitment": "A" * 64},
-        CIMultiDict(
-            [
-                ("X-Leadpoet-Qualification-Route-Commitment", "1" * 64),
-                ("x-leadpoet-qualification-route-commitment", "2" * 64),
-            ]
-        ),
-    ],
-)
-def test_invalid_or_duplicate_qualification_route_header_rejects_prebroker(
-    headers,
-):
-    broker_requests = []
-    router = BrokeredProviderTransportV2(
-        lambda request: broker_requests.append(request) or {}
-    )
-    scope = router.create_scope(
-        job_id="job-1",
-        purpose="research_lab.provider_evidence.v2",
-        logical_operation_id="score-icp-1",
-        retry_policy_hashes={
-            provider: HASH for provider in BUILTIN_PROVIDER_ROUTES
-        },
-    )
-    with router.activate_scope(scope):
-        with pytest.raises(ProviderClientV2Error, match="commitment header"):
-            router._execute_request(
-                method="POST",
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                body=b"same-body",
-                timeout_ms=1000,
-            )
-
-    assert broker_requests == []
-    assert scope.request_intents == set()
+    assert scope.completion_observation() == {
+        "schema_version": "leadpoet.provider-terminal-observation.v1",
+        "request_intent_count": 2,
+        "terminal_count": 2,
+        "latest_operation_count": 2,
+        "accepted_latest_terminal_count": 1,
+        "successful_latest_terminal_count": 1,
+        "failed_latest_terminal_count": 1,
+        "unresolved_latest_terminal_count": 1,
+        "latest_terminal_attempt_hashes": [
+            "sha256:" + "b" * 64,
+            "sha256:" + "c" * 64,
+        ],
+        "successful_latest_terminal_attempt_hashes": [
+            "sha256:" + "b" * 64
+        ],
+    }
 
 
 def test_httpx_request_uses_coordinator_and_preserves_response_shape():

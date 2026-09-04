@@ -174,7 +174,7 @@ def test_validator_deploy_preserves_secret_manager_gateway_routing():
     assert capture < main_env < docker_env < restore < first_container
     assert deploy.count(
         '-e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}"'
-    ) == 3
+    ) == 2
     assert (
         '-e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}"'
         in deploy

@@ -8125,7 +8125,12 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
     assert "miner-maintenance N-1 handoff lost its cwd or timing ledger" in script
     assert "gateway restart timing ledger is unavailable" in script
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
-    assert 'bash /home/ec2-user/gw_restart.sh\n' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_ROOT="$FORWARD_AUTHORITY_ROOT"' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_COMMIT="$CANDIDATE_SHA"' in script
+    assert (
+        'bash "$FORWARD_AUTHORITY_ROOT/gw_restart.sh" --commit "$CANDIDATE_SHA"'
+        in script
+    )
     assert "direct miner-maintenance restart performed secret writes" in script
     launcher = script.split(
         '  set +e\n  if [ "$TRANSITION" = "rollback" ]; then', 1
@@ -8134,6 +8139,7 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         '  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
     )
     first_rollout, direct = remaining.split("  else\n", 1)
+    assert "bash /home/ec2-user/gw_restart.sh" not in direct
     git_environment_overrides = (
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",

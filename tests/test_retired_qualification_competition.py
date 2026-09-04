@@ -50,6 +50,11 @@ def test_validator_has_no_retired_qualification_worker_path() -> None:
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
+    restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    required_start = restart.index("required_keys=(")
+    restart_required = restart[
+        required_start : restart.index(")", required_start)
+    ]
     retired_functions = {
         "detect_qualification_proxies",
         "detect_qualification_worker_ids",
@@ -73,6 +78,28 @@ def test_validator_has_no_retired_qualification_worker_path() -> None:
     assert "ENABLE_QUALIFICATION_WORKERS" not in deploy
     assert "ENABLE_QUALIFICATION_EVALUATION" not in deploy
     assert "QUALIFICATION_WEBSHARE_PROXY" not in deploy
+    assert "ENABLE_QUALIFICATION_EVALUATION" not in restart_required
+    assert "QUALIFICATION_WEBSHARE_PROXY" not in restart_required
+    assert "QUALIFICATION_OPENROUTER_API_KEY" not in restart_required
+    assert "QUALIFICATION_SCRAPINGDOG_API_KEY" not in restart_required
+    assert (
+        'export QUALIFICATION_OPENROUTER_API_KEY="${QUALIFICATION_OPENROUTER_API_KEY:-${OPENROUTER_API_KEY:-}}"'
+        in restart
+    )
+    assert (
+        'export QUALIFICATION_SCRAPINGDOG_API_KEY="${QUALIFICATION_SCRAPINGDOG_API_KEY:-${SCRAPINGDOG_API_KEY:-}}"'
+        in restart
+    )
+    for active_key in (
+        "ENABLE_FULFILLMENT",
+        "FULFILLMENT_OPENROUTER_API_KEY",
+        "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED",
+        "RESEARCH_LAB_INTERNAL_API_KEY",
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED",
+        "RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED",
+    ):
+        assert active_key in restart_required
+    assert "required_keys+=(VALIDATOR_V2_GATEWAY_URL)" in restart
 
 
 def test_retired_qualification_runtime_is_removed() -> None:

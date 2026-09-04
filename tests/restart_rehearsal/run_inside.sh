@@ -1065,6 +1065,14 @@ PY
       rm -rf -- "$MINER_BOOTSTRAP_ROOT"
     fi
   else
+    FORWARD_BOOTSTRAP_ROOT="$(
+      mktemp -d /tmp/gateway-restart-controller-bootstrap.XXXXXX
+    )"
+    FORWARD_AUTHORITY_ROOT="$FORWARD_BOOTSTRAP_ROOT/authority"
+    mkdir -m 700 "$FORWARD_AUTHORITY_ROOT"
+    GIT_NO_REPLACE_OBJECTS=1 \
+      git --git-dir=/srv/origin.git archive "$CANDIDATE_SHA" \
+      | tar -xf - -C "$FORWARD_AUTHORITY_ROOT"
     env \
       -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
       -u GIT_CEILING_DIRECTORIES \
@@ -1087,14 +1095,23 @@ PY
       GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
       GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
       GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
+      GATEWAY_RESTART_AUTHORITY_ROOT="$FORWARD_AUTHORITY_ROOT" \
+      GATEWAY_RESTART_AUTHORITY_COMMIT="$CANDIDATE_SHA" \
       GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
       GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
       GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       "${GATEWAY_ACTIVE_RELEASE_ENV[@]}" \
-      bash /home/ec2-user/gw_restart.sh
+      bash "$FORWARD_AUTHORITY_ROOT/gw_restart.sh" --commit "$CANDIDATE_SHA"
     RESTART_STATUS=$?
+    if [[ "$FORWARD_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+$ ]]; then
+      chmod -R u+w -- "$FORWARD_BOOTSTRAP_ROOT" 2>/dev/null || true
+      rm -rf -- "$FORWARD_BOOTSTRAP_ROOT"
+    else
+      echo "ERROR: unsafe gateway restart controller cleanup path" >&2
+      RESTART_STATUS=1
+    fi
   fi
   set -e
 

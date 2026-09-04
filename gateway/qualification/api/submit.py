@@ -48,6 +48,8 @@ from gateway.qualification.utils.helpers import (
 # Import chain utilities for real implementations
 from gateway.qualification.utils.chain import (
     verify_hotkey_signature as chain_verify_hotkey_signature,
+    ChainRegistrationUnavailable,
+    check_hotkey_registration as chain_check_hotkey_registration,
     is_hotkey_registered as chain_is_hotkey_registered,
     get_chain_info,
     BITTENSOR_NETWORK,
@@ -126,7 +128,15 @@ async def get_presigned_upload_url(presign_request: PresignRequest, request: Req
         )
     
     # Verify hotkey is registered
-    is_registered = await is_hotkey_registered(presign_request.miner_hotkey)
+    try:
+        is_registered = await is_hotkey_registered(presign_request.miner_hotkey)
+    except ChainRegistrationUnavailable as exc:
+        logger.error(f"Registration check unavailable: {str(exc)[:240]}")
+        raise HTTPException(
+            status_code=503,
+            detail="Subnet registration check is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "30"},
+        ) from exc
     if not is_registered:
         raise HTTPException(
             status_code=403,
@@ -309,8 +319,16 @@ async def submit_model(submission: ModelSubmission, request: Request):
     # ---------------------------------------------------------------------
     # Step 2: Verify hotkey is registered on subnet
     # ---------------------------------------------------------------------
-    is_registered = await is_hotkey_registered(submission.miner_hotkey)
-    
+    try:
+        is_registered = await is_hotkey_registered(submission.miner_hotkey)
+    except ChainRegistrationUnavailable as exc:
+        logger.error(f"Registration check unavailable: {str(exc)[:240]}")
+        raise HTTPException(
+            status_code=503,
+            detail="Subnet registration check is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "30"},
+        ) from exc
+
     if not is_registered:
         logger.warning(f"Unregistered hotkey attempted submission: {submission.miner_hotkey[:16]}...")
         raise HTTPException(
@@ -694,9 +712,14 @@ async def is_hotkey_registered(hotkey: str) -> bool:
     
     Returns:
         True if registered, False otherwise
+
+    Raises:
+        ChainRegistrationUnavailable: the metagraph could not be read, so
+            registration is unknown. Callers must answer 503, never 403 —
+            an unreadable metagraph is not evidence of deregistration.
     """
     # Use real chain verification
-    is_registered, role = await chain_is_hotkey_registered(hotkey)
+    is_registered, role = await chain_check_hotkey_registration(hotkey)
     if is_registered:
         logger.info(f"Hotkey {hotkey[:16]}... is registered as {role} on {BITTENSOR_NETWORK}")
     return is_registered

@@ -492,6 +492,63 @@ async def get_metagraph():
         raise
 
 
+class ChainRegistrationUnavailable(RuntimeError):
+    """
+    The subnet registration view could not be read.
+
+    This is NOT the same fact as "this hotkey is not registered". Collapsing the
+    two is what caused the 2026-09-04 lockout: every metagraph refresh failed,
+    `is_hotkey_registered` reported that as `(False, None)`, and every miner on
+    the subnet was told "hotkey is not registered on this subnet" for ninety
+    minutes. Callers that gate access on registration must answer "try again"
+    (503), not "you are not a member" (403), when they get this.
+    """
+
+
+async def check_hotkey_registration(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a hotkey is registered on the subnet, distinguishing an absent
+    hotkey from an unreadable metagraph.
+
+    Args:
+        hotkey: The Bittensor hotkey (SS58 address)
+
+    Returns:
+        Tuple of (is_registered, role) where role is "miner" or "validator" or None
+
+    Raises:
+        ChainRegistrationUnavailable: the metagraph could not be read, so
+            registration is unknown. `get_metagraph()` has already exhausted the
+            gateway cache and its own direct-fetch fallback by this point.
+    """
+    try:
+        metagraph = await get_metagraph()
+    except Exception as e:
+        logger.error(f"Registration check unavailable, metagraph unreadable: {e}")
+        raise ChainRegistrationUnavailable(str(e)) from e
+
+    try:
+        # Check if hotkey exists in metagraph
+        if hotkey not in metagraph.hotkeys:
+            return False, None
+
+        # Get UID for this hotkey
+        uid = metagraph.hotkeys.index(hotkey)
+
+        # Determine role based on validator_permit
+        validator_permit = bool(metagraph.validator_permit[uid])
+
+        if validator_permit:
+            return True, "validator"
+        else:
+            return True, "miner"
+
+    except Exception as e:
+        # A metagraph we hold but cannot read is still an unreadable metagraph.
+        logger.error(f"Error reading hotkey registration from metagraph: {e}")
+        raise ChainRegistrationUnavailable(str(e)) from e
+
+
 async def is_hotkey_registered(hotkey: str) -> Tuple[bool, Optional[str]]:
     """
     Check if a hotkey is registered on the subnet.
@@ -501,27 +558,16 @@ async def is_hotkey_registered(hotkey: str) -> Tuple[bool, Optional[str]]:
     
     Returns:
         Tuple of (is_registered, role) where role is "miner" or "validator" or None
+
+    Note:
+        This form reports an unreadable metagraph as "not registered". That is
+        safe for advisory callers and wrong for anything that refuses a request
+        on the answer — those must use `check_hotkey_registration` and map
+        `ChainRegistrationUnavailable` to a retryable 503.
     """
     try:
-        metagraph = await get_metagraph()
-        
-        # Check if hotkey exists in metagraph
-        if hotkey not in metagraph.hotkeys:
-            return False, None
-        
-        # Get UID for this hotkey
-        uid = metagraph.hotkeys.index(hotkey)
-        
-        # Determine role based on validator_permit
-        validator_permit = bool(metagraph.validator_permit[uid])
-        
-        if validator_permit:
-            return True, "validator"
-        else:
-            return True, "miner"
-            
-    except Exception as e:
-        logger.error(f"Error checking hotkey registration: {e}")
+        return await check_hotkey_registration(hotkey)
+    except ChainRegistrationUnavailable:
         return False, None
 
 

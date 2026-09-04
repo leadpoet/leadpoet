@@ -30,6 +30,8 @@ from gateway.qualification.api.payment import get_payment_info, verify_payment
 from gateway.qualification.utils.chain import (
     BITTENSOR_NETUID,
     BITTENSOR_NETWORK,
+    ChainRegistrationUnavailable,
+    check_hotkey_registration as chain_check_hotkey_registration,
     is_hotkey_registered as chain_is_hotkey_registered,
     verify_hotkey_signature,
 )
@@ -3994,7 +3996,18 @@ async def _verify_signed_miner(payload: object) -> None:
     if is_banned:
         raise HTTPException(status_code=403, detail=f"hotkey is banned: {ban_reason}")
 
-    is_registered, _role = await chain_is_hotkey_registered(payload.miner_hotkey)
+    try:
+        is_registered, _role = await chain_check_hotkey_registration(payload.miner_hotkey)
+    except ChainRegistrationUnavailable as exc:
+        # Registration is UNKNOWN, not absent. Answering 403 here tells a
+        # legitimate miner it has been deregistered and invites it to stop
+        # retrying; 503 tells it to come back. See the 2026-09-04 lockout.
+        logger.error("miner registration check unavailable: %s", str(exc)[:240])
+        raise HTTPException(
+            status_code=503,
+            detail="subnet registration check is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "30"},
+        ) from exc
     if not is_registered:
         raise HTTPException(status_code=403, detail="hotkey is not registered on this subnet")
 

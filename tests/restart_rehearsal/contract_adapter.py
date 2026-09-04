@@ -673,14 +673,6 @@ def _candidate_worker_ids(
     return tuple(range(first, last + 1))
 
 
-def _candidate_qualification_worker_ids() -> tuple[int, ...]:
-    return _candidate_worker_ids(
-        section_start="# Auto-detect QUALIFICATION proxies",
-        section_end="# Get enclave CID for TEE signing",
-        role="qualification",
-    )
-
-
 def _candidate_fulfillment_worker_ids() -> tuple[int, ...]:
     return _candidate_worker_ids(
         section_start="# Auto-detect FULFILLMENT proxies",
@@ -692,9 +684,7 @@ def _candidate_fulfillment_worker_ids() -> tuple[int, ...]:
 def _validator_secret() -> dict[str, str]:
     values = {
         "ENABLE_FULFILLMENT": "true",
-        "ENABLE_QUALIFICATION_WORKERS": "true",
         "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED": "false",
-        "ENABLE_QUALIFICATION_EVALUATION": "true",
         "LEADPOET_WRAPPER_ACTIVE": "1",
         "GATEWAY_URL": "http://gateway.invalid:8000",
         "VALIDATOR_V2_GATEWAY_URL": "http://gateway.invalid:8000",
@@ -726,10 +716,6 @@ def _validator_secret() -> dict[str, str]:
         "NO_PROXY": "127.0.0.1,localhost",
         "VALIDATOR_WEIGHT_PROTOCOL": "authoritative_v2",
     }
-    for worker_id in _candidate_qualification_worker_ids():
-        values[f"QUALIFICATION_WEBSHARE_PROXY_{worker_id}"] = (
-            f"http://rehearsal-qual-{worker_id}.invalid:8080"
-        )
     for worker_id in _candidate_fulfillment_worker_ids():
         values[f"FULFILLMENT_WEBSHARE_PROXY_{worker_id}"] = (
             f"http://rehearsal-ff-{worker_id}.invalid:8080"
@@ -1753,7 +1739,7 @@ def command_docker(argv: list[str]) -> int:
                         )
                 else:
                     worker_match = re.fullmatch(
-                        r"leadpoet-(validator|qual|ff)-worker-([1-9][0-9]*)",
+                        r"leadpoet-(validator|ff)-worker-([1-9][0-9]*)",
                         name,
                     )
                     if not worker_match:
@@ -1763,12 +1749,10 @@ def command_docker(argv: list[str]) -> int:
                     worker_kind, worker_id = worker_match.groups()
                     expected_mode = {
                         "validator": "worker",
-                        "qual": "qualification_worker",
                         "ff": "fulfillment_worker",
                     }[worker_kind]
                     role = {
                         "validator": "validator.sourcing_worker",
-                        "qual": "validator.qualification_worker",
                         "ff": "validator.fulfillment_worker",
                     }[worker_kind]
                     if (

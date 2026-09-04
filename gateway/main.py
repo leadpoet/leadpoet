@@ -88,9 +88,6 @@ from gateway.api import role_translate
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api import metrics as metrics_api
 
-# Import qualification router (Lead Qualification Agent Competition - Phase 10)
-from gateway.qualification.api.router import qualification_router
-
 # Research Lab is an authoritative V2 service. Import failures must abort
 # startup instead of silently launching a gateway without its protected path.
 from gateway.research_lab.api import router as research_lab_router
@@ -729,9 +726,6 @@ app.include_router(attestation.router)  # TEE attestation endpoint (/attestation
 app.include_router(weights.router)  # Weights submission for auditor validators
 app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
 app.include_router(metrics_api.router)
-
-# Lead Qualification Agent Competition API (Phase 10)
-app.include_router(qualification_router)
 
 app.include_router(research_lab_router)
 app.include_router(arena_proxy_router)

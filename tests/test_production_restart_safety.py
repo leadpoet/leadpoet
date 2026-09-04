@@ -497,4 +497,4 @@ def test_validator_runtime_never_logs_proxy_userinfo() -> None:
     assert "Proxy: ${FF_PROXY_VALUE" not in deploy
     assert "Proxy: {proxy_url" not in validator
     assert "Proxy enabled: {HTTP_PROXY_URL" not in checks
-    assert deploy.count("Proxy: configured (credentials redacted)") == 3
+    assert deploy.count("Proxy: configured (credentials redacted)") == 2

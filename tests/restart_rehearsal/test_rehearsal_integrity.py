@@ -8133,7 +8133,12 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
     assert "miner-maintenance N-1 handoff lost its cwd or timing ledger" in script
     assert "gateway restart timing ledger is unavailable" in script
     assert 'bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"' in script
-    assert 'bash /home/ec2-user/gw_restart.sh\n' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_ROOT="$FORWARD_AUTHORITY_ROOT"' in script
+    assert 'GATEWAY_RESTART_AUTHORITY_COMMIT="$CANDIDATE_SHA"' in script
+    assert (
+        'bash "$FORWARD_AUTHORITY_ROOT/gw_restart.sh" --commit "$CANDIDATE_SHA"'
+        in script
+    )
     assert "direct miner-maintenance restart performed secret writes" in script
     launcher = script.split(
         '  set +e\n  if [ "$TRANSITION" = "rollback" ]; then', 1
@@ -8142,6 +8147,7 @@ def test_forward_rehearsal_uses_canonical_first_rollout_and_keeps_direct_paths()
         '  elif [ "$MINER_FIRST_ROLLOUT" = "1" ]; then', 1
     )
     first_rollout, direct = remaining.split("  else\n", 1)
+    assert "bash /home/ec2-user/gw_restart.sh" not in direct
     git_environment_overrides = (
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_CEILING_DIRECTORIES",
@@ -8355,6 +8361,38 @@ def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
         assert relative == Path(
             "gateway/tee/gateway_miner_maintenance_restart_v1.py"
         )
+        assert source_kind == "candidate_archive"
+        with pytest.raises(RuntimeError, match="outside the candidate checkout"):
+            contract_adapter._candidate_git_path(
+                outside.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
+
+
+def test_module_provenance_accepts_only_candidate_restart_authority_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    with _production_named_temp_directory(
+        "gateway-restart-controller-bootstrap."
+    ) as bootstrap_root:
+        module_path = (
+            bootstrap_root
+            / "authority/gateway/tee/restart_preflight_v2.py"
+        )
+        module_path.parent.mkdir(parents=True)
+        module_path.write_text("VALUE = 'candidate authority'\n", encoding="utf-8")
+        outside = bootstrap_root / "unbound.py"
+        outside.write_text("VALUE = 'outside authority'\n", encoding="utf-8")
+
+        relative, source_kind = contract_adapter._candidate_git_path(
+            module_path.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+        assert relative == Path("gateway/tee/restart_preflight_v2.py")
         assert source_kind == "candidate_archive"
         with pytest.raises(RuntimeError, match="outside the candidate checkout"):
             contract_adapter._candidate_git_path(

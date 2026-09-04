@@ -3412,6 +3412,7 @@ def _release_channel(commit: str) -> dict[str, Any]:
     from gateway.tee.release_manifest_v2 import (
         BUILD_EVIDENCE_SCHEMA_VERSION,
         HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        build_local_release_identity,
         build_release_manifest,
     )
     from gateway.tee.release_channel_v2 import (
@@ -3421,6 +3422,7 @@ def _release_channel(commit: str) -> dict[str, Any]:
     from gateway.tee.topology import ROLE_SPECS, topology_hash
     from leadpoet_canonical.attested_v2 import sha256_json
     from validator_tee.host.release_v2 import (
+        build_local_validator_release_identity,
         build_validator_build_evidence,
         build_validator_release,
         build_validator_release_manifest,
@@ -3525,6 +3527,33 @@ def _release_channel(commit: str) -> dict[str, Any]:
         dockerfile_hash=dockerfile_hash,
         base_dockerfile_hash=base_dockerfile_hash,
     )
+    if (
+        not historical
+        and commit == os.environ.get("REHEARSAL_CANDIDATE_SHA", "").strip()
+    ):
+        local_gateway_results = [
+            {
+                "role": role,
+                "commit_sha": expected["commit_sha"],
+                "pcr0": expected["pcr0"],
+                "image_id": expected["normalized_image_hash"],
+                "source_manifest_hash": expected["source_manifest_hash"],
+                "build_identity_hash": expected["build_identity_hash"],
+                "execution_manifest_hash": expected["execution_manifest_hash"],
+                "dependency_lock_hash": expected["dependency_lock_hash"],
+                "dockerfile_hash": expected["dockerfile_hash"],
+                "topology_hash": expected["topology_hash"],
+            }
+            for role, expected in sorted(expected_roles.items())
+        ]
+        return build_release_channel_v2(
+            gateway_release_manifest=build_local_release_identity(
+                local_gateway_results
+            ),
+            validator_release_manifest=build_local_validator_release_identity(
+                validator_release
+            ),
+        )
     validator_evidence = [
         build_validator_build_evidence(
             validator_release,

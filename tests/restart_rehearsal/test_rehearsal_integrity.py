@@ -4056,15 +4056,23 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
         "SOURCE_ROOT",
         Path(__file__).resolve().parents[2],
     )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     channel = rehearsal_sitecustomize._release_channel(COMMIT)
     gateway = channel["gateway_release_manifest"]
+    assert gateway["schema_version"] == "leadpoet.gateway_local_release.v1"
+    assert gateway["verified_build_count"] == len(ROLE_SPECS)
     for role, release in gateway["roles"].items():
+        assert release["verified_build_count"] == 1
         assert release["normalized_image_hash"] == normalized_image_id(
             COMMIT,
             role,
         )
-        assert eif_hash(COMMIT, role) in release["eif_hashes"]
-    validator = channel["validator_release_manifest"]["release"]
+    validator_manifest = channel["validator_release_manifest"]
+    assert validator_manifest["schema_version"] == (
+        "leadpoet.validator_local_release.v1"
+    )
+    assert validator_manifest["verified_build_count"] == 1
+    validator = validator_manifest["release"]
     assert validator["normalized_image_hash"] == normalized_image_id(
         COMMIT,
         "validator_weights",
@@ -8245,6 +8253,27 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
             rows,
             candidate_sha=COMMIT,
         )
+
+
+def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    module = "gateway.tee.verify_weight_submission_ready_v2"
+    monkeypatch.setenv("SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN)
+    contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
+    assert os.environ["SUPABASE_URL"] == contract_adapter.LOCAL_POSTGREST_ORIGIN
+
+    monkeypatch.setenv("SUPABASE_URL", "https://unexpected.invalid")
+    with pytest.raises(ValueError, match="Supabase origin differs"):
+        contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
+
+    contract_adapter._route_host_storage_preflight_to_local_postgrest(
+        "gateway.tee.restart_preflight_v2"
+    )
+    assert os.environ["SUPABASE_URL"] == "https://unexpected.invalid"
 
 
 def test_gateway_readiness_accepts_missing_optional_preflight_only_for_rollback() -> None:

@@ -55,6 +55,7 @@ _PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
 PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+LOCAL_POSTGREST_ORIGIN = "http://127.0.0.1:54321"
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 PCR0_CACHE_PROVENANCE = "validator_pcr0_cache_v1"
@@ -190,6 +191,15 @@ def _rehearsal_scope() -> str:
 
 def _targeted_substitutions_allowed() -> bool:
     return _rehearsal_scope() == TARGETED_REGRESSION_SCOPE
+
+
+def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
+    if module != "gateway.tee.verify_weight_submission_ready_v2":
+        return
+    configured = os.environ.get("SUPABASE_URL", "").strip()
+    if configured not in {PRODUCTION_SUPABASE_ORIGIN, LOCAL_POSTGREST_ORIGIN}:
+        raise ValueError("host storage preflight Supabase origin differs")
+    os.environ["SUPABASE_URL"] = LOCAL_POSTGREST_ORIGIN
 
 
 def _candidate_root() -> Path:
@@ -2924,6 +2934,7 @@ def command_python(argv: list[str]) -> int:
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.verify_weight_submission_ready_v2":
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             if (
                 "--repair" in argv
                 and os.environ.get(

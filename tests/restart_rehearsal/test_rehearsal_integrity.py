@@ -5908,6 +5908,9 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     verifier = (harness_root / "verify_evidence.py").read_text(
         encoding="utf-8"
     )
+    release_builder = (
+        harness_root.parents[1] / "gateway/tee/build_local_release_v2.sh"
+    ).read_text(encoding="utf-8")
     contract = json.loads(
         (harness_root / "boundary_contract.json").read_text(encoding="utf-8")
     )
@@ -5926,6 +5929,9 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     assert verifier.count('"nitro:run_enclave"') == 2
     assert "len(GATEWAY_ROLE_SPECS)" in verifier
     assert "exact three-enclave topology" not in verifier
+    assert "python3 -m gateway.tee.local_release_v2" in release_builder
+    assert verifier.count('"module:gateway.tee.local_release_v2"') == 2
+    assert '"module:gateway.tee.release_channel_v2"' not in verifier
 
 
 def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:

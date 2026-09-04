@@ -1652,7 +1652,7 @@ def main() -> int:
                 )
         verify_chain_settlement_durable_readback(rows)
         required_gateway_order = [
-            "module:gateway.tee.release_channel_v2",
+            "module:gateway.tee.local_release_v2",
             "module:gateway.tee.prepare_gateway_envelopes_v2",
         ]
         if storage_preflight_supported:
@@ -1700,7 +1700,7 @@ def main() -> int:
         require_order(
             labels,
             [
-                "module:gateway.tee.release_channel_v2",
+                "module:gateway.tee.local_release_v2",
                 "module:validator_tee.host.refresh_hotkey_config_v2",
                 "module:validator_tee.host.restart_preflight_v2",
                 "nitro:build_enclave",

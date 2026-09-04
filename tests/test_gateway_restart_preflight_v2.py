@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -299,34 +298,6 @@ def _compact_weight_settlement_contract_response() -> bytes:
             "identity_unique_constraint_enabled": True,
             "row_level_security_enabled": True,
             "finalized_stage_supported": True,
-        }
-    ).encode()
-
-
-def _candidate_hybrid_constraint_definition() -> str:
-    clauses = []
-    for role, purposes in schema_preflight.ROLE_PURPOSES.items():
-        encoded_purposes = ", ".join(
-            "'%s'::text" % purpose for purpose in sorted(purposes)
-        )
-        clauses.append(
-            "((role = '%s'::text) AND (purpose = ANY (ARRAY[%s])))"
-            % (role, encoded_purposes)
-        )
-    return "CHECK (%s)" % " OR ".join(clauses)
-
-
-def _candidate_hybrid_purpose_contract_response() -> bytes:
-    return json.dumps(
-        {
-            "schema_version": (
-                "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
-            ),
-            "constraint_name": (
-                "research_lab_attested_execution_receipts_v2_role_purpose_check"
-            ),
-            "constraint_valid": True,
-            "constraint_definition": _candidate_hybrid_constraint_definition(),
         }
     ).encode()
 
@@ -653,12 +624,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 body=_compact_weight_settlement_contract_response()
             )
         if request.full_url.endswith(
-            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_candidate_hybrid_purpose_contract_response()
-            )
-        if request.full_url.endswith(
             "/rpc/research_lab_source_add_provider_origin_contract_v1"
         ):
             return _SchemaResponse(
@@ -701,14 +666,14 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 7
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 6
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
-    assert result["data_probe_count"] == 7
+    assert result["data_probe_count"] == 6
     assert result["schema_document_probe_count"] == 1
     assert result["chain_realized_settlement_activation_http_probe_count"] == 1
     assert result["chain_realized_settlement_activation_source"] == "postgrest"
@@ -721,24 +686,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["compact_weight_settlement_contract"] == json.loads(
         _compact_weight_settlement_contract_response()
     )
-    assert result["candidate_hybrid_purpose_contract"] == {
-        "schema_version": (
-            "leadpoet.research_lab_candidate_hybrid_purpose_contract.v1"
-        ),
-        "constraint_name": (
-            "research_lab_attested_execution_receipts_v2_role_purpose_check"
-        ),
-        "constraint_valid": True,
-        "role_count": len(schema_preflight.ROLE_PURPOSES),
-        "role_purpose_pair_count": sum(
-            len(purposes)
-            for purposes in schema_preflight.ROLE_PURPOSES.values()
-        ),
-        "constraint_definition_sha256": "sha256:"
-        + hashlib.sha256(
-            _candidate_hybrid_constraint_definition().encode("utf-8")
-        ).hexdigest(),
-    }
     assert result["source_add_provider_origin_contract"] == json.loads(
         _source_add_provider_origin_contract_response()
     )
@@ -758,7 +705,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "reward_epochs": 20,
         "daily_cap": 50,
     }
-    assert len(requests) == result["table_probe_count"] + 9
+    assert len(requests) == result["table_probe_count"] + 8
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -782,13 +729,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         for request in table_requests
         if request.full_url.endswith(
             "/rpc/research_lab_compact_weight_settlement_contract_v1"
-        )
-    ]
-    hybrid_contract_requests = [
-        request
-        for request in table_requests
-        if request.full_url.endswith(
-            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
         )
     ]
     origin_contract_requests = [
@@ -831,7 +771,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         for request in table_requests
         if request not in activation_requests
         and request not in contract_requests
-        and request not in hybrid_contract_requests
         and request not in origin_contract_requests
         and request not in privacy_contract_requests
         and request not in leg1_contract_requests
@@ -843,7 +782,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     )
     assert len(activation_requests) == 1
     assert len(contract_requests) == 1
-    assert len(hybrid_contract_requests) == 1
     assert len(origin_contract_requests) == 1
     assert len(privacy_contract_requests) == 1
     assert len(leg1_contract_requests) == 1
@@ -852,15 +790,6 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
-        "scripts/95-research-lab-git-tree-autoresearch.sql",
-        "scripts/115-research-lab-git-tree-root-replacement.sql",
-        "scripts/117-research-lab-trajectory-antijoin.sql",
-        "scripts/118-research-lab-maintenance-lease.sql",
-        "scripts/119-research-lab-provider-usage-batch-insert.sql",
-        "scripts/120-research-lab-trajectory-delta.sql",
-        "scripts/121-research-lab-atomic-candidate-claim.sql",
-        "scripts/122-research-lab-atomic-run-claim.sql",
-        "scripts/123-research-lab-corpus-completeness.sql",
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "scripts/127-research-lab-chain-unattributed-settlement.sql",
         "scripts/128-research-lab-chain-settlement-transport-purposes.sql",
@@ -870,146 +799,21 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/134-research-lab-provider-outcome-head-contention.sql",
         "scripts/144-research-lab-provider-persistence-batches.sql",
         "scripts/145-research-lab-source-add-admission-control.sql",
-        "scripts/146-research-lab-private-benchmark-schema-v11.sql",
-        "scripts/148-research-lab-atomic-credit-resume.sql",
         "scripts/149-research-lab-compact-weight-settlement-authority.sql",
-        "scripts/154-research-lab-model-compatibility-purpose.sql",
         "scripts/155-research-lab-ancestry-disclosure-root-fast-path.sql",
         "scripts/156-production-parity-readonly-role.sql",
-        "scripts/161-research-lab-exact-model-transitions.sql",
         "scripts/169-research-lab-source-add-post-accept-leg1.sql",
         "scripts/170-research-lab-source-add-provider-origin-uniqueness.sql",
         "scripts/171-research-lab-source-add-duplicate-privacy.sql",
         "scripts/172-research-lab-source-add-claim-control.sql",
         "scripts/173-research-lab-source-add-leg1-release-policy.sql",
         "scripts/178-research-lab-source-add-miner-status.sql",
+        "scripts/180-lab-arena-daily-competition.sql",
+        "scripts/181-lab-arena-source-submissions.sql",
+        "scripts/182-lab-arena-source-execution.sql",
+        "scripts/183-lab-arena-miner-reward-basis.sql",
     }.issubset(set(result["migration_files"]))
-    assert (
-        "scripts/163-research-lab-model-transition-artifact-custody.sql"
-        not in result["migration_files"]
-    )
-    assert result["routing_model_transition_v2_required"] is False
     assert "service-role-value" not in str(result)
-
-
-@pytest.mark.parametrize(
-    ("activation_name", "activation_value"),
-    (
-        ("RESEARCH_LAB_ROUTING_EXPERIMENT_ENABLED", "true"),
-        ("RESEARCH_LAB_ROUTING_EXPERIMENT_LIVE_ENABLED", "1"),
-        ("RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED", "yes"),
-        ("RESEARCH_LAB_ROUTING_PRODUCT_COMPOSITION", "reviewed_v2"),
-    ),
-)
-def test_routing_activation_requires_exact_transition_custody_rpcs(
-    activation_name,
-    activation_value,
-) -> None:
-    activation = json.loads(_chain_realized_activation_response())[0]
-    required_rpcs = (
-        schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-        + schema_preflight.ROUTING_MODEL_TRANSITION_V2_RPCS
-    )
-
-    def opener(request, *, timeout):
-        assert timeout == 10.0
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in required_rpcs
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if request.full_url.endswith(
-            "/rpc/research_lab_compact_weight_settlement_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_compact_weight_settlement_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_candidate_hybrid_purpose_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_source_add_provider_origin_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_source_add_provider_origin_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_source_add_duplicate_privacy_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_source_add_duplicate_privacy_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_source_add_post_accept_leg1_contract_v4"
-        ):
-            return _SchemaResponse(
-                body=_source_add_post_accept_leg1_contract_response()
-            )
-        if request.full_url.endswith(
-                "/rpc/research_lab_source_add_claim_control_contract_v2"
-        ):
-            return _SchemaResponse(
-                body=_source_add_claim_control_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_source_add_miner_status_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_source_add_miner_status_contract_response()
-            )
-        return _SchemaResponse()
-
-    result = schema_preflight.verify_required_supabase_v2_schema(
-        {
-            "SUPABASE_URL": "http://127.0.0.1:3000",
-            "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            activation_name: activation_value,
-        },
-        opener=opener,
-        chain_realized_activation_authority=activation,
-    )
-
-    assert result["routing_model_transition_v2_required"] is True
-    assert result["rpc_probe_count"] == len(required_rpcs)
-    assert (
-        "scripts/163-research-lab-model-transition-artifact-custody.sql"
-        in result["migration_files"]
-    )
-
-
-def test_routing_activation_fails_closed_without_transition_lookup_rpc() -> None:
-    activation = json.loads(_chain_realized_activation_response())[0]
-
-    def opener(request, *, timeout):
-        assert timeout == 10.0
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                    + schema_preflight.ROUTING_MODEL_TRANSITION_V2_RPCS[:1]
-                )
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="research_lab_routing_load_model_transition_v2",
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "http://127.0.0.1:3000",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-                "RESEARCH_LAB_ROUTING_EXECUTION_CONSUMER_ENABLED": "true",
-            },
-            opener=opener,
-            chain_realized_activation_authority=activation,
-        )
 
 
 def test_schema_preflight_provided_activation_avoids_data_request() -> None:
@@ -1037,12 +841,6 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
         ):
             return _SchemaResponse(
                 body=_compact_weight_settlement_contract_response()
-            )
-        if request.full_url.endswith(
-            "/rpc/research_lab_candidate_hybrid_purpose_contract_v1"
-        ):
-            return _SchemaResponse(
-                body=_candidate_hybrid_purpose_contract_response()
             )
         if request.full_url.endswith(
             "/rpc/research_lab_source_add_provider_origin_contract_v1"
@@ -1087,7 +885,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
     )
 
     assert result["status"] == "ready"
-    assert result["data_probe_count"] == 7
+    assert result["data_probe_count"] == 6
     assert result["chain_realized_settlement_activation_http_probe_count"] == 0
     assert result["chain_realized_settlement_activation_source"] == (
         "provided-authority"
@@ -1104,32 +902,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
         and "limit=2" in request.full_url
         for request, _timeout in requests
     )
-    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 8
-
-
-def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
-    contract = json.loads(_candidate_hybrid_purpose_contract_response())
-    contract["constraint_definition"] = contract[
-        "constraint_definition"
-    ].replace(
-        "'research_lab.candidate_hybrid_discovery.v2'::text, ",
-        "",
-    )
-
-    def opener(_request, *, timeout):
-        assert timeout == 10.0
-        return _SchemaResponse(body=json.dumps(contract).encode())
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match="differs from canonical roles",
-    ):
-        schema_preflight._verify_candidate_hybrid_purpose_contract_v1(
-            headers={},
-            supabase_url="https://project.supabase.co",
-            opener=opener,
-            timeout_seconds=10.0,
-        )
+    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 7
 
 
 @pytest.mark.parametrize(
@@ -1400,7 +1173,7 @@ def test_source_add_leg1_release_environment_rejects_policy_drift(
         )
 
 
-def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
+def test_required_supabase_v2_schema_covers_retained_and_arena_contracts() -> None:
     schema_contract = {
         (migration, relation)
         for migration, relation, _columns in (
@@ -1450,108 +1223,86 @@ def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
     ) in rpc_contract
 
     assert (
-        "scripts/95-research-lab-git-tree-autoresearch.sql",
-        "research_lab_autoresearch_tree_node_current",
+        "scripts/181-lab-arena-source-submissions.sql",
+        "lab_arena_submissions",
     ) in schema_contract
     assert {
-        "root_manifest_hash",
-        "root_source_tree_hash",
-        "root_git_commit",
-        "root_image_digest",
-        "policy_hash",
-        "evaluator_commitment_hash",
-        "tree_doc",
-        "current_event_type",
-        "current_event_doc",
-        "current_event_hash",
-        "current_round_index",
-        "current_frontier_hash",
-        "current_frontier_doc",
-    }.issubset(relation_columns["research_lab_autoresearch_tree_current"])
-    assert {
-        "tree_generation",
-        "replaces_tree_id",
-        "root_manifest_hash",
-        "policy_hash",
-        "evaluator_commitment_hash",
-        "tree_doc",
-        "current_event_doc",
-        "current_event_hash",
-    }.issubset(
-        relation_columns["research_lab_autoresearch_run_tree_current"]
-    )
-    assert {
-        "event_type",
-        "node_id",
-        "previous_event_hash",
-        "event_doc",
-        "created_at",
-    }.issubset(
-        relation_columns["research_lab_autoresearch_tree_events"]
-    )
-    assert {
-        "schema_version",
-        "expected_previous_hash",
-        "frontier_doc",
-        "commitment_hash",
-        "created_at",
-    }.issubset(
-        relation_columns["research_lab_autoresearch_frontier_commitments"]
-    )
-    assert {"run_id", "candidate_id"}.issubset(
-        relation_columns["research_lab_autoresearch_tree_handoffs"]
-    )
+        "submission_id",
+        "round_id",
+        "miner_hotkey",
+        "status",
+        "is_king",
+        "source_ref",
+        "source_sha256",
+        "source_size_bytes",
+        "submission_doc",
+    } == relation_columns["lab_arena_submissions"]
     assert (
-        "scripts/95-research-lab-git-tree-autoresearch.sql",
-        "research_lab_autoresearch_operation_current",
+        "scripts/183-lab-arena-miner-reward-basis.sql",
+        "lab_arena_reward_basis_v1",
     ) in schema_contract
-    assert (
-        "scripts/95-research-lab-git-tree-autoresearch.sql",
-        "research_lab_autoresearch_tree_current",
-    ) in schema_contract
-    assert (
-        "scripts/115-research-lab-git-tree-root-replacement.sql",
-        "research_lab_autoresearch_run_tree_current",
-    ) in schema_contract
-
     assert {
         (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "create_research_lab_autoresearch_tree",
+            "scripts/180-lab-arena-daily-competition.sql",
+            "lab_arena_current_daily_icp_set",
         ),
         (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "plan_research_lab_autoresearch_tree_node",
+            "scripts/181-lab-arena-source-submissions.sql",
+            "lab_arena_register_submission",
         ),
         (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "append_research_lab_autoresearch_tree_event",
+            "scripts/181-lab-arena-source-submissions.sql",
+            "lab_arena_update_submission",
         ),
         (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "transition_research_lab_autoresearch_operation",
+            "scripts/182-lab-arena-source-execution.sql",
+            "lab_arena_claim_assignment",
         ),
         (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "commit_research_lab_autoresearch_frontier",
-        ),
-        (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "select_research_lab_autoresearch_tree_final",
-        ),
-        (
-            "scripts/95-research-lab-git-tree-autoresearch.sql",
-            "record_research_lab_autoresearch_tree_handoff",
-        ),
-        (
-            "scripts/115-research-lab-git-tree-root-replacement.sql",
-            "create_research_lab_git_tree_candidate_handoff",
-        ),
-        (
-            "scripts/115-research-lab-git-tree-root-replacement.sql",
-            "research_lab_autoresearch_run_evaluation_usage",
+            "scripts/183-lab-arena-miner-reward-basis.sql",
+            "lab_arena_activate_reward",
         ),
     }.issubset(rpc_contract)
+
+    retired_markers = (
+        "autoresearch",
+        "git-tree",
+        "trajectory",
+        "private-model",
+        "private_benchmark",
+        "active_model",
+        "candidate_hybrid",
+        "routing_",
+        "claim_next_research_loop",
+        "claim_next_research_lab_candidate",
+    )
+    required_names = (
+        [
+            migration
+            for migration, _relation, _columns in (
+                schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+            )
+        ]
+        + [
+            relation
+            for _migration, relation, _columns in (
+                schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+            )
+        ]
+        + [
+            migration
+            for migration, _function in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        ]
+        + [
+            function
+            for _migration, function in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+        ]
+    )
+    assert not {
+        value
+        for value in required_names
+        if any(marker in value for marker in retired_markers)
+    }
 
 
 def test_required_supabase_v2_schema_rejects_missing_source_add_miner_status_view() -> None:
@@ -1621,132 +1372,6 @@ def test_required_supabase_v2_schema_rejects_missing_source_add_miner_status_rpc
         )
 
 
-def test_required_supabase_v2_schema_rejects_incomplete_git_tree_current_view() -> None:
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_autoresearch_tree_current?" in request.full_url
-        ):
-            raise HTTPError(
-                request.full_url,
-                400,
-                "current_event_doc column missing",
-                {},
-                None,
-            )
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_autoresearch_tree_current.*"
-            r"95-research-lab-git-tree-autoresearch"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
-
-
-def test_required_supabase_v2_schema_rejects_incomplete_git_tree_event_table() -> None:
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if "research_lab_autoresearch_tree_events?" in request.full_url:
-            raise HTTPError(
-                request.full_url,
-                400,
-                "event_doc column missing",
-                {},
-                None,
-            )
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_autoresearch_tree_events.*"
-            r"95-research-lab-git-tree-autoresearch"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
-
-
-def test_required_supabase_v2_schema_rejects_missing_git_tree_replacement_rpc() -> None:
-    required_function = "research_lab_autoresearch_run_evaluation_usage"
-
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-                if function_name != required_function
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_autoresearch_run_evaluation_usage.*"
-            r"115-research-lab-git-tree-root-replacement"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
-
-
 def test_required_supabase_v2_schema_names_missing_migration() -> None:
     def opener(_request, *, timeout):
         del timeout
@@ -1787,46 +1412,8 @@ def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
         match=(
-            r"create_research_lab_autoresearch_tree.*"
-            r"95-research-lab-git-tree-autoresearch"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
-
-
-def test_required_supabase_v2_schema_requires_lineage_generation_rpc() -> None:
-    required_function = "research_lab_private_model_lineage_generation"
-
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-                if function_name != required_function
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_private_model_lineage_generation.*"
-            r"153-research-lab-private-model-lineage-generation"
+            r"lab_arena_current_daily_icp_set.*"
+            r"180-lab-arena-daily-competition"
         ),
     ):
         schema_preflight.verify_required_supabase_v2_schema(
@@ -2029,44 +1616,6 @@ def test_required_supabase_v2_schema_requires_provider_persistence_batch_contrac
         match=(
             rf"{required_function}.*"
             r"144-research-lab-provider-persistence-batches"
-        ),
-    ):
-        schema_preflight.verify_required_supabase_v2_schema(
-            {
-                "SUPABASE_URL": "https://project.supabase.co",
-                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
-            },
-            opener=opener,
-        )
-
-
-def test_required_supabase_v2_schema_requires_private_benchmark_schema_contract() -> None:
-    required_function = "research_lab_private_benchmark_schema_contract_v1"
-
-    def opener(request, *, timeout):
-        del timeout
-        if request.full_url.endswith("/rest/v1/"):
-            paths = {
-                f"/rpc/{function_name}": {"post": {}}
-                for _migration, function_name in (
-                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
-                )
-                if function_name != required_function
-            }
-            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
-        if (
-            "research_lab_chain_realized_settlement_activation_v1"
-            in request.full_url
-            and "limit=2" in request.full_url
-        ):
-            return _SchemaResponse(body=_chain_realized_activation_response())
-        return _SchemaResponse()
-
-    with pytest.raises(
-        schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=(
-            r"research_lab_private_benchmark_schema_contract_v1.*"
-            r"146-research-lab-private-benchmark-schema-v11"
         ),
     ):
         schema_preflight.verify_required_supabase_v2_schema(

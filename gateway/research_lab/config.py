@@ -21,11 +21,11 @@ from leadpoet_verifier.economics import (
     DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO,
     DEFAULT_RESEARCH_LAB_EMISSION_PERCENT,
 )
-from .ticket_lifecycle import UNPAID_TICKET_TTL_SECONDS
 
 
 TRUTHY = {"1", "true", "yes", "on"}
 logger = logging.getLogger(__name__)
+UNPAID_TICKET_TTL_SECONDS = 24 * 60 * 60
 
 V2_HOSTED_PROXY_PREFIXES = (
     "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY",
@@ -1664,30 +1664,6 @@ class ResearchLabGatewayConfig:
             else:
                 tiers[str(name)].pop("reasoning_effort", None)
         return tiers
-
-    def code_edit_allowed_path_prefixes(self) -> tuple[str, ...]:
-        from research_lab.code_editing import DEFAULT_ALLOWED_PATH_PREFIXES
-
-        return _tuple_from_json_or_csv(
-            self.code_edit_allowed_paths_json,
-            DEFAULT_ALLOWED_PATH_PREFIXES,
-        )
-
-    def code_edit_allowed_exact_paths(self) -> tuple[str, ...]:
-        from research_lab.code_editing import DEFAULT_ALLOWED_EXACT_PATHS
-
-        return _tuple_from_json_or_csv(
-            self.code_edit_allowed_exact_paths_json,
-            DEFAULT_ALLOWED_EXACT_PATHS,
-        )
-
-    def code_edit_allowed_suffixes(self) -> tuple[str, ...]:
-        from research_lab.code_editing import DEFAULT_ALLOWED_SUFFIXES
-
-        return _tuple_from_json_or_csv(
-            self.code_edit_allowed_suffixes_json,
-            DEFAULT_ALLOWED_SUFFIXES,
-        )
 
     def live_mutation_flags(self) -> dict[str, bool]:
         return {

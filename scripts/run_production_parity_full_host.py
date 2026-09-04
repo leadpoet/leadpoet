@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full rebenchmark and non-forwarding weight path on one Nitro host."""
+"""Run the full gateway and non-forwarding weight path on one Nitro host."""
 
 from __future__ import annotations
 
@@ -69,20 +69,7 @@ from scripts.production_parity_snapshot import (  # noqa: E402
     capture_snapshot,
     restore_snapshot,
 )
-from scripts.production_parity_acceptance_transfer import (  # noqa: E402
-    AcceptanceTransferError,
-    fetch_and_unpack_transfer,
-)
 from scripts.run_production_parity_fast import _DockerDatabase  # noqa: E402
-from gateway.tee.acceptance_corpus_v2 import (  # noqa: E402
-    load_and_validate_acceptance_corpus_v2,
-)
-from gateway.tee.release_channel_v2 import (  # noqa: E402
-    fetch_release_channel_v2,
-)
-from gateway.tee.release_manifest_v2 import (  # noqa: E402
-    validate_release_manifest,
-)
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -131,11 +118,8 @@ FULL_FAILURE_STAGES = frozenset(
         "snapshot-restore",
         "clone-http-origin",
         "clone-secret",
-        "acceptance-transfer",
-        "acceptance-corpus",
         "gateway-restart",
         "gateway-health",
-        "rebenchmark-publication",
         "weight-readiness",
         "allocation-handoff",
         "nonforwarding-weight-path",
@@ -149,8 +133,6 @@ FULL_FAILURE_STAGES = frozenset(
 FULL_ERROR_TYPES = frozenset(
     {
         "BotoCoreError",
-        "AcceptanceCorpusV2Error",
-        "AcceptanceTransferError",
         "CalledProcessError",
         "ClientError",
         "CleanupError",
@@ -159,8 +141,6 @@ FULL_ERROR_TYPES = frozenset(
         "JSONDecodeError",
         "OSError",
         "ProductionParityError",
-        "ReleaseChannelV2Error",
-        "ReleaseManifestV2Error",
         "RuntimeError",
         "TimeoutError",
         "TimeoutExpired",
@@ -621,241 +601,6 @@ def _dsn_from_secret(raw: str) -> str:
     return dsn
 
 
-def _acceptance_corpus_tree(
-    root: Path,
-    *,
-    owner_uid: int,
-    owner_gid: int,
-) -> tuple[list[Path], list[Path]]:
-    try:
-        root_metadata = root.lstat()
-    except OSError as exc:
-        raise FullParityError("signed acceptance corpus is unavailable") from exc
-    if (
-        root.is_symlink()
-        or not stat.S_ISDIR(root_metadata.st_mode)
-        or stat.S_IMODE(root_metadata.st_mode) != 0o700
-        or root_metadata.st_uid != owner_uid
-        or root_metadata.st_gid != owner_gid
-    ):
-        raise FullParityError("signed acceptance corpus ownership differs")
-
-    directories: list[Path] = []
-    files: list[Path] = []
-    for current, names, filenames in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        for name in sorted(names):
-            path = current_path / name
-            metadata = path.lstat()
-            if (
-                path.is_symlink()
-                or not stat.S_ISDIR(metadata.st_mode)
-                or stat.S_IMODE(metadata.st_mode) != 0o700
-                or metadata.st_uid != owner_uid
-                or metadata.st_gid != owner_gid
-            ):
-                raise FullParityError("signed acceptance corpus ownership differs")
-            directories.append(path)
-        for name in sorted(filenames):
-            path = current_path / name
-            metadata = path.lstat()
-            if (
-                path.is_symlink()
-                or not stat.S_ISREG(metadata.st_mode)
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_uid != owner_uid
-                or metadata.st_gid != owner_gid
-            ):
-                raise FullParityError("signed acceptance corpus ownership differs")
-            files.append(path)
-    return directories, files
-
-
-def _copy_acceptance_file(source: Path, destination: Path) -> None:
-    source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    destination_flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    source_descriptor = os.open(source, source_flags)
-    try:
-        source_metadata = os.fstat(source_descriptor)
-        if (
-            not stat.S_ISREG(source_metadata.st_mode)
-            or stat.S_IMODE(source_metadata.st_mode) != 0o600
-        ):
-            raise FullParityError("signed acceptance corpus ownership differs")
-        destination_descriptor = os.open(
-            destination,
-            destination_flags,
-            0o600,
-        )
-        try:
-            while True:
-                chunk = os.read(source_descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(destination_descriptor, view)
-                    if written <= 0:
-                        raise FullParityError(
-                            "signed acceptance corpus copy failed"
-                        )
-                    view = view[written:]
-            os.fchmod(destination_descriptor, 0o600)
-            os.fsync(destination_descriptor)
-        finally:
-            os.close(destination_descriptor)
-    finally:
-        os.close(source_descriptor)
-
-
-def _materialize_acceptance_corpus(
-    *,
-    source_config_dir: Path,
-    destination_config_dir: Path,
-    candidate_sha: str,
-    candidate_release_manifest: Mapping[str, Any],
-) -> dict[str, Any]:
-    release = validate_release_manifest(candidate_release_manifest)
-    signer_hash = str(release.get("acceptance_signer_pubkey_hash") or "")
-    if (
-        release.get("commit_sha") != candidate_sha
-        or not HASH_RE.fullmatch(signer_hash)
-        or not HASH_RE.fullmatch(str(release.get("release_hash") or ""))
-    ):
-        raise FullParityError("candidate acceptance signer identity differs")
-
-    source_config = Path(source_config_dir)
-    source_manifest = source_config / "acceptance-corpus-v2.json"
-    source_root = source_config / "acceptance-corpus-v2"
-    try:
-        source_config_metadata = source_config.lstat()
-        manifest_metadata = source_manifest.lstat()
-    except OSError as exc:
-        raise FullParityError("signed acceptance corpus is unavailable") from exc
-    if (
-        source_config.is_symlink()
-        or not stat.S_ISDIR(source_config_metadata.st_mode)
-        or stat.S_IMODE(source_config_metadata.st_mode) != 0o700
-        or source_manifest.is_symlink()
-        or not stat.S_ISREG(manifest_metadata.st_mode)
-        or stat.S_IMODE(manifest_metadata.st_mode) != 0o600
-        or manifest_metadata.st_uid != source_config_metadata.st_uid
-        or manifest_metadata.st_gid != source_config_metadata.st_gid
-    ):
-        raise FullParityError("signed acceptance corpus ownership differs")
-    directories, files = _acceptance_corpus_tree(
-        source_root,
-        owner_uid=manifest_metadata.st_uid,
-        owner_gid=manifest_metadata.st_gid,
-    )
-    try:
-        source_value = load_and_validate_acceptance_corpus_v2(
-            source_manifest,
-            corpus_root=source_root,
-            expected_signing_pubkey_hash=signer_hash,
-        )
-    except Exception as exc:
-        raise FullParityError(
-            "signed acceptance corpus does not match candidate release"
-        ) from exc
-    listed_files = {
-        Path(str(item.get("artifact_path") or "")).as_posix()
-        for item in source_value.get("fixtures") or ()
-        if isinstance(item, Mapping)
-    }
-    discovered_files = {
-        path.relative_to(source_root).as_posix() for path in files
-    }
-    expected_directories = {
-        parent.as_posix()
-        for listed_file in listed_files
-        for parent in Path(listed_file).parents
-        if parent != Path(".")
-    }
-    discovered_directories = {
-        path.relative_to(source_root).as_posix() for path in directories
-    }
-    if (
-        not listed_files
-        or listed_files != discovered_files
-        or expected_directories != discovered_directories
-        or len(listed_files) != len(source_value.get("fixtures") or ())
-    ):
-        raise FullParityError("signed acceptance corpus file set differs")
-
-    destination_config = Path(destination_config_dir)
-    destination_manifest = destination_config / "acceptance-corpus-v2.json"
-    destination_root = destination_config / "acceptance-corpus-v2"
-    try:
-        destination_metadata = destination_config.lstat()
-    except OSError as exc:
-        raise FullParityError(
-            "run-owned acceptance corpus destination is unavailable"
-        ) from exc
-    if (
-        destination_config.is_symlink()
-        or not stat.S_ISDIR(destination_metadata.st_mode)
-        or stat.S_IMODE(destination_metadata.st_mode) != 0o700
-        or destination_metadata.st_uid != os.getuid()
-        or destination_manifest.exists()
-        or destination_root.exists()
-    ):
-        raise FullParityError("run-owned acceptance corpus destination differs")
-
-    try:
-        destination_root.mkdir(mode=0o700)
-        for source_directory in sorted(
-            directories,
-            key=lambda path: (len(path.relative_to(source_root).parts), str(path)),
-        ):
-            destination_directory = destination_root / source_directory.relative_to(
-                source_root
-            )
-            destination_directory.mkdir(mode=0o700)
-            destination_directory.chmod(0o700)
-        for source_file in sorted(files):
-            _copy_acceptance_file(
-                source_file,
-                destination_root / source_file.relative_to(source_root),
-            )
-        _copy_acceptance_file(source_manifest, destination_manifest)
-        destination_value = load_and_validate_acceptance_corpus_v2(
-            destination_manifest,
-            corpus_root=destination_root,
-            expected_signing_pubkey_hash=signer_hash,
-        )
-        destination_directories, destination_files = _acceptance_corpus_tree(
-            destination_root,
-            owner_uid=os.getuid(),
-            owner_gid=os.getgid(),
-        )
-        destination_manifest_metadata = destination_manifest.lstat()
-        if (
-            source_value != destination_value
-            or len(destination_directories) != len(directories)
-            or len(destination_files) != len(files)
-            or destination_manifest_metadata.st_uid != os.getuid()
-            or destination_manifest_metadata.st_gid != os.getgid()
-            or stat.S_IMODE(destination_manifest_metadata.st_mode) != 0o600
-        ):
-            raise FullParityError("copied acceptance corpus identity differs")
-    except Exception:
-        shutil.rmtree(destination_root, ignore_errors=True)
-        destination_manifest.unlink(missing_ok=True)
-        raise
-    return {
-        "candidate_sha": candidate_sha,
-        "release_hash": release["release_hash"],
-        "manifest_hash": source_value["manifest_hash"],
-        "fixture_count": len(files),
-        "copied_exact": True,
-    }
-
 
 def _wait_https_origin(origin: str, *, timeout_seconds: int = 300) -> None:
     origin = _validated_public_origin(origin)
@@ -1230,151 +975,6 @@ def _report_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return report if isinstance(report, Mapping) else value
 
 
-def _rebenchmark_identity(
-    value: Mapping[str, Any],
-    *,
-    policy: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Validate and identify one published result using candidate policy."""
-
-    report = _report_document(value)
-    expected_counts = {
-        "public": int(policy.get("public_total_icps") or 0),
-        "private": int(policy.get("private_total_icps") or 0),
-        "conditional": int(policy.get("conditional_total_icps") or 0),
-    }
-    expected_total = sum(expected_counts.values())
-    public_weak = int(policy.get("public_weak_total") or 0)
-    private_weak = int(policy.get("private_weak_total") or 0)
-    if (
-        any(count <= 0 for count in expected_counts.values())
-        or public_weak < 0
-        or public_weak > expected_counts["public"]
-        or private_weak < 0
-        or private_weak > expected_counts["private"]
-    ):
-        raise FullParityError("candidate ICP policy is invalid")
-    split = report.get("visibility_split")
-    if not isinstance(split, Mapping):
-        raise FullParityError("published rebenchmark assignment is missing")
-    observed_counts = {
-        "public": int(split.get("public_count") or 0),
-        "private": int(split.get("private_count") or 0),
-        "conditional": int(split.get("conditional_count") or 0),
-    }
-    try:
-        aggregate_score = float(
-            value.get("aggregate_score")
-            if value.get("aggregate_score") is not None
-            else report.get("aggregate_score")
-        )
-    except (TypeError, ValueError) as exc:
-        raise FullParityError("published rebenchmark score is invalid") from exc
-    public_strength = split.get("public_strength_counts")
-    private_strength = split.get("private_strength_counts")
-    expected_public_strength = {
-        "strong": expected_counts["public"] - public_weak,
-        "weak": public_weak,
-    }
-    expected_private_strength = {
-        "strong": expected_counts["private"] - private_weak,
-        "weak": private_weak,
-    }
-    expected_public_strength = {
-        key: count
-        for key, count in expected_public_strength.items()
-        if count > 0
-    }
-    expected_private_strength = {
-        key: count
-        for key, count in expected_private_strength.items()
-        if count > 0
-    }
-    report_hash = str(report.get("report_public_hash") or "")
-    report_without_hash = {
-        key: item for key, item in report.items() if key != "report_public_hash"
-    }
-    if (
-        value.get("current_report_status") != "published"
-        or value.get("benchmark_quality") != "passed"
-        or report.get("report_type") != "research_lab_public_daily_benchmark"
-        or int(report.get("item_count") or 0) != expected_total
-        or observed_counts != expected_counts
-        or dict(public_strength or {}) != expected_public_strength
-        or dict(private_strength or {}) != expected_private_strength
-        or str(split.get("split_policy") or "")
-        != str(policy.get("selection_policy") or "")
-        or str(split.get("rolling_window_hash") or "")
-        != str(report.get("rolling_window_hash") or "")
-        or not 0.0 <= aggregate_score <= 100.0
-        or not HASH_RE.fullmatch(report_hash)
-        or report_hash != sha256_json(report_without_hash)
-    ):
-        raise FullParityError(
-            "published rebenchmark score or assignment differs from candidate policy"
-        )
-    identity = {
-        "report_id": str(value.get("report_id") or ""),
-        "benchmark_bundle_id": str(value.get("benchmark_bundle_id") or ""),
-        "benchmark_date": str(value.get("benchmark_date") or ""),
-        "rolling_window_hash": str(value.get("rolling_window_hash") or ""),
-        "private_model_artifact_hash": str(
-            value.get("private_model_artifact_hash") or ""
-        ),
-        "private_model_manifest_hash": str(
-            value.get("private_model_manifest_hash") or ""
-        ),
-        "aggregate_score": aggregate_score,
-        "item_count": expected_total,
-        "report_public_hash": report_hash,
-        "category_counts": observed_counts,
-        "public_strength_counts": dict(public_strength or {}),
-        "private_strength_counts": dict(private_strength or {}),
-    }
-    if (
-        not identity["report_id"]
-        or not identity["benchmark_bundle_id"]
-        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", identity["benchmark_date"])
-        or not HASH_RE.fullmatch(identity["rolling_window_hash"])
-        or not HASH_RE.fullmatch(identity["private_model_artifact_hash"])
-        or not HASH_RE.fullmatch(identity["private_model_manifest_hash"])
-    ):
-        raise FullParityError("published rebenchmark identity is incomplete")
-    return identity
-
-
-def _contains_dashboard_identity(
-    value: Any,
-    identity: Mapping[str, Any],
-) -> bool:
-    """Match the public subnet-dashboard projection to a durable result."""
-
-    if not isinstance(value, Mapping) or value.get("success") is not True:
-        return False
-    data = value.get("data")
-    benchmark = data.get("benchmark") if isinstance(data, Mapping) else None
-    if not isinstance(benchmark, Mapping):
-        return False
-    try:
-        score_matches = float(benchmark.get("aggregateScore")) == float(
-            identity["aggregate_score"]
-        )
-        count_matches = int(benchmark.get("itemCount")) == int(
-            identity["item_count"]
-        )
-    except (TypeError, ValueError):
-        return False
-    return (
-        str(benchmark.get("reportId") or "") == identity["report_id"]
-        and str(benchmark.get("benchmarkDate") or "")
-        == identity["benchmark_date"]
-        and str(benchmark.get("rollingWindowHash") or "")
-        == identity["rolling_window_hash"]
-        and score_matches
-        and count_matches
-    )
-
-
 def _parse_gateway_environment_file(path: Path) -> dict[str, str]:
     try:
         source = path.read_text(encoding="utf-8")
@@ -1426,7 +1026,7 @@ def _clone_service_role_key(
     supabase_origin: str,
     jwt_secret: str,
 ) -> str:
-    """Verify the run-scoped 48-hour clone token used after rebenchmarking."""
+    """Verify the run-scoped 48-hour clone token."""
 
     boundary = validate_production_parity_boundary_document_v2(
         values,
@@ -1973,76 +1573,6 @@ async def _restore_miner_intake_controls(
         )
 
 
-def _wait_rebenchmark(
-    *,
-    candidate_sha: str,
-    secret_id: str,
-    region: str,
-    run_id: str,
-    supabase_origin: str,
-    artifact_bucket: str,
-    timeout_seconds: int,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    last: dict[str, Any] = {}
-    while time.monotonic() < deadline:
-        remaining = max(1, math.ceil(deadline - time.monotonic()))
-        try:
-            result = _run(
-                [
-                    sys.executable,
-                    str(ROOT / "scripts/check_production_parity_rebenchmark.py"),
-                    "--root",
-                    str(ROOT),
-                    "--candidate-sha",
-                    candidate_sha,
-                    "--secret-id",
-                    secret_id,
-                    "--region",
-                    region,
-                    "--run-id",
-                    run_id,
-                    "--supabase-origin",
-                    supabase_origin,
-                    "--artifact-bucket",
-                    artifact_bucket,
-                ],
-                timeout=min(remaining, 300),
-                env=_clone_child_environment(region=region),
-            )
-        except subprocess.TimeoutExpired:
-            last = {"reason": "clone_readiness_child_timeout"}
-            sleep_seconds = min(30, max(0, deadline - time.monotonic()))
-            if sleep_seconds:
-                time.sleep(sleep_seconds)
-            continue
-        if len(result.stdout or "") > 256 * 1024:
-            raise FullParityError("clone readiness child output is unbounded")
-        if result.returncode not in {0, 2}:
-            raise FullParityError("clone readiness child failed closed")
-        last = _last_json_document(
-            result.stdout or "", field="clone readiness child"
-        )
-        if (
-            last.get("schema_version")
-            != "leadpoet.production_parity_rebenchmark_readiness.v1"
-            or last.get("candidate_sha") != candidate_sha
-            or last.get("artifact_bucket") != artifact_bucket
-        ):
-            raise FullParityError("clone readiness child identity differs")
-        if result.returncode == 0 and last.get("available") is True:
-            return last
-        if result.returncode != 2 or last.get("available") is not False:
-            raise FullParityError("clone readiness child status differs")
-        sleep_seconds = min(30, max(0, deadline - time.monotonic()))
-        if sleep_seconds:
-            time.sleep(sleep_seconds)
-    raise FullParityError(
-        "full rebenchmark did not publish before timeout: "
-        + str(last.get("reason") or "unknown")
-    )
-
-
 def _current_epoch_from_readiness(output: str) -> int:
     for line in reversed(output.splitlines()):
         try:
@@ -2376,7 +1906,6 @@ def run_full(
             "arweave_address_hash": runtime_identity[
                 "arweave_address_hash"
             ],
-            "private_model_source": "signed-immutable-artifact",
         }
         secrets_client = boto3.client("secretsmanager", region_name=region)
         database = _DockerDatabase(
@@ -2498,55 +2027,6 @@ def run_full(
             encoding="utf-8",
         )
         artifact_policy.chmod(0o600)
-        candidate_s3 = boto3.client("s3", region_name=region)
-        failure_stage = "acceptance-transfer"
-        release_channel = fetch_release_channel_v2(
-            bucket=ATTESTED_V2_RELEASE_BUCKET,
-            commit_sha=candidate_sha,
-            prefix=ATTESTED_V2_RELEASE_PREFIX,
-            s3_client=candidate_s3,
-        )
-        transferred_config = work / "transferred-v2-config"
-        acceptance_transfer = fetch_and_unpack_transfer(
-            s3_client=candidate_s3,
-            artifact_bucket=artifact_bucket,
-            run_id=run_id,
-            candidate_sha=candidate_sha,
-            destination_config_dir=transferred_config,
-            candidate_release_manifest=release_channel[
-                "gateway_release_manifest"
-            ],
-        )
-        failure_stage = "acceptance-corpus"
-        acceptance_corpus = _materialize_acceptance_corpus(
-            source_config_dir=transferred_config,
-            destination_config_dir=artifact_policy.parent,
-            candidate_sha=candidate_sha,
-            candidate_release_manifest=release_channel[
-                "gateway_release_manifest"
-            ],
-        )
-        compared_fields = (
-            "candidate_sha",
-            "release_hash",
-            "manifest_hash",
-            "fixture_count",
-        )
-        if any(
-            acceptance_transfer.get(field) != acceptance_corpus.get(field)
-            for field in compared_fields
-        ):
-            raise FullParityError(
-                "transferred acceptance corpus identity differs"
-            )
-        acceptance_corpus["transfer"] = {
-            "archive_sha256": acceptance_transfer["archive_sha256"],
-            "archive_size_bytes": acceptance_transfer["archive_size_bytes"],
-            "binding_hash": acceptance_transfer["binding_hash"],
-            "source": "run-scoped-object-lock",
-            "validated_exact": acceptance_transfer.get("copied_exact") is True,
-        }
-        shutil.rmtree(transferred_config)
         env = _full_restart_environment(
             region=region,
             updates={
@@ -2563,12 +2043,6 @@ def run_full(
                 "GATEWAY_HOST_RESTART_SCRIPT": str(ROOT / "gw_restart.sh"),
                 "GATEWAY_TEE_EIF_ROOT": str(work / "tee"),
                 "GATEWAY_V2_CONFIG_DIR": str(work / "v2-config"),
-                "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST": str(
-                    work / "v2-config" / "acceptance-corpus-v2.json"
-                ),
-                "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT": str(
-                    work / "v2-config" / "acceptance-corpus-v2"
-                ),
                 "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts"),
                 "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT": str(work / "offline-artifacts" / "validator-runtime"),
                 "GATEWAY_RESTART_LOCK_FILE": str(work / "gateway-restart.lock"),
@@ -2605,20 +2079,6 @@ def run_full(
             or str(build.get("git_commit") or "").lower() != candidate_sha
         ):
             raise FullParityError("gateway V2 health is not exact-candidate ready")
-
-        failure_stage = "rebenchmark-publication"
-        rebenchmark = _wait_rebenchmark(
-            candidate_sha=candidate_sha,
-            secret_id=secret_state["secret_id"],
-            region=region,
-            run_id=run_id,
-            supabase_origin=supabase_origin,
-            artifact_bucket=artifact_bucket,
-            timeout_seconds=_remaining_full_timeout(
-                deadline=deadline,
-                stage="full rebenchmark publication",
-            ),
-        )
 
         parsed_env = _validated_clone_environment(
             gateway_env_file,
@@ -2726,11 +2186,9 @@ def run_full(
                     "pcr0": health.get("pcr0"),
                     "attestation_ready": True,
                 },
-                "acceptance_corpus": acceptance_corpus,
                 "external_write_boundaries": {
                     "arweave": "blocked-production-parity",
                 },
-                "rebenchmark": rebenchmark,
                 "allocation_handoff": handoff,
                 "weight_path": weight_path,
                 "miner_intake": miner_intake,

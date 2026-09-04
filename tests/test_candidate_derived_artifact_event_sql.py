@@ -28,13 +28,6 @@ def test_candidate_derived_artifact_failure_extends_historical_allowlist() -> No
     assert current == historical | {"candidate_derived_artifact_failed"}
 
 
-def test_candidate_derived_artifact_failure_matches_runtime_event() -> None:
-    runtime = (ROOT / "gateway/research_lab/code_build.py").read_text(
-        encoding="utf-8"
-    )
-    assert 'failure_stage="candidate_derived_artifact_failed"' in runtime
-
-
 def test_migration_is_transactional_and_rerunnable() -> None:
     sql = MIGRATION.read_text(encoding="utf-8")
     assert sql.startswith("BEGIN;\n")

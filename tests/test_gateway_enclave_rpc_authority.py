@@ -1,7 +1,6 @@
 import pytest
 
 from gateway.tee.rpc_authority import (
-    AUTORESEARCH_ROLE,
     COORDINATOR_ROLE,
     RPCAuthorityError,
     active_enclave_role,
@@ -10,20 +9,12 @@ from gateway.tee.rpc_authority import (
 
 
 @pytest.mark.parametrize("role", ["gateway_scoring"])
-def test_scoring_roles_cannot_use_coordinator_or_autoresearch_authority(role):
+def test_scoring_roles_cannot_use_coordinator_authority(role):
     assert rpc_method_allowed(role, "scoring_v2_submit_job")
     assert rpc_method_allowed(role, "role_health")
     assert not rpc_method_allowed(role, "scoring_submit_job")
     assert not rpc_method_allowed(role, "append_event")
     assert not rpc_method_allowed(role, "sign_checkpoint")
-    assert not rpc_method_allowed(role, "autoresearch_submit_job")
-
-
-def test_autoresearch_role_cannot_use_scoring_or_coordinator_authority():
-    assert rpc_method_allowed(AUTORESEARCH_ROLE, "autoresearch_v2_submit_job")
-    assert not rpc_method_allowed(AUTORESEARCH_ROLE, "autoresearch_submit_job")
-    assert not rpc_method_allowed(AUTORESEARCH_ROLE, "scoring_submit_job")
-    assert not rpc_method_allowed(AUTORESEARCH_ROLE, "sign_checkpoint")
 
 
 def test_coordinator_is_the_only_v2_event_and_provider_authority():
@@ -44,13 +35,10 @@ def test_coordinator_is_the_only_v2_event_and_provider_authority():
     )
     assert rpc_method_allowed(COORDINATOR_ROLE, "receipt_verify_graph")
     assert not rpc_method_allowed(COORDINATOR_ROLE, "scoring_submit_job")
-    assert not rpc_method_allowed(COORDINATOR_ROLE, "autoresearch_submit_job")
     assert not rpc_method_allowed(COORDINATOR_ROLE, "set_pcr_measurements")
 
 
-@pytest.mark.parametrize(
-    "role", ["gateway_scoring", AUTORESEARCH_ROLE]
-)
+@pytest.mark.parametrize("role", ["gateway_scoring"])
 def test_non_coordinator_roles_cannot_sign_transparency_events(role):
     assert not rpc_method_allowed(role, "initialize_event_signer")
     assert not rpc_method_allowed(role, "sign_transparency_event")

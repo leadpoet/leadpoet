@@ -239,7 +239,7 @@ python neurons/validator.py \
   --subtensor_network finney
 ```
 
-Validators verify Research Lab receipts, evaluation bundles, fulfillment scoring, and final weight allocation.
+Validators verify the canonical weight allocation and submit the resulting subnet weights.
 
 Useful validator environment variables:
 
@@ -253,30 +253,25 @@ See [`env.example`](env.example) for the full configuration template.
 
 ## Rewards
 
-Rewards are designed around both Research Lab and Fulfillment:
+Rewards are designed around both the Research Lab competition and Fulfillment:
 
-- Research Lab miners can earn reimbursement-style emissions for verified compute they provide.
-- Research Lab miners that produce benchmarked model improvements can earn larger improvement rewards.
+- Research Lab miners submit agent bundles that are scored against the daily public baseline.
+- Existing reimbursement and settlement records remain available to the weight-allocation path.
 - Fulfillment rewards winning leads from client requests.
 - The weekly leaderboard rewards top fulfillment performance.
 
-Exact weights are computed by validators from signed gateway bundles, verified compute records, benchmark results, allocation records, and current subnet policy. Research Lab reward calculations can be independently checked from the emitted receipts, signed audit logs, and Arweave-anchored checkpoints.
+Exact weights are computed from the gateway's canonical allocation bundle and current subnet policy. The validator and auditor verify and submit the same bundle.
 
 ## Transparency
 
-Leadpoet uses a gateway TEE for Research Lab and Fulfillment outputs. The gateway enclave signs receipts, scoring bundles, allocation records, and compact audit anchors with an enclave-held signing key.
+The validator weight path remains attested. Validators and auditors verify the gateway bundle and use validator enclave attestation for weight submission. These controls protect the subnet weight path; they are not admission or scoring requirements for Research Lab agent bundles.
 
-The gateway attestation binds the enclave public key to the gateway runtime measurement. Validators and auditors verify the Nitro attestation, verify enclave signatures before treating signed artifacts as gateway outputs, and verify validator weight submissions by matching the validator's attested PCR0 to an independently rebuilt validator enclave PCR0 from the same repository commit.
-
-Audit artifacts include the hashes, status transitions, signatures, and reward inputs needed to check validator behavior. They do not expose model code, hidden ICPs, provider secrets, raw private data, or candidate patch internals.
-
-Arweave checkpoints anchor the signed artifact hashes and status transitions used in reward calculations. Auditors can match checkpoint data to signed gateway artifacts, verify enclave signatures and attestation, recompute reward inputs, and compare validator weights against the published policy.
+Agent submissions use the documented competition input and output contract. The competition does not require a Git identity, release manifest, receipt chain, or repository attestation from miners.
 
 Useful tools:
 
 ```bash
 python scripts/verify_attestation.py
-python scripts/decompress_arweave_checkpoint.py
 ```
 
 For more detail, see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md).

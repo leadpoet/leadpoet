@@ -16,7 +16,6 @@ import uuid
 from gateway.research_lab.config import (
     LEGACY_SCORING_PROXY_PREFIXES,
 )
-from gateway.research_lab.worker_autostart import _configured_proxies
 from gateway.tee.provider_broker_v2 import _validated_tls_proxy_url
 from gateway.tee.proxy_transport_preflight_v2 import (
     verify_worker_proxy_fleets_v2,
@@ -44,6 +43,28 @@ _ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class GatewayV2ProxySecretUpdateError(RuntimeError):
     """The production secret could not be migrated without losing state."""
+
+
+def _configured_proxies(
+    environment: Mapping[str, str], prefixes: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Read legacy proxy slots without importing the retired worker supervisor."""
+
+    proxies: list[str] = []
+    seen: set[str] = set()
+    for index in range(1, 501):
+        for prefix in prefixes:
+            value = str(environment.get(f"{prefix}_{index}", "")).strip()
+            if value and value not in seen:
+                proxies.append(value)
+                seen.add(value)
+                break
+    for prefix in prefixes:
+        value = str(environment.get(prefix, "")).strip()
+        if value and value not in seen:
+            proxies.append(value)
+            seen.add(value)
+    return tuple(proxies)
 
 
 def _parse_shell_environment(raw: str) -> dict[str, str]:

@@ -36,33 +36,6 @@ logger = logging.getLogger(__name__)
 _MICRO_USD = Decimal("1000000")
 
 
-def cost_evidence_from_loop_result(loop_result: Any) -> dict[str, Any]:
-    """Build a neutral cost snapshot from a loop result object."""
-    ledger: Mapping[str, Any] = {}
-    if loop_result is not None and callable(getattr(loop_result, "cost_ledger", None)):
-        try:
-            maybe_ledger = loop_result.cost_ledger()
-            if isinstance(maybe_ledger, Mapping):
-                ledger = maybe_ledger
-        except Exception:  # noqa: BLE001 - cost evidence is best effort
-            ledger = {}
-    provider_usage = list(getattr(loop_result, "provider_usage", ()) or ()) if loop_result is not None else []
-    return normalize_cost_evidence(
-        {
-            "source": "loop_result",
-            "trusted_cost_ledger": True,
-            "provider_usage": provider_usage,
-            "cost_ledger": dict(ledger),
-            "actual_openrouter_cost_usd": getattr(loop_result, "actual_openrouter_cost_usd", None),
-            "actual_openrouter_cost_microusd": ledger.get("actual_openrouter_cost_microusd"),
-            "estimated_cost_usd": getattr(loop_result, "estimated_cost_usd", None),
-            "openrouter_call_count": getattr(loop_result, "openrouter_call_count", None),
-            "iterations_completed": getattr(loop_result, "iterations_completed", None),
-            "stop_reason": getattr(loop_result, "stop_reason", None),
-        }
-    )
-
-
 async def latest_reimbursable_loop_cost_evidence(run_id: str) -> dict[str, Any]:
     """Return the latest append-only loop event cost evidence for ``run_id``.
 

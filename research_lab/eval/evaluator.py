@@ -52,7 +52,6 @@ from .private_runtime import (
     end_incontainer_trace_collection,
     ensure_private_model_outputs,
     incontainer_trace_capture_enabled,
-    publish_attested_receipt_hash,
     publish_incontainer_trace_entries,
 )
 from .provider_costs import summarize_provider_cost_trace_entries
@@ -3100,9 +3099,6 @@ class QualificationStyleCompanyScorer:
     def __init__(
         self,
         *,
-        attested_epoch_id: int | None = None,
-        attested_purpose: str = "",
-        attested_provider_profile: str = "default",
         reference_scoring_adapter_version: str = (
             QUALIFICATION_SCORING_ADAPTER_VERSION_V1
         ),
@@ -3121,47 +3117,8 @@ class QualificationStyleCompanyScorer:
             raise ValueError(
                 "qualification scorer adapter version is unsupported"
             )
-        self._attested_epoch_id = (
-            int(attested_epoch_id) if attested_epoch_id is not None else None
-        )
-        self._attested_purpose = str(attested_purpose or "")
-        self._attested_provider_profile = str(
-            attested_provider_profile or "default"
-        )
         self._reference_scoring_adapter_version = reference_version
         self._candidate_scoring_adapter_version = candidate_version
-        self._attested_receipts: list[dict[str, Any]] = []
-        self._attested_outcome_count = 0
-        self._last_attested_receipt_hash = ""
-
-    def _record_attested_outcome(self, outcome: Mapping[str, Any] | None) -> None:
-        if not isinstance(outcome, Mapping):
-            return
-        receipt = outcome.get("receipt")
-        if not isinstance(receipt, Mapping) or not receipt.get("receipt_hash"):
-            return
-        receipt_hash = str(receipt["receipt_hash"])
-        self._attested_outcome_count += 1
-        self._last_attested_receipt_hash = receipt_hash
-        publish_attested_receipt_hash(receipt_hash)
-        if any(item.get("receipt_hash") == receipt_hash for item in self._attested_receipts):
-            return
-        self._attested_receipts.append(dict(receipt))
-
-    def attested_receipts(self) -> list[dict[str, Any]]:
-        """Return sidecar receipts without changing the scorer result contract."""
-
-        return [dict(item) for item in self._attested_receipts]
-
-    def attested_outcome_count(self) -> int:
-        """Count successful measured scoring calls, including deterministic retries."""
-
-        return int(self._attested_outcome_count)
-
-    def last_attested_receipt_hash(self) -> str:
-        """Return the receipt produced by the latest successful measured call."""
-
-        return str(self._last_attested_receipt_hash)
 
     async def __call__(
         self,
@@ -3204,45 +3161,12 @@ class QualificationStyleCompanyScorer:
             if is_reference_model
             else self._candidate_scoring_adapter_version
         )
-        # Gateway legacy compatibility keeps the established host scorer while
-        # current main is deployed before the multi-enclave V2 runtime is
-        # ready. Import lazily so this shared package remains gateway-optional.
-        try:
-            from gateway.research_lab.tee_protocol import legacy_v1_enabled
-        except ImportError:
-            legacy_protocol = False
-        else:
-            legacy_protocol = legacy_v1_enabled()
-        if (
-            legacy_protocol
-            or self._attested_epoch_id is None
-            or self._attested_epoch_id <= 0
-            or not self._attested_purpose
-        ):
-            return await self._score_with_breakdowns_impl(
-                companies,
-                icp,
-                is_reference_model,
-                scoring_adapter_version=scoring_adapter_version,
-            )
-        from gateway.research_lab.attested_scoring import (
-            execute_required_qualification_company_scores,
-        )
-
-        attestation: dict[str, Any] = {}
-        result = await execute_required_qualification_company_scores(
-            epoch_id=int(self._attested_epoch_id),
-            sequence=sequence,
-            purpose=self._attested_purpose,
-            companies=[dict(item) for item in companies],
-            icp=dict(icp),
-            is_reference_model=bool(is_reference_model),
+        return await self._score_with_breakdowns_impl(
+            companies,
+            icp,
+            is_reference_model,
             scoring_adapter_version=scoring_adapter_version,
-            provider_credential_profile=self._attested_provider_profile,
-            attestation_out=attestation,
         )
-        self._record_attested_outcome(attestation)
-        return result
 
     async def _score_with_breakdowns_impl(
         self,

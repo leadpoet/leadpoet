@@ -2299,17 +2299,19 @@ def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
     ]
 
 
-def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:
+def test_gateway_restart_checks_source_add_without_retired_admin_command() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = "if ! wait_for_gateway_v2_authority; then"
     handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
-    resume = (
-        "-m gateway.research_lab.admin resume-restart-maintenance \\\n"
-        '  --expected-commit "$GATEWAY_DEPLOY_SHA"'
+    source_add_status = (
+        "curl -fsS http://localhost:8000/research-lab/status"
+    )
+    source_add_runtime = (
+        "-m gateway.tee.gateway_miner_maintenance_restart_v1"
     )
     completed = 'GATEWAY_DEPLOY_STAGE="completed"'
 
-    assert "scoring and autoresearch remain operator-controlled" in script
+    assert "resume-restart-maintenance" not in script
     for command in (
         "pause-autoresearch",
         "resume-autoresearch",
@@ -2318,7 +2320,12 @@ def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> Non
     ):
         assert f"-m gateway.research_lab.admin {command}" not in script
     assert script.rindex(v2_health) < script.rindex(handoff)
-    assert script.rindex(handoff) < script.rindex(resume) < script.rindex(completed)
+    assert script.rindex(handoff) < script.rindex(source_add_status)
+    assert (
+        script.rindex(source_add_status)
+        < script.rindex(source_add_runtime)
+        < script.rindex(completed)
+    )
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
@@ -2587,17 +2594,6 @@ def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
     assert (
         'enclave-build-gateway.json' in script
         or 'build_role_enclaves.sh' in script
-    )
-
-
-def test_worker_process_prefers_checkout_but_keeps_attested_fallback() -> None:
-    source = (ROOT / "gateway" / "research_lab" / "worker_process.py").read_text(
-        encoding="utf-8"
-    )
-    assert "for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):" in source
-    assert "while str(path) in sys.path:" in source
-    assert source.index("for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):") < source.index(
-        "from gateway.research_lab.config"
     )
 
 

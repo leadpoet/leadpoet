@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-from gateway.research_lab.provider_probe import probe_guard_terms_from_icp_items
 from gateway.research_lab.source_add_trial_runner import (
     build_source_add_sandbox_runner,
     build_trial_registry_entry,
@@ -290,16 +289,3 @@ class TestFullTrialThroughRunner:
         assert trial.failure_reason == ""
         assert trial.measured_trial_yield == 1.0
         assert calls == ["icp:1", "icp:2"]
-
-
-class TestProbeGuardTermExtraction:
-    def test_extracts_identifier_shaped_terms_only(self):
-        items = [
-            {
-                "icp_description": "B2B SaaS companies in Europe hiring RevOps leaders with intent signals",
-                "target_companies": [{"company_name": "Acme Robotics", "domain": "acme-robotics.example"}],
-                "account_hints": {"employer": "Globex"},
-            }
-        ]
-        terms = probe_guard_terms_from_icp_items(items)
-        assert terms == {"Acme Robotics", "acme-robotics.example", "Globex"}

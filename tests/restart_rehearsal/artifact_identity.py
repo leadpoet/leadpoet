@@ -15,7 +15,6 @@ import tarfile
 
 
 GATEWAY_ROLES = (
-    "gateway_autoresearch",
     "gateway_coordinator",
     "gateway_scoring",
 )

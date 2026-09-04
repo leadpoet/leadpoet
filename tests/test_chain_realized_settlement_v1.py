@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -338,12 +339,20 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
 
 
 @pytest.mark.asyncio
-async def test_settlement_attempt_advances_from_durable_failed_receipt_history():
+async def test_settlement_attempt_advances_from_stale_failed_receipt_history():
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def load_attempt_history(table, **kwargs):
         calls.append((table, kwargs))
-        return [{"sequence": 1}]
+        return [
+            {
+                "sequence": 1,
+                "receipt_status": "failed",
+                "issued_at": (
+                    datetime.now(timezone.utc) - timedelta(seconds=301)
+                ).isoformat(),
+            }
+        ]
 
     resolved = await v2_authority._resolve_chain_settlement_attempt_v1(
         epoch_id=101,
@@ -356,7 +365,7 @@ async def test_settlement_attempt_advances_from_durable_failed_receipt_history()
         (
             "research_lab_attested_execution_receipts_v2",
             {
-                "columns": "purpose,sequence",
+                "columns": "purpose,sequence,receipt_status,issued_at",
                 "filters": (
                     ("role", "gateway_coordinator"),
                     ("epoch_id", 101),
@@ -379,7 +388,13 @@ async def test_settlement_attempt_advances_from_durable_failed_receipt_history()
 @pytest.mark.asyncio
 async def test_settlement_attempt_history_does_not_rewind_process_retry():
     async def load_attempt_history(*_args, **_kwargs):
-        return [{"sequence": 1}]
+        return [
+            {
+                "sequence": 1,
+                "receipt_status": "succeeded",
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
 
     assert await v2_authority._resolve_chain_settlement_attempt_v1(
         epoch_id=101,
@@ -391,7 +406,67 @@ async def test_settlement_attempt_history_does_not_rewind_process_retry():
 @pytest.mark.asyncio
 async def test_settlement_attempt_history_fails_closed_when_sequence_is_invalid():
     async def load_attempt_history(*_args, **_kwargs):
-        return [{"sequence": "1"}]
+        return [
+            {
+                "sequence": "1",
+                "receipt_status": "failed",
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="attempt history is invalid",
+    ):
+        await v2_authority._resolve_chain_settlement_attempt_v1(
+            epoch_id=101,
+            requested_attempt=0,
+            load_attempt_history=load_attempt_history,
+        )
+
+
+@pytest.mark.asyncio
+async def test_recent_failed_settlement_attempt_cools_down_before_execute():
+    execute_calls = 0
+
+    async def load_attempt_history(*_args, **_kwargs):
+        return [
+            {
+                "sequence": 0,
+                "receipt_status": "failed",
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+
+    async def execute(**_kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        raise AssertionError("chain execution must not run during cooldown")
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="retry is cooling down",
+    ):
+        await v2_authority.settle_chain_realized_epoch_v1(
+            epoch_id=101,
+            netuid=71,
+            execute=execute,
+            load_attempt_history=load_attempt_history,
+        )
+
+    assert execute_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_attempt_with_invalid_timestamp_fails_closed():
+    async def load_attempt_history(*_args, **_kwargs):
+        return [
+            {
+                "sequence": 0,
+                "receipt_status": "failed",
+                "issued_at": "not-a-timestamp",
+            }
+        ]
 
     with pytest.raises(
         v2_authority.ResearchLabV2AuthorityError,

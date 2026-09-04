@@ -30,7 +30,8 @@ from gateway.qualification.api.payment import get_payment_info, verify_payment
 from gateway.qualification.utils.chain import (
     BITTENSOR_NETUID,
     BITTENSOR_NETWORK,
-    is_hotkey_registered as chain_is_hotkey_registered,
+    ChainRegistrationUnavailable,
+    check_hotkey_registration as chain_is_hotkey_registered,
     verify_hotkey_signature,
 )
 from gateway.utils.bans import is_hotkey_banned
@@ -3994,7 +3995,16 @@ async def _verify_signed_miner(payload: object) -> None:
     if is_banned:
         raise HTTPException(status_code=403, detail=f"hotkey is banned: {ban_reason}")
 
-    is_registered, _role = await chain_is_hotkey_registered(payload.miner_hotkey)
+    try:
+        is_registered, _role = await chain_is_hotkey_registered(
+            payload.miner_hotkey
+        )
+    except ChainRegistrationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="subnet registration check is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "30"},
+        ) from exc
     if not is_registered:
         raise HTTPException(status_code=403, detail="hotkey is not registered on this subnet")
 

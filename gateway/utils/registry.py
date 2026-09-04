@@ -24,6 +24,7 @@ _metagraph_cache = None
 _cache_epoch = None  # Track which epoch the cache is from
 _cache_epoch_timestamp = None  # Track when we last calculated the epoch
 _cache_lock = threading.Lock()  # For quick cache read/write ONLY (no await inside!)
+_warm_lock = threading.Lock()  # Serialize long background refreshes
 _fetch_in_progress = False  # Flag to prevent concurrent fetches (async-safe)
 
 # Async subtensor instance (injected at gateway startup)
@@ -585,11 +586,14 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp
     import time
     
-    with _cache_lock:
-        # Check if cache is already warmed for this epoch
-        if _cache_epoch == target_epoch:
-            print(f"🔥 Cache already warmed for epoch {target_epoch}")
-            return True
+    if not _warm_lock.acquire(blocking=False):
+        print(f"🔥 A metagraph warm is already running; skipping epoch {target_epoch}")
+        return False
+    try:
+        with _cache_lock:
+            if _cache_epoch == target_epoch:
+                print(f"🔥 Cache already warmed for epoch {target_epoch}")
+                return True
         
         # Fetch new metagraph with retry logic
         max_retries = 8  # Aggressive retries for background warming (user wants 8 attempts)
@@ -616,10 +620,13 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
                     future = executor.submit(_fetch_metagraph)
                     metagraph = future.result(timeout=timeout_per_attempt)  # Hard 60s timeout
                 
-                # Update cache
-                _metagraph_cache = metagraph
-                _cache_epoch = target_epoch
-                _cache_epoch_timestamp = time.time()
+                # Hold the cache lock only for the cache write.
+                with _cache_lock:
+                    if _cache_epoch is not None and _cache_epoch > target_epoch:
+                        return True
+                    _metagraph_cache = metagraph
+                    _cache_epoch = target_epoch
+                    _cache_epoch_timestamp = time.time()
                 
                 print(f"🔥 ✅ Cache warmed for epoch {target_epoch}: {len(metagraph.hotkeys)} neurons")
                 return True
@@ -650,6 +657,8 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
                     return False
         
         return False
+    finally:
+        _warm_lock.release()
 
 
 def print_registry_stats():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -173,6 +174,8 @@ _PURPOSE_V2 = {
     "research_lab.rebenchmark.v1": "research_lab.rebenchmark.v2",
     "research_lab.confirmation_score.v1": "research_lab.confirmation_score.v2",
 }
+
+_CHAIN_SETTLEMENT_RETRY_COOLDOWN_SECONDS = 300.0
 
 
 class ResearchLabV2AuthorityError(RuntimeError):
@@ -1931,7 +1934,7 @@ async def _resolve_chain_settlement_attempt_v1(
 ) -> int:
     rows = await load_attempt_history(
         "research_lab_attested_execution_receipts_v2",
-        columns="purpose,sequence",
+        columns="purpose,sequence,receipt_status,issued_at",
         filters=(
             ("role", "gateway_coordinator"),
             ("epoch_id", int(epoch_id)),
@@ -1949,7 +1952,8 @@ async def _resolve_chain_settlement_attempt_v1(
     )
     if not rows:
         return int(requested_attempt)
-    durable_sequence = rows[0].get("sequence")
+    latest = rows[0]
+    durable_sequence = latest.get("sequence")
     if (
         isinstance(durable_sequence, bool)
         or not isinstance(durable_sequence, int)
@@ -1958,6 +1962,30 @@ async def _resolve_chain_settlement_attempt_v1(
         raise ResearchLabV2AuthorityError(
             "chain-realized settlement attempt history is invalid"
         )
+    receipt_status = latest.get("receipt_status")
+    if receipt_status not in {"failed", "succeeded"}:
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement attempt history is invalid"
+        )
+    if receipt_status == "failed":
+        raw_issued_at = latest.get("issued_at")
+        try:
+            issued_at = datetime.fromisoformat(
+                str(raw_issued_at).replace("Z", "+00:00")
+            )
+            if issued_at.tzinfo is None:
+                issued_at = issued_at.replace(tzinfo=timezone.utc)
+            age_seconds = (
+                datetime.now(timezone.utc) - issued_at.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError):
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement attempt history is invalid"
+            ) from None
+        if age_seconds < _CHAIN_SETTLEMENT_RETRY_COOLDOWN_SECONDS:
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement retry is cooling down"
+            )
     return max(int(requested_attempt), (durable_sequence // 2) + 1)
 
 

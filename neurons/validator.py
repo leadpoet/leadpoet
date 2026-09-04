@@ -4315,12 +4315,7 @@ class Validator(BaseValidatorNeuron):
             }
 
     async def _research_lab_allocation_submission_window_open(self) -> bool:
-        """True when this epoch's on-chain weight submission window has opened.
-
-        Fails safe: any error resolving the epoch state reports the window as
-        OPEN, which selects the tighter fetch budget and leaves behaviour exactly
-        as it was before the preparation budget existed.
-        """
+        """Return true when this epoch's weight submission window is open."""
 
         try:
             epoch_state = await self._get_epoch_state_async()
@@ -4336,16 +4331,7 @@ class Validator(BaseValidatorNeuron):
         self,
         epoch: int,
     ) -> "asyncio.Task[dict]":
-        """Create the per-epoch guard task with the fetch budget it has room for.
-
-        Before the submission window opens there are ~60 blocks (~720s) of margin
-        and the gateway's cold attested-allocation build costs 67-100s, so the
-        90-second window budget cuts the preparation off for no reason. The
-        budget travels as a ContextVar because the fetch is issued inside
-        _research_lab_pre_weight_submission_guard, a protected weight-path
-        workflow whose AST is pinned; asyncio.create_task copies the current
-        context, so the value set here reaches that one task and nothing else.
-        """
+        """Start early preparation with its larger, task-local fetch budget."""
 
         from research_lab.validator_integration import (
             ALLOCATION_PREPARATION_FETCH_BUDGET,

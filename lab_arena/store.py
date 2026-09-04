@@ -483,7 +483,7 @@ class ArenaStore:
             order="effective_reward_epoch",
             descending=True,
             limit=limit,
-            columns="round_id,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,reward_activated_at,published_at",
+            columns="round_id,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,reward_activated_at,published_at,configuration_doc",
         )
         return [row for row in rows if row.get("reward_activated_at") and row.get("reward_basis_doc")]
 

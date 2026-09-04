@@ -331,7 +331,7 @@ def _final_entry(entry: Any) -> Dict[str, Any]:
 
 
 def final_ranking(entries: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Rank by score, then keep the king, then use the stable submission ID.
+    """Rank by score, then keep the baseline, then use the stable submission ID.
 
     ``final_score`` is ``None`` for a participant without a valid result; such
     rows sort last. Bundle bytes and digests never affect rank.
@@ -355,7 +355,7 @@ def final_ranking(entries: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
                 "rank": index + 1,
                 "submission_id": row["submission_id"],
                 "final_score": row["final_score"],
-                "is_king": row["is_king"],
+                "is_baseline": row["is_king"],
             }
         )
     return ranked
@@ -376,17 +376,15 @@ def king_decision(
     finalists_final_scores: Sequence[Mapping[str, Any]],
     king_entry: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    """Section 12.3 decision from finalist and king final results.
+    """Choose a miner only when it strictly beats the daily baseline.
 
     Entries are ``{"submission_id", "hotkey", "final_score"}``
     where ``final_score`` is ``None`` for a participant with no valid
     30-ICP result. Contenders are challengers with any valid score.
-    The highest contender (ties by stable submission ID) is crowned
-    when it strictly exceeds the king's valid score, or whenever the king has
-    no valid result; an exact tie keeps the king (``defended``). With no
-    contender the king is ``defended`` when it has a valid result and
-    ``retained_ineligible`` otherwise; with no king at all the round records
-    ``no_king``.
+    The highest contender (ties by stable submission ID) is crowned only when
+    both it and the organizer baseline have valid scores and the contender's
+    score is strictly higher. A tie, no contender, or no valid baseline score
+    records ``no_king``. The baseline is a threshold, never a champion.
     """
 
     contenders = []  # type: List[Dict[str, Any]]
@@ -404,20 +402,18 @@ def king_decision(
     best = contenders[0] if contenders else None
 
     if king_entry is None:
-        if best is None:
-            return _decision("no_king", None, None)
-        return _decision("crowned", best, best["submission_id"])
+        return _decision("no_king", None, None)
 
     king = _final_entry(king_entry)
     if king["submission_id"] in seen:
         raise ArenaContractError("the king cannot also be a finalist")
-    if king["final_score"] is not None:
-        if best is not None and best["final_score"] > king["final_score"]:
-            return _decision("crowned", best, best["submission_id"])
-        return _decision("defended", king, None)
-    if best is not None:
+    if (
+        king["final_score"] is not None
+        and best is not None
+        and best["final_score"] > king["final_score"]
+    ):
         return _decision("crowned", best, best["submission_id"])
-    return _decision("retained_ineligible", king, None)
+    return _decision("no_king", None, None)
 
 
 def result_is_valid(rows_by_position: Mapping[int, Mapping[str, Any]], positions: Sequence[int]) -> bool:

@@ -24,10 +24,10 @@ SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
-    "stage_1": 210,
-    "stage_1_scoring": 60,
-    "stage_2": 210,
-    "final_scoring": 90,
+    "stage_1": 240,
+    "stage_1_scoring": 360,
+    "stage_2": 180,
+    "final_scoring": 240,
 }
 CANCEL_REASONS = {
     "benchmark_leak": "benchmark_leaked_before_cutoff",
@@ -202,7 +202,7 @@ class RoundDefaults:
     baseline_hotkey: str = ""
     baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
-    max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
+    max_challengers: int = contracts.DEFAULT_MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     # The trusted scorer is resolved once and copied into each round. A service
     # restart therefore cannot change the scorer midway through that round.
     scorer_image_digest: str = "sha256:" + "0" * 64

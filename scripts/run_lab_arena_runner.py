@@ -3,7 +3,7 @@
 
 A runner follows every running Arena round (or one pinned with
 ``--round-id``), claims one assignment per free local slot
-(``LAB_ARENA_MAX_PARALLEL_RUNS``, default 1), executes submitted source with
+(``LAB_ARENA_MAX_PARALLEL_RUNS``, default 8), executes submitted source with
 the round-pinned runtime in a fresh gVisor sandbox, and submits a signed
 result. Startup fails unless the host is Linux x86_64 with an executable
 runsc binary.

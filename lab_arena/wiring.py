@@ -107,11 +107,9 @@ def banned_hotkeys_from_environment() -> List[str]:
 
 
 def _daily_cutoff_hour_from_environment() -> Optional[int]:
-    """LAB_ARENA_DAILY_CUTOFF_UTC: the UTC hour of each day's cutoff (0..23); unset leaves round creation to the operator."""
+    """LAB_ARENA_DAILY_CUTOFF_UTC: each daily cutoff hour (0..23), default 00:00 UTC."""
 
-    raw = os.environ.get("LAB_ARENA_DAILY_CUTOFF_UTC", "").strip()
-    if not raw:
-        return None
+    raw = os.environ.get("LAB_ARENA_DAILY_CUTOFF_UTC", "0").strip() or "0"
     try:
         value = int(raw)
     except ValueError:
@@ -152,7 +150,7 @@ def _max_challengers_from_environment() -> int:
 
     raw = os.environ.get("LAB_ARENA_MAX_CHALLENGERS", "").strip()
     if not raw:
-        return contracts.MAX_CHALLENGERS
+        return contracts.DEFAULT_MAX_CHALLENGERS
     try:
         value = int(raw)
     except ValueError:

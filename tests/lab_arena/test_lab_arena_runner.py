@@ -238,9 +238,11 @@ def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_pat
 
 
 def test_parallelism_env_and_http_boundary():
-    assert rn.max_parallel_runs_from_environment({}) == 1 and rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "4"}) == 4
+    assert rn.max_parallel_runs_from_environment({}) == 8 and rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "4"}) == 4
     with pytest.raises(rn.RunnerError):
         rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "0"})
+    with pytest.raises(rn.RunnerError):
+        rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "9"})
     with pytest.raises(rn.RunnerError):
         rn.HttpArenaApiClient("http://arena.example.com")
     with pytest.raises(rn.RunnerError):

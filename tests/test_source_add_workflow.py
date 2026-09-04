@@ -185,6 +185,71 @@ async def test_dispatcher_logs_durable_pause_once_and_resume(monkeypatch, caplog
     assert caplog.text.count("SOURCE_ADD_DISPATCHER_RESUMED") == 1
 
 
+@pytest.mark.asyncio
+async def test_dispatcher_claims_work_when_leg1_reconciliation_times_out(
+    monkeypatch, caplog
+):
+    caplog.set_level(logging.WARNING, logger=source_add_workflow.__name__)
+    rpc_calls: list[str] = []
+    processed_work: list[dict] = []
+    claimed_work = {
+        "work_id": "source_add_work:" + "a" * 16,
+        "work_kind": "leg1_reward",
+    }
+    claims = iter(
+        [
+            {"status": "empty"},
+            {"status": "claimed", "work": claimed_work},
+            {"status": "empty"},
+        ]
+    )
+
+    async def fake_rpc(name, _params):
+        rpc_calls.append(name)
+        if name == "research_lab_source_add_reconcile_provenance_leg1_v1":
+            raise TimeoutError("reconciliation timed out")
+        assert name == "research_lab_source_add_claim_work"
+        return next(claims)
+
+    async def fake_process(work, *, config):
+        assert config is dispatcher_config
+        processed_work.append(dict(work))
+
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(source_add_workflow, "_rpc", fake_rpc)
+    monkeypatch.setattr(
+        source_add_workflow, "process_source_add_work_item", fake_process
+    )
+    monkeypatch.setattr(source_add_workflow.asyncio, "sleep", fake_sleep)
+    dispatcher_config = SimpleNamespace(
+        source_add_enabled=True,
+        source_add_dispatcher_enabled=True,
+        source_add_dispatcher_poll_seconds=0.25,
+        source_add_work_lease_seconds=120,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await source_add_workflow.run_source_add_dispatcher(
+            config_supplier=lambda: dispatcher_config
+        )
+
+    assert rpc_calls == [
+        "research_lab_source_add_claim_work",
+        "research_lab_source_add_reconcile_provenance_leg1_v1",
+        "research_lab_source_add_claim_work",
+        "research_lab_source_add_claim_work",
+    ]
+    assert processed_work == [claimed_work]
+    assert "SOURCE_ADD_LEG1_RECONCILIATION_FAILED type=TimeoutError" in caplog.text
+
+
 def test_historical_leg1_rebuild_removes_only_host_routing_reason():
     row = {
         "submission_id": "source_add_submission:" + "a" * 16,

@@ -1135,16 +1135,6 @@ async def run_source_add_dispatcher(
             ):
                 await asyncio.sleep(poll_seconds)
                 continue
-            now = asyncio.get_running_loop().time()
-            if now >= next_leg1_reconciliation_at:
-                reconciled = await _rpc(
-                    "research_lab_source_add_reconcile_provenance_leg1_v1", {}
-                )
-                if str(reconciled.get("status") or "") != "reconciled":
-                    raise SourceAddWorkflowError(
-                        "SOURCE_ADD Leg 1 reconciliation returned an invalid status"
-                    )
-                next_leg1_reconciliation_at = now + 30.0
             claim = await _rpc(
                 "research_lab_source_add_claim_work",
                 {
@@ -1163,6 +1153,29 @@ async def run_source_add_dispatcher(
                 logger.info("SOURCE_ADD_DISPATCHER_RESUMED worker_id=%s", worker_id)
                 queue_paused = False
             if claim_status != "claimed":
+                now = asyncio.get_running_loop().time()
+                if now >= next_leg1_reconciliation_at:
+                    next_leg1_reconciliation_at = now + 30.0
+                    try:
+                        reconciled = await _rpc(
+                            "research_lab_source_add_reconcile_provenance_leg1_v1",
+                            {},
+                        )
+                        if str(reconciled.get("status") or "") != "reconciled":
+                            raise SourceAddWorkflowError(
+                                "SOURCE_ADD Leg 1 reconciliation returned "
+                                "an invalid status"
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # New provenance passes enqueue their reward work in
+                        # the same transaction. Reconciliation only repairs
+                        # historical gaps and must not starve durable work.
+                        logger.warning(
+                            "SOURCE_ADD_LEG1_RECONCILIATION_FAILED type=%s",
+                            type(exc).__name__,
+                        )
                 await asyncio.sleep(poll_seconds)
                 continue
             work = claim.get("work")

@@ -5,8 +5,8 @@ dedicated ``lab_arena_service`` role over PostgREST: every write is one of
 the SECURITY DEFINER functions in ``scripts/179-lab-arena-v1.sql`` and reads
 are plain selects. The HTTP/1.1-pinned client construction is copied from
 ``gateway/db/client.py`` (never imported: the validator enclave image copies
-that file). The operator-minted JWT is sent as the ``Authorization`` header
-and the anon key as ``apikey``; the project service key is never held.
+that file). The preferred scoped ``sb_secret_`` API key is sent only as
+``apikey``. Legacy parity environments can still use an operator-minted JWT.
 
 ``PsycopgTransport`` exists for tests and local tooling only: it calls the
 same SQL functions through a PostgreSQL driver so disposable-PostgreSQL
@@ -143,14 +143,15 @@ def create_http1_client(timeout_seconds: float) -> httpx.Client:
 
 
 class PostgrestTransport(StoreTransport):
-    """PostgREST over HTTP/1.1 with the operator-minted service JWT."""
+    """PostgREST over HTTP/1.1 with one least-privilege credential."""
 
     def __init__(
         self,
         base_url: str,
         *,
         anon_key: str,
-        service_jwt: str,
+        service_jwt: str = "",
+        service_key: str = "",
         timeout_seconds: float = 8.0,
         http_client: Optional[httpx.Client] = None,
     ) -> None:
@@ -165,17 +166,20 @@ class PostgrestTransport(StoreTransport):
             or parsed.fragment
         ):
             raise ArenaStoreError("PostgREST base URL must be https (or loopback for tests)")
-        if not anon_key or not service_jwt:
-            raise ArenaStoreError("PostgREST anon key and service JWT are required")
-        if service_jwt.count(".") != 2:
-            raise ArenaStoreError("service JWT has an invalid shape")
+        if bool(service_key) == bool(service_jwt):
+            raise ArenaStoreError("exactly one PostgREST service credential is required")
+        if service_key and not service_key.startswith("sb_secret_"):
+            raise ArenaStoreError("scoped service key has an invalid shape")
+        if service_jwt and (not anon_key or service_jwt.count(".") != 2):
+            raise ArenaStoreError("anon key and valid service JWT are required")
         self._base_url = base_url.rstrip("/")
         self._headers = {
-            "apikey": anon_key,
-            "Authorization": "Bearer " + service_jwt,
+            "apikey": service_key or anon_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if service_jwt:
+            self._headers["Authorization"] = "Bearer " + service_jwt
         self._client = http_client or create_http1_client(timeout_seconds)
         self.deadlock_retries = 0
 

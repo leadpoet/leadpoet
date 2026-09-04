@@ -18,6 +18,9 @@ BEGIN
 END
 $roles$;
 
+-- Required only for ownership transfers by the hosted migration role.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 GRANT SELECT ON TABLE public.qualification_private_icp_sets TO lab_arena_owner;
 DROP POLICY IF EXISTS lab_arena_owner_current_daily_icp_set
   ON public.qualification_private_icp_sets;
@@ -311,4 +314,5 @@ GRANT EXECUTE ON FUNCTION public.lab_arena_current_daily_icp_set(BIGINT)
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

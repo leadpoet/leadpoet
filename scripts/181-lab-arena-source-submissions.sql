@@ -3,6 +3,9 @@
 
 BEGIN;
 
+-- Required only for ownership transfers by the hosted migration role.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 ALTER TABLE public.lab_arena_submissions
   ADD COLUMN IF NOT EXISTS source_ref TEXT,
   ADD COLUMN IF NOT EXISTS source_size_bytes BIGINT;
@@ -232,4 +235,5 @@ ALTER FUNCTION public.lab_arena_update_submission(TEXT, TEXT, TEXT, TEXT, JSONB)
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

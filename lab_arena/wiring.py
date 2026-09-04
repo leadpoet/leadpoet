@@ -8,8 +8,11 @@ objects that never print them.
 from __future__ import annotations
 
 import atexit
+import base64
 import json
 import os
+import re
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -195,10 +198,31 @@ def registry_client_from_environment() -> images.RegistryClient:
     username = os.environ.get("LAB_ARENA_REGISTRY_USERNAME", "").strip()
     password = os.environ.get("LAB_ARENA_REGISTRY_PASSWORD", "")
     registry_host = images.parse_repository(repository)[0] if repository else ""
+    ecr_match = re.fullmatch(
+        r"([0-9]{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com", registry_host
+    )
+    ecr_credentials = None
+    ecr_expires_at = 0.0
 
     def credentials_for(host: str):
+        nonlocal ecr_credentials, ecr_expires_at
         if username and password and registry_host and host == registry_host:
             return (username, password)
+        if ecr_match and host == registry_host:
+            if ecr_credentials is None or time.time() >= ecr_expires_at - 300:
+                import boto3
+
+                response = boto3.client("ecr", region_name=ecr_match.group(2)).get_authorization_token(
+                    registryIds=[ecr_match.group(1)]
+                )
+                authorization = (response.get("authorizationData") or [])[0]
+                decoded = base64.b64decode(str(authorization["authorizationToken"]), validate=True).decode("utf-8")
+                ecr_credentials = tuple(decoded.split(":", 1))
+                expires_at = authorization.get("expiresAt")
+                ecr_expires_at = float(expires_at.timestamp()) if hasattr(expires_at, "timestamp") else float(expires_at or 0)
+                if len(ecr_credentials) != 2 or not all(ecr_credentials):
+                    raise ServiceError("ECR authorization token is invalid", 500)
+            return ecr_credentials
         return None
 
     return images.RegistryClient(credentials=credentials_for)
@@ -207,7 +231,18 @@ def registry_client_from_environment() -> images.RegistryClient:
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
-    transport = PostgrestTransport(_required("LAB_ARENA_SUPABASE_URL"), anon_key=_required("LAB_ARENA_SUPABASE_ANON_KEY"), service_jwt=_required("LAB_ARENA_SERVICE_JWT"))
+    supabase_url = _required("LAB_ARENA_SUPABASE_URL")
+    supabase_anon_key = _required("LAB_ARENA_SUPABASE_ANON_KEY")
+    service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
+    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
+    if not service_key and not service_jwt:
+        raise ServiceError("environment LAB_ARENA_SERVICE_KEY is required", 500)
+    transport = PostgrestTransport(
+        supabase_url,
+        anon_key=supabase_anon_key,
+        service_key=service_key,
+        service_jwt="" if service_key else service_jwt,
+    )
     store = ArenaStore(transport)
     objects = S3ObjectStore(_required("LAB_ARENA_BUCKET"), region_name=os.environ.get("AWS_REGION"))
     chain_config = chain_module.ArenaChainConfig(endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT"), netuid=int(os.environ.get("LAB_ARENA_NETUID", "71")), network_name=os.environ.get("LAB_ARENA_NETWORK", "finney"), request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")))
@@ -229,7 +264,7 @@ def build_service_from_environment(mode: str):
     runners = _runner_hotkeys_from_environment()
     # The trusted scorer remains an organizer-owned internal image. Miner and
     # baseline agents enter as source archives and need no registry account.
-    registry = images.RegistryClient()
+    registry = registry_client_from_environment()
     image_rules = images.ImageRules(max_image_bytes=_max_image_bytes_from_environment())
     try:
         scorer = images.resolve_image(registry, images.parse_reference(_required("LAB_ARENA_SCORER_IMAGE")), image_rules)

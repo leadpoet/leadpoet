@@ -16,6 +16,9 @@ BEGIN
 END;
 $lab_arena_184_requires_183$;
 
+-- Required only for ownership transfers by the hosted migration role.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_transition_round(
   p_round_id TEXT,
   p_expected_status TEXT,
@@ -335,4 +338,5 @@ ALTER FUNCTION public.lab_arena_schema_version_v1() OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_schema_version_v1() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.lab_arena_schema_version_v1() TO lab_arena_service;
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

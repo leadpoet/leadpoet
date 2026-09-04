@@ -59,7 +59,9 @@ Set these values on the Arena service host:
 - `LAB_ARENA_MODE`: `shadow` or `live`. Use `off` to disable the Arena.
 - `LAB_ARENA_SUPABASE_URL`
 - `LAB_ARENA_SUPABASE_ANON_KEY`
-- `LAB_ARENA_SERVICE_JWT`
+- `LAB_ARENA_SERVICE_KEY`: preferred production credential. Use a scoped
+  `sb_secret_` API key whose JWT template role is `lab_arena_service`.
+  `LAB_ARENA_SERVICE_JWT` remains a legacy fallback for parity environments.
 - `LAB_ARENA_BUCKET`
 - `LAB_ARENA_CHAIN_ENDPOINT`
 - the three host provider keys listed above

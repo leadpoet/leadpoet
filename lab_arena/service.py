@@ -1761,6 +1761,16 @@ class ArenaService:
         current = active[-1] if active else None
         open_round = next((row for row in active if row["status"] == "open"), None)
         running = [row for row in active if row["status"] != "open"]
+        published = self.latest_published_round()
+        published_round = (
+            {
+                "round_id": published["round_id"],
+                "status": published["status"],
+                "published_at": published.get("published_at"),
+            }
+            if published is not None
+            else None
+        )
         epoch = None
         try:
             epoch = int(self._config.chain.current_settlement_epoch())
@@ -1790,6 +1800,7 @@ class ArenaService:
             # Rounds overlap: miners submit to the open round while runners work the running ones.
             "open_round": dict(open_round) if open_round else None,
             "running_rounds": [dict(row) for row in running],
+            "published_round": published_round,
             "king": {"hotkey": governing.get("king_hotkey"), "outcome": governing.get("king_outcome"), "round_id": governing.get("round_id"), "king_start_epoch": governing.get("king_start_epoch")} if governing else None,
             "reward_week_index": week,
             "epoch_eligible": eligibility,

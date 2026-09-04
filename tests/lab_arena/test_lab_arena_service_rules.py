@@ -387,6 +387,81 @@ def test_public_round_does_not_expose_source_transport_fields():
     assert "configuration" not in view
 
 
+def test_public_current_discovers_latest_published_round_without_rewards():
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "published_at": "2026-09-03T08:00:00Z",
+        "configuration_doc": {
+            "mode": "live",
+            "rewards_enabled": False,
+            "runner_hotkeys": ["private-runner"],
+        },
+        "publication_doc": {"private": "must-not-leak"},
+        "reward_basis_doc": None,
+    }
+    newer_open = {
+        "round_id": "arena-2026-09-03",
+        "status": "open",
+        "created_at": "2026-09-03T09:00:00Z",
+        "configuration_doc": {
+            "mode": "live",
+            "schedule": {"submission_cutoff": "2026-09-04T00:00:00Z"},
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def list_rounds(*, status=None, **_kwargs):
+            return [published] if status == "published" else [newer_open, published]
+
+        @staticmethod
+        def published_reward_bases(**_kwargs):
+            return []
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(
+        mode="live",
+        chain=SimpleNamespace(
+            current_settlement_epoch=lambda: (_ for _ in ()).throw(RuntimeError())
+        ),
+    )
+    service.public_reward_basis = lambda _epoch: None
+
+    current = service.public_current()
+
+    assert current["published_round"] == {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "published_at": "2026-09-03T08:00:00Z",
+    }
+    assert current["open_round"]["round_id"] == "arena-2026-09-03"
+    assert current["king"] is None
+    assert "private" not in json.dumps(current["published_round"])
+    assert "runner_hotkeys" not in json.dumps(current["published_round"])
+
+
+def test_public_current_has_no_published_round_before_publication():
+    class Store:
+        @staticmethod
+        def list_rounds(*, status=None, **_kwargs):
+            if status == "published":
+                return []
+            return []
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(
+        mode="shadow",
+        chain=SimpleNamespace(
+            current_settlement_epoch=lambda: (_ for _ in ()).throw(RuntimeError())
+        ),
+    )
+
+    assert service.public_current()["published_round"] is None
+
+
 def test_public_views_never_serialize_source_or_private_runtime_fields():
     source_ref = "arena/private/source-secret.tar.gz"
     hotkey = "5" + "A" * 47
@@ -467,6 +542,7 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "status": "open",
         "schedule": schedule,
     }
+    assert current["published_round"] is None
     assert round_view["participants"] == [
         {
             "submission_id": "sub-random",

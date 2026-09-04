@@ -5,6 +5,9 @@
 
 BEGIN;
 
+-- Required only for ownership transfers by the hosted migration role.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 -- A round that already admitted an image-only submission cannot continue in
 -- the source competition. Cancel it once, fail its open work through the
 -- existing cancellation function, and retire its incomplete submissions.
@@ -216,4 +219,5 @@ ALTER TABLE public.lab_arena_submissions
 
 NOTIFY pgrst, 'reload schema';
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

@@ -55,6 +55,7 @@ _PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
 PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 PRODUCTION_SUPABASE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
+LOCAL_POSTGREST_ORIGIN = "http://127.0.0.1:54321"
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 PCR0_CACHE_PROVENANCE = "validator_pcr0_cache_v1"
@@ -192,6 +193,21 @@ def _targeted_substitutions_allowed() -> bool:
     return _rehearsal_scope() == TARGETED_REGRESSION_SCOPE
 
 
+def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
+    if module not in {
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    }:
+        return
+    configured = os.environ.get("SUPABASE_URL", "").strip()
+    if configured not in {PRODUCTION_SUPABASE_ORIGIN, LOCAL_POSTGREST_ORIGIN}:
+        raise ValueError("host storage preflight Supabase origin differs")
+    os.environ["SUPABASE_URL"] = LOCAL_POSTGREST_ORIGIN
+
+
 def _candidate_root() -> Path:
     gateway_root = Path("/home/ec2-user/leadpoet_repo")
     if gateway_root.is_dir():
@@ -229,7 +245,7 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
         if (
             parent.parent == archive_parent
             and re.fullmatch(
-                r"gateway-restart-controller-bootstrap\.[A-Za-z0-9]+",
+                r"(?:gateway|validator)-restart-controller-bootstrap\.[A-Za-z0-9]+",
                 parent.name,
             )
         ):
@@ -239,6 +255,28 @@ def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
                     resolved.relative_to(candidate_archive),
                     "candidate_archive",
                 )
+
+    configured_build_root = Path(
+        os.environ.get(
+            "GATEWAY_V2_BUILD_WORK_ROOT",
+            "/home/ec2-user/.cache/leadpoet/gateway-release-build-v2",
+        )
+    )
+    if configured_build_root.is_absolute():
+        candidate_build_root = (
+            configured_build_root.resolve() / f"{_candidate_sha()}-local"
+        )
+        try:
+            relative = resolved.relative_to(candidate_build_root)
+        except ValueError:
+            pass
+        else:
+            if (
+                len(relative.parts) >= 3
+                and relative.parts[0] in GATEWAY_ROLES
+                and relative.parts[1] == "source"
+            ):
+                return Path(*relative.parts[2:]), "candidate_archive"
 
     raise RuntimeError(
         "production source is outside the candidate checkout or a recognized "
@@ -679,11 +717,9 @@ def _validator_secret() -> dict[str, str]:
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",
         "OPENROUTER_KEY": "rehearsal-openrouter",
-        "QUALIFICATION_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "FULFILLMENT_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "EXA_API_KEY": "rehearsal-exa",
         "SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
-        "QUALIFICATION_SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "COMPANIES_HOUSE_API_KEY": "rehearsal-companies-house",
         "AWS_REGION": "us-east-1",
@@ -949,6 +985,26 @@ def _external_build_role(argv: list[str], tag: str) -> str:
         ):
             raise ValueError("gateway enclave build contract is invalid")
         return role
+    if tag.startswith("leadpoet-gateway-verify:"):
+        match = re.fullmatch(
+            r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)-raw",
+            tag,
+        )
+        if match is None:
+            raise ValueError("gateway verification image tag is invalid")
+        role, short_commit, _index = match.groups()
+        build_args = _arg_values(argv, "--build-arg")
+        dockerfile = Path(_arg_value(argv, "-f"))
+        context = Path(argv[-1]) if argv else Path()
+        if (
+            role not in GATEWAY_ROLES
+            or short_commit != _candidate_sha()[:12]
+            or build_args
+            != ("SOURCE_DATE_EPOCH=0", f"LEADPOET_ENCLAVE_ROLE={role}")
+            or dockerfile != context / "tee/Dockerfile.enclave"
+        ):
+            raise ValueError("gateway verification image build contract is invalid")
+        return role
     return ""
 
 
@@ -1102,15 +1158,31 @@ def _docker_load(
         if isinstance(config.get("config"), dict)
         else {}
     )
+    rootfs = config.get("rootfs")
+    rootfs_layers = (
+        rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    )
     commit = str(labels.get("org.leadpoet.rehearsal.commit") or "")
     role = str(labels.get("org.leadpoet.rehearsal.role") or "")
     image_id = "sha256:" + config_path.rsplit("/", 1)[-1]
     if (
         role not in ALL_ROLES
         or image_id != normalized_image_id(commit, role)
+        or not isinstance(rootfs_layers, list)
+        or not rootfs_layers
+        or any(
+            not isinstance(layer, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", layer) is None
+            for layer in rootfs_layers
+        )
     ):
         raise ValueError("Docker load image identity differs from build contract")
-    record = {"id": image_id, "commit": commit, "role": role}
+    record = {
+        "id": image_id,
+        "commit": commit,
+        "role": role,
+        "rootfs_layers": list(rootfs_layers),
+    }
     cache_tags = [
         tag for tag in tags if _PCR0_CACHE_NORMALIZED_TAG.fullmatch(tag)
     ]
@@ -1206,6 +1278,30 @@ def _official_normalized_image_tag(role: str) -> str:
     if role in GATEWAY_ROLES:
         return f"tee-enclave:{role}"
     return ""
+
+
+def _gateway_verification_image_is_bound(
+    *,
+    image: str,
+    record: dict[str, Any],
+) -> bool:
+    match = re.fullmatch(
+        r"leadpoet-gateway-verify:(gateway_[a-z]+)-([0-9a-f]{12})-([1-9][0-9]*)",
+        image,
+    )
+    if match is None:
+        return False
+    tagged_role, tagged_commit, _index = match.groups()
+    commit = str(record.get("commit") or "")
+    role = str(record.get("role") or "")
+    return (
+        commit == _candidate_sha()
+        and role == tagged_role
+        and role in GATEWAY_ROLES
+        and tagged_commit == commit[:12]
+        and not str(record.get("provenance") or "")
+        and _image_record_id(record) == normalized_image_id(commit, role)
+    )
 
 
 def _docker_run_contract(
@@ -1419,6 +1515,15 @@ def command_docker(argv: list[str]) -> int:
                     output = json.dumps([record], sort_keys=True)
                 elif "org.opencontainers.image.revision" in template:
                     output = str(record.get("commit") or "")
+                elif template == "{{json .RootFS.Layers}}":
+                    layers = record.get("rootfs_layers")
+                    if not isinstance(layers, list) or not layers:
+                        return _fail(
+                            "docker",
+                            argv,
+                            "Docker image rootfs layers are unavailable",
+                        )
+                    output = json.dumps(layers, separators=(",", ":"))
                 elif ".Id" in template:
                     output = _image_record_id(record)
                 else:
@@ -1981,7 +2086,13 @@ def command_nitro(argv: list[str]) -> int:
                 candidate_bound = (
                     commit == _candidate_sha()
                     and role in ALL_ROLES
-                    and image == _official_normalized_image_tag(role)
+                    and (
+                        image == _official_normalized_image_tag(role)
+                        or _gateway_verification_image_is_bound(
+                            image=image,
+                            record=record,
+                        )
+                    )
                     and not str(record.get("provenance") or "")
                     and _image_record_id(record)
                     == normalized_image_id(commit, role)
@@ -2450,6 +2561,7 @@ def _exec_long_lived_production_module(
     if "/harness" not in python_paths:
         python_paths.insert(0, "/harness")
     os.environ["PYTHONPATH"] = ":".join(python_paths)
+    _route_host_storage_preflight_to_local_postgrest(module)
     os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
     return 127
 
@@ -2784,6 +2896,9 @@ def command_python(argv: list[str]) -> int:
             os.environ["PYTHONPATH"] = ":".join(python_paths)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+            "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+            "gateway.tee.prepare_active_release_lineage_v2",
             "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
@@ -2800,6 +2915,7 @@ def command_python(argv: list[str]) -> int:
             "gateway.tee.release_archive_v2",
         }:
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             current_python_path = os.environ.get("PYTHONPATH", "")
             python_paths = [
                 item for item in current_python_path.split(":") if item
@@ -2820,6 +2936,7 @@ def command_python(argv: list[str]) -> int:
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.verify_weight_submission_ready_v2":
             _record_production_module(module, argv)
+            _route_host_storage_preflight_to_local_postgrest(module)
             if (
                 "--repair" in argv
                 and os.environ.get(

@@ -2902,6 +2902,11 @@
       "symbol": "verify_archive_index"
     },
     {
+      "ast_sha256": "sha256:393ddd915582d69f980079e466498641e48c5815534bb21eefd6870ba613620c",
+      "path": "gateway/tee/release_channel_v2.py",
+      "symbol": "__module__"
+    },
+    {
       "ast_sha256": "sha256:81aa4066710f86397a3fc5c18fa280aa47678be0c2d25cf5a4017d22981188c0",
       "path": "gateway/tee/release_channel_v2.py",
       "symbol": "build_release_channel_v2"
@@ -2932,6 +2937,11 @@
       "symbol": "validate_release_channel_v2"
     },
     {
+      "ast_sha256": "sha256:7c9fdb6068e88903f11932127b48b3a74388e885b369b0a2063c0846a9e0815a",
+      "path": "gateway/tee/release_lineage_v2.py",
+      "symbol": "__module__"
+    },
+    {
       "ast_sha256": "sha256:08867dcd38a411bac357081289331fe04388dec8f302989b766205c9f89b5a86",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "build_compact_release_lineage_boot_verifier_v2"
@@ -2950,6 +2960,11 @@
       "ast_sha256": "sha256:1323271ccd10e5cc2cdf42c73a29259b16d9860524fd51563b6a2ce7e08faedf",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "validate_compact_release_lineage_v2"
+    },
+    {
+      "ast_sha256": "sha256:9db3e79b28f448075808c154d245f93c6882a6560c8c23a33b13941548412403",
+      "path": "gateway/tee/release_manifest_v2.py",
+      "symbol": "__module__"
     },
     {
       "ast_sha256": "sha256:f4b4ae1a080f4b5ef1c15636d0c8bfff5c9723052f1dc9950a376b5ad954336a",
@@ -4667,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:d3b629a5dc27b7fecb93544fc83d1aaaa778d5e168c7ecbbfce05438b504382b",
-  "protected_source_commit": "f1ec4031f3e67087ae24d06a0c7bcd1226876b60",
+  "manifest_hash": "sha256:d99e629ffd9a9b05fe323b9dbbd080227d1509d76ee06514c2e2ddeb381b3a42",
+  "protected_source_commit": "0a1a20d592258afbff9e06ec483549e152c74fc1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

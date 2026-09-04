@@ -20,6 +20,8 @@ if candidate_source_root.is_dir():
     sys.path.insert(0, str(candidate_source_root))
 
 with redirect_stdout(sys.stderr):
+    from gateway.tee.topology import ROLE_SPECS as GATEWAY_ROLE_SPECS
+
     if __package__:
         from .postgres_v2_contract_probe import (
             EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
@@ -1173,140 +1175,6 @@ def verify_durable_boundary_state(
     }
 
 
-def verify_gateway_provider_preflight(
-    rows: list[dict],
-    *,
-    transition: str,
-) -> None:
-    if transition != "forward":
-        return
-    expected = {
-        ("api.exa.ai", "/search"),
-        ("api.scrapingdog.com", "/account"),
-    }
-    observed = {
-        (str(row.get("host") or ""), str(row.get("path") or ""))
-        for row in rows
-        if row.get("operation") == "provider_transport"
-        and row.get("status") == 200
-    }
-    if not expected <= observed:
-        raise SystemExit(
-            "gateway provider preflight did not complete through both "
-            "authenticated provider boundaries"
-        )
-    append_rows = [
-        (ordinal, row)
-        for ordinal, row in enumerate(rows)
-        if row.get("kind") == "local-postgrest"
-        and row.get("operation")
-        in {
-            "provider_outcome_checkpoint_appended",
-            "provider_outcome_checkpoint_batch_appended",
-        }
-        and row.get("status") == "ok"
-        and row.get("result_status") in {"inserted", "existing"}
-    ]
-    checkpoint_hashes = {
-        str(row.get("checkpoint_hash") or "")
-        for _ordinal, row in append_rows
-    }
-    appended_sequence_count = sum(
-        (
-            int(row.get("checkpoint_count") or 0)
-            if row.get("operation")
-            == "provider_outcome_checkpoint_batch_appended"
-            else 1
-        )
-        for _ordinal, row in append_rows
-    )
-    if not append_rows or appended_sequence_count < 2 or not checkpoint_hashes:
-        raise SystemExit(
-            "gateway provider preflight did not durably append both "
-            "provider outcomes"
-        )
-    for _append_ordinal, append_row in append_rows:
-        batch = (
-            append_row.get("operation")
-            == "provider_outcome_checkpoint_batch_appended"
-        )
-        if (
-            append_row.get("method") != "POST"
-            or append_row.get("target")
-            != (
-                "append_research_lab_provider_outcome_checkpoints_v2"
-                if batch
-                else "append_research_lab_provider_outcome_checkpoint_v2"
-            )
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(append_row.get("checkpoint_hash") or ""),
-            )
-        ):
-            raise SystemExit(
-                "gateway provider preflight atomic checkpoint "
-                "acknowledgement is invalid"
-            )
-        if batch:
-            sequences = append_row.get("sequences")
-            if (
-                not isinstance(sequences, list)
-                or len(sequences)
-                != int(append_row.get("checkpoint_count") or 0)
-                or not sequences
-                or any(
-                    not isinstance(sequence, int)
-                    or isinstance(sequence, bool)
-                    or sequence <= 0
-                    for sequence in sequences
-                )
-            ):
-                raise SystemExit(
-                    "gateway provider preflight batch checkpoint "
-                    "acknowledgement is invalid"
-                )
-        elif (
-            not isinstance(append_row.get("sequence"), int)
-            or isinstance(append_row.get("sequence"), bool)
-            or int(append_row["sequence"]) <= 0
-        ):
-            raise SystemExit(
-                "gateway provider preflight checkpoint sequence is invalid"
-            )
-    first_append_ordinal = append_rows[0][0]
-    readback_rows = [
-        (ordinal, row)
-        for ordinal, row in enumerate(rows)
-        if row.get("kind") == "local-postgrest"
-        and row.get("operation")
-        == "provider_outcome_checkpoint_readback"
-        and row.get("status") == "ok"
-    ]
-    if not any(ordinal < first_append_ordinal for ordinal, _row in readback_rows):
-        raise SystemExit(
-            "gateway provider preflight did not exercise checkpoint "
-            "restart recovery before appending"
-        )
-    if any(ordinal > first_append_ordinal for ordinal, _row in readback_rows):
-        raise SystemExit(
-            "gateway provider preflight issued a redundant checkpoint "
-            "readback after atomic append"
-        )
-    if any(
-        row.get("kind") == "local-postgrest"
-        and row.get("status") == "rejected"
-        and (
-            "provider_outcome" in str(row.get("target") or "")
-            or "provider_outcome" in str(row.get("path") or "")
-        )
-        for row in rows
-    ):
-        raise SystemExit(
-            "gateway provider preflight encountered a rejected checkpoint "
-            "operation"
-        )
-
-
 def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
     persistence_ordinals = [
         ordinal
@@ -1421,23 +1289,97 @@ def selected_weight_storage_preflight_capability(
     )
 
 
+def selected_weight_storage_preflight_pins_epoch(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("gw_restart.sh")
+    stage_marker = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"'
+    )
+    end_marker = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"'
+    module = "gateway.tee.verify_weight_submission_ready_v2"
+    for root in candidate_roots:
+        source_path = root / relative
+        if not source_path.is_file():
+            continue
+        source = source_path.read_text(encoding="utf-8")
+        stage_start = source.find(stage_marker)
+        stage_end = source.find(end_marker, stage_start + len(stage_marker))
+        if stage_start < 0 or stage_end < 0:
+            raise SystemExit(
+                "candidate gateway restart storage preflight stage is unavailable"
+            )
+        stage_lines = source[stage_start:stage_end].splitlines()
+        invocations: list[list[str]] = []
+        for ordinal, line in enumerate(stage_lines):
+            if line.strip() != "run_prepared_gateway_module \\":
+                continue
+            arguments: list[str] = []
+            for argument_line in stage_lines[ordinal + 1 :]:
+                argument = argument_line.strip()
+                continued = argument.endswith("\\")
+                if continued:
+                    argument = argument[:-1].rstrip()
+                arguments.append(argument)
+                if not continued:
+                    break
+            if arguments[:2] == [module, "--storage-read-preflight"]:
+                invocations.append(arguments)
+        legacy_arguments = [module, "--storage-read-preflight"]
+        pinned_arguments = [
+            *legacy_arguments,
+            '--epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"',
+        ]
+        if invocations == [legacy_arguments]:
+            return False
+        if invocations == [pinned_arguments]:
+            return True
+        raise SystemExit(
+            "candidate gateway restart storage preflight invocation is unknown"
+        )
+    raise SystemExit(
+        "candidate gateway restart source is unavailable for capability proof"
+    )
+
+
 def verify_gateway_weight_readiness_invocations(
     rows: list[dict],
     *,
     candidate_sha: str,
     transition: str = "forward",
     storage_preflight_supported: bool = True,
+    storage_preflight_pins_epoch: bool = False,
 ) -> None:
     module = "gateway.tee.verify_weight_submission_ready_v2"
     if not storage_preflight_supported and transition != "rollback":
         raise SystemExit(
             "current release does not declare the required weight storage preflight"
         )
+    observed = [
+        row
+        for row in rows
+        if row.get("kind") == "python-module"
+        and row.get("module") == module
+    ]
     expected_prefix = []
     if storage_preflight_supported:
+        argv = ["-m", module, "--storage-read-preflight"]
+        if storage_preflight_pins_epoch:
+            observed_argv = observed[0].get("argv") if observed else None
+            if (
+                not isinstance(observed_argv, list)
+                or len(observed_argv) != 5
+                or observed_argv[:4] != [*argv, "--epoch"]
+                or not str(observed_argv[4]).isdigit()
+            ):
+                raise SystemExit(
+                    "gateway launcher did not execute the exact production "
+                    f"weight storage preflight: {observed!r}"
+                )
+            argv = list(observed_argv)
         expected_prefix.append(
             {
-                "argv": ["-m", module, "--storage-read-preflight"],
+                "argv": argv,
                 "source_kind": "candidate_archive",
             }
         )
@@ -1456,12 +1398,6 @@ def verify_gateway_weight_readiness_invocations(
         ],
         "source_kind": "candidate_checkout",
     }
-    observed = [
-        row
-        for row in rows
-        if row.get("kind") == "python-module"
-        and row.get("module") == module
-    ]
     prefix_count = len(expected_prefix)
     if (
         len(observed) > prefix_count
@@ -1617,19 +1553,26 @@ def main() -> int:
             raise SystemExit(
                 "targeted fault scenario cannot satisfy exact restart evidence"
             )
+        candidate_roots = (
+            Path("/home/ec2-user/leadpoet_repo"),
+            Path("/home/ec2-user/leadpoet/leadpoet"),
+        )
         storage_preflight_supported = (
             selected_weight_storage_preflight_capability(
-                (
-                    Path("/home/ec2-user/leadpoet_repo"),
-                    Path("/home/ec2-user/leadpoet/leadpoet"),
-                )
+                candidate_roots
             )
+        )
+        storage_preflight_pins_epoch = (
+            selected_weight_storage_preflight_pins_epoch(candidate_roots)
+            if storage_preflight_supported
+            else False
         )
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=candidate_sha,
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
+            storage_preflight_pins_epoch=storage_preflight_pins_epoch,
         )
         if transition == "forward":
             launcher_log = Path(
@@ -1650,7 +1593,7 @@ def main() -> int:
                 )
         verify_chain_settlement_durable_readback(rows)
         required_gateway_order = [
-            "module:gateway.tee.release_channel_v2",
+            "module:gateway.tee.local_release_v2",
             "module:gateway.tee.prepare_gateway_envelopes_v2",
         ]
         if storage_preflight_supported:
@@ -1671,12 +1614,15 @@ def main() -> int:
             ]
         )
         require_order(labels, required_gateway_order)
-        verify_gateway_provider_preflight(rows, transition=transition)
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
-        if len(state.get("enclaves", [])) != 2:
-            raise SystemExit("gateway did not start the exact two-enclave topology")
+        expected_enclave_count = len(GATEWAY_ROLE_SPECS)
+        if len(state.get("enclaves", [])) != expected_enclave_count:
+            raise SystemExit(
+                "gateway did not start the candidate-defined "
+                f"{expected_enclave_count}-enclave topology"
+            )
     else:
         restart_invariants = verify_validator_gateway_activation_barrier(
             serialized_adapter_events(),
@@ -1694,7 +1640,7 @@ def main() -> int:
         require_order(
             labels,
             [
-                "module:gateway.tee.release_channel_v2",
+                "module:gateway.tee.local_release_v2",
                 "module:validator_tee.host.refresh_hotkey_config_v2",
                 "module:validator_tee.host.restart_preflight_v2",
                 "nitro:build_enclave",

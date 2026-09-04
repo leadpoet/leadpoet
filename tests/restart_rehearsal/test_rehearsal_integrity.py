@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -46,6 +47,7 @@ from tests.restart_rehearsal.fixture_contract import (
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
     EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE as GATEWAY_ATOMIC_CREDIT_RESUME_EVIDENCE,
+    LocalPostgRESTServer,
     LocalPostgRESTState,
     RUNTIME_TABLES,
     _apply_table_query,
@@ -57,6 +59,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _migration_schema_contract,
     _schema_contract,
     _source_add_claim_control_contract,
+    _source_add_claim_control_contract_v2,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_MIGRATION_PREREQUISITES_SQL,
@@ -97,7 +100,7 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 from tests.restart_rehearsal.verify_evidence import (
     events,
     selected_weight_storage_preflight_capability,
-    verify_gateway_provider_preflight,
+    selected_weight_storage_preflight_pins_epoch,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
     verify_chain_settlement_durable_readback,
@@ -1542,6 +1545,36 @@ def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> Non
             "weight_receipt_hash=eq.sha256:test",
             allowed_columns=columns,
         )
+
+
+def test_gateway_rehearsal_icp_schema_covers_runtime_contract() -> None:
+    match = re.search(
+        r"CREATE TABLE public\.qualification_private_icp_sets \((.*?)\n\);",
+        ALLOCATION_MIGRATION_PREREQUISITES_SQL,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    columns = {
+        line.strip().split()[0].rstrip(",")
+        for line in match.group(1).splitlines()
+        if line.strip()
+    }
+    assert columns == {
+        "set_id",
+        "icps",
+        "icp_set_hash",
+        "industry_distribution",
+        "active_from",
+        "active_until",
+        "generation_seed",
+        "is_active",
+    }
+    assert _apply_table_query(
+        [],
+        "select=set_id,icps,icp_set_hash,active_from,active_until"
+        "&is_active=eq.True&limit=1",
+        allowed_columns=frozenset(columns),
+    ) == []
 
 
 def test_migration_backed_contract_is_candidate_bound_and_complete(
@@ -3960,8 +3993,11 @@ def test_gateway_runtime_identity_uses_the_installed_local_nsm_boundary(
 
 
 def test_external_build_identities_match_the_production_image_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
     from validator_tee.host.docker_image_normalizer_v2 import (
         normalize_saved_image,
     )
@@ -3982,6 +4018,17 @@ def test_external_build_identities_match_the_production_image_normalizer(
         assert image_id == normalized_image_id(COMMIT, role)
         assert image_id not in observed
         observed.add(image_id)
+        images = {}
+        assert contract_adapter._docker_load(
+            normalized,
+            images,
+            {},
+        ) == [f"rehearsal:{role}"]
+        assert images[f"rehearsal:{role}"]["rootfs_layers"]
+        assert all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+            for layer in images[f"rehearsal:{role}"]["rootfs_layers"]
+        )
 
 
 def test_release_channel_uses_the_same_commit_bound_external_artifacts(
@@ -4022,15 +4069,23 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
         "SOURCE_ROOT",
         Path(__file__).resolve().parents[2],
     )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     channel = rehearsal_sitecustomize._release_channel(COMMIT)
     gateway = channel["gateway_release_manifest"]
+    assert gateway["schema_version"] == "leadpoet.gateway_local_release.v1"
+    assert gateway["verified_build_count"] == len(ROLE_SPECS)
     for role, release in gateway["roles"].items():
+        assert release["verified_build_count"] == 1
         assert release["normalized_image_hash"] == normalized_image_id(
             COMMIT,
             role,
         )
-        assert eif_hash(COMMIT, role) in release["eif_hashes"]
-    validator = channel["validator_release_manifest"]["release"]
+    validator_manifest = channel["validator_release_manifest"]
+    assert validator_manifest["schema_version"] == (
+        "leadpoet.validator_local_release.v1"
+    )
+    assert validator_manifest["verified_build_count"] == 1
+    validator = validator_manifest["release"]
     assert validator["normalized_image_hash"] == normalized_image_id(
         COMMIT,
         "validator_weights",
@@ -4038,22 +4093,20 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
     assert validator["eif_hash"] == eif_hash(COMMIT, "validator_weights")
 
 
-def test_release_channel_accepts_the_known_historical_gateway_topology(
+def test_release_channel_preserves_the_exact_historical_role_topology(
     monkeypatch,
     tmp_path,
 ) -> None:
     from gateway.tee.release_manifest_v2 import (
         HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
-        historical_three_role_specs,
-        validate_historical_release_manifest,
     )
+    from gateway.tee.topology import ROLE_SPECS
 
     historical_commit = "2" * 40
+    role_names = {*ROLE_SPECS, "gateway_autoresearch"}
     roles = {}
-    role_specs = historical_three_role_specs(
-        expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
-    )
-    for role, spec in role_specs.items():
+    for role in role_names:
+        historical_role = role == "gateway_autoresearch"
         roles[role] = {
             "build_identity_hash": "sha256:" + "1" * 64,
             "commit_sha": historical_commit,
@@ -4061,20 +4114,20 @@ def test_release_channel_accepts_the_known_historical_gateway_topology(
             "dockerfile_hash": "sha256:" + "3" * 64,
             "eif_hash": (
                 "sha256:" + "5" * 64
-                if role == "gateway_autoresearch"
+                if historical_role
                 else eif_hash(historical_commit, role)
             ),
             "execution_manifest_hash": "sha256:" + "4" * 64,
             "normalized_image_hash": (
                 "sha256:" + "9" * 64
-                if role == "gateway_autoresearch"
+                if historical_role
                 else normalized_image_id(
                     historical_commit,
                     role,
                 )
             ),
             "pcr0": pcr0(historical_commit),
-            "service_role": spec["service_role"],
+            "service_role": role,
             "source_manifest_hash": "sha256:" + "6" * 64,
             "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
         }
@@ -4099,12 +4152,10 @@ def test_release_channel_accepts_the_known_historical_gateway_topology(
 
     channel = rehearsal_sitecustomize._release_channel(historical_commit)
 
-    assert channel["commit_sha"] == historical_commit
-    assert set(channel["gateway_release_manifest"]["roles"]) == set(roles)
-    validate_historical_release_manifest(
-        channel["gateway_release_manifest"],
-        expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
-    )
+    gateway = channel["gateway_release_manifest"]
+    assert gateway["topology_hash"] == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    assert set(gateway["roles"]) == role_names
+    assert gateway["verified_build_count"] == 18
 
     roles["gateway_autoresearch"]["service_role"] = "gateway_scoring"
     (tmp_path / "release-build-input.json").write_text(
@@ -5894,6 +5945,9 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     verifier = (harness_root / "verify_evidence.py").read_text(
         encoding="utf-8"
     )
+    release_builder = (
+        harness_root.parents[1] / "gateway/tee/build_local_release_v2.sh"
+    ).read_text(encoding="utf-8")
     contract = json.loads(
         (harness_root / "boundary_contract.json").read_text(encoding="utf-8")
     )
@@ -5910,6 +5964,11 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     } <= allowed
     assert verifier.count('"nitro:build_enclave"') == 2
     assert verifier.count('"nitro:run_enclave"') == 2
+    assert "len(GATEWAY_ROLE_SPECS)" in verifier
+    assert "exact three-enclave topology" not in verifier
+    assert "python3 -m gateway.tee.local_release_v2" in release_builder
+    assert verifier.count('"module:gateway.tee.local_release_v2"') == 2
+    assert '"module:gateway.tee.release_channel_v2"' not in verifier
 
 
 def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:
@@ -6517,95 +6576,108 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
     )
     assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "parser.add_argument('--epoch', type=int)\n",
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
-def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
-    rows = [
-        {
-            "operation": "provider_transport",
-            "host": "api.exa.ai",
-            "path": "/search",
-            "status": 200,
-        },
-        {
-            "operation": "provider_transport",
-            "host": "api.scrapingdog.com",
-            "path": "/account",
-            "status": 200,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 0,
-            "checkpoint_hashes": [],
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "1" * 64,
-            "sequence": 1,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "2" * 64,
-            "sequence": 2,
-        },
-    ]
-    verify_gateway_provider_preflight(rows, transition="forward")
-    verify_gateway_provider_preflight([], transition="rollback")
 
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(rows[1:], transition="forward")
+def test_weight_storage_preflight_epoch_binding_tracks_restart_wrapper(
+    tmp_path,
+) -> None:
+    restart = tmp_path / "gw_restart.sh"
+    prefix = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"\n'
+        "run_prepared_gateway_module \\\n"
+        "  gateway.tee.verify_weight_submission_ready_v2 \\\n"
+    )
+    suffix = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"\n'
+    restart.write_text(
+        prefix + "  --storage-read-preflight\n" + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is False
 
-    failed = [dict(row) for row in rows]
-    failed[1]["status"] = 503
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(failed, transition="forward")
-    with pytest.raises(SystemExit, match="durably append both"):
-        verify_gateway_provider_preflight(rows[:3], transition="forward")
-    with pytest.raises(SystemExit, match="restart recovery"):
-        verify_gateway_provider_preflight(
-            [*rows[:2], *rows[3:]],
-            transition="forward",
-        )
-    redundant_readback = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 1,
-            "checkpoint_hashes": ["sha256:" + "2" * 64],
-        },
-    ]
-    with pytest.raises(SystemExit, match="redundant checkpoint readback"):
-        verify_gateway_provider_preflight(
-            redundant_readback,
-            transition="forward",
-        )
-    rejected = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "request_validation",
-            "status": "rejected",
-            "path": (
-                "/rest/v1/rpc/"
-                "append_research_lab_provider_outcome_checkpoint_v2"
-            ),
-        },
-    ]
-    with pytest.raises(SystemExit, match="rejected checkpoint"):
-        verify_gateway_provider_preflight(rejected, transition="forward")
+    restart.write_text(
+        prefix
+        + "  --storage-read-preflight \\\n"
+        + '  --epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"\n'
+        + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is True
+    assert selected_weight_storage_preflight_pins_epoch(
+        (Path(__file__).resolve().parents[2],)
+    ) is True
+
+
+def test_gateway_rehearsal_has_no_retired_provider_preflight_receipt_gate() -> None:
+    verifier = (
+        Path(__file__).resolve().parent / "verify_evidence.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def verify_gateway_provider_preflight(" not in verifier
+    assert "gateway provider preflight did not durably append" not in verifier
+
+
+def test_gateway_rehearsal_serves_source_add_restart_contracts(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    admission_rpc = "research_lab_source_add_admission_control_contract_v1"
+    restart_rpc = "research_lab_source_add_claim_control_contract_v2"
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables=set(),
+        rpcs={admission_rpc, restart_rpc},
+    )
+    server = LocalPostgRESTServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        responses = {}
+        for rpc_name in (admission_rpc, restart_rpc):
+            request = urllib.request.Request(
+                "http://127.0.0.1:%d/rest/v1/rpc/%s"
+                % (server.server_address[1], rpc_name),
+                data=b"{}",
+                headers={
+                    "apikey": "rehearsal-secret",
+                    "authorization": "Bearer rehearsal-secret",
+                    "content-type": "application/json",
+                },
+                method="POST",
+            )
+            with opener.open(request, timeout=2.0) as response:
+                assert response.status == 200
+                responses[rpc_name] = json.loads(response.read())
+        assert responses == {
+            admission_rpc: {
+                "schema_version": (
+                    "leadpoet.source_add_admission_control_contract.v1"
+                ),
+                "control_row_present": True,
+                "trigger_enabled": True,
+                "pause_rpc": "research_lab_source_add_set_paused",
+                "admission_trigger": "trg_source_add_work_admission_control",
+            },
+            restart_rpc: _source_add_claim_control_contract_v2(source_root),
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
 
 
 def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
@@ -8056,6 +8128,7 @@ def test_exact_rehearsal_supplies_paired_active_release_handoff() -> None:
     assert "prepare_gateway_final_active_lineage_v2(" in script
     assert "load_source_add_graphs=no_active_graphs" in script
     assert "validate_active_release_requirements_v2(conflicting)" in script
+    assert "fetch_prior_release_channel_v2(" in script
     assert "running_channel[\"gateway_release_manifest\"]" in script
     assert '"leadpoet-validator-main" in containers' in script
     assert 'f"VALIDATOR_V2_DEPLOY_COMMIT={running_commit}"' in script
@@ -8191,7 +8264,16 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         }
 
     rows = [
-        row(["-m", module, "--storage-read-preflight"], "candidate_archive"),
+        row(
+            [
+                "-m",
+                module,
+                "--storage-read-preflight",
+                "--epoch",
+                "24304",
+            ],
+            "candidate_archive",
+        ),
         row(
             ["-m", module, "--repair-chain-settlements"],
             "candidate_checkout",
@@ -8215,6 +8297,7 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
 
     recovered_rows = [
@@ -8228,14 +8311,167 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         recovered_rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
+
+    advanced_epoch_rows = copy.deepcopy(rows)
+    advanced_epoch_rows[0]["argv"][-1] = "24303"
+    verify_gateway_weight_readiness_invocations(
+        advanced_epoch_rows,
+        candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
+    )
+
+    malformed_epoch_rows = copy.deepcopy(rows)
+    malformed_epoch_rows[0]["argv"][-1] = "not-an-epoch"
+    with pytest.raises(SystemExit, match="exact production"):
+        verify_gateway_weight_readiness_invocations(
+            malformed_epoch_rows,
+            candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
+        )
 
     rows[3]["argv"][-1] = "30"
     with pytest.raises(SystemExit, match="launcher contract"):
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
         )
+
+    legacy_rows = copy.deepcopy(rows)
+    legacy_rows[0]["argv"] = ["-m", module, "--storage-read-preflight"]
+    legacy_rows[3]["argv"][-1] = "360"
+    verify_gateway_weight_readiness_invocations(
+        legacy_rows,
+        candidate_sha=COMMIT,
+    )
+
+
+def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    modules = (
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+        "gateway.tee.verify_weight_submission_ready_v2",
+    )
+    for module in modules:
+        monkeypatch.setenv(
+            "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+        )
+        contract_adapter._route_host_storage_preflight_to_local_postgrest(module)
+        assert (
+            os.environ["SUPABASE_URL"]
+            == contract_adapter.LOCAL_POSTGREST_ORIGIN
+        )
+
+        monkeypatch.setenv("SUPABASE_URL", "https://unexpected.invalid")
+        with pytest.raises(ValueError, match="Supabase origin differs"):
+            contract_adapter._route_host_storage_preflight_to_local_postgrest(
+                module
+            )
+
+    contract_adapter._route_host_storage_preflight_to_local_postgrest(
+        "gateway.tee.restart_preflight_v2"
+    )
+    assert os.environ["SUPABASE_URL"] == "https://unexpected.invalid"
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
+        "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
+        "gateway.tee.prepare_active_release_lineage_v2",
+    ),
+)
+def test_gateway_storage_helpers_route_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    module: str,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_record_production_module",
+        lambda name, argv: observed.update(module=name, recorded_argv=argv),
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            exec_argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", module, "--help"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter.command_python(argv)
+
+    assert observed == {
+        "module": module,
+        "recorded_argv": argv,
+        "executable": contract_adapter.REAL_PYTHON,
+        "exec_argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
+
+
+def test_gateway_main_routes_storage_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter, "_locked_state", lambda: (object(), {})
+    )
+    monkeypatch.setattr(contract_adapter, "_save_state", lambda *_args: None)
+    monkeypatch.setattr(contract_adapter, "_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        contract_adapter, "_module_source", lambda _module: Path("gateway/main.py")
+    )
+    monkeypatch.setattr(
+        contract_adapter, "_source_identity", lambda _path: {}
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", "gateway.main"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter._exec_long_lived_production_module(
+            "gateway.main", "gateway.main", argv
+        )
+
+    assert observed == {
+        "executable": contract_adapter.REAL_PYTHON,
+        "argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
 
 
 def test_gateway_readiness_accepts_missing_optional_preflight_only_for_rollback() -> None:
@@ -8369,22 +8605,25 @@ def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(
             )
 
 
-def test_module_provenance_accepts_only_candidate_restart_authority_archive(
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        "gateway-restart-controller-bootstrap.",
+        "validator-restart-controller-bootstrap.",
+    ),
+)
+def test_module_provenance_accepts_candidate_restart_authority_archive(
     monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
 ) -> None:
     monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     from tests.restart_rehearsal import contract_adapter
 
-    with _production_named_temp_directory(
-        "gateway-restart-controller-bootstrap."
-    ) as bootstrap_root:
-        module_path = (
-            bootstrap_root
-            / "authority/gateway/tee/restart_preflight_v2.py"
-        )
+    with _production_named_temp_directory(prefix) as bootstrap_root:
+        module_path = bootstrap_root / "authority/scripts/gateway_git_deploy.py"
         module_path.parent.mkdir(parents=True)
-        module_path.write_text("VALUE = 'candidate authority'\n", encoding="utf-8")
-        outside = bootstrap_root / "unbound.py"
+        module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+        outside = bootstrap_root / "outside.py"
         outside.write_text("VALUE = 'outside authority'\n", encoding="utf-8")
 
         relative, source_kind = contract_adapter._candidate_git_path(
@@ -8392,14 +8631,169 @@ def test_module_provenance_accepts_only_candidate_restart_authority_archive(
             Path("/home/ec2-user/leadpoet_repo"),
         )
 
-        assert relative == Path("gateway/tee/restart_preflight_v2.py")
+        assert relative == Path("scripts/gateway_git_deploy.py")
         assert source_kind == "candidate_archive"
-        with pytest.raises(RuntimeError, match="outside the candidate checkout"):
+        with pytest.raises(RuntimeError, match="recognized candidate"):
             contract_adapter._candidate_git_path(
                 outside.resolve(),
                 Path("/home/ec2-user/leadpoet_repo"),
             )
 
+        escaped_link = bootstrap_root / "authority/escaped.py"
+        escaped_link.symlink_to(outside)
+        with pytest.raises(RuntimeError, match="recognized candidate"):
+            contract_adapter._candidate_git_path(
+                escaped_link.resolve(),
+                Path("/home/ec2-user/leadpoet_repo"),
+            )
+
+
+def test_module_provenance_accepts_only_exact_candidate_local_release_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    build_root = tmp_path / "gateway-release-build-v2"
+    monkeypatch.setenv("GATEWAY_V2_BUILD_WORK_ROOT", str(build_root))
+    module_path = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("VALUE = 'candidate archive'\n", encoding="utf-8")
+
+    relative, source_kind = contract_adapter._candidate_git_path(
+        module_path.resolve(),
+        Path("/home/ec2-user/leadpoet_repo"),
+    )
+
+    assert relative == Path("gateway/tee/build_identity.py")
+    assert source_kind == "candidate_archive"
+
+    wrong_candidate = (
+        build_root
+        / f"{'2' * 40}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_candidate.parent.mkdir(parents=True)
+    wrong_candidate.write_text("VALUE = 'wrong candidate'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_candidate.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    wrong_role = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_unknown/source/gateway/tee/build_identity.py"
+    )
+    wrong_role.parent.mkdir(parents=True)
+    wrong_role.write_text("VALUE = 'wrong role'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_role.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    outside_source = (
+        build_root
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/outside/gateway/tee/build_identity.py"
+    )
+    outside_source.parent.mkdir(parents=True)
+    outside_source.write_text("VALUE = 'outside source'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            outside_source.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+    wrong_root = (
+        tmp_path
+        / "untrusted/gateway-release-build-v2"
+        / f"{COMMIT}-local"
+        / "gateway_coordinator/source/gateway/tee/build_identity.py"
+    )
+    wrong_root.parent.mkdir(parents=True)
+    wrong_root.write_text("VALUE = 'wrong root'\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="recognized candidate"):
+        contract_adapter._candidate_git_path(
+            wrong_root.resolve(),
+            Path("/home/ec2-user/leadpoet_repo"),
+        )
+
+
+def test_gateway_verification_image_build_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    context = Path("/build/gateway_coordinator/source/gateway")
+    argv = [
+        "build",
+        "--pull",
+        "--no-cache",
+        "--build-arg",
+        "SOURCE_DATE_EPOCH=0",
+        "--build-arg",
+        "LEADPOET_ENCLAVE_ROLE=gateway_coordinator",
+        "-f",
+        str(context / "tee/Dockerfile.enclave"),
+        "-t",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-1-raw",
+        str(context),
+    ]
+
+    assert (
+        contract_adapter._external_build_role(argv, argv[-2])
+        == "gateway_coordinator"
+    )
+
+    for invalid_tag in (
+        f"leadpoet-gateway-verify:gateway_coordinator-{'2' * 12}-1-raw",
+        f"leadpoet-gateway-verify:gateway_unknown-{COMMIT[:12]}-1-raw",
+        f"leadpoet-gateway-verify:gateway_coordinator-{COMMIT[:12]}-raw",
+    ):
+        with pytest.raises(ValueError, match="gateway verification image"):
+            contract_adapter._external_build_role(argv, invalid_tag)
+
+
+def test_gateway_verification_normalized_image_is_bound_to_role_and_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    role = "gateway_coordinator"
+    record = {
+        "commit": COMMIT,
+        "id": normalized_image_id(COMMIT, role),
+        "role": role,
+    }
+    image = f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-1"
+    assert contract_adapter._gateway_verification_image_is_bound(
+        image=image,
+        record=record,
+    )
+
+    invalid_cases = (
+        (f"leadpoet-gateway-verify:{role}-{'2' * 12}-1", record),
+        (f"leadpoet-gateway-verify:gateway_scoring-{COMMIT[:12]}-1", record),
+        (f"leadpoet-gateway-verify:{role}-{COMMIT[:12]}-0", record),
+        (image + "-raw", record),
+        (image, {**record, "id": "sha256:" + "2" * 64}),
+        (image, {**record, "provenance": "copied"}),
+    )
+    for invalid_image, invalid_record in invalid_cases:
+        assert not contract_adapter._gateway_verification_image_is_bound(
+            image=invalid_image,
+            record=invalid_record,
+        )
 
 def test_docker_contract_inherits_name_only_environment_without_argv_secret(
     monkeypatch: pytest.MonkeyPatch,

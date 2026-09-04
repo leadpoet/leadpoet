@@ -1226,6 +1226,7 @@ class LocalPostgRESTState:
         durable_schema_sha: str = "",
     ):
         self.state_root = state_root
+        self.source_root = source_root
         self.fixture = fixture
         self.tables = tables
         self.rpcs = rpcs
@@ -3948,6 +3949,24 @@ class Handler(BaseHTTPRequestHandler):
                     "identity_unique_constraint_enabled": True,
                     "row_level_security_enabled": True,
                     "finalized_stage_supported": True,
+                }
+            elif name == (
+                "research_lab_source_add_admission_control_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD admission-control contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.source_add_admission_control_contract.v1"
+                    ),
+                    "control_row_present": True,
+                    "trigger_enabled": True,
+                    "pause_rpc": "research_lab_source_add_set_paused",
+                    "admission_trigger": (
+                        "trg_source_add_work_admission_control"
+                    ),
                 }
             elif name == (
                 "research_lab_source_add_provider_origin_contract_v1"

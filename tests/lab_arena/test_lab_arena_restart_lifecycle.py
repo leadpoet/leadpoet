@@ -17,7 +17,12 @@ def test_gateway_restart_replaces_and_checks_the_arena_sidecar() -> None:
 
     assert stop < gateway_health < start < handoff
     assert "scripts/run_lab_arena_service.py" in script
-    assert "http://127.0.0.1:8792/arena/v1/current" in script
+    function_start = script.index("start_lab_arena_service() {")
+    function_end = script.index("\n}\n", function_start)
+    function = script[function_start:function_end]
+    sidecar_health = function.index("http://127.0.0.1:8792/arena/v1/current")
+    public_health = function.index("http://127.0.0.1:8000/arena/v1/current")
+    assert sidecar_health < public_health
     assert 'case "$mode" in' in script
     assert "shadow|live" in script
 

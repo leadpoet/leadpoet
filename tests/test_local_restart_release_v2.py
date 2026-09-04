@@ -1,6 +1,7 @@
 import json
-from pathlib import Path
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from gateway.tee.release_manifest_v2 import (
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.auditor_v2 import fetch_locked_release_identity_cache
+from scripts import gateway_git_deploy
 from validator_tee.host.release_v2 import (
     build_local_validator_release_identity,
     build_validator_release,
@@ -209,8 +211,14 @@ def test_restart_scripts_use_attested_channel_only_for_explicit_historical_relea
     assert "build_local_release_v2.sh" in validator
     assert '[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]' in gateway
     assert '[ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]' in validator
-    assert "selected release has an incomplete or unsupported V2 release acquisition contract" in gateway
-    assert "selected release has an incomplete or unsupported V2 release acquisition contract" in validator
+    assert (
+        "selected release has an incomplete or unsupported V2 release "
+        "acquisition contract" in gateway
+    )
+    assert (
+        "selected release has an incomplete or unsupported V2 release "
+        "acquisition contract" in validator
+    )
     assert "fetch_release_channel_v2" in operator
     assert "historical_topology_hash is not None" in operator
     assert "active gateway release differs from immutable channel" in operator
@@ -275,3 +283,147 @@ def test_real_historical_release_has_only_the_channel_capability() -> None:
     assert "def configured_scoring_worker_count(" not in historical_bootstrap
     assert (root / "gateway/tee/build_local_release_v2.sh").is_file()
     assert (root / "gateway/tee/local_release_v2.py").is_file()
+
+
+def test_local_release_builder_runs_modules_from_candidate_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "gateway/tee/build_local_release_v2.sh").read_text(
+        encoding="utf-8"
+    )
+
+    candidate_root = script.index('cd "$CANDIDATE_ROOT"')
+    gateway_builder = script.index(
+        "python3 -m validator_tee.host.gateway_pcr0_builder"
+    )
+    release_builder = script.index("python3 -m gateway.tee.local_release_v2")
+    assert candidate_root < gateway_builder < release_builder
+
+
+def test_local_release_builder_leaves_a_strict_candidate_tree_clean(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    candidate = tmp_path / "candidate"
+    builder = candidate / "gateway/tee/build_local_release_v2.sh"
+    builder.parent.mkdir(parents=True)
+    builder.write_bytes(
+        (root / "gateway/tee/build_local_release_v2.sh").read_bytes()
+    )
+    builder.chmod(0o755)
+    lock = candidate / "validator_tee/scripts/docker_operation_lock_v2.sh"
+    lock.parent.mkdir(parents=True)
+    lock.write_text(
+        "leadpoet_acquire_docker_operation_lock_v2() { :; }\n"
+        "leadpoet_release_docker_operation_lock_v2() { :; }\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run(["git", "init", "-q", str(candidate)], check=True)
+    subprocess.run(
+        ["git", "-C", str(candidate), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(candidate), "config", "user.name", "Test"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(candidate), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(candidate), "commit", "-qm", "candidate"],
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(candidate), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_bash = fake_bin / "bash"
+    fake_bash.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "candidate_root=${1%/validator_tee/scripts/build_enclave.sh}\n"
+        "mkdir -p \"$candidate_root/.validator-tee-artifacts\"\n"
+        "printf 'stamp\\n' > \"$candidate_root/.validator-base.dockerfile.sha256\"\n"
+        "printf 'artifact\\n' > \"$candidate_root/.validator-tee-artifacts/runtime.bin\"\n"
+        "printf 'eif\\n' > \"$candidate_root/validator_tee/validator-enclave.eif\"\n"
+        "printf 'measurements\\n' > \"$candidate_root/validator_tee/enclave_build_output.txt\"\n"
+        "printf '{}\\n' > \"$candidate_root/validator_tee/validator-v2-release.json\"\n",
+        encoding="utf-8",
+    )
+    fake_bash.chmod(0o755)
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "test \"${1:-}\" = -m\n"
+        "module=${2:-}\n"
+        "shift 2\n"
+        "output_file= gateway_output= validator_output= validator_release=\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --output-file) output_file=$2; shift 2 ;;\n"
+        "    --gateway-output) gateway_output=$2; shift 2 ;;\n"
+        "    --validator-output) validator_output=$2; shift 2 ;;\n"
+        "    --validator-release) validator_release=$2; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "case \"$module\" in\n"
+        "  validator_tee.host.gateway_pcr0_builder) printf '[]\\n' > \"$output_file\" ;;\n"
+        "  gateway.tee.local_release_v2)\n"
+        "    test -s \"$validator_release\"\n"
+        "    printf '{}\\n' > \"$gateway_output\"\n"
+        "    printf '{}\\n' > \"$validator_output\"\n"
+        "    ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    gateway_output = tmp_path / "gateway-release.json"
+    validator_output = tmp_path / "validator-release.json"
+    environment = os.environ.copy()
+    environment["GATEWAY_V2_BUILD_WORK_ROOT"] = str(tmp_path / "build-work")
+    environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(builder),
+            "--repository",
+            str(candidate),
+            "--revision",
+            revision,
+            "--gateway-output",
+            str(gateway_output),
+            "--validator-output",
+            str(validator_output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert gateway_output.is_file()
+    assert validator_output.is_file()
+    for relative_path in (
+        ".validator-base.dockerfile.sha256",
+        ".validator-tee-artifacts",
+        "validator_tee/validator-enclave.eif",
+        "validator_tee/enclave_build_output.txt",
+        "validator_tee/validator-v2-release.json",
+    ):
+        assert not (candidate / relative_path).exists()
+
+    evidence = gateway_git_deploy.verify_materialized_tree(
+        repo_root=candidate,
+        materialized_root=candidate,
+        target_sha=revision,
+        strict_extras=True,
+    )
+    assert evidence["strict_extras"] is True

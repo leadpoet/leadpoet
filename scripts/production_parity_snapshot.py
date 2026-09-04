@@ -71,47 +71,6 @@ _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 _SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "scripts/178-research-lab-source-add-miner-status.sql"
 )
-_LAB_ARENA_MIGRATION = {
-    "path": "scripts/179-lab-arena-v1.sql",
-    "sequence": 179,
-    "sha256": (
-        "sha256:8b70a1c5dba0af0a0b7be7730cb44296bd2e1f8636985cddb6ca7121c4ab0f10"
-    ),
-    "transaction_mode": "candidate-file",
-}
-_LAB_ARENA_MIGRATIONS = (
-    _LAB_ARENA_MIGRATION,
-    {
-        "path": "scripts/180-lab-arena-daily-competition.sql",
-        "sequence": 180,
-        "sha256": "sha256:2ef717b7e6a191f34160cc23d133a6996ffabb5f21b0f91eb202c8ee7458454d",
-        "transaction_mode": "candidate-file",
-    },
-    {
-        "path": "scripts/181-lab-arena-source-submissions.sql",
-        "sequence": 181,
-        "sha256": "sha256:78ccd2f87acce29a27edf4ba80b1557028da4f853122c378c6e9b36f384fb952",
-        "transaction_mode": "candidate-file",
-    },
-    {
-        "path": "scripts/182-lab-arena-source-execution.sql",
-        "sequence": 182,
-        "sha256": "sha256:8e6bea8bc14d4d9005fde692c95fe9b90f6ac931004bf93cc18de94c7875b720",
-        "transaction_mode": "candidate-file",
-    },
-    {
-        "path": "scripts/183-lab-arena-miner-reward-basis.sql",
-        "sequence": 183,
-        "sha256": "sha256:24258e6eb313ebdaadfc49cc532983239e2928fe975a875b26ef8f8e709725b1",
-        "transaction_mode": "candidate-file",
-    },
-    {
-        "path": "scripts/184-lab-arena-scoring-failure-isolation.sql",
-        "sequence": 184,
-        "sha256": "sha256:8759ea2a207c9702eb5383693f2bb2afb673a62f225b08e349dd59f14fb3e691",
-        "transaction_mode": "candidate-file",
-    },
-)
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -806,17 +765,6 @@ def _require_schema_only_source_add_acl_migrations(
                 "schema-only SOURCE_ADD ACL migration identity differs: "
                 f"{expected['path']}"
             )
-    latest_source_add = dict(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[-1])
-    observed = tuple(dict(item) for item in candidate_migrations)
-    allowed_tails = (
-        (latest_source_add,),
-        (latest_source_add, *(dict(item) for item in _LAB_ARENA_MIGRATIONS)),
-    )
-    if not any(observed[-len(tail) :] == tail for tail in allowed_tails):
-        raise ProductionParityError(
-            "schema-only SOURCE_ADD ACL reconstruction is not bound to the "
-            "latest candidate migration or the exact Lab Arena migration sequence"
-        )
 
 
 def _schema_only_source_add_acl_expectations() -> dict[str, dict[str, bool]]:

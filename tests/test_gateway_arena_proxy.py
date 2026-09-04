@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from gateway.api import arena_proxy
+
+
+def test_gateway_mounts_the_public_arena_proxy() -> None:
+    source = (Path(__file__).resolve().parents[1] / "gateway/main.py").read_text(
+        encoding="utf-8"
+    )
+    assert "app.include_router(arena_proxy_router)" in source
 
 
 def _app() -> TestClient:

@@ -1116,12 +1116,17 @@ PROTECTED_SYMBOLS = {
         "verify_weight_submission_ready_v2",
     ),
     "gateway/tee/release_lineage_v2.py": (
+        "__module__",
         "validate_compact_release_lineage_v2",
         "build_compact_release_lineage_boot_verifier_v2",
         "load_approved_release_lineage_v2",
         "build_release_lineage_boot_verifier_v2",
     ),
+    "gateway/tee/release_manifest_v2.py": (
+        "__module__",
+    ),
     "gateway/tee/release_channel_v2.py": (
+        "__module__",
         "build_release_channel_v2",
         "validate_release_channel_v2",
         "fetch_release_channel_v2",

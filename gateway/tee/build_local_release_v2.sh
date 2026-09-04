@@ -27,12 +27,19 @@ if [ -z "$REPOSITORY" ] || [ -z "$REVISION" ] \
   exit 2
 fi
 test "$(git -C "$REPOSITORY" rev-parse "$REVISION^{commit}")" = "$REVISION"
+cd "$CANDIDATE_ROOT"
 
 WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
 TEMPORARY_ROOT="$(mktemp -d /tmp/leadpoet-local-release.XXXXXX)"
 . "$CANDIDATE_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
 cleanup() {
+  rm -f -- \
+    "$CANDIDATE_ROOT/.validator-base.dockerfile.sha256" \
+    "$CANDIDATE_ROOT/validator_tee/validator-enclave.eif" \
+    "$CANDIDATE_ROOT/validator_tee/enclave_build_output.txt" \
+    "$CANDIDATE_ROOT/validator_tee/validator-v2-release.json"
+  rm -rf -- "$CANDIDATE_ROOT/.validator-tee-artifacts"
   rm -rf -- "$TEMPORARY_ROOT"
   leadpoet_release_docker_operation_lock_v2 || true
 }

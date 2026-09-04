@@ -248,7 +248,8 @@ start_lab_arena_service() {
       wait "$pid" 2>/dev/null || true
       return 1
     fi
-    if timeout 5 curl -fsS http://127.0.0.1:8792/arena/v1/current >/dev/null 2>&1; then
+    if timeout 5 curl -fsS http://127.0.0.1:8792/arena/v1/current >/dev/null 2>&1 \
+        && timeout 5 curl -fsS http://127.0.0.1:8000/arena/v1/current >/dev/null 2>&1; then
       echo "Lab Arena service ready after attempt $attempt"
       return 0
     fi

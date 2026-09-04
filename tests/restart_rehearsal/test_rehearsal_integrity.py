@@ -8328,6 +8328,8 @@ def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
     from tests.restart_rehearsal import contract_adapter
 
     modules = (
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
         "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
         "gateway.tee.prepare_active_release_lineage_v2",
         "gateway.tee.verify_weight_submission_ready_v2",
@@ -8357,11 +8359,12 @@ def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(
 @pytest.mark.parametrize(
     "module",
     (
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
         "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
         "gateway.tee.prepare_active_release_lineage_v2",
     ),
 )
-def test_gateway_active_release_helpers_route_storage_before_exec(
+def test_gateway_storage_helpers_route_before_exec(
     monkeypatch: pytest.MonkeyPatch,
     module: str,
 ) -> None:
@@ -8396,6 +8399,50 @@ def test_gateway_active_release_helpers_route_storage_before_exec(
         "recorded_argv": argv,
         "executable": contract_adapter.REAL_PYTHON,
         "exec_argv": [contract_adapter.REAL_PYTHON, *argv],
+        "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
+    }
+
+
+def test_gateway_main_routes_storage_before_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.restart_rehearsal import contract_adapter
+
+    observed: dict[str, Any] = {}
+    monkeypatch.setenv(
+        "SUPABASE_URL", contract_adapter.PRODUCTION_SUPABASE_ORIGIN
+    )
+    monkeypatch.setenv("PYTHONPATH", "/source")
+    monkeypatch.setattr(
+        contract_adapter, "_locked_state", lambda: (object(), {})
+    )
+    monkeypatch.setattr(contract_adapter, "_save_state", lambda *_args: None)
+    monkeypatch.setattr(contract_adapter, "_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        contract_adapter, "_module_source", lambda _module: Path("gateway/main.py")
+    )
+    monkeypatch.setattr(
+        contract_adapter, "_source_identity", lambda _path: {}
+    )
+
+    def fake_exec(executable: str, argv: list[str]) -> None:
+        observed.update(
+            executable=executable,
+            argv=argv,
+            supabase_url=os.environ["SUPABASE_URL"],
+        )
+        raise RuntimeError("exec captured")
+
+    monkeypatch.setattr(contract_adapter.os, "execv", fake_exec)
+    argv = ["-m", "gateway.main"]
+    with pytest.raises(RuntimeError, match="exec captured"):
+        contract_adapter._exec_long_lived_production_module(
+            "gateway.main", "gateway.main", argv
+        )
+
+    assert observed == {
+        "executable": contract_adapter.REAL_PYTHON,
+        "argv": [contract_adapter.REAL_PYTHON, *argv],
         "supabase_url": contract_adapter.LOCAL_POSTGREST_ORIGIN,
     }
 

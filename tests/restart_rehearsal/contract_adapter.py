@@ -195,6 +195,8 @@ def _targeted_substitutions_allowed() -> bool:
 
 def _route_host_storage_preflight_to_local_postgrest(module: str) -> None:
     if module not in {
+        "gateway.main",
+        "gateway.research_lab.stateful_epoch_cutover_cli_v1",
         "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
         "gateway.tee.prepare_active_release_lineage_v2",
         "gateway.tee.verify_weight_submission_ready_v2",
@@ -2568,6 +2570,7 @@ def _exec_long_lived_production_module(
     if "/harness" not in python_paths:
         python_paths.insert(0, "/harness")
     os.environ["PYTHONPATH"] = ":".join(python_paths)
+    _route_host_storage_preflight_to_local_postgrest(module)
     os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
     return 127
 
@@ -2902,6 +2905,7 @@ def command_python(argv: list[str]) -> int:
             os.environ["PYTHONPATH"] = ":".join(python_paths)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.research_lab.stateful_epoch_cutover_cli_v1",
             "gateway.tee.bootstrap_active_ancestry_checkpoints_v2",
             "gateway.tee.prepare_active_release_lineage_v2",
             "gateway.tee.restart_preflight_v2",

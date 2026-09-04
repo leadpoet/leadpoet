@@ -170,11 +170,12 @@ def test_attested_wrapper_targets_attested_path(monkeypatch):
 def test_preparation_fetch_budget_fits_between_build_cost_and_block_margin():
     """The block-180 preparation must not be cut off by its own deadline.
 
-    The gateway's cold attested-allocation build has cost 67-100 seconds every
-    day since 2026-08-17, and 24 builds between 16 and 26 August 2026 ran past
-    the 90-second submission-window budget. The preparation budget must clear
-    the worst observed build with room for the bounded retry, while still
-    finishing inside the block margin it has to spend.
+    Measured 2026-09-04 on the gateway's server spans for the attested
+    allocation route (trailing 14 days, successful responses, sub-10s cache
+    hits excluded, 244 cold builds): worst build 299.0s, p99 238.6s. The
+    preparation budget must clear that worst observed build with real headroom
+    for the bounded retry, while still finishing inside the block margin it has
+    to spend.
     """
     from leadpoet_canonical.constants import (
         ALLOCATION_PREPARATION_BLOCK,
@@ -185,8 +186,10 @@ def test_preparation_fetch_budget_fits_between_build_cost_and_block_margin():
         WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS as WINDOW_BUDGET,
     )
 
-    worst_observed_cold_build_seconds = 100
-    assert PREP_BUDGET > worst_observed_cold_build_seconds
+    worst_observed_cold_build_seconds = 299
+    # Not just "greater than" -- one second of headroom is not a budget. The
+    # budget has to absorb a repeat of the worst build with room to spare.
+    assert PREP_BUDGET >= 1.5 * worst_observed_cold_build_seconds
     assert PREP_BUDGET > WINDOW_BUDGET
 
     # ~12s Finney blocks; the preparation has to finish before the window opens.
@@ -194,6 +197,9 @@ def test_preparation_fetch_budget_fits_between_build_cost_and_block_margin():
         WEIGHT_SUBMISSION_BLOCK - ALLOCATION_PREPARATION_BLOCK
     ) * 12
     assert PREP_BUDGET < block_margin_seconds
+    # And it must leave the window itself room to breathe: a preparation that
+    # spends its whole budget still has to hand over before block 240.
+    assert block_margin_seconds - PREP_BUDGET >= WINDOW_BUDGET
 
 
 def test_ambient_preparation_budget_only_ever_raises_the_floor():

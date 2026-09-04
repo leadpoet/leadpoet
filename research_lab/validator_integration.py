@@ -72,12 +72,23 @@ WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS = 90
 # (tests/test_weight_submission_window_regression.py, SLOWEST_OBSERVED_BUILD_SECONDS);
 # the attested-allocation client was left at a flat 90.
 #
-# 300 seconds is 3x the worst build ever measured on this route and 42% of the
-# 720-second block margin, so a slow build is absorbed about seven minutes
-# before the submission window opens rather than racing it. The
-# submission-window fetch keeps 90 seconds, because there the on-chain deadline
-# is real and waiting longer buys nothing.
-ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS = 300
+# Re-measured on 2026-09-04 over the gateway's own server spans for
+# GET /research-lab/allocations/attested/{epoch}, trailing 14 days, successful
+# responses only, excluding sub-10s cache hits (244 cold builds): the worst
+# single build is 299.0 seconds (2026-09-03 06:46:40Z), p99 is 238.6s, p95 is
+# 178.8s and the median is 79.7s. The build is far slower and far more variable
+# than the 67-100s the paragraph above was written against, so a 300-second
+# budget would leave one second of headroom over the worst build already on
+# record -- no budget at all.
+#
+# 480 seconds is 1.6x that worst observed build and 2.0x p99, and it is two
+# thirds of the 720-second margin between ALLOCATION_PREPARATION_BLOCK (180)
+# and WEIGHT_SUBMISSION_BLOCK (240) at ~12s Finney blocks. So the worst build
+# on record still completes with ~180s to spare, and even a build that spends
+# the entire budget leaves ~240 seconds before the submission window opens
+# rather than racing it. The submission-window fetch keeps 90 seconds, because
+# there the on-chain deadline is real and waiting longer buys nothing.
+ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS = 480
 
 # Ambient fetch budget for the attested-allocation fetch, set by the validator's
 # per-epoch allocation preparation before it creates the guard task.

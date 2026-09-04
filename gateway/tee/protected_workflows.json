@@ -97,7 +97,7 @@
       "symbol": "require_worker_authority_after_liveness"
     },
     {
-      "ast_sha256": "sha256:d4fe414133acde1f7772c992c0a7c325307df9dd507c51540678584fb5bf9861",
+      "ast_sha256": "sha256:23cd1d1fc77c0f12eb180753a86ce3630b9070ecdb579a15adac6d94ff6c2257",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
     },
@@ -8897,7 +8897,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:1aa1b9a8084805d6e18ff36165a0492d53ade0feffdd774b44b1628436321dbd",
-  "protected_source_commit": "69aaf6cd03efdf6df06a5105fb656729a6244465",
+  "manifest_hash": "sha256:ff53775c093de4eb8b0114ac74a71da4fb46ba1946c7c7185cea84d595cfbb3d",
+  "protected_source_commit": "c96b03646da7a95b0f0d5ee8a7906fe2c2046338",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

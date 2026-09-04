@@ -2238,13 +2238,21 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
         ) -> list[dict[str, Any]]:
             if (
                 table != "research_lab_attested_execution_receipts_v2"
+                or kwargs.get("columns")
+                != "purpose,sequence,receipt_status,issued_at"
                 or kwargs.get("order_by") != (("sequence", True),)
                 or kwargs.get("limit") != 1
             ):
                 raise RuntimeError(
                     "chain settlement durable retry history query differs"
                 )
-            return [{"sequence": 7}]
+            return [
+                {
+                    "sequence": 7,
+                    "receipt_status": "succeeded",
+                    "issued_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
 
         durable_retry_attempt = (
             await v2_authority._resolve_chain_settlement_attempt_v1(
@@ -2257,6 +2265,27 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
             raise RuntimeError(
                 "chain settlement retry identity did not survive restart"
             )
+
+        async def load_recent_failure(*_args: Any, **_kwargs: Any):
+            return [
+                {
+                    "sequence": 7,
+                    "receipt_status": "failed",
+                    "issued_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+
+        try:
+            await v2_authority._resolve_chain_settlement_attempt_v1(
+                epoch_id=target_epoch,
+                requested_attempt=0,
+                load_attempt_history=load_recent_failure,
+            )
+        except v2_authority.ResearchLabV2AuthorityError as exc:
+            if "retry is cooling down" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("recent chain settlement failure was retried")
 
         propagated_attempts: list[tuple[int, int]] = []
 
@@ -2300,6 +2329,7 @@ async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
             "retry_observation_sequence": 8,
             "retry_attempts_propagated": len(propagated_attempts),
             "durable_retry_attempt": durable_retry_attempt,
+            "durable_retry_cooldown": True,
         }
     finally:
         (
@@ -7706,6 +7736,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "durable_retry_attempt"
             )
             == 4
+            and behavior_evidence["chain-settlement-state-space"].get(
+                "durable_retry_cooldown"
+            )
+            is True
         ),
         "conditional_icp_policy_config_bound": (
             "conditional-icp-policy" in behavior_evidence

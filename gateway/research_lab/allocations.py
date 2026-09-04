@@ -57,6 +57,7 @@ _ALLOCATION_V2_RETRY_GENERATIONS: dict[
 ] = {}
 _ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS = 3600.0
 _ALLOCATION_V2_RETRY_MAX_GENERATIONS = 8
+_ALLOCATION_V2_RETRY_MIN_INTERVAL_SECONDS = 300.0
 _ALLOCATION_V2_RECEIPT_TABLE = "research_lab_attested_execution_receipts_v2"
 _ALLOCATION_V2_RECEIPT_ROLE = "gateway_coordinator"
 _ALLOCATION_V2_RECEIPT_PURPOSE = "research_lab.allocation.v2"
@@ -73,18 +74,44 @@ def _active_gateway_commit() -> str:
     return commit
 
 
+def _receipt_issued_at(row: Mapping[str, Any]) -> datetime | None:
+    """Read a receipt's issue time, treating anything unparsable as unknown."""
+
+    raw = row.get("issued_at") or row.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 async def _load_durable_allocation_retry_generation(
     *,
     epoch_id: int,
 ) -> int:
-    """Resume after failed allocation receipts from an earlier process."""
+    """Resume after failed allocation receipts from an earlier process.
+
+    The retry allowance is spent over time, not over calls. Only failures
+    inside the retry window count against it, so a transiently broken epoch
+    becomes buildable again instead of staying refused for the life of the
+    running gateway, and a fresh build is not started while the previous
+    failure is still fresh, so an impatient caller cannot spend the whole
+    allowance in a few minutes.
+    """
 
     commit_sha = _active_gateway_commit()
     rows = await select_many(
         _ALLOCATION_V2_RECEIPT_TABLE,
         columns=(
             "sequence,receipt_status,failure_code,job_id,commit_sha,"
-            "epoch_id,purpose,role"
+            "epoch_id,purpose,role,issued_at"
         ),
         filters=(
             ("role", _ALLOCATION_V2_RECEIPT_ROLE),
@@ -99,7 +126,10 @@ async def _load_durable_allocation_retry_generation(
     if not rows:
         return 0
 
+    now = datetime.now(timezone.utc)
     highest_sequence = -1
+    recent_failures = 0
+    newest_failure_at: datetime | None = None
     for row in rows:
         sequence = row.get("sequence")
         if (
@@ -119,10 +149,26 @@ async def _load_durable_allocation_retry_generation(
             raise RuntimeError("durable allocation retry receipt is invalid")
         highest_sequence = max(highest_sequence, sequence)
 
-    generation = highest_sequence + 1
-    if generation >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
+        issued_at = _receipt_issued_at(row)
+        if issued_at is None:
+            # An unreadable timestamp is treated as a failure that just
+            # happened, so a malformed row can only ever be conservative.
+            issued_at = now
+        age_seconds = (now - issued_at).total_seconds()
+        if age_seconds <= _ALLOCATION_V2_RETRY_GENERATION_TTL_SECONDS:
+            recent_failures += 1
+        if newest_failure_at is None or issued_at > newest_failure_at:
+            newest_failure_at = issued_at
+
+    if (
+        newest_failure_at is not None
+        and (now - newest_failure_at).total_seconds()
+        < _ALLOCATION_V2_RETRY_MIN_INTERVAL_SECONDS
+    ):
+        raise RuntimeError("durable allocation retry is cooling down")
+    if recent_failures >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
         raise RuntimeError("durable allocation retry generations are exhausted")
-    return generation
+    return highest_sequence + 1
 
 
 def _allocation_v2_build_is_retryable(exc: BaseException) -> bool:
@@ -173,9 +219,9 @@ async def _build_allocation_v2_singleflight(
             durable_generation = await _load_durable_allocation_retry_generation(
                 epoch_id=int(epoch_id),
             )
-            generation = max(int(memory_generation), int(durable_generation))
-            if generation >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
+            if int(memory_generation) >= _ALLOCATION_V2_RETRY_MAX_GENERATIONS:
                 raise RuntimeError("allocation retry generations are exhausted")
+            generation = max(int(memory_generation), int(durable_generation))
             selected_generation.append(generation)
             return await build_allocation_v2(
                 epoch_id=int(epoch_id),

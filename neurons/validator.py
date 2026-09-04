@@ -4163,6 +4163,39 @@ class Validator(BaseValidatorNeuron):
                 "evaluation_verification": None,
             }
 
+    async def _research_lab_allocation_submission_window_open(self) -> bool:
+        """Return true when this epoch's weight submission window is open."""
+
+        try:
+            epoch_state = await self._get_epoch_state_async()
+            return bool(epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK))
+        except Exception as exc:
+            bt.logging.warning(
+                "Cannot resolve epoch state for the allocation preparation "
+                f"budget; using the submission-window budget: {exc}"
+            )
+            return True
+
+    def _start_research_lab_allocation_preparation(
+        self,
+        epoch: int,
+    ) -> "asyncio.Task[dict]":
+        """Start early preparation with its larger, task-local fetch budget."""
+
+        from research_lab.validator_integration import (
+            ALLOCATION_PREPARATION_FETCH_BUDGET,
+            ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS,
+        )
+
+        async def guarded() -> dict:
+            if not await self._research_lab_allocation_submission_window_open():
+                ALLOCATION_PREPARATION_FETCH_BUDGET.set(
+                    ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS
+                )
+            return await self._research_lab_pre_weight_submission_guard(epoch)
+
+        return asyncio.create_task(guarded())
+
     async def _prepare_research_lab_allocation(
         self,
         current_epoch: int,
@@ -4175,9 +4208,7 @@ class Validator(BaseValidatorNeuron):
         tasks = getattr(self, "_research_lab_allocation_preparation_tasks", {})
         task = tasks.get(epoch)
         if task is None:
-            task = asyncio.create_task(
-                self._research_lab_pre_weight_submission_guard(epoch)
-            )
+            task = self._start_research_lab_allocation_preparation(epoch)
             # Retain only the current epoch so stale multi-megabyte handoffs do
             # not accumulate in a long-lived validator process.
             tasks = {epoch: task}

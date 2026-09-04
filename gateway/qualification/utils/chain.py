@@ -39,6 +39,11 @@ NETWORK_ENDPOINTS = {
     "local": "ws://127.0.0.1:9944",
 }
 
+
+class ChainRegistrationUnavailable(RuntimeError):
+    """The subnet registration state could not be read."""
+
+
 # =============================================================================
 # Payment Wallet Configuration (Network-Specific)
 # =============================================================================
@@ -492,15 +497,15 @@ async def get_metagraph():
         raise
 
 
-async def is_hotkey_registered(hotkey: str) -> Tuple[bool, Optional[str]]:
+async def check_hotkey_registration(hotkey: str) -> Tuple[bool, Optional[str]]:
     """
-    Check if a hotkey is registered on the subnet.
+    Check registration and distinguish an unreadable chain from absence.
     
     Args:
         hotkey: The Bittensor hotkey (SS58 address)
     
-    Returns:
-        Tuple of (is_registered, role) where role is "miner" or "validator" or None
+    Raises:
+        ChainRegistrationUnavailable: If the metagraph cannot be read.
     """
     try:
         metagraph = await get_metagraph()
@@ -520,8 +525,19 @@ async def is_hotkey_registered(hotkey: str) -> Tuple[bool, Optional[str]]:
         else:
             return True, "miner"
             
-    except Exception as e:
-        logger.error(f"Error checking hotkey registration: {e}")
+    except Exception as exc:
+        logger.error("Error checking hotkey registration: %s", exc)
+        raise ChainRegistrationUnavailable(
+            "subnet registration state is unavailable"
+        ) from exc
+
+
+async def is_hotkey_registered(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """Compatibility wrapper for callers that treat read failure as absent."""
+
+    try:
+        return await check_hotkey_registration(hotkey)
+    except ChainRegistrationUnavailable:
         return False, None
 
 

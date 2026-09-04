@@ -8,6 +8,7 @@ on-chain unless an explicit future live mutation flag is enabled.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 import http.client
 import json
@@ -17,7 +18,7 @@ import re
 import socket
 import sys
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -51,6 +52,25 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integra
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
 WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS = 90
+# The block-180 preparation has about 720 seconds before submission starts.
+# Give its measured cold build enough time, but keep the in-window budget at 90.
+ALLOCATION_PREPARATION_FETCH_TIMEOUT_SECONDS = 480
+
+# Context keeps the larger budget limited to the early preparation task without
+# changing the protected weight-submission guard.
+ALLOCATION_PREPARATION_FETCH_BUDGET: "ContextVar[Optional[int]]" = ContextVar(
+    "leadpoet_allocation_preparation_fetch_budget",
+    default=None,
+)
+
+
+def resolve_allocation_fetch_budget(timeout_seconds: float) -> float:
+    """Return the larger of the caller's budget and any ambient preparation budget."""
+
+    ambient = ALLOCATION_PREPARATION_FETCH_BUDGET.get()
+    if ambient is None:
+        return float(timeout_seconds)
+    return float(max(float(timeout_seconds), float(ambient)))
 # Bounded in-window retry for the weight-path allocation fetch. A single
 # transient gateway failure (connection refused, 5xx, a brief restart blip)
 # must not cost the validator the whole epoch's weight submission. The retry
@@ -603,7 +623,7 @@ def fetch_research_lab_attested_allocation_bundle(
     base = gateway_url.rstrip("/")
     return _fetch_allocation_json(
         f"{base}/research-lab/allocations/attested/{int(epoch)}",
-        deadline_seconds=timeout_seconds,
+        deadline_seconds=resolve_allocation_fetch_budget(timeout_seconds),
     )
 
 

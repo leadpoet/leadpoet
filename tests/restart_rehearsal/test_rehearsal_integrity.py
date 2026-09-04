@@ -6569,6 +6569,13 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
         + "parser.add_argument('--storage-read-preflight', action='store_true')\n",
         encoding="utf-8",
     )
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is False
+
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "parser.add_argument('--epoch', type=int)\n",
+        encoding="utf-8",
+    )
     assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
 
@@ -8304,7 +8311,16 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         }
 
     rows = [
-        row(["-m", module, "--storage-read-preflight"], "candidate_archive"),
+        row(
+            [
+                "-m",
+                module,
+                "--storage-read-preflight",
+                "--epoch",
+                "24304",
+            ],
+            "candidate_archive",
+        ),
         row(
             ["-m", module, "--repair-chain-settlements"],
             "candidate_checkout",
@@ -8342,6 +8358,14 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         recovered_rows,
         candidate_sha=COMMIT,
     )
+
+    mismatched_epoch_rows = copy.deepcopy(rows)
+    mismatched_epoch_rows[0]["argv"][-1] = "24303"
+    with pytest.raises(SystemExit, match="changed their pinned epoch"):
+        verify_gateway_weight_readiness_invocations(
+            mismatched_epoch_rows,
+            candidate_sha=COMMIT,
+        )
 
     rows[3]["argv"][-1] = "30"
     with pytest.raises(SystemExit, match="launcher contract"):

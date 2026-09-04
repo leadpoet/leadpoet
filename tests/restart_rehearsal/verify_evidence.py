@@ -1409,15 +1409,22 @@ def selected_weight_storage_preflight_capability(
             source_path.read_text(encoding="utf-8"),
             filename=str(source_path),
         )
-        return any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "add_argument"
-            and bool(node.args)
-            and isinstance(node.args[0], ast.Constant)
-            and node.args[0].value == "--storage-read-preflight"
+        supported_arguments = {
+            node.args[0].value
             for node in ast.walk(tree)
-        )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            )
+        }
+        return {
+            "--storage-read-preflight",
+            "--epoch",
+        }.issubset(supported_arguments)
     raise SystemExit(
         "candidate weight-readiness source is unavailable for capability proof"
     )
@@ -1435,11 +1442,31 @@ def verify_gateway_weight_readiness_invocations(
         raise SystemExit(
             "current release does not declare the required weight storage preflight"
         )
+    observed = [
+        row
+        for row in rows
+        if row.get("kind") == "python-module"
+        and row.get("module") == module
+    ]
     expected_prefix = []
+    storage_preflight_epoch = None
     if storage_preflight_supported:
+        argv = observed[0].get("argv") if observed else None
+        if (
+            not isinstance(argv, list)
+            or len(argv) != 5
+            or argv[:4]
+            != ["-m", module, "--storage-read-preflight", "--epoch"]
+            or not str(argv[4]).isdigit()
+        ):
+            raise SystemExit(
+                "gateway launcher did not execute the exact production "
+                f"weight storage preflight: {observed!r}"
+            )
+        storage_preflight_epoch = str(argv[4])
         expected_prefix.append(
             {
-                "argv": ["-m", module, "--storage-read-preflight"],
+                "argv": list(argv),
                 "source_kind": "candidate_archive",
             }
         )
@@ -1458,12 +1485,6 @@ def verify_gateway_weight_readiness_invocations(
         ],
         "source_kind": "candidate_checkout",
     }
-    observed = [
-        row
-        for row in rows
-        if row.get("kind") == "python-module"
-        and row.get("module") == module
-    ]
     prefix_count = len(expected_prefix)
     if (
         len(observed) > prefix_count
@@ -1532,6 +1553,14 @@ def verify_gateway_weight_readiness_invocations(
     if not repair_rows or active_epoch is None or not cycle_has_repair:
         raise SystemExit(
             "gateway launcher did not execute pinned weight readiness repair"
+        )
+    if (
+        storage_preflight_epoch is not None
+        and storage_preflight_epoch != active_epoch
+    ):
+        raise SystemExit(
+            "gateway weight storage preflight and repair changed their "
+            "pinned epoch"
         )
     expected.append(http_contract)
     injected = any(

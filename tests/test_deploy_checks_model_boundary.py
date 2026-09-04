@@ -18,45 +18,13 @@ def test_deploy_checks_uses_local_consumer_gates_not_private_source_checkout() -
     assert "exact_sourcing_model_source" not in workflow
 
 
-def test_trusted_main_push_admits_signed_artifact_without_private_checkout() -> None:
+def test_production_parity_has_no_closed_model_admission_job() -> None:
     workflow = PARITY_WORKFLOW.read_text(encoding="utf-8")
-    job = workflow.split("  signed-artifact-admission:", 1)[1].split(
-        "\n  validate:", 1
-    )[0]
-    job_environment = job.split("\n    steps:", 1)[0]
-    admission_step = job.split(
-        "      - name: Admit current signed artifact before provider spend",
-        1,
-    )[1].split("\n      - name: Remove ephemeral ECR login", 1)[0]
-
-    assert "github.event_name == 'push'" in job
-    assert "github.ref == 'refs/heads/main'" in job
-    assert "github.repository_id == '1075412927'" in job
-    assert "id-token: write" in job
-    assert "persist-credentials: false" in job
-    assert "LEADPOET_PARITY_AWS_ROLE_ARN" in job
-    assert "scripts/verify_signed_sourcing_artifact_admission.py" in job
-    assert (
-        "LEADPOET_DOCKER_OPERATION_LOCK_FILE: "
-        "${{ runner.temp }}/leadpoet-docker-operation-v2.lock"
-    ) in admission_step
-    assert (
-        "LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE: "
-        "${{ runner.temp }}/leadpoet-docker-operation-v2.admission.lock"
-    ) in admission_step
-    assert "runner.temp" not in job_environment
-    assert "branches/leadpoet-lab/current.json" in job
-    assert "ecr:BatchGetImage" in job
-    assert "kms:Verify" in job
     for forbidden in (
+        "signed-artifact-admission",
+        "verify_signed_sourcing_artifact_admission.py",
+        "branches/leadpoet-lab/current.json",
         "SOURCING_MODEL_READ_TOKEN",
         "repository: leadpoet/Sourcing_model",
-        "secretsmanager:",
-        "ec2:",
-        "s3:Put",
-        "s3:Delete",
-        "ecr:PutImage",
-        "kms:Sign",
-        "kms:Decrypt",
     ):
-        assert forbidden not in job
+        assert forbidden not in workflow

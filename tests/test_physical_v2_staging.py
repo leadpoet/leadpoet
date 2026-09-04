@@ -951,20 +951,6 @@ def test_full_workflow_uses_exact_candidate_and_tears_down_without_testnet():
     assert 'test "$AWS_REGION" = "us-east-1"' in source
     assert "export AWS_REGION={q(required['AWS_REGION'])}" in source
     assert "export AWS_DEFAULT_REGION={q(required['AWS_REGION'])}" in source
-    assert 'get("acceptance_corpus", {}).get("copied_exact") is not True' in source
-    assert 'get("acceptance_corpus", {}).get("candidate_sha")' in source
-    assert 'get("acceptance_corpus", {}).get("fixture_count", 0) <= 0' in source
-    transfer = source.index(
-        "python3 scripts/production_parity_acceptance_transfer.py"
-    )
-    execute = source.index(
-        '"$host_python" scripts/run_production_parity_full_host.py'
-    )
-    assert transfer < execute
-    assert "/home/ec2-user/.config/leadpoet/v2" in source
-    assert "acceptance-corpus-v2-binding.json" in source
-    assert '"validated_exact"' in source
-    assert '"run-scoped-object-lock"' in source
     assert 'get("external_write_boundaries", {}).get("arweave")' in source
     assert '!= "blocked-production-parity"' in source
 
@@ -1145,7 +1131,6 @@ def test_full_host_binds_real_handoff_to_nonforwarding_primary_audit_path():
         "capture_snapshot(",
         "restore_snapshot(",
         "gw_restart.sh",
-        "_wait_rebenchmark(",
         "_validate_real_handoff(",
         "--production-allocation",
         "primary/audit workflow did not consume the clone allocation",

@@ -31,7 +31,6 @@ The restart and canonical-weight event matrix is in
 | Primary validator | `neurons/validator.py` |
 | Auditor validator | `neurons/auditor_validator.py` |
 | Miner | `neurons/miner.py` |
-| Research Lab workers | `gateway/research_lab/worker_process.py`, `scripts/run_research_lab_scoring_worker.py`, `scripts/run_research_lab_scoring_worker_fleet.py` |
 | Release/PCR0 host tools | `validator_tee/host/gateway_pcr0_builder.py`, `validator_tee/host/runtime_v2_bootstrap.py`, `validator_tee/host/verify_release_gate_v2.py` |
 | Restart controllers | `gw_restart.sh`, `validator_restart.sh` through the bounded `sentry_cli` bridge |
 | Attested release | `.github/workflows/attested-v2-release.yml` through the same release-summary bridge |

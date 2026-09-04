@@ -27,8 +27,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #                              production training data.
 CALL_SITE_REGISTRY = {
     # -- captured -----------------------------------------------------------
-    "gateway/research_lab/worker.py": "captured",
-    "gateway/research_lab/scoring_worker.py": "captured",
     "research_lab/openrouter_telemetry.py": "captured",
     "qualification/scoring/intent_precheck.py": "captured",
     "qualification/scoring/intent_signal_gate.py": "captured",

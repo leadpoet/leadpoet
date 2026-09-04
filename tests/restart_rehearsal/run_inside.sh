@@ -375,7 +375,6 @@ expected_manifest = {
     "candidate_sha": candidate,
 }
 expected_identities = {
-    "gateway_autoresearch.json",
     "gateway_coordinator.json",
     "gateway_scoring.json",
 }
@@ -798,36 +797,7 @@ if [ "$COMPONENT" = "gateway" ]; then
   rm -rf /app/gateway/_attested_runtime
   cp -a "$REHEARSAL_STATE_ROOT/gateway-attested-runtime" \
     /app/gateway/_attested_runtime
-  RUNSC_ARTIFACT_NAME="$(
-    /usr/bin/python3.11 - <<'PY'
-import json
-print(
-    json.load(
-        open(
-            "/app/gateway/tee/runsc-runtime.lock.json",
-            encoding="utf-8",
-        )
-    )["artifact_filename"]
-)
-PY
-  )"
-  install -m 0555 \
-    "/opt/leadpoet/external-artifacts/$RUNSC_ARTIFACT_NAME" \
-    /usr/local/bin/runsc
-  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
-    /app/gateway/tee/sandbox_runtime_artifact.py verify \
-      --lock /app/gateway/tee/runsc-runtime.lock.json \
-      --artifact /usr/local/bin/runsc
-  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
-    /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
-      --lock /app/gateway/tee/runsc-runtime.lock.json \
-      --requirements-lock \
-        /app/gateway/tee/requirements-scoring-py39.lock \
-      --python-version 3.9.24 \
-      --output /leadpoet-model-rootfs.manifest.json
-  install -d -m 0711 -o 0 -g 0 /leadpoet-model-sandboxes
-
-  for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
+  for role in gateway_coordinator gateway_scoring; do
     REHEARSAL_GATEWAY_ENCLAVE_ROLE="$role" \
       REHEARSAL_GATEWAY_CANDIDATE_ROOT="$SELECTED_GATEWAY_SOURCE_ROOT/gateway" \
       REHEARSAL_GATEWAY_CANONICAL_APP_ROOT="/app/gateway" \

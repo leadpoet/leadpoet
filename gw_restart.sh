@@ -4218,13 +4218,9 @@ if actual != expected:
 print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
+echo "Verifying retained SOURCE_ADD gateway status"
 timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
 timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
-
-echo "Verifying Research Lab maintenance state; daily scoring remains operator-controlled"
-PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-  -m gateway.research_lab.admin resume-restart-maintenance \
-  --expected-commit "$GATEWAY_DEPLOY_SHA"
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE

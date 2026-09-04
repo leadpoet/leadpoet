@@ -20,18 +20,6 @@ if candidate_source_root.is_dir():
     sys.path.insert(0, str(candidate_source_root))
 
 with redirect_stdout(sys.stderr):
-    from gateway.research_lab.git_tree_models import (
-        GitTreeContractError,
-        TreePolicy,
-        TreeReplacement,
-        derive_child_slot,
-        derive_tree_id,
-    )
-    from gateway.tee.supabase_schema_preflight_v2 import (
-        REQUIRED_SUPABASE_V2_RPCS,
-        REQUIRED_SUPABASE_V2_SCHEMA,
-    )
-    from leadpoet_canonical.attested_v2 import sha256_json
     if __package__:
         from .postgres_v2_contract_probe import (
             EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE,
@@ -60,24 +48,6 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
         "alias/leadpoet-research-lab-artifact-signing"
     ),
-}
-GIT_TREE_SCHEMA_MIGRATIONS = {
-    "scripts/95-research-lab-git-tree-autoresearch.sql",
-    "scripts/115-research-lab-git-tree-root-replacement.sql",
-}
-GIT_TREE_VIEW_RELATIONS = {
-    "research_lab_autoresearch_tree_node_current",
-    "research_lab_autoresearch_operation_current",
-    "research_lab_autoresearch_tree_current",
-    "research_lab_autoresearch_run_tree_current",
-}
-REQUIRED_GIT_TREE_RELATION_CONTRACT = {
-    relation: {
-        "kind": "v" if relation in GIT_TREE_VIEW_RELATIONS else "r",
-        "columns": frozenset(columns),
-    }
-    for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
-    if migration in GIT_TREE_SCHEMA_MIGRATIONS
 }
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
@@ -1031,257 +1001,6 @@ def verify_migration_backed_database_contract(
         raise SystemExit(
             "migration-backed maintenance lease evidence is missing"
         )
-    git_tree = document.get("git_tree_autoresearch")
-    expected_git_tree_fields = {
-        "run_id",
-        "policy",
-        "initial_tree_id",
-        "replacement_tree_id",
-        "replacement_hash",
-        "replacement",
-        "predecessor_event",
-        "cancellation_event",
-        "candidate_id",
-        "candidate_artifact_hash",
-        "evaluation_usage",
-        "row_counts",
-        "restart_replay_exact",
-        "stale_root_rejected_atomically",
-    }
-    git_tree_commitments_valid = False
-    if isinstance(git_tree, dict) and set(git_tree) == expected_git_tree_fields:
-        try:
-            policy = TreePolicy.from_mapping(git_tree.get("policy") or {})
-            replacement = TreeReplacement.from_mapping(
-                git_tree.get("replacement") or {}
-            )
-            predecessor = git_tree.get("predecessor_event")
-            cancellation = git_tree.get("cancellation_event")
-            candidate_artifact_hash = str(
-                git_tree.get("candidate_artifact_hash") or ""
-            )
-            expected_run_id = "00000000-0000-4000-8000-000000000095"
-            expected_initial_root = sha256_json({"root": "a"})
-            expected_replacement_root = sha256_json({"root": "b"})
-            expected_initial_manifest = sha256_json({"manifest": "a"})
-            expected_replacement_manifest = sha256_json({"manifest": "b"})
-            expected_candidate_artifact = sha256_json(
-                {"candidate": "selected"}
-            )
-            expected_policy = TreePolicy(mode="active")
-            expected_initial_slot = derive_child_slot(
-                tree_id=derive_tree_id(
-                    run_id=expected_run_id,
-                    root_artifact_hash=expected_initial_root,
-                    policy=expected_policy,
-                ),
-                parent_node_id="root",
-                root_branch_id="",
-                depth=1,
-                slot_index=0,
-            )
-            expected_initial_lineage_hash = sha256_json(
-                {
-                    "schema_version": "research_lab.git_tree_lineage.v1",
-                    "tree_id": expected_initial_slot.tree_id,
-                    "node_id": expected_initial_slot.node_id,
-                    "git_commit": "c" * 64,
-                    "composition": {"root_git_commit": "a" * 64},
-                }
-            )
-            expected_initial_selection = {
-                "tree_id": expected_initial_slot.tree_id,
-                "selected_node_id": expected_initial_slot.node_id,
-                "paid_finalist_count": 1,
-                "selected_candidate_artifact_hash": expected_candidate_artifact,
-                "selected_node_git_commit": "c" * 64,
-                "selected_lineage_hash": expected_initial_lineage_hash,
-            }
-            expected_predecessor_doc = {
-                "selection_hash": sha256_json(expected_initial_selection),
-                "selection": expected_initial_selection,
-            }
-            predecessor_doc = (
-                dict(predecessor.get("event_doc") or {})
-                if isinstance(predecessor, dict)
-                else {}
-            )
-            predecessor_hash = (
-                sha256_json(
-                    {
-                        "schema_version": "research_lab.git_tree_event.v1",
-                        "tree_id": str(predecessor.get("tree_id") or ""),
-                        "event_type": str(predecessor.get("event_type") or ""),
-                        "node_id": str(predecessor.get("node_id") or ""),
-                        "previous_event_hash": str(
-                            predecessor.get("previous_event_hash") or ""
-                        ),
-                        "event_doc": predecessor_doc,
-                    }
-                )
-                if isinstance(predecessor, dict)
-                else ""
-            )
-            cancellation_doc = (
-                dict(cancellation.get("event_doc") or {})
-                if isinstance(cancellation, dict)
-                else {}
-            )
-            cancellation_hash = (
-                sha256_json(
-                    {
-                        "schema_version": "research_lab.git_tree_event.v1",
-                        "tree_id": str(cancellation.get("tree_id") or ""),
-                        "event_type": str(
-                            cancellation.get("event_type") or ""
-                        ),
-                        "node_id": str(cancellation.get("node_id") or ""),
-                        "previous_event_hash": str(
-                            cancellation.get("previous_event_hash") or ""
-                        ),
-                        "event_doc": cancellation_doc,
-                    }
-                )
-                if isinstance(cancellation, dict)
-                else ""
-            )
-            expected_initial_tree = derive_tree_id(
-                run_id=expected_run_id,
-                root_artifact_hash=expected_initial_root,
-                policy=expected_policy,
-            )
-            expected_replacement_tree = derive_tree_id(
-                run_id=expected_run_id,
-                root_artifact_hash=expected_replacement_root,
-                policy=expected_policy,
-                replacement=replacement,
-            )
-            git_tree_commitments_valid = bool(
-                git_tree.get("run_id") == expected_run_id
-                and policy == expected_policy
-                and replacement.generation == 1
-                and replacement.replaces_tree_id == expected_initial_tree
-                and replacement.cancellation_event_hash == cancellation_hash
-                and replacement.prior_root_artifact_hash
-                == expected_initial_root
-                and replacement.prior_root_manifest_hash
-                == expected_initial_manifest
-                and replacement.prior_policy_hash == expected_policy.policy_hash
-                and replacement.root_artifact_hash
-                == expected_replacement_root
-                and replacement.root_manifest_hash
-                == expected_replacement_manifest
-                and replacement.policy_hash == expected_policy.policy_hash
-                and git_tree.get("initial_tree_id") == expected_initial_tree
-                and git_tree.get("replacement_tree_id")
-                == expected_replacement_tree
-                and git_tree.get("replacement_hash")
-                == replacement.replacement_hash
-                and isinstance(predecessor, dict)
-                and set(predecessor)
-                == {
-                    "tree_id",
-                    "seq",
-                    "event_type",
-                    "node_id",
-                    "previous_event_hash",
-                    "event_doc",
-                    "event_hash",
-                }
-                and predecessor.get("tree_id") == expected_initial_tree
-                and isinstance(predecessor.get("seq"), int)
-                and not isinstance(predecessor.get("seq"), bool)
-                and int(predecessor["seq"]) >= 0
-                and predecessor.get("event_type") == "final_selected"
-                and predecessor.get("node_id")
-                == expected_initial_slot.node_id
-                and re.fullmatch(
-                    r"sha256:[0-9a-f]{64}",
-                    str(predecessor.get("previous_event_hash") or ""),
-                )
-                and predecessor_doc == expected_predecessor_doc
-                and predecessor.get("event_hash") == predecessor_hash
-                and isinstance(cancellation, dict)
-                and set(cancellation)
-                == {
-                    "tree_id",
-                    "event_type",
-                    "node_id",
-                    "previous_event_hash",
-                    "event_doc",
-                    "event_hash",
-                }
-                and cancellation.get("tree_id") == expected_initial_tree
-                and cancellation.get("event_type")
-                == "tree_cancelled_root_changed"
-                and cancellation.get("node_id") == ""
-                and cancellation.get("previous_event_hash")
-                == predecessor_hash
-                and re.fullmatch(
-                    r"sha256:[0-9a-f]{64}",
-                    str(cancellation.get("previous_event_hash") or ""),
-                )
-                and cancellation.get("event_hash") == cancellation_hash
-                and cancellation_doc.get("old_root_artifact_hash")
-                == expected_initial_root
-                and cancellation_doc.get("new_root_artifact_hash")
-                == expected_replacement_root
-                and cancellation_doc.get("old_root_manifest_hash")
-                == expected_initial_manifest
-                and cancellation_doc.get("new_root_manifest_hash")
-                == expected_replacement_manifest
-                and cancellation_doc.get("old_policy_hash")
-                == expected_policy.policy_hash
-                and cancellation_doc.get("new_policy_hash")
-                == expected_policy.policy_hash
-                and candidate_artifact_hash == expected_candidate_artifact
-                and git_tree.get("candidate_id")
-                == "candidate:" + expected_candidate_artifact.split(":", 1)[1]
-            )
-        except (GitTreeContractError, TypeError, ValueError):
-            git_tree_commitments_valid = False
-    if (
-        not isinstance(git_tree, dict)
-        or not git_tree_commitments_valid
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("initial_tree_id") or ""),
-        )
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("replacement_tree_id") or ""),
-        )
-        or git_tree.get("initial_tree_id")
-        == git_tree.get("replacement_tree_id")
-        or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(git_tree.get("replacement_hash") or ""),
-        )
-        or not re.fullmatch(
-            r"candidate:[0-9a-f]{64}",
-            str(git_tree.get("candidate_id") or ""),
-        )
-        or git_tree.get("restart_replay_exact") is not True
-        or git_tree.get("stale_root_rejected_atomically") is not True
-        or git_tree.get("evaluation_usage")
-        != {
-            "settled_cost_microusd": 250,
-            "provider_call_count": 4,
-            "terminal_operation_count": 2,
-            "unsettled_operation_ids": [],
-            "indeterminate_operation_ids": [],
-        }
-        or git_tree.get("row_counts")
-        != {
-            "trees": 2,
-            "handoffs": 1,
-            "candidates": 1,
-            "evaluation_events": 1,
-        }
-    ):
-        raise SystemExit(
-            "migration-backed Git-tree autoresearch evidence is missing"
-        )
     provider_append = document.get("provider_outcome_append")
     if (
         not isinstance(provider_append, dict)
@@ -1304,30 +1023,12 @@ def verify_migration_backed_database_contract(
             "research_lab_attested_ancestry_activations_v2",
             "research_lab_allocation_settlement_frontiers_v2",
             "research_lab_allocation_settlement_frontier_activation_v2",
-            *REQUIRED_GIT_TREE_RELATION_CONTRACT,
         } <= set(relations)
     ):
         raise SystemExit(
             "migration-backed durable relation evidence is missing"
         )
-    for relation, expected in REQUIRED_GIT_TREE_RELATION_CONTRACT.items():
-        observed = relations.get(relation)
-        if (
-            not isinstance(observed, dict)
-            or observed.get("kind") != expected["kind"]
-            or not isinstance(observed.get("columns"), list)
-            or not expected["columns"].issubset(observed["columns"])
-        ):
-            raise SystemExit(
-                "migration-backed Git-tree relation evidence differs: "
-                + relation
-            )
     rpcs = document.get("rpcs")
-    required_git_tree_rpcs = {
-        function_name
-        for migration, function_name in REQUIRED_SUPABASE_V2_RPCS
-        if migration in GIT_TREE_SCHEMA_MIGRATIONS
-    }
     if (
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
@@ -1337,7 +1038,6 @@ def verify_migration_backed_database_contract(
         or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
         or "research_lab_allocation_frontier_bootstrap_contract_v2" not in rpcs
         or "research_lab_compact_checkpoint_graph_contract_v1" not in rpcs
-        or not required_git_tree_rpcs.issubset(rpcs)
     ):
         raise SystemExit(
             "migration-backed ancestry checkpoint RPC evidence is missing"

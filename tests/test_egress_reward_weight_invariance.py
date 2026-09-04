@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import pytest
 
-import gateway.research_lab.worker as hosted
-
-
 @pytest.mark.asyncio
 async def test_champion_status_reconcile_is_actor_identity_invariant(monkeypatch):
     from gateway.research_lab import maintenance
@@ -96,59 +93,3 @@ def test_onchain_u16_weight_vector_golden() -> None:
     uids, weights = normalize_to_u16_with_uids_pure([5, 7, 3], [0.06, 0.03, 0.0])
     assert uids == [5, 7]              # the zero-weight uid is dropped
     assert weights == [65535, 32768]   # 0.06 -> U16_MAX, 0.03 -> half
-
-
-def test_reimbursement_cost_evidence_comes_from_loop_result_not_ledger_table() -> None:
-    # The batched provider-usage ledger insert (item 4) is WRITE-only: reimburse-
-    # ment cost evidence is derived from the in-memory loop result's
-    # provider_usage / cost_ledger, never from the provider_usage_ledger table,
-    # so the batching cannot change any reimbursement input.
-    from gateway.research_lab.reimbursement_awards import cost_evidence_from_loop_result
-
-    class _LoopResult:
-        provider_usage = [{"provider_id": "exa", "endpoint_class": "search"}]
-        actual_openrouter_cost_usd = 1.25
-        openrouter_call_count = 3
-        iterations_completed = 2
-        stop_reason = "plateau"
-
-        def cost_ledger(self):
-            return {"actual_openrouter_cost_microusd": 1_250_000}
-
-    ev = cost_evidence_from_loop_result(_LoopResult())
-    assert ev["source"] == "loop_result"
-    assert ev["provider_usage"] == [{"provider_id": "exa", "endpoint_class": "search"}]
-    assert ev["cost_ledger"]["actual_openrouter_cost_microusd"] == 1_250_000
-
-
-def test_maintenance_cadence_is_independent_of_idle_backoff(monkeypatch):
-    # Item 9: the lease-held sweep interval must always be >= the idle-backoff
-    # cap, so a poll that has backed off to 60s never widens the maintenance gap
-    # (the sweeps run on their own wall-clock cadence, not once per poll).
-    monkeypatch.delenv("RESEARCH_LAB_WORKER_MAINTENANCE_INTERVAL_SECONDS", raising=False)
-    monkeypatch.delenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", raising=False)
-    interval = hosted._lease_maintenance_interval_seconds()
-    assert interval >= hosted._idle_backoff_max_seconds(15.0)
-    assert interval == 150  # default
-
-    # Even if an operator sets a tiny interval, it is floored to the backoff cap
-    # so it can never become coupled to (smaller than) the poll gap.
-    monkeypatch.setenv("RESEARCH_LAB_WORKER_MAINTENANCE_INTERVAL_SECONDS", "5")
-    monkeypatch.setenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", "60")
-    assert hosted._lease_maintenance_interval_seconds() == 60
-
-
-def test_idle_request_rate_stays_bounded_as_worker_count_grows():
-    # Item 12: idle request volume must not multiply with worker count. Each
-    # worker's idle poll rate is capped by the backoff cap (not the base poll),
-    # and the global maintenance sweeps run on exactly ONE worker (the lease
-    # holder), so N idle workers issue ~N cheap polls -- never N x the maintenance
-    # scan volume. Here we pin the per-worker cap component.
-    base, cap = 15.0, 60.0
-    interval = base
-    for _ in range(10):
-        interval = hosted._idle_backoff_next(interval, base, cap)
-    assert interval == cap  # converges to the cap, so per-worker rate is 1/cap
-    # The maintenance sweeps are lease-gated to a single holder (proven in
-    # test_migrations_postgres_integration + test_maintenance_lease), so their
-    # request volume is O(1) in the fleet size, not O(workers).

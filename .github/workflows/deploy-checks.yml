@@ -89,13 +89,6 @@ jobs:
             research_lab \
             validator_models
 
-      - name: Exercise pinned runsc rootfs-visible inputs
-        run: |
-          python_bin="$(command -v python)"
-          sudo env PYTHONPATH="$GITHUB_WORKSPACE" \
-            "$python_bin" \
-            scripts/_runsc_rootfs_visible_inputs_probe_ci.py
-
       - name: Exercise validator enclave finalization under Python 3.7
         run: |
           docker run --rm \

@@ -18,11 +18,6 @@ from gateway.research_lab.provider_outcome_digest import (
     load_provider_outcome_sidecar,
     parse_provider_error_marker_line,
 )
-from research_lab.code_editing import (
-    build_code_edit_auto_research_messages,
-    build_code_edit_source_inspection_messages,
-    build_loop_direction_planner_messages,
-)
 
 
 class TestMarkerParsing:
@@ -405,54 +400,3 @@ class TestCompactSidecar:
         path.write_text("{}", encoding="utf-8")
         os.chmod(path, 0o644)
         assert load_provider_outcome_sidecar(str(path), warn=False) is None
-
-
-class TestPromptInjection:
-    DIGEST = {"schema_version": "1.0", "providers": {"exa": {"call_count": 3, "error_rate": 0.33}}}
-
-    def test_planner_context_gains_digest_beside_benchmark_summary(self):
-        user = build_loop_direction_planner_messages(
-            ticket={"ticket_id": "t1"},
-            artifact_manifest={},
-            component_registry={},
-            benchmark_public_summary={"score": 1},
-            runtime_source_index={"editable_files": []},
-            budget_context={},
-            provider_outcome_digest=self.DIGEST,
-        )[1]["content"]
-        assert "provider_outcome_digest" in user
-        assert "benchmark_public_summary" in user
-
-    def test_inspection_and_draft_contexts_gain_digest(self):
-        inspection = build_code_edit_source_inspection_messages(
-            ticket={"ticket_id": "t1"},
-            artifact_manifest={},
-            component_registry={},
-            benchmark_public_summary={},
-            runtime_source_index={"editable_files": []},
-            source_inspection_context={},
-            budget_context={},
-            provider_outcome_digest=self.DIGEST,
-        )[1]["content"]
-        assert "provider_outcome_digest" in inspection
-        draft = build_code_edit_auto_research_messages(
-            ticket={"ticket_id": "t1"},
-            artifact_manifest={},
-            component_registry={},
-            benchmark_public_summary={},
-            budget_context={},
-            max_candidates=1,
-            provider_outcome_digest=self.DIGEST,
-        )[1]["content"]
-        assert "provider_outcome_digest" in draft
-
-    def test_absent_digest_keeps_prompts_unchanged(self):
-        user = build_loop_direction_planner_messages(
-            ticket={"ticket_id": "t1"},
-            artifact_manifest={},
-            component_registry={},
-            benchmark_public_summary={},
-            runtime_source_index={"editable_files": []},
-            budget_context={},
-        )[1]["content"]
-        assert "provider_outcome_digest" not in user

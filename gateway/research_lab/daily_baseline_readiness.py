@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import logging
 import math
 from typing import Any, Mapping
@@ -12,8 +12,16 @@ from leadpoet_canonical.production_parity_boundary_v2 import (
 )
 
 from .config import ResearchLabGatewayConfig
-from .daily_icp_set import DAILY_ICP_COUNT
-from .public_baseline_runner import BASELINE_ID
+from .daily_icp_set import (
+    DAILY_ICP_COUNT,
+    DailyIcpSetUnavailable,
+    daily_icp_set_from_input_doc,
+)
+from .public_baseline_runner import (
+    BASELINE_ENTRYPOINT,
+    BASELINE_ID,
+    BASELINE_REPOSITORY,
+)
 from .public_baseline_store import load_completed_run
 
 
@@ -31,18 +39,35 @@ def _same_number(left: Any, right: Any) -> bool:
     )
 
 
-def _valid_completed_row(row: Mapping[str, Any]) -> bool:
+def valid_completed_row(row: Mapping[str, Any]) -> bool:
     results = row.get("per_icp_results")
     summary = row.get("score_summary_doc")
     report = row.get("public_report_doc")
+    window = row.get("window_doc")
+    input_doc = row.get("benchmark_input_doc")
     try:
+        benchmark_date = date.fromisoformat(str(row.get("benchmark_date") or ""))
+        benchmark_date_text = benchmark_date.isoformat()
+        expected_set_id = int(benchmark_date.strftime("%Y%m%d"))
         aggregate = float(row.get("aggregate_score"))
         expected = int(row.get("expected_icp_count") or 0)
         completed = int(row.get("completed_icp_count") or 0)
     except (TypeError, ValueError):
         return False
+    if not isinstance(input_doc, Mapping):
+        return False
+    try:
+        frozen_set = daily_icp_set_from_input_doc(
+            input_doc,
+            required_set_id=expected_set_id,
+        )
+    except DailyIcpSetUnavailable:
+        return False
     if (
         str(row.get("status") or "") != "completed"
+        or str(row.get("baseline_id") or "") != BASELINE_ID
+        or str(row.get("baseline_repository") or "") != BASELINE_REPOSITORY
+        or str(row.get("baseline_entrypoint") or "") != BASELINE_ENTRYPOINT
         or not math.isfinite(aggregate)
         or not 0.0 <= aggregate <= 100.0
         or expected != DAILY_ICP_COUNT
@@ -51,8 +76,19 @@ def _valid_completed_row(row: Mapping[str, Any]) -> bool:
         or len(results) != expected
         or not isinstance(summary, Mapping)
         or not isinstance(report, Mapping)
+        or not isinstance(window, Mapping)
         or not summary
         or not report
+        or dict(input_doc) != frozen_set.input_doc
+        or dict(window) != frozen_set.public_doc
+    ):
+        return False
+    window_refs = window.get("icp_refs")
+    if (
+        window.get("icp_count") != expected
+        or not isinstance(window_refs, list)
+        or len(window_refs) != expected
+        or len({str(value) for value in window_refs}) != expected
     ):
         return False
     summaries = summary.get("per_icp_summaries")
@@ -90,7 +126,10 @@ def _valid_completed_row(row: Mapping[str, Any]) -> bool:
         ):
             return False
         summary_by_ref[ref] = item
-    if set(result_summaries) != set(summary_by_ref):
+    if (
+        set(result_summaries) != set(summary_by_ref)
+        or set(result_summaries) != {str(value) for value in window_refs}
+    ):
         return False
     calculated = sum(float(item["score"]) for item in summaries) / expected
     report_rows = report.get("per_icp")
@@ -111,13 +150,21 @@ def _valid_completed_row(row: Mapping[str, Any]) -> bool:
         report_by_ref[ref] = item
     summary_baseline = summary.get("baseline")
     report_baseline = report.get("baseline")
+    try:
+        report_completed = int(report.get("completed_icp_count") or 0)
+    except (TypeError, ValueError):
+        return False
     return (
         set(report_by_ref) == set(summary_by_ref)
         and isinstance(summary_baseline, Mapping)
         and isinstance(report_baseline, Mapping)
         and str(summary_baseline.get("id") or "") == BASELINE_ID
         and str(report_baseline.get("id") or "") == BASELINE_ID
-        and int(report.get("completed_icp_count") or 0) == expected
+        and str(summary.get("benchmark_date") or "") == benchmark_date_text
+        and str(report.get("benchmark_date") or "") == benchmark_date_text
+        and summary.get("icp_set_id") == expected_set_id
+        and report.get("icp_set_id") == expected_set_id
+        and report_completed == expected
         and _same_number(summary.get("aggregate_score"), aggregate)
         and _same_number(report.get("aggregate_score"), aggregate)
         and _same_number(calculated, aggregate)
@@ -151,7 +198,7 @@ async def daily_public_baseline_readiness(
             "reason": "daily_baseline_gate_unavailable",
             "benchmark_date": benchmark_date,
         }
-    if not isinstance(row, Mapping) or not _valid_completed_row(row):
+    if not isinstance(row, Mapping) or not valid_completed_row(row):
         return {
             "available": False,
             "reason": "daily_baseline_not_published",

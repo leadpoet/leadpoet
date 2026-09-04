@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -35,6 +36,8 @@ PROVIDER_ENV_NAMES = (
 DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 12 * 60
 DEFAULT_BUILD_TIMEOUT_SECONDS = 15 * 60
 MAX_COMPANIES = 5
+MAX_PROVIDER_CALLS = 30
+MAX_COMBINED_COST_USD = 4.0
 MAX_OUTPUT_BYTES = 2_000_000
 
 
@@ -83,6 +86,16 @@ def _redact_error(value: str) -> str:
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text[:2000]
+
+
+def _nonnegative_number(value: Any, *, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PublicBaselineRunError(f"baseline returned invalid {field}") from exc
+    if not math.isfinite(number) or number < 0:
+        raise PublicBaselineRunError(f"baseline returned invalid {field}")
+    return number
 
 
 def _cleanup_container(container_name: str) -> None:
@@ -257,12 +270,12 @@ class PublicBaselineDockerRunner:
             dict(icp),
         )
         raw_companies = result.get("companies")
-        if not isinstance(raw_companies, list) or len(raw_companies) > MAX_COMPANIES:
+        if not isinstance(raw_companies, list) or len(raw_companies) > company_limit:
             raise PublicBaselineRunError("baseline returned an invalid company list")
         try:
             companies = validate_companies(
                 raw_companies,
-                max_companies=MAX_COMPANIES,
+                max_companies=company_limit,
             )
         except (TypeError, ValueError) as exc:
             raise PublicBaselineRunError(
@@ -272,24 +285,52 @@ class PublicBaselineDockerRunner:
         provider_calls = result.get("provider_calls")
         if not isinstance(usage, Mapping) or not isinstance(provider_calls, list):
             raise PublicBaselineRunError("baseline returned invalid usage data")
+        if any(not isinstance(value, Mapping) for value in provider_calls):
+            raise PublicBaselineRunError("baseline returned invalid provider calls")
+        call_count = result.get("provider_call_count")
+        if (
+            type(call_count) is not int
+            or call_count != len(provider_calls)
+            or call_count > MAX_PROVIDER_CALLS
+        ):
+            raise PublicBaselineRunError("baseline exceeded the provider-call limit")
+        provider_cost = _nonnegative_number(
+            result.get("estimated_provider_cost_usd"),
+            field="provider cost",
+        )
+        combined_cost = _nonnegative_number(
+            result.get("estimated_combined_cost_usd"),
+            field="combined cost",
+        )
+        model_cost = (
+            _nonnegative_number(result.get("model_cost_usd"), field="model cost")
+            if result.get("model_cost_usd") is not None
+            else None
+        )
+        latency = _nonnegative_number(
+            result.get("latency_seconds"),
+            field="latency",
+        )
+        if (
+            result.get("cost_limit_status") != "within_limit"
+            or combined_cost > MAX_COMBINED_COST_USD
+            or combined_cost + 0.000001 < provider_cost
+            or (
+                model_cost is not None
+                and abs(combined_cost - provider_cost - model_cost) > 0.00001
+            )
+        ):
+            raise PublicBaselineRunError("baseline exceeded the combined cost limit")
+        if result.get("token_limit_status") != "within_limit":
+            raise PublicBaselineRunError("baseline exceeded the token limit")
         return PublicBaselineExecution(
             companies=companies,
             usage=dict(usage),
             provider_calls=[dict(value) for value in provider_calls if isinstance(value, Mapping)],
-            provider_cost_usd=float(
-                result.get("estimated_provider_cost_usd") or 0.0
-            ),
-            model_cost_usd=(
-                float(result["model_cost_usd"])
-                if result.get("model_cost_usd") is not None
-                else None
-            ),
-            combined_cost_usd=(
-                float(result["estimated_combined_cost_usd"])
-                if result.get("estimated_combined_cost_usd") is not None
-                else None
-            ),
-            latency_seconds=float(result.get("latency_seconds") or 0.0),
+            provider_cost_usd=provider_cost,
+            model_cost_usd=model_cost,
+            combined_cost_usd=combined_cost,
+            latency_seconds=latency,
         )
 
     def close(self) -> None:

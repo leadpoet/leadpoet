@@ -1061,8 +1061,14 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         < shutdown
     )
     assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
-    assert "--acceptance-corpus-manifest" not in script
-    assert "--acceptance-corpus-root" not in script
+    acceptance = script.index("V2_PREFLIGHT_ACCEPTANCE_ARGS=()")
+    assert acceptance < shutdown
+    assert 'if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ]; then' in script[
+        acceptance:shutdown
+    ]
+    assert "--acceptance-corpus-manifest" in script[acceptance:shutdown]
+    assert "--acceptance-corpus-root" in script[acceptance:shutdown]
+    assert '"${V2_PREFLIGHT_ACCEPTANCE_ARGS[@]}"' in script[acceptance:shutdown]
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index("bootstrap_active_ancestry_checkpoints_v2.py") < shutdown

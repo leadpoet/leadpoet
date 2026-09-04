@@ -23,9 +23,12 @@ def test_submit_source_needs_only_source_and_wallet_inputs():
             "miner",
             "--hotkey-name",
             "default",
+            "--wallet-path",
+            "/var/lib/miner-wallets",
         ]
     )
     assert args.source == "./agent"
+    assert args.wallet_path == "/var/lib/miner-wallets"
     assert not hasattr(args, "image")
 
 

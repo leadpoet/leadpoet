@@ -36,6 +36,7 @@ def _common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--wallet-name", default=None)
     parser.add_argument("--hotkey-name", default=None)
+    parser.add_argument("--wallet-path", default=None)
     parser.add_argument(
         "--hotkey-uri", default=None, help="development only: derive the hotkey from a URI"
     )
@@ -63,9 +64,13 @@ def _keypair(args):
         return Keypair.create_from_uri(args.hotkey_uri)
     from bittensor_wallet import Wallet
 
-    return Wallet(
-        name=args.wallet_name or "default", hotkey=args.hotkey_name or "default"
-    ).hotkey
+    wallet_arguments = {
+        "name": args.wallet_name or "default",
+        "hotkey": args.hotkey_name or "default",
+    }
+    if args.wallet_path:
+        wallet_arguments["path"] = args.wallet_path
+    return Wallet(**wallet_arguments).hotkey
 
 
 def submit_source(args) -> int:

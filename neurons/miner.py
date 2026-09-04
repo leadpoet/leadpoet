@@ -2197,6 +2197,8 @@ def main():
                     str(config.wallet.name),
                     "--hotkey-name",
                     str(config.wallet.hotkey),
+                    "--wallet-path",
+                    str(config.wallet.path),
                 ],
                 check=False,
             )

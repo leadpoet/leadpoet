@@ -5441,6 +5441,14 @@ def test_rehearsal_build_stages_compact_weight_readiness_dependency(
     assert result.returncode == 0
 
 
+def test_rehearsal_does_not_recreate_removed_acceptance_corpus() -> None:
+    harness_root = Path(__file__).resolve().parent
+    for name in ("contract_adapter.py", "run_inside.sh"):
+        source = (harness_root / name).read_text(encoding="utf-8")
+        assert "acceptance-corpus-v2" not in source
+        assert "leadpoet.acceptance_corpus.v2" not in source
+
+
 def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> None:
     harness_root = Path(__file__).resolve().parent
     run_inside = (harness_root / "run_inside.sh").read_text(encoding="utf-8")

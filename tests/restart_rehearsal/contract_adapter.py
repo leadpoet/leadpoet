@@ -2525,17 +2525,6 @@ def _module_envelopes(argv: list[str]) -> int:
                 "credential_reference_hash": "sha256:" + HASH64,
             },
         )
-    corpus = output_dir / "acceptance-corpus-v2"
-    corpus.mkdir(parents=True, exist_ok=True)
-    (corpus / "fixture.json").write_text("{}\n", encoding="utf-8")
-    _write_json(
-        output_dir / "acceptance-corpus-v2.json",
-        {
-            "schema_version": "leadpoet.acceptance_corpus.v2",
-            "deploy_commit": deploy_commit,
-            "corpus_hash": "sha256:" + HASH64,
-        },
-    )
     _write_json(
         output_dir / "gateway-v2-env-transition.json",
         {"schema_version": "leadpoet.gateway_env_transition.v2", "status": "ready"},

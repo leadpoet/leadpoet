@@ -83,10 +83,10 @@ def test_roles_follow_the_migration_156_pattern():
     assert "CREATE ROLE lab_arena_owner NOLOGIN" in SQL
     assert "CREATE ROLE lab_arena_service NOLOGIN" in SQL
     assert "pg_advisory_xact_lock" in SQL
-    assert "ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION" in SQL
+    assert "ALTER ROLE lab_arena_service WITH NOCREATEDB NOCREATEROLE NOINHERIT;" in SQL
     code_lines = [line for line in SQL.splitlines() if not line.lstrip().startswith("--")]
     assert not any("NOSUPERUSER" in line or "NOBYPASSRLS" in line for line in code_lines)
-    assert "rolsuper OR rolbypassrls OR rolcanlogin" in SQL
+    assert "rolsuper OR rolbypassrls OR rolcanlogin OR rolreplication" in SQL
     assert "rolname = 'authenticator'" in SQL
     assert "GRANT lab_arena_service TO authenticator" in SQL
     assert "REVOKE CREATE ON SCHEMA public FROM lab_arena_service" in SQL

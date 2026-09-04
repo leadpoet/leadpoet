@@ -55,11 +55,12 @@ def test_miner_uses_miner_keys_even_if_it_becomes_king(kind, is_king):
     assert vault.calls == [(context.submission_id, "openrouter")]
 
 
-def test_only_the_organizer_baseline_uses_host_keys():
-    keys, context, vault = resolver(baseline=True)
+@pytest.mark.parametrize("credentials", [False, True])
+def test_only_the_organizer_baseline_uses_host_keys(credentials):
+    keys, context, vault = resolver(baseline=True, credentials=credentials)
     assert keys.funding_source_for(context) == "host"
     assert keys.credential_for(context, "openrouter") == "host-runtime-key"
-    assert not vault.calls
+    assert vault is None or not vault.calls
 
 
 @pytest.mark.parametrize("provider", ["scrapingdog", "openrouter_management_key", "unknown"])

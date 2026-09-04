@@ -150,6 +150,15 @@ def test_weights_pay_the_king_exactly_and_refuse_a_triple_that_differs_from_its_
     corrupt = dict(proposed, lab_arena_reward_basis=dict(basis, king_start_epoch=24800))
     with pytest.raises(WeightComputationError, match="lab_arena_reward_basis"):
         compute_final_weights_with_lab_arena(corrupt)
+    # The validator enclave replaces this list with its finalized metagraph.
+    # A moved or deregistered king must not leave payment on the old numeric UID.
+    for finalized_hotkeys in (
+        [BURN, "fulfillment-hotkey", KING, "lab-hotkey"],
+        [BURN, "fulfillment-hotkey", "lab-hotkey", "other-hotkey"],
+    ):
+        stale_uid = dict(proposed, metagraph_hotkeys=finalized_hotkeys)
+        with pytest.raises(WeightComputationError, match="lab_arena_reward_basis"):
+            compute_final_weights_with_lab_arena(stale_uid)
     # An ineligible epoch names the basis and a zero triple; that is consistent.
     stale = signed_basis(signer, effective=24700, start=24700)
     zero = snapshot(lab_arena_reward_basis=stale)

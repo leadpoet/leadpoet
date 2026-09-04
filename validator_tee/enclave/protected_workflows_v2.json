@@ -652,14 +652,14 @@
       "symbol": "weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:af7981e49e6863b19aeb173be5fdd341d8e42728ae2023fff6f9c82925b29b2b",
-      "path": "leadpoet_canonical/weight_computation.py",
-      "symbol": "_check_lab_arena_champion_triple"
-    },
-    {
-      "ast_sha256": "sha256:0f7ef93cc845cf695262378cea7dfb600bb73f92df0eff6101b01dfecb443114",
+      "ast_sha256": "sha256:d3526d7096028e89fc35a4f965e3c2988e0015f355c4e658ce95c47c8aa8a6d1",
       "path": "leadpoet_canonical/weight_computation.py",
       "symbol": "compute_final_weights"
+    },
+    {
+      "ast_sha256": "sha256:3c72540c2f019ed6358bbc785baea828eb453f56d6adbfe2fbcca2c04edf3e71",
+      "path": "leadpoet_canonical/weight_computation.py",
+      "symbol": "compute_final_weights_with_lab_arena"
     },
     {
       "ast_sha256": "sha256:2774126b08622ad116a094b08c95e1ecd6986a16356778792dd26c7e713de000",
@@ -1092,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:feb1c7c4c26afb02b1ea26c8986e16cbf7da755d994fc757fe9f218192ea8a3e",
-  "protected_source_commit": "9a55aeda13f4eb04e1ef6c6e5cadb12b3ed6754e",
+  "manifest_hash": "sha256:2a63a5d459c63400e04db4e37abcc5d10222ee05594b786e96ec2267b2504208",
+  "protected_source_commit": "69aaf6cd03efdf6df06a5105fb656729a6244465",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

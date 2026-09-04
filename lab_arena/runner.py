@@ -72,6 +72,7 @@ MAX_REQUIREMENTS = 128
 MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
+DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 
@@ -451,39 +452,72 @@ def _validated_requirements(path: Path) -> List[str]:
 
 
 def install_binary_requirements(requirements_path: Path, target_dir: Path) -> None:
-    """Install listed wheels without source builds, dependency scripts, or pip config."""
+    """Install listed wheels in a size-capped temporary filesystem."""
 
     requirements = _validated_requirements(requirements_path)
     if not requirements:
         return
-    environment = {
-        "HOME": str(target_dir.parent),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "PIP_CONFIG_FILE": os.devnull,
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "PYTHONNOUSERSITE": "1",
-    }
-    command = [
-        sys.executable,
-        "-I",
-        "-m",
-        "pip",
-        "install",
-        "--isolated",
-        "--disable-pip-version-check",
-        "--no-input",
-        "--no-cache-dir",
-        "--no-compile",
-        "--only-binary=:all:",
-        "--index-url=https://pypi.org/simple",
-        "--target",
-        str(target_dir),
-        "--requirement",
-        str(requirements_path),
-    ]
+    target = Path(target_dir)
+    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+        raise RunnerError("dependency target must be an empty directory")
+    staging = Path(tempfile.mkdtemp(prefix="lab-arena-deps-"))
+    mounted = False
+    unmounted = False
+    failure: Optional[Exception] = None
     try:
+        mount = subprocess.run(
+            [
+                "mount",
+                "-t",
+                "tmpfs",
+                "-o",
+                "size=%d,mode=0700,nosuid,nodev,noexec" % MAX_DEPENDENCY_BYTES,
+                "tmpfs",
+                str(staging),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if mount.returncode != 0:
+            raise RunnerError("dependency filesystem mount failed")
+        mounted = True
+        install_target = staging / "target"
+        install_target.mkdir(mode=0o700)
+        home = staging / "home"
+        home.mkdir(mode=0o700)
+        temporary = staging / "tmp"
+        temporary.mkdir(mode=0o700)
+        environment = {
+            "HOME": str(home),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PIP_CONFIG_FILE": os.devnull,
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "PYTHONNOUSERSITE": "1",
+            "TMPDIR": str(temporary),
+        }
+        command = [
+            sys.executable,
+            "-I",
+            "-m",
+            "pip",
+            "install",
+            "--isolated",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-cache-dir",
+            "--no-compile",
+            "--only-binary=:all:",
+            "--index-url=https://pypi.org/simple",
+            "--target",
+            str(install_target),
+            "--requirement",
+            str(requirements_path),
+        ]
         result = subprocess.run(
             command,
             stdin=subprocess.DEVNULL,
@@ -493,10 +527,57 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
             timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
             check=False,
         )
+        if result.returncode != 0:
+            raise AgentDependencyError("binary dependency installation failed")
+        _lock_down_dependency_tree(install_target)
+        for child in install_target.iterdir():
+            destination = target / child.name
+            if child.is_dir():
+                shutil.copytree(child, destination)
+            else:
+                shutil.copy2(child, destination)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AgentDependencyError("binary dependency installation failed") from exc
-    if result.returncode != 0:
-        raise AgentDependencyError("binary dependency installation failed")
+        failure = (
+            AgentDependencyError("binary dependency installation failed")
+            if mounted
+            else RunnerError("dependency filesystem mount failed")
+        )
+        failure.__cause__ = exc
+    except Exception as exc:
+        failure = exc
+    finally:
+        if mounted:
+            try:
+                result = subprocess.run(
+                    ["umount", str(staging)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                unmounted = result.returncode == 0
+                if not unmounted:
+                    result = subprocess.run(
+                        ["umount", "-l", str(staging)],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=DEPENDENCY_MOUNT_TIMEOUT_SECONDS,
+                        check=False,
+                    )
+                    unmounted = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                unmounted = False
+            if not unmounted:
+                cleanup_failure = RunnerError("dependency filesystem cleanup failed")
+                if failure is not None:
+                    cleanup_failure.__cause__ = failure
+                failure = cleanup_failure
+        if not mounted or unmounted:
+            shutil.rmtree(staging, ignore_errors=True)
+    if failure is not None:
+        raise failure
 
 
 def _lock_down_dependency_tree(path: Path) -> None:

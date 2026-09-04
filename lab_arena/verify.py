@@ -380,7 +380,7 @@ def king_decision(
 
     Entries are ``{"submission_id", "hotkey", "final_score"}``
     where ``final_score`` is ``None`` for a participant with no valid
-    30-ICP result. Contenders are challengers with any valid score.
+    full daily ICP result. Contenders are challengers with any valid score.
     The highest contender (ties by stable submission ID) is crowned only when
     both it and the organizer baseline have valid scores and the contender's
     score is strictly higher. A tie, no contender, or no valid baseline score

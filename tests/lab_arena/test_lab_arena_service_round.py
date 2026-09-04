@@ -150,6 +150,7 @@ class ModelSandbox:
         self.lock = threading.Lock()
         self.runs = 0
         self.inflate_scores = False  # a cheating validator reports 99.0 for every company
+        self.judge_failures: set[tuple[str, int]] = set()
 
     def run_icp(self, spec: runtime.SandboxSpec, **_):
         with self.lock:
@@ -172,7 +173,18 @@ class ModelSandbox:
         if scoring_run:
             # A scoring assignment: the validator's judge sandbox (the pinned scorer image, trusted mode).
             assert runtime_digest == SCORER_IMAGE_DIGEST and spec.extra_environment.get(shim.TRUSTED_SCORER_ENV) == "1" and spec.entry_command == runtime.SCORER_ENTRY_COMMAND
-            breakdowns = deterministic_scorer(input_document["companies"], icp, False)
+            companies = list(input_document["companies"])
+            flavor = (
+                str(companies[0].get("company_name") or "").split(" Company ", 1)[0]
+                if companies
+                else ""
+            )
+            position = int(str(icp["icp_id"]).rsplit("_", 1)[-1]) - 1
+            if (flavor, position) in self.judge_failures:
+                return runtime.fake_result(
+                    exit_code=1, output_bytes=None, stderr=b"judge failure"
+                )
+            breakdowns = deterministic_scorer(companies, icp, False)
             if self.inflate_scores:
                 breakdowns = [dict(row, final_score=99.0) for row in breakdowns]
             output = scoring.build_scoring_output(input_document["scored_run_id"], breakdowns)
@@ -478,6 +490,13 @@ class Harness:
         return self.service.store.get_round(self.round_id)["status"]
 
 
+def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    checks = harness.service.startup_checks()
+    assert checks["schema_version"] == 184
+    assert checks["database_identity"]["current_user"] == "lab_arena_service"
+
+
 def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(connect, tmp_path):
     """A normal round publishes scores; its winner does not replace tomorrow's baseline."""
 
@@ -758,6 +777,102 @@ def _start_round(harness: Harness, *, day: int = 9, epoch: int = 30000) -> int:
     for participant in service.store.get_round(harness.round_id)["participants"]:
         harness.flavors.setdefault(participant["source_sha256"], "PublicBaseline")
     return len(service.store.get_round(harness.round_id)["participants"])
+
+
+def test_stage_one_judge_failure_excludes_only_that_challenger(connect, tmp_path):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["JudgeFailOne", "JudgePassOne"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=10, epoch=30100)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["source_sha256"]] == "JudgeFailOne"
+    )
+    harness.sandbox.judge_failures.add(("JudgeFailOne", 0))
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+
+    harness.advance_until("published", runners=2)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert failed["submission_id"] not in row["finalists"]
+    assert failed["submission_id"] not in {
+        item["submission_id"] for item in row["publication_doc"]["stage1_ranking"]
+    }
+    score_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="score",
+    )
+    assert any(run["terminal_cause"] == "judge_error" for run in score_runs)
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="execute",
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_final_judge_failure_excludes_only_that_challenger(connect, tmp_path):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["JudgeFailFinal", "JudgePassFinal"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=11, epoch=30200)
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.advance_until("stage1_scored", runners=2)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["source_sha256"]] == "JudgeFailFinal"
+    )
+    assert failed["submission_id"] in harness.service.store.get_round(
+        harness.round_id
+    )["finalists"]
+    harness.sandbox.judge_failures.add(("JudgeFailFinal", 10))
+
+    harness.advance_until("published", runners=2)
+
+    publication = harness.service.store.get_round(harness.round_id)["publication_doc"]
+    assert failed["submission_id"] not in {
+        item["submission_id"] for item in publication["final_ranking"]
+    }
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=2,
+        submission_id=failed["submission_id"],
+        kind="execute",
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+
+
+def test_baseline_judge_failure_cancels_the_daily_round(connect, tmp_path):
+    harness = Harness(
+        connect,
+        tmp_path,
+        challengers=["JudgePassAgainstBaseline"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=14, epoch=30250)
+    harness.sandbox.judge_failures.add(("PublicBaseline", 0))
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
+
+    closed = harness.service.advance_round(harness.round_id)
+
+    assert closed["status"] == "cancelled"
+    assert harness.status() == "cancelled"
 
 
 def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_path):

@@ -101,3 +101,14 @@ def test_daily_capacity_defaults_are_bounded(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_MAX_CHALLENGERS", raising=False)
     assert wiring._max_challengers_from_environment() == 16
     assert wiring._max_challengers_from_environment() < wiring.contracts.MAX_CHALLENGERS
+
+
+def test_service_requires_at_least_one_runner_hotkey(monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_RUNNER_HOTKEYS", raising=False)
+    with pytest.raises(ServiceError, match="LAB_ARENA_RUNNER_HOTKEYS"):
+        wiring._runner_hotkeys_from_environment()
+    monkeypatch.setenv("LAB_ARENA_RUNNER_HOTKEYS", " runner-one, runner-two ")
+    assert wiring._runner_hotkeys_from_environment() == (
+        "runner-one",
+        "runner-two",
+    )

@@ -160,6 +160,17 @@ def _max_challengers_from_environment() -> int:
     return value
 
 
+def _runner_hotkeys_from_environment() -> tuple[str, ...]:
+    runners = tuple(
+        item.strip()
+        for item in os.environ.get("LAB_ARENA_RUNNER_HOTKEYS", "").split(",")
+        if item.strip()
+    )
+    if not runners:
+        raise ServiceError("environment LAB_ARENA_RUNNER_HOTKEYS is required", 500)
+    return runners
+
+
 def _max_image_bytes_from_environment() -> int:
     """LAB_ARENA_MAX_IMAGE_BYTES: compressed size ceiling of the trusted scorer."""
 
@@ -214,7 +225,7 @@ def build_service_from_environment(mode: str):
         "scrapingdog": _required("LAB_ARENA_SCRAPINGDOG_API_KEY"),
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
-    runners = tuple(item.strip() for item in os.environ.get("LAB_ARENA_RUNNER_HOTKEYS", "").split(",") if item.strip())
+    runners = _runner_hotkeys_from_environment()
     # The trusted scorer remains an organizer-owned internal image. Miner and
     # baseline agents enter as source archives and need no registry account.
     registry = images.RegistryClient()

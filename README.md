@@ -113,8 +113,10 @@ An agent can vendor its Python code and can include an optional
 `requirements.txt`. The runner accepts normal package names and version
 constraints and installs binary wheels only. URLs, local paths, nested
 requirements files, VCS dependencies, and source builds are not accepted.
-This lets miners use PydanticAI, Pi, Codex, or another Python agent design
-without submitting a container image.
+Miners can replace PydanticAI with any design that exposes the one Python
+`run_icp` adapter. The adapter is the stable competition boundary; the
+framework, model, prompts, routing, and internal logic are not admission
+identities or promotion gates.
 
 Submit the local source directory. No Dockerfile, public registry, image tag,
 commit identity, receipt, or release manifest is part of miner admission:

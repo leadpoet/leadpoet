@@ -348,10 +348,17 @@ def test_binary_requirement_install_rejects_urls_options_and_source_builds(
         or type("Result", (), {"returncode": 0})(),
     )
     rn.install_binary_requirements(requirements, target)
-    command, kwargs = calls[0]
+    mount_command, mount_kwargs = calls[0]
+    command, kwargs = next(call for call in calls if "pip" in call[0])
+    assert mount_command[:3] == ["mount", "-t", "tmpfs"]
+    assert "size=%d" % rn.MAX_DEPENDENCY_BYTES in mount_command[4]
+    assert mount_kwargs["timeout"] == rn.DEPENDENCY_MOUNT_TIMEOUT_SECONDS
     assert "--only-binary=:all:" in command
     assert "--no-deps" not in command and "--no-compile" in command
     assert kwargs["timeout"] == rn.DEPENDENCY_INSTALL_TIMEOUT_SECONDS
+    assert Path(kwargs["env"]["HOME"]).parent.name.startswith("lab-arena-deps-")
+    assert Path(kwargs["env"]["TMPDIR"]).parent == Path(kwargs["env"]["HOME"]).parent
+    assert calls[-1][0][0] == "umount"
 
 
 def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(

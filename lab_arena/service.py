@@ -340,6 +340,15 @@ class ArenaService:
         """
 
         identity = self._store.require_service_role()
+        try:
+            schema = self._store._transport.rpc("lab_arena_schema_version_v1", {})
+        except ArenaStoreError as exc:
+            raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
+        if schema != {
+            "schema_version": "leadpoet.lab_arena.schema_version.v1",
+            "version": 184,
+        }:
+            raise ServiceError("arena_schema_version_invalid", 500)
         for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
             try:
                 self._store._transport.select(table, limit=1)
@@ -377,6 +386,7 @@ class ArenaService:
         current = self.current_round()
         return {
             "database_identity": identity,
+            "schema_version": int(schema["version"]),
             "scoring_adapter_version": self._scorer_policy["scoring_adapter_version"],
             "current_round": current["round_id"] if current else None,
         }
@@ -1103,19 +1113,67 @@ class ArenaService:
         icps = self.benchmark_icps(round_id)
         outputs = self._outputs_by_run(round_id, stage)
         chosen = self._scoring_outputs(round_id, stage)
-        breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
-        judge_executions = 0
+        baseline_ids = {
+            str(participant["submission_id"])
+            for participant in round_row.get("participants") or []
+            if participant.get("is_king")
+        }
+        if len(baseline_ids) != 1:
+            raise ServiceError("baseline_submission_invalid", 500)
+        baseline_id = next(iter(baseline_ids))
+        ineligible: set[str] = set()
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
             if run is None:
                 raise ServiceError("scoring_assignment_missing", 500)
+            if run["status"] == "accepted":
+                continue
+            submission_id = str(item["submission_id"])
+            if submission_id == baseline_id:
+                return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+            ineligible.add(submission_id)
+        breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
+        judge_executions = 0
+        for item in plan["work_items"]:
+            submission_id = str(item["submission_id"])
+            if submission_id in ineligible:
+                continue
+            scored_run_id = item["scored_run_id"]
+            run = chosen.get(scored_run_id)
             icp = icps[int(item["icp_position"])]
             companies = outputs[scored_run_id]
-            if run["status"] != "accepted":
-                raise scoring.ScoringError("run %s was not judged" % scored_run_id)
-            breakdowns_by_item[scored_run_id] = self._verified_breakdowns(run, icp=icp, companies=companies, policy=policy)
+            try:
+                breakdowns_by_item[scored_run_id] = self._verified_breakdowns(
+                    run, icp=icp, companies=companies, policy=policy
+                )
+            except scoring.ScoringError:
+                if submission_id == baseline_id:
+                    return self._store.cancel_round(
+                        round_id, CANCEL_REASONS["scoring"]
+                    )
+                ineligible.add(submission_id)
             judge_executions += 1
+        if ineligible:
+            breakdowns_by_item = {
+                item["scored_run_id"]: breakdowns_by_item[item["scored_run_id"]]
+                for item in plan["work_items"]
+                if item["submission_id"] not in ineligible
+                and item["scored_run_id"] in breakdowns_by_item
+            }
+            plan = {
+                **plan,
+                "work_items": [
+                    item
+                    for item in plan["work_items"]
+                    if item["submission_id"] not in ineligible
+                ],
+                "zero_rows": [
+                    row
+                    for row in plan["zero_rows"]
+                    if row["submission_id"] not in ineligible
+                ],
+            }
         stage_scores = scoring.build_stage_scores(
             plan=plan,
             policy=policy,
@@ -1140,9 +1198,18 @@ class ArenaService:
                 "stage1_scored",
                 {"finalists": finalists},
             )
-            return {"status": transition.get("status"), "judge_executions": judge_executions, "finalists": finalists}
+            return {
+                "status": transition.get("status"),
+                "judge_executions": judge_executions,
+                "ineligible_submissions": sorted(ineligible),
+                "finalists": finalists,
+            }
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
-        return {"status": transition.get("status"), "judge_executions": judge_executions}
+        return {
+            "status": transition.get("status"),
+            "judge_executions": judge_executions,
+            "ineligible_submissions": sorted(ineligible),
+        }
 
     def _score_entries_from_runs(
         self,

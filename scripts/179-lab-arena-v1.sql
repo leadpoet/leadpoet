@@ -802,6 +802,7 @@ DECLARE
   v_patch JSONB := COALESCE(p_patch, '{}'::JSONB);
   v_keys TEXT[];
   v_allowed TEXT[];
+  v_baseline_count INTEGER;
   v_challenger_count INTEGER;
   v_missing_scores INTEGER;
   v_invalid_finalists INTEGER;
@@ -876,6 +877,9 @@ BEGIN
        OR v_round.stage1_scoring_plan_doc IS NULL THEN
       RAISE EXCEPTION 'lab_arena_patch_keys_invalid' USING ERRCODE = '22023';
     END IF;
+    SELECT COUNT(*) INTO v_baseline_count
+    FROM pg_catalog.jsonb_array_elements(v_round.participants) AS participant
+    WHERE COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE);
     SELECT COUNT(*) INTO v_missing_scores
     FROM pg_catalog.jsonb_array_elements(v_round.participants) AS participant
     WHERE (
@@ -886,13 +890,29 @@ BEGIN
         AND runs.kind = 'execute'
         AND runs.submission_id = participant ->> 'submission_id'
         AND runs.per_icp_score IS NOT NULL
-    ) <> 10;
+    ) <> 10
+      AND (
+        v_baseline_count <> 1
+        OR COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE)
+      );
     IF v_missing_scores <> 0 THEN
-      RAISE EXCEPTION 'lab_arena_stage1_scores_incomplete' USING ERRCODE = '22023';
+      RAISE EXCEPTION 'lab_arena_stage1_baseline_scores_incomplete' USING ERRCODE = '22023';
     END IF;
     SELECT COUNT(*) INTO v_challenger_count
     FROM pg_catalog.jsonb_array_elements(v_round.participants) AS participant
-    WHERE NOT COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE);
+    WHERE NOT COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE)
+      AND (
+        v_baseline_count <> 1
+        OR (
+          SELECT COUNT(DISTINCT runs.icp_position)
+          FROM public.lab_arena_runs AS runs
+          WHERE runs.round_id = p_round_id
+            AND runs.stage = 1
+            AND runs.kind = 'execute'
+            AND runs.submission_id = participant ->> 'submission_id'
+            AND runs.per_icp_score IS NOT NULL
+        ) = 10
+      );
     SELECT COUNT(*) INTO v_invalid_finalists
     FROM pg_catalog.jsonb_array_elements(v_patch -> 'finalists') AS finalist
     WHERE pg_catalog.jsonb_typeof(finalist) <> 'string'
@@ -901,6 +921,18 @@ BEGIN
          FROM pg_catalog.jsonb_array_elements(v_round.participants) AS participant
          WHERE participant ->> 'submission_id' = finalist #>> '{}'
            AND NOT COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE)
+           AND (
+             v_baseline_count <> 1
+             OR (
+               SELECT COUNT(DISTINCT runs.icp_position)
+               FROM public.lab_arena_runs AS runs
+               WHERE runs.round_id = p_round_id
+                 AND runs.stage = 1
+                 AND runs.kind = 'execute'
+                 AND runs.submission_id = participant ->> 'submission_id'
+                 AND runs.per_icp_score IS NOT NULL
+             ) = 10
+           )
        );
     IF v_invalid_finalists <> 0
        OR pg_catalog.jsonb_array_length(v_patch -> 'finalists') <> LEAST(10, v_challenger_count)
@@ -2068,10 +2100,9 @@ END;
 $lab_arena_open_scoring$;
 ALTER FUNCTION public.lab_arena_open_scoring(TEXT, SMALLINT, JSONB) OWNER TO lab_arena_owner;
 
--- Close the scoring window: open score runs fail as stage_closed, and the
--- round is cancelled when any scoring assignment is incomplete. Otherwise
--- the round is stageN_judged and the Arena verifies the breakdowns and
--- records the per-run scores.
+-- Close the scoring window: open score runs fail as stage_closed. A missing
+-- baseline judgment cancels the round. A challenger judgment failure makes
+-- only that challenger ineligible; the remaining scores can still publish.
 CREATE OR REPLACE FUNCTION public.lab_arena_close_scoring(p_round_id TEXT, p_stage SMALLINT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -2083,6 +2114,8 @@ DECLARE
   v_round public.lab_arena_rounds;
   v_run public.lab_arena_runs;
   v_generation BIGINT;
+  v_baseline_count INTEGER;
+  v_baseline_incomplete INTEGER;
   v_incomplete INTEGER;
   v_next TEXT;
 BEGIN
@@ -2126,7 +2159,24 @@ BEGIN
     ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
   ) AS latest
   WHERE latest.status <> 'accepted';
-  IF v_incomplete > 0 THEN
+  SELECT COUNT(*) INTO v_baseline_count
+  FROM pg_catalog.jsonb_array_elements(COALESCE(v_round.participants, '[]'::JSONB)) AS participant
+  WHERE COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE);
+  SELECT COUNT(*) INTO v_baseline_incomplete FROM (
+    SELECT DISTINCT ON (runs.assignment_id)
+      runs.assignment_id, runs.submission_id, runs.status
+    FROM public.lab_arena_runs AS runs
+    WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'score'
+    ORDER BY runs.assignment_id, (runs.status = 'accepted') DESC, runs.attempt DESC
+  ) AS latest
+  WHERE latest.status <> 'accepted'
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.jsonb_array_elements(COALESCE(v_round.participants, '[]'::JSONB)) AS participant
+      WHERE participant ->> 'submission_id' = latest.submission_id
+        AND COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE)
+    );
+  IF v_incomplete > 0 AND (v_baseline_count <> 1 OR v_baseline_incomplete > 0) THEN
     v_next := 'cancelled';
     UPDATE public.lab_arena_rounds
     SET status = 'cancelled', status_generation = status_generation + 1, stage_generation = v_generation,

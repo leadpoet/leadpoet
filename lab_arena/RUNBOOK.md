@@ -83,8 +83,10 @@ needed only when a live, reward-enabled published round is activated.
 Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/180-lab-arena-daily-competition.sql`, then
 `scripts/181-lab-arena-source-submissions.sql` and
-`scripts/182-lab-arena-source-execution.sql` with the database owner before
-service startup. Then check the service wiring:
+`scripts/182-lab-arena-source-execution.sql`,
+`scripts/183-lab-arena-miner-reward-basis.sql`, and
+`scripts/184-lab-arena-scoring-failure-isolation.sql` with the database owner
+before service startup. Then check the service wiring:
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
@@ -108,6 +110,8 @@ python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
 Each runner needs Linux AMD64, root access for the sandbox mounts, and an
 executable gVisor `runsc`. It also needs:
 
+- `LAB_ARENA_MODE`: the same `off`, `shadow`, or `live` mode as the service;
+  `off` stops the runner
 - `LAB_ARENA_API_BASE_URL`
 - `LAB_ARENA_WALLET_NAME`
 - `LAB_ARENA_HOTKEY_NAME`

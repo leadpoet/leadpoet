@@ -1602,56 +1602,121 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
             offset += 1000
 
     # 4. Build the response — SAME shape + index-alignment invariant as before.
+    #
+    # Each request is assembled in isolation and a request that cannot be
+    # assembled is SKIPPED, not allowed to fail the call.  This step is pure
+    # Python over whatever the three queries above returned, so every line of
+    # it is an assumption about the shape of a stored row — and a single row
+    # that breaks one of those assumptions used to take the entire scoring
+    # feed down for every validator.  That is what happened on 2026-09-04:
+    # from 09:57 UTC every call returned 500, with no deploy behind it and
+    # the database answering normally, and no revealed lead was scored for
+    # hours.  A malformed record can cost its own request; it must not cost
+    # the others.
     req_by_id = {r["request_id"]: r for r in scoring_requests}
     out = []
+    unassembled: List[str] = []
     for rid in needed_ids:
-        r = req_by_id[rid]
-        already_scored = scored_subs_by_req.get(rid, set())
-        submissions = []
-        for s in subs_by_req.get(rid, []):
-            # Skip submissions this validator already scored — only the
-            # un-scored remainder needs work (see the per-submission
-            # tracking rationale above).
-            if s["submission_id"] in already_scored:
-                continue
-            # SAFETY: `leads` and `lead_ids` MUST come from the same
-            # `lead_data` list so they stay index-aligned — the validator
-            # zips them onto scores, and mismatched lengths silently corrupt
-            # consensus / winner selection.  lead_data entries are
-            # {"lead_id": ..., "data": ...} so both projections are safe.
-            lead_data = s.get("lead_data") or []
-            submissions.append({
-                "submission_id": s["submission_id"],
-                "miner_hotkey": s["miner_hotkey"],
-                "leads": [entry.get("data", {}) for entry in lead_data],
-                "lead_ids": [entry.get("lead_id", "") for entry in lead_data],
-            })
-
-        # Nothing left to score on this request for this validator — omit it
-        # (this is where the fully-scored case, previously handled by the
-        # request-level filter, now falls out).
-        if not submissions:
+        try:
+            entry = _assemble_scoring_request(
+                req_by_id[rid],
+                subs_by_req.get(rid, []),
+                scored_subs_by_req.get(rid, set()),
+            )
+        except Exception as exc:
+            # Loud on purpose: the request_id is the only handle anyone has
+            # for finding the bad record, and this path is silent otherwise.
+            unassembled.append(rid)
+            logger.error(
+                "fulfillment_scoring_assembly_failed request_id=%s %s: %s",
+                rid, type(exc).__name__, exc,
+            )
             continue
+        if entry is not None:
+            out.append(entry)
 
-        print(f"   Returning {rid[:8]}... with {len(submissions)} submission(s), "
-              f"{sum(len(s['leads']) for s in submissions)} total leads")
+    # Only report failure when the feed can genuinely serve nothing.  An empty
+    # `requests` list is a legitimate answer ("nothing to score"), so it must
+    # not be how a total assembly failure looks — a validator would poll a
+    # broken feed forever believing it was idle.
+    if unassembled and not out:
+        raise HTTPException(
+            500,
+            detail=(
+                f"Could not assemble any of {len(unassembled)} scoring "
+                f"request(s): {', '.join(rid[:8] for rid in unassembled[:5])}"
+            ),
+        )
 
-        # Merge the top-level required_attributes column into icp_details so
-        # the validator's `FulfillmentICP(**icp_details)` reconstruction sees
-        # it. required_attributes is a dedicated column (not inside icp_details
-        # JSONB), so omitting this merge meant Tier 2c never fired.
-        icp_payload = dict(r.get("icp_details", {}) or {})
-        if r.get("required_attributes"):
-            icp_payload["required_attributes"] = r["required_attributes"]
+    if unassembled:
+        print(f"   ⚠️ Skipped {len(unassembled)} unassemblable request(s): "
+              f"{', '.join(rid[:8] for rid in unassembled[:5])}")
 
-        out.append({
-            "request_id": rid,
-            "icp": icp_payload,
-            "status": r["status"],
-            "submissions": submissions,
+    return {"requests": out, "skipped": len(unassembled)}
+
+
+def _assemble_scoring_request(
+    r: dict, subs: List[dict], already_scored: set
+) -> Optional[dict]:
+    """Build one request's scoring payload, or None if nothing is left to score.
+
+    Split out of ``_collect_scoring_requests_sync`` so one request's bad data
+    can be caught and skipped there without losing the rest of the feed.
+    Raises whatever the row shape provokes; the caller decides what that costs.
+    """
+    rid = r["request_id"]
+    submissions = []
+    for s in subs:
+        # Skip submissions this validator already scored — only the
+        # un-scored remainder needs work (see the per-submission
+        # tracking rationale above).
+        if s["submission_id"] in already_scored:
+            continue
+        # SAFETY: `leads` and `lead_ids` MUST come from the same
+        # `lead_data` list so they stay index-aligned — the validator
+        # zips them onto scores, and mismatched lengths silently corrupt
+        # consensus / winner selection.  Both projections are therefore
+        # built from ONE filtered list: entries that are not
+        # {"lead_id": ..., "data": ...} maps are dropped from both at once,
+        # which keeps the invariant while a stray non-map entry (the shape
+        # that used to raise AttributeError here) costs only itself.
+        lead_data = [
+            entry for entry in (s.get("lead_data") or [])
+            if isinstance(entry, dict)
+        ]
+        submissions.append({
+            "submission_id": s["submission_id"],
+            "miner_hotkey": s["miner_hotkey"],
+            "leads": [entry.get("data", {}) for entry in lead_data],
+            "lead_ids": [entry.get("lead_id", "") for entry in lead_data],
         })
 
-    return {"requests": out}
+    # Nothing left to score on this request for this validator — omit it
+    # (this is where the fully-scored case, previously handled by the
+    # request-level filter, now falls out).
+    if not submissions:
+        return None
+
+    print(f"   Returning {rid[:8]}... with {len(submissions)} submission(s), "
+          f"{sum(len(s['leads']) for s in submissions)} total leads")
+
+    # Merge the top-level required_attributes column into icp_details so
+    # the validator's `FulfillmentICP(**icp_details)` reconstruction sees
+    # it. required_attributes is a dedicated column (not inside icp_details
+    # JSONB), so omitting this merge meant Tier 2c never fired.
+    # icp_details is JSONB and has been seen holding non-map values; anything
+    # that is not a map is passed through as an empty ICP rather than raising.
+    stored_icp = r.get("icp_details")
+    icp_payload = dict(stored_icp) if isinstance(stored_icp, dict) else {}
+    if r.get("required_attributes"):
+        icp_payload["required_attributes"] = r["required_attributes"]
+
+    return {
+        "request_id": rid,
+        "icp": icp_payload,
+        "status": r["status"],
+        "submissions": submissions,
+    }
 
 
 @fulfillment_router.get("/scoring")

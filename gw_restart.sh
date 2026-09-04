@@ -217,6 +217,8 @@ GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
 GATEWAY_ANCESTRY_CHECKPOINT_LOG="${GATEWAY_ANCESTRY_CHECKPOINT_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.ancestry-checkpoint.log}"
 GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT="${GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.running-release.json}"
 GATEWAY_ANCESTRY_SAFE_EPOCH="${GATEWAY_ANCESTRY_SAFE_EPOCH:-}"
+GATEWAY_RESTART_EPOCH_REPORT=""
+GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH=""
 GATEWAY_WEIGHT_INPUT_REPAIR_REPORT=""
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
@@ -1128,6 +1130,38 @@ safe_epoch = int(report["ancestry_safe_epoch"])
 if epoch < 0 or safe_epoch < 0 or safe_epoch > epoch:
     raise SystemExit("weight storage preflight ancestry epoch is invalid")
 print(safe_epoch)
+PY
+}
+
+gateway_weight_preflight_epoch_from_restart_report() {
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - \
+    "$1" "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
+
+report = json.loads(sys.argv[1])
+if not isinstance(report, dict) or report.get("restart_allowed") is not True:
+    raise SystemExit("restart epoch gate report is invalid")
+
+schema_version = report.get("schema_version")
+if schema_version == "leadpoet.restart_epoch_gate.v1":
+    snapshot_doc = report.get("snapshot")
+elif schema_version == "leadpoet.restart_epoch_start.v1":
+    snapshot_doc = report.get("current_snapshot")
+else:
+    raise SystemExit("restart epoch gate report schema is unsupported")
+if not isinstance(snapshot_doc, dict):
+    raise SystemExit("restart epoch gate snapshot is missing")
+
+cutover_doc = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+if not isinstance(cutover_doc, dict):
+    raise SystemExit("stateful epoch cutover manifest is invalid")
+snapshot = SubnetEpochSnapshot.from_mapping(snapshot_doc)
+cutover = SubnetEpochCutover.from_mapping(cutover_doc)
+print(snapshot.settlement_epoch_id(cutover))
 PY
 }
 
@@ -3207,11 +3241,14 @@ if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
 else
   echo "Capturing the official subnet restart window before release acquisition"
 fi
-if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
-    "${RESTART_GATE_ARGS[@]}"; then
+if ! GATEWAY_RESTART_EPOCH_REPORT="$(
+    run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
+      "${RESTART_GATE_ARGS[@]}"
+  )"; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
+printf '%s\n' "$GATEWAY_RESTART_EPOCH_REPORT"
 
 echo "Snapshotting active legacy ancestry authority while release acquisition proceeds"
 if ! prepare_gateway_ancestry_checkpoint_bootstrap; then
@@ -3364,16 +3401,24 @@ tree = ast.parse(
     source_path.read_text(encoding="utf-8"),
     filename=str(source_path),
 )
-supported = any(
-    isinstance(node, ast.Call)
-    and isinstance(node.func, ast.Attribute)
-    and node.func.attr == "add_argument"
-    and bool(node.args)
-    and isinstance(node.args[0], ast.Constant)
-    and node.args[0].value == "--storage-read-preflight"
+supported_arguments = {
+    node.args[0].value
     for node in ast.walk(tree)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    )
+}
+required_arguments = {"--storage-read-preflight", "--epoch"}
+print(
+    "supported"
+    if required_arguments.issubset(supported_arguments)
+    else "unsupported"
 )
-print("supported" if supported else "unsupported")
 PY
   )"; then
   echo "ERROR: unable to inspect selected weight-readiness CLI capability" >&2
@@ -3382,6 +3427,14 @@ PY
 fi
 case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
   supported)
+    if ! GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH="$(
+      gateway_weight_preflight_epoch_from_restart_report \
+        "$GATEWAY_RESTART_EPOCH_REPORT"
+    )"; then
+      echo "ERROR: official restart epoch could not be mapped to durable storage" >&2
+      echo "Gateway remains running; production shutdown has not started." >&2
+      exit 1
+    fi
     if GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT="$(
       (
         set -a
@@ -3389,7 +3442,8 @@ case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
         set +a
         run_prepared_gateway_module \
           gateway.tee.verify_weight_submission_ready_v2 \
-          --storage-read-preflight
+          --storage-read-preflight \
+          --epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"
       )
     )"; then
       printf '%s\n' "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"

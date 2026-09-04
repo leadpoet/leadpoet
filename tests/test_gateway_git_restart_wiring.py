@@ -665,7 +665,7 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
     assert '. "$ENV_CLONE"' in preflight_block
     assert "ast.parse(" in preflight_block
     assert (
-        'node.args[0].value == "--storage-read-preflight"'
+        'required_arguments = {"--storage-read-preflight", "--epoch"}'
         in preflight_block
     )
     assert (
@@ -688,12 +688,86 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
         "          gateway.tee.verify_weight_submission_ready_v2"
         in preflight_block
     )
+    assert "gateway_weight_preflight_epoch_from_restart_report" in preflight_block
+    assert '--epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"' in preflight_block
     assert "gateway_ancestry_safe_epoch_from_report" in preflight_block
     assert 'report["ancestry_safe_epoch"]' in script
     assert "Pinned active ancestry bootstrap to proven-safe epoch" in preflight_block
     assert "Gateway remains running; production shutdown has not started." in (
         preflight_block
     )
+
+
+def test_gateway_weight_preflight_reuses_exact_restart_epoch() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_weight_preflight_epoch_from_restart_report",
+    )
+    manifest = json.loads(
+        (ROOT / "config/stateful-epoch-cutover-sn71.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    snapshot = {
+        "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": manifest["network_genesis_hash"],
+        "netuid": 71,
+        "head_kind": "exact",
+        "block_hash": "0x" + "1" * 64,
+        "current_block": 100,
+        "last_epoch_block": 95,
+        "pending_epoch_at": 0,
+        "subnet_epoch_index": 24020,
+        "tempo": 360,
+        "blocks_since_last_step": 5,
+        "observed_at": "2026-09-04T00:00:00+00:00",
+    }
+    report = {
+        "schema_version": "leadpoet.restart_epoch_gate.v1",
+        "restart_allowed": True,
+        "snapshot": snapshot,
+    }
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_PYTHON_BIN="$2"
+GATEWAY_STATEFUL_CUTOVER_MANIFEST="$3"
+gateway_weight_preflight_epoch_from_restart_report "$4"
+"""
+    arguments = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-restart-epoch-reuse-test",
+        str(ROOT),
+        sys.executable,
+        str(ROOT / "config/stateful-epoch-cutover-sn71.json"),
+        json.dumps(report, sort_keys=True),
+    ]
+
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "24073"
+
+    report["snapshot"]["network_genesis_hash"] = "0x" + "2" * 64
+    arguments[-1] = json.dumps(report, sort_keys=True)
+    rejected = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert rejected.returncode != 0
+    assert "snapshot and cutover genesis hashes differ" in rejected.stderr
 
 
 def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:

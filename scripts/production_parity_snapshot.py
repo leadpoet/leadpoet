@@ -71,6 +71,14 @@ _SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 _SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "scripts/178-research-lab-source-add-miner-status.sql"
 )
+_LAB_ARENA_MIGRATION = {
+    "path": "scripts/179-lab-arena-v1.sql",
+    "sequence": 179,
+    "sha256": (
+        "sha256:bd20a27b25055cc82a7a6b39593eed0e23cc0d9ac1142577e31a909312899eb7"
+    ),
+    "transaction_mode": "candidate-file",
+}
 _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS = (
     {
         "path": "scripts/72-research-lab-source-experiments.sql",
@@ -765,12 +773,16 @@ def _require_schema_only_source_add_acl_migrations(
                 "schema-only SOURCE_ADD ACL migration identity differs: "
                 f"{expected['path']}"
             )
-    if not candidate_migrations or dict(candidate_migrations[-1]) != dict(
-        _SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[-1]
-    ):
+    latest_source_add = dict(_SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS[-1])
+    observed = tuple(dict(item) for item in candidate_migrations)
+    allowed_tails = (
+        (latest_source_add,),
+        (latest_source_add, dict(_LAB_ARENA_MIGRATION)),
+    )
+    if not any(observed[-len(tail) :] == tail for tail in allowed_tails):
         raise ProductionParityError(
             "schema-only SOURCE_ADD ACL reconstruction is not bound to the "
-            "latest candidate migration"
+            "latest candidate migration or the exact Lab Arena migration"
         )
 
 

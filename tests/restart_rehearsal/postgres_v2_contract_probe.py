@@ -6820,10 +6820,6 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
         )
         applied.append(SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION)
-        # The Lab Arena tables, roles, and the signed reward-basis view the
-        # weight path measures (labarena.md 13.4).
-        database.apply_migration(scripts / LAB_ARENA_MIGRATION)
-        applied.append(LAB_ARENA_MIGRATION)
         source_add_provenance_origin_contract = json.loads(
             database.psql(
                 """
@@ -6935,6 +6931,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-178 SOURCE_ADD miner status contract differs"
             )
+        # The Lab Arena schema follows the existing migration 178.
+        database.apply_migration(scripts / LAB_ARENA_MIGRATION)
+        applied.append(LAB_ARENA_MIGRATION)
         routing_purpose_contract = json.loads(
             database.psql(
                 """

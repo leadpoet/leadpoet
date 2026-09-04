@@ -1030,6 +1030,10 @@ def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value)
 
 def test_schema_only_source_add_acl_is_exact_migration_bound():
     migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+    arena_migration = parity_snapshot._LAB_ARENA_MIGRATION
+    assert parity_snapshot.file_sha256(
+        ROOT / str(arena_migration["path"])
+    ) == arena_migration["sha256"]
     sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
         "utf-8"
     )
@@ -1111,9 +1115,19 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     ):
         parity_snapshot._schema_only_source_add_acl_sql(rewritten)
 
+    arena_extended = [
+        *migrations,
+        arena_migration,
+    ]
+    parity_snapshot._schema_only_source_add_acl_sql(arena_extended)
+
     extended = [
         *migrations,
-        {**migrations[-1], "path": "scripts/179-next.sql", "sequence": 179},
+        {
+            **migrations[-1],
+            "path": "scripts/179-next.sql",
+            "sequence": 179,
+        },
     ]
     with pytest.raises(
         ProductionParityError,

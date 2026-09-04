@@ -153,6 +153,7 @@ TERMINAL_CAUSES = (
     "model_timeout",
     "invalid_output",
     "budget_exhausted",
+    "credential_error",
     "model_error",
     "lease_expired",
     "worker_lost",
@@ -167,9 +168,9 @@ TERMINAL_CAUSES = (
 # gets one confirmation attempt (another validator when there is one); a
 # quota exhaustion does not, and a second failure stands as the zero.
 MODEL_CAUSED_TERMINAL_CAUSES = frozenset(
-    {"model_timeout", "invalid_output", "budget_exhausted", "model_error"}
+    {"model_timeout", "invalid_output", "budget_exhausted", "credential_error", "model_error"}
 )
-SCORE_TERMINAL_CAUSES = ("accepted", "judge_error", "judge_timeout")
+SCORE_TERMINAL_CAUSES = ("accepted", "credential_error", "judge_error", "judge_timeout")
 # Causes that infrastructure caused: a second attempt with a fresh per-ICP cap.
 INFRASTRUCTURE_TERMINAL_CAUSES = frozenset({"lease_expired", "worker_lost", "result_rejected", "provider_error", "judge_error", "judge_timeout"})
 
@@ -753,6 +754,11 @@ SUBMISSION_FINALIZE_BODY_FIELDS = (
     F("submission_id", "str", minimum=1, maximum=64),
     F("source_ref", "str", minimum=1, maximum=512),
     F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
+    F("credentials", "object", fields=(
+        F("openrouter_api_key", "str", minimum=16, maximum=4096),
+        F("openrouter_management_key", "str", minimum=16, maximum=4096),
+        F("deepline_api_key", "str", minimum=16, maximum=4096),
+    )),
 )
 
 
@@ -867,7 +873,7 @@ RUN_RESULT_FIELDS = (
     ),
     F("started_at", "iso8601"),
     F("finished_at", "iso8601"),
-    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "model_error", "provider_error", "judge_error", "judge_timeout")),
+    F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "credential_error", "model_error", "provider_error", "judge_error", "judge_timeout")),
 )
 
 

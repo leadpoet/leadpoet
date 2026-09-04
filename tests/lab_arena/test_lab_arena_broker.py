@@ -56,7 +56,7 @@ class FakeLedgerStore:
             existing = self.calls.get(call_identity)
             if existing:
                 return self._view(existing)
-            assert funding_source == "host"
+            assert funding_source in ("host", "miner_key")
             reason = None
             if self._consumed(provider) >= self.per_icp_quota:
                 reason = "per_icp_quota"
@@ -68,6 +68,7 @@ class FakeLedgerStore:
             if provider == "openrouter":
                 self.openrouter_capacity -= amount_microusd
             self.calls[call_identity] = {"kind": "reservation", "identity": call_identity, "amount": amount_microusd, "provider": provider}
+            self.calls[call_identity]["funding_source"] = funding_source
             return {"status": "reserved", "idempotent": False, "call_identity": call_identity, "amount_microusd": amount_microusd}
 
     def mark_dispatched(self, *, run_id, lease_token_hash, call_identity):

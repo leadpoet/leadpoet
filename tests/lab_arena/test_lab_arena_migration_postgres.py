@@ -8,6 +8,7 @@ via ``PsycopgTransport``; superuser access is used only to simulate time
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -130,6 +131,15 @@ def source_submission_doc(
     return document
 
 
+def encrypted_runtime_credentials(submission_id: str) -> Dict[str, str]:
+    return {
+        provider: base64.b64encode(
+            ("kms-ciphertext-%s-%s" % (provider, submission_id)).encode()
+        ).decode()
+        for provider in ("openrouter", "deepline")
+    }
+
+
 def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix: str, king_index=None) -> List[Dict[str, Any]]:
     participants = []
     for index in range(count):
@@ -142,8 +152,11 @@ def frozen_participants(store: ArenaStore, round_id: str, count: int, *, prefix:
             source_submission_doc(round_id, submission_id),
         )
         assert result["status"] == "registered"
-        result = store.update_submission(
-            round_id, submission_id, "uploading", "accepted", {}
+        result = store.accept_submission_with_credentials(
+            round_id,
+            submission_id,
+            miner,
+            encrypted_runtime_credentials(submission_id),
         )
         assert result["status"] == "ok", result
         result = store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": king_index == index})
@@ -431,14 +444,119 @@ def test_source_admission_has_no_cross_miner_digest_identity(store):
             miner,
             source_submission_doc(round_id, submission_id),
         )["status"] == "registered"
-        accepted = store.update_submission(
+        with pytest.raises(ArenaStoreError, match="lab_arena_submission_credentials_required"):
+            store.update_submission(
+                round_id,
+                submission_id,
+                "uploading",
+                "accepted",
+                {},
+            )
+        accepted = store.accept_submission_with_credentials(
             round_id,
             submission_id,
-            "uploading",
-            "accepted",
-            {},
+            miner,
+            encrypted_runtime_credentials(submission_id),
         )
         assert accepted["status"] == "ok"
+
+
+def test_credential_admission_is_owner_bound_and_retries_cannot_replace_rows(store):
+    round_id = "arena-2026-09-02-credentials"
+    submission_id = "credential-submission"
+    miner = hotkey("credential-owner")
+    wrong_miner = hotkey("credential-other")
+    assert store.create_round(
+        round_id, round_config(round_id, [hotkey("credential-runner")])
+    )["status"] == "created"
+    assert store.register_submission(
+        round_id,
+        submission_id,
+        miner,
+        source_submission_doc(round_id, submission_id),
+    )["status"] == "registered"
+    with pytest.raises(ArenaStoreError, match="lab_arena_submission_missing"):
+        store.accept_submission_with_credentials(
+            round_id,
+            submission_id,
+            wrong_miner,
+            encrypted_runtime_credentials(submission_id),
+        )
+    original = encrypted_runtime_credentials(submission_id)
+    original["openrouter"] = base64.b64encode(b"o" * 512).decode()
+    assert store.accept_submission_with_credentials(
+        round_id, submission_id, miner, original
+    )["status"] == "ok"
+    assert store.get_submission_credential(
+        submission_id, wrong_miner, "openrouter"
+    ) is None
+    first = store.get_submission_credential(submission_id, miner, "openrouter")
+    assert first is not None and first["ciphertext_b64"] == original["openrouter"]
+    replacement = encrypted_runtime_credentials(submission_id + "-replacement")
+    assert store.accept_submission_with_credentials(
+        round_id, submission_id, miner, replacement
+    )["status"] == "existing"
+    assert store.get_submission_credential(
+        submission_id, miner, "openrouter"
+    )["ciphertext_b64"] == original["openrouter"]
+    with pytest.raises(ArenaStoreError, match="lab_arena_credential_provider_invalid"):
+        store.get_submission_credential(submission_id, miner, "management")
+
+
+def test_credential_admission_rechecks_the_submission_cutoff(store, superuser):
+    round_id = "arena-2026-09-02-credcutoff"
+    submission_id = "cutoff-submission"
+    miner = hotkey("cutoff-owner")
+    assert store.create_round(
+        round_id, round_config(round_id, [hotkey("cutoff-runner")])
+    )["status"] == "created"
+    assert store.register_submission(
+        round_id,
+        submission_id,
+        miner,
+        source_submission_doc(round_id, submission_id),
+    )["status"] == "registered"
+    with superuser.cursor() as cursor:
+        cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_rounds_write_once")
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds SET configuration_doc = "
+            "jsonb_set(configuration_doc, '{schedule,submission_cutoff}', "
+            "to_jsonb('2000-01-02T00:00:00Z'::text)) WHERE round_id = %s",
+            (round_id,),
+        )
+        cursor.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_rounds_write_once")
+    result = store.accept_submission_with_credentials(
+        round_id,
+        submission_id,
+        miner,
+        encrypted_runtime_credentials(submission_id),
+    )
+    assert result["status"] == "window_closed"
+    assert store.get_submission(submission_id)["status"] == "uploading"
+    assert store.get_submission_credential(submission_id, miner, "openrouter") is None
+
+
+def test_credential_error_is_terminal_without_a_confirmation_attempt(store):
+    round_id = "arena-2026-09-02-cred"
+    runners, _parts = open_round(
+        store, round_id, participants=1, prefix="cred"
+    )
+    leased, token, _, _ = claim(store, round_id, runners[0])
+    result = complete(
+        store,
+        leased["run_id"],
+        hash_lease_token(token),
+        "credential_error",
+    )
+    assert result["status"] == "failed"
+    assert "confirmation_attempt" not in result
+    assignment_runs = [
+        row
+        for row in store.list_runs(round_id, stage=1, kind="execute")
+        if row["assignment_id"] == leased["assignment_id"]
+    ]
+    assert len(assignment_runs) == 1
+    assert assignment_runs[0]["terminal_cause"] == "credential_error"
 
 
 @pytest.mark.parametrize(
@@ -510,7 +628,7 @@ def test_append_only_ledger_and_write_once_rounds_resist_owner_level_mutation(st
     run_id = response["run_id"]
     lease_hash = hash_lease_token(token)
     identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={"q": 1})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={"q": 1})["status"] == "reserved"
     with superuser.cursor() as cursor:
         for statement in (
             "UPDATE public.lab_arena_ledger SET amount_microusd = 0",
@@ -783,8 +901,8 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
     identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("q1"))
     dispatched_identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("q2"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity)["status"] == "dispatched"
     # Wrong token is stale everywhere.
     wrong = hash_lease_token("other")
@@ -795,7 +913,7 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     assert store.expire_leases(round_id) == {"status": "ok", "expired": 0, "retried": 0}
     heads = {row["call_identity"]: row["entry_kind"] for row in store.list_ledger(run_id=run_id)}
     assert heads[identity] == "recovery" and heads[dispatched_identity] == "uncertain"
-    for call in (store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=sha("x"), operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={}),
+    for call in (store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=sha("x"), operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={}),
                  store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=dispatched_identity, actual_microusd=0, terminal_response={})):
         assert call["status"] == "stale"
     terminal_replay = complete(
@@ -815,13 +933,13 @@ def test_stale_lease_fails_provider_event_and_completion_and_expiry_retries_once
     lease2 = hash_lease_token(token2)
     heavy = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=0, operation_id="deepline.execute", request_hash=sha("heavy"))
     first_ok = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=1, operation_id="deepline.execute", request_hash=sha("first-ok"))
-    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=first_ok, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
-    refused = store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=first_ok, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    refused = store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
     assert refused["status"] == "refused" and refused["reason"] == "stage_quota"
     # Another provider's quota is independent, and the refusal is recorded and replayed.
     other = contracts.provider_call_identity(attempt=1, assignment_id=second["assignment_id"], icp_position=0, action_sequence=2, operation_id="scrapingdog.google", request_hash=sha("other"))
-    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
-    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "refused"
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=second["run_id"], lease_token_hash=lease2, call_identity=heavy, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "refused"
     # No third attempt after the second expires.
     expire_now(superuser, second["run_id"])
     assert store.expire_leases(round_id) == {"status": "ok", "expired": 1, "retried": 0}
@@ -836,7 +954,7 @@ def test_model_caused_failure_gets_one_confirmation_attempt_and_completion_requi
     response, token, _, _ = claim(store, round_id, runners[0], parallelism=8)
     run_id, lease_hash = response["run_id"], hash_lease_token(token)
     identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=0, operation_id="openrouter.chat", request_hash=sha("q"))
-    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="host", amount_microusd=9000, call_doc={})["status"] == "reserved"
+    assert store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=9000, call_doc={})["status"] == "reserved"
     blocked = complete(store, run_id, lease_hash, "model_timeout")
     assert blocked == {"status": "accounting_open", "open_calls": 1}
     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity)["status"] == "dispatched"
@@ -922,8 +1040,8 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
     for index, (response, lease_hash) in enumerate(leases):
         reserved = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=0, operation_id="deepline.execute", request_hash=sha("r%d" % index))
         dispatched = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=1, operation_id="deepline.execute", request_hash=sha("d%d" % index))
-        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=reserved, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
-        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
+        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=reserved, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+        assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
         assert setup.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=dispatched)["status"] == "dispatched"
     workers = [ArenaStore(PsycopgTransport(connect)) for _ in range(2)]
     closer = ArenaStore(PsycopgTransport(connect))
@@ -941,7 +1059,7 @@ def test_close_stage_races_hundred_operations_without_deadlock(connect):
         if kind == 0:
             result = claim(worker, round_id, runners[0], parallelism=100, ceiling=100)[0]
         elif kind == 1:
-            result = worker.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=sha("new%d" % index), operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})
+            result = worker.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=sha("new%d" % index), operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
         elif kind == 2:
             result = worker.mark_dispatched(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity_r)
         elif kind == 3:
@@ -1093,7 +1211,7 @@ def test_concurrent_reservations_never_exceed_the_call_quota(connect):
 
     def reserve(index: int):
         identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="deepline.execute", request_hash=sha("c%d" % index))
-        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})
+        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
         with lock:
             results.append((result["status"], result.get("reason")))
 
@@ -1104,11 +1222,11 @@ def test_concurrent_reservations_never_exceed_the_call_quota(connect):
     assert statuses.count("refused") == 38 and {reason for status, reason in results if status == "refused"} == {"per_icp_quota"}
     # Quotas are per provider: Scrapingdog calls on the same attempt are untouched by the Deepline quota.
     other = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=99, operation_id="scrapingdog.google", request_hash=sha("g"))
-    assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="host", amount_microusd=0, call_doc={})["status"] == "reserved"
-    # The host is the only valid funding source.
+    assert setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=other, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})["status"] == "reserved"
+    # A miner run cannot fall back to the organizer's host key.
     blocked = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=100, operation_id="scrapingdog.google", request_hash=sha("blocked"))
-    with pytest.raises(ArenaStoreError, match="lab_arena_reserve_input_invalid"):
-        setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=blocked, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="miner_key", amount_microusd=0, call_doc={})
+    with pytest.raises(ArenaStoreError, match="lab_arena_funding_source_mismatch"):
+        setup.reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=blocked, operation_id="scrapingdog.google", provider="scrapingdog", funding_source="host", amount_microusd=0, call_doc={})
     for instance in instances + [setup]:
         instance.close()
 
@@ -1141,7 +1259,7 @@ def test_openrouter_host_quota_dispatch_uniqueness_and_settlement_rules(connect)
 
     def reserve(index: int):
         identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=0, action_sequence=index, operation_id="openrouter.chat", request_hash=sha("o%d" % index))
-        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="host", amount_microusd=1_000_000, call_doc={})
+        result = instances[index % 2].reserve_call(run_id=response["run_id"], lease_token_hash=lease_hash, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1_000_000, call_doc={})
         with lock:
             results.append((index, result["status"]))
 
@@ -1215,7 +1333,7 @@ def test_openrouter_execution_money_cap_is_atomic_and_counts_each_call_once(conn
             call_identity=identity,
             operation_id="openrouter.chat",
             provider="openrouter",
-            funding_source="host",
+            funding_source="miner_key",
             amount_microusd=1_000_000,
             call_doc={},
         )
@@ -1238,7 +1356,7 @@ def test_openrouter_execution_money_cap_is_atomic_and_counts_each_call_once(conn
         call_identity=first_identity,
         operation_id="openrouter.chat",
         provider="openrouter",
-        funding_source="host",
+        funding_source="miner_key",
         amount_microusd=1_000_000,
         call_doc={},
     )
@@ -1288,7 +1406,7 @@ def test_openrouter_execution_money_cap_is_atomic_and_counts_each_call_once(conn
         call_identity=exact_identity,
         operation_id="openrouter.chat",
         provider="openrouter",
-        funding_source="host",
+        funding_source="miner_key",
         amount_microusd=750_000,
         call_doc={},
     )["status"] == "reserved"
@@ -1306,7 +1424,7 @@ def test_openrouter_execution_money_cap_is_atomic_and_counts_each_call_once(conn
         call_identity=over_identity,
         operation_id="openrouter.chat",
         provider="openrouter",
-        funding_source="host",
+        funding_source="miner_key",
         amount_microusd=1,
         call_doc={},
     )
@@ -1412,10 +1530,10 @@ def test_scoring_assignments_are_claimed_by_any_validator_and_close_to_judged(st
     response2, token2, _, _ = claim(store, round_id, scorer, parallelism=100, ceiling=100)
     lease2 = hash_lease_token(token2)
     identity = contracts.provider_call_identity(attempt=1, assignment_id=response2["assignment_id"], icp_position=response2["icp_position"], action_sequence=0, operation_id="openrouter.chat", request_hash=sha("judge"))
-    reserved = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="host", amount_microusd=1000, call_doc={})
+    reserved = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1000, call_doc={})
     assert reserved["status"] == "reserved"
     over_identity = contracts.provider_call_identity(attempt=1, assignment_id=response2["assignment_id"], icp_position=response2["icp_position"], action_sequence=1, operation_id="openrouter.chat", request_hash=sha("judge-over"))
-    over = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=over_identity, operation_id="openrouter.chat", provider="openrouter", funding_source="host", amount_microusd=1, call_doc={})
+    over = store.reserve_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=over_identity, operation_id="openrouter.chat", provider="openrouter", funding_source="miner_key", amount_microusd=1, call_doc={})
     assert over["status"] == "refused" and over["reason"] == "money_cap"
     assert store.mark_dispatched(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity)["status"] == "dispatched"
     assert store.settle_call(run_id=response2["run_id"], lease_token_hash=lease2, call_identity=identity, actual_microusd=400, terminal_response={"status": 200})["status"] == "settled"

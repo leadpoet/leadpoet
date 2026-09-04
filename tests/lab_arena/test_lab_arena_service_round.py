@@ -8,6 +8,7 @@ and the public verifier rebuilds it from the published bundle.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import gzip
 import io
@@ -21,7 +22,7 @@ from typing import Any, Dict, List
 import pytest
 from bittensor_wallet import Keypair
 
-from lab_arena import broker as br, contracts, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, verify
+from lab_arena import broker as br, contracts, runner as rn, runtime, scoring, service as svc, shim, signing, source_bundle, submission_runtime, verify
 
 SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image validators run
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
@@ -34,6 +35,7 @@ KEYS: Dict[str, Keypair] = {}
 CANARY_DEEPLINE_KEY = "dl_canary_" + "x" * 30
 CANARY_DOG_KEY = "dogcanary" + "y" * 30
 CANARY_OPENROUTER_KEY = "sk-or-v1-" + "o" * 40
+CANARY_OPENROUTER_MANAGEMENT_KEY = "sk-or-v1-" + "m" * 40
 CANARY_KEYS = {"deepline": CANARY_DEEPLINE_KEY, "scrapingdog": CANARY_DOG_KEY, "openrouter": CANARY_OPENROUTER_KEY}
 
 
@@ -48,8 +50,8 @@ def assert_canary_absent(harness, connect) -> None:
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
-            for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
-                for canary in CANARY_KEYS.values():
+            for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger", "lab_arena_submission_credentials"):
+                for canary in (*CANARY_KEYS.values(), CANARY_OPENROUTER_MANAGEMENT_KEY):
                     cursor.execute("SELECT count(*) FROM public.%s WHERE row_to_json(%s)::text LIKE %%s" % (table, table), ("%" + canary + "%",))
                     assert cursor.fetchone()[0] == 0, (table, canary)
     finally:
@@ -120,6 +122,24 @@ class FakeProviderTransport:
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')
         payload = json.dumps({"results": [{"url": "https://co1.example.com", "title": "Co"}]}).encode()
         return br.ProviderResponse(200, {"content-type": "application/json"}, payload)
+
+
+class FakeCredentialManager:
+    def validate_and_encrypt(self, credentials, *, submission_id, miner_hotkey):
+        assert credentials == {
+            "openrouter_api_key": CANARY_OPENROUTER_KEY,
+            "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
+            "deepline_api_key": CANARY_DEEPLINE_KEY,
+        }
+        assert submission_id and miner_hotkey
+        return {
+            provider: base64.b64encode(("kms-ciphertext-" + provider).encode()).decode()
+            for provider in ("openrouter", "deepline")
+        }
+
+    def runtime_key(self, row, provider):
+        assert row["provider"] == provider
+        return CANARY_KEYS[provider]
 
 
 PRICED_MODELS = ("openai/gpt-4o-mini", *sorted(set(scoring.DEFAULT_JUDGE_MODELS.values())))
@@ -372,7 +392,21 @@ class Harness:
         harness = self
 
         def broker_factory(service, round_row):
-            return br.Broker(store=store, key_for=lambda provider: CANARY_KEYS[provider], price_table=price_table(), judge_models=tuple(scoring.DEFAULT_JUDGE_MODELS.values()), transport=FakeProviderTransport(), clock=harness.clock)
+            payer = submission_runtime.SubmissionProviderKeys(
+                store=store,
+                credentials=service.config.credential_manager,
+                organizer_keys=CANARY_KEYS,
+            )
+            return br.Broker(
+                store=store,
+                key_for=lambda provider: CANARY_KEYS[provider],
+                credential_for=payer.credential_for,
+                funding_source_for=payer.funding_source_for,
+                price_table=price_table(),
+                judge_models=tuple(scoring.DEFAULT_JUDGE_MODELS.values()),
+                transport=FakeProviderTransport(),
+                clock=harness.clock,
+            )
 
         config = svc.ServiceConfig(
             mode="live", store=store, object_store=self.objects, signer=self.signer, chain=self.chain, verify_signature=wallet_verify,
@@ -391,6 +425,7 @@ class Harness:
             ),
             clock=self.clock,
             baseline_source_fetcher=lambda _url, _limit: self.baseline_source,
+            credential_manager=FakeCredentialManager(),
         )
         return svc.ArenaService(config)
 
@@ -430,6 +465,11 @@ class Harness:
                 "submission_id": target["submission_id"],
                 "source_ref": target["source_ref"],
                 "source_size_bytes": facts["source_size_bytes"],
+                "credentials": {
+                    "openrouter_api_key": CANARY_OPENROUTER_KEY,
+                    "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
+                    "deepline_api_key": CANARY_DEEPLINE_KEY,
+                },
             },
             timestamp=int(self.clock().timestamp()),
             sign_message=lambda message: miner.sign(message.encode()).hex(),
@@ -500,7 +540,7 @@ class Harness:
 def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     checks = harness.service.startup_checks()
-    assert checks["schema_version"] == 184
+    assert checks["schema_version"] == 185
     assert checks["database_identity"]["current_user"] == "lab_arena_service"
 
 
@@ -1053,6 +1093,11 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
             "submission_id": submission_id,
             "source_ref": target["source_ref"],
             "source_size_bytes": facts["source_size_bytes"],
+            "credentials": {
+                "openrouter_api_key": CANARY_OPENROUTER_KEY,
+                "openrouter_management_key": CANARY_OPENROUTER_MANAGEMENT_KEY,
+                "deepline_api_key": CANARY_DEEPLINE_KEY,
+            },
         },
         timestamp=int(harness.clock().timestamp()),
         sign_message=lambda message: miner.sign(message.encode()).hex(),

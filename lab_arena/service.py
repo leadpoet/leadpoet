@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, contracts, rewards, scoring, signing, source_bundle, verify
+from lab_arena import broker as broker_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -244,6 +244,7 @@ class ServiceConfig:
     network_name: str = "finney"
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
+    credential_manager: Optional[credentials_module.CredentialManager] = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -343,10 +344,14 @@ class ArenaService:
             schema = self._store._transport.rpc("lab_arena_schema_version_v1", {})
         except ArenaStoreError as exc:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
-        if schema != {
-            "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 184,
-        }:
+        expected_schema = "leadpoet.lab_arena.schema_version.v1"
+        schema_version = schema.get("version") if isinstance(schema, Mapping) else None
+        supported_versions = (184, 185) if self._config.credential_manager is None else (185,)
+        if (
+            not isinstance(schema, Mapping)
+            or schema.get("schema_version") != expected_schema
+            or schema_version not in supported_versions
+        ):
             raise ServiceError("arena_schema_version_invalid", 500)
         for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
             try:
@@ -385,7 +390,7 @@ class ArenaService:
         current = self.current_round()
         return {
             "database_identity": identity,
-            "schema_version": int(schema["version"]),
+            "schema_version": int(schema_version),
             "scoring_adapter_version": self._scorer_policy["scoring_adapter_version"],
             "current_round": current["round_id"] if current else None,
         }
@@ -673,7 +678,12 @@ class ArenaService:
             "expires_in_seconds": int(upload["expires_in_seconds"]),
         }
 
-    def _validate_uploaded_source(self, row: Mapping[str, Any]) -> None:
+    def _validate_uploaded_source(
+        self,
+        row: Mapping[str, Any],
+        *,
+        forbidden_values: Sequence[str] = (),
+    ) -> None:
         expected_size = int(row.get("source_size_bytes") or 0)
         source_ref = str(row.get("source_ref") or "")
         try:
@@ -685,7 +695,9 @@ class ArenaService:
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
         try:
-            source_bundle.validate_source_archive(payload)
+            source_bundle.validate_source_archive(
+                payload, forbidden_values=forbidden_values
+            )
         except source_bundle.SourceBundleError as exc:
             raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
 
@@ -712,11 +724,21 @@ class ArenaService:
             if body[field] != row.get(field):
                 raise ServiceError("submission_transport_mismatch", 409)
         if row.get("status") == "accepted":
-            return {"status": "accepted", "submission_id": submission_id}
+            if all(
+                self._store.get_submission_credential(
+                    submission_id, validated["hotkey"], provider
+                )
+                is not None
+                for provider in credentials_module.RUNTIME_PROVIDERS
+            ):
+                return {"status": "accepted", "submission_id": submission_id}
+            raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
             raise ServiceError("submission_not_uploading", 409)
         try:
-            self._validate_uploaded_source(row)
+            self._validate_uploaded_source(
+                row, forbidden_values=tuple(body["credentials"].values())
+            )
         except ServiceError as exc:
             if exc.code.startswith("submission_rejected:"):
                 self._store.update_submission(
@@ -727,10 +749,33 @@ class ArenaService:
                     {"rejection_rule": exc.code.split(":", 1)[1]},
                 )
             raise
-        result = self._store.update_submission(
-            str(round_row["round_id"]), submission_id, "uploading", "accepted"
+        manager = self._config.credential_manager
+        if manager is None:
+            raise ServiceError("credential_validation_unavailable", 503)
+        try:
+            encrypted_credentials = manager.validate_and_encrypt(
+                body["credentials"],
+                submission_id=submission_id,
+                miner_hotkey=validated["hotkey"],
+            )
+        except credentials_module.CredentialError as exc:
+            if exc.retryable:
+                raise ServiceError(exc.code, 503) from exc
+            self._store.update_submission(
+                str(round_row["round_id"]),
+                submission_id,
+                "uploading",
+                "rejected",
+                {"rejection_rule": exc.code},
+            )
+            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+        result = self._store.accept_submission_with_credentials(
+            str(round_row["round_id"]),
+            submission_id,
+            validated["hotkey"],
+            encrypted_credentials,
         )
-        if result.get("status") not in ("ok", "stale"):
+        if result.get("status") not in ("ok", "existing"):
             raise ServiceError("submission_finalize_failed", 500)
         return {"status": "accepted", "submission_id": submission_id}
 

@@ -1904,7 +1904,9 @@ def run_research_lab_source_add_flow(
         print(f"   Precheck: {result.get('precheck_status')}")
     for reason in (result.get("precheck_reasons") or [])[:8]:
         print(f"     - {reason}")
-    print("   Run the miner again and select option 4 to check this submission.")
+    print(
+        "   Run the miner again, select Submit SOURCE_ADD, then check your submissions."
+    )
     return True
 
 
@@ -2030,9 +2032,43 @@ def _run_research_lab_source_add_mode(config) -> int:
     return 1
 
 
+def _choose_primary_miner_mode(input_fn=input, output_fn=print) -> str:
+    """Return one of the two primary submission modes or SOURCE_ADD status."""
+
+    output_fn("")
+    output_fn("=" * 80)
+    output_fn(" LEADPOET MINER — SELECT ACTION")
+    output_fn("=" * 80)
+    output_fn("")
+    output_fn("  1. Submit SOURCE_ADD — Submit or check an API/source candidate")
+    output_fn("  2. Submit Model — Submit model source and run credentials (default)")
+    output_fn("")
+    selection = input_fn("Select action (1/2) [default: 2]: ").strip()
+    if selection != "1":
+        return "agent_competition"
+
+    output_fn("")
+    output_fn(" SOURCE_ADD")
+    output_fn("  1. Submit a new API/source candidate (default)")
+    output_fn("  2. Check my submissions, decisions, and rewards")
+    output_fn("")
+    source_add_selection = input_fn(
+        "Select SOURCE_ADD action (1/2) [default: 1]: "
+    ).strip()
+    if source_add_selection == "2":
+        return "research_lab_source_add_status"
+    return "research_lab_source_add"
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
+    parser.add_argument(
+        "--mode",
+        choices=("menu", "fulfillment"),
+        default="menu",
+        help="use fulfillment only for the legacy background worker",
+    )
     args = parser.parse_args()
 
     if args.logging_trace:
@@ -2153,32 +2189,13 @@ def main():
         else:
             bt.logging.info(f"✅ Contributor terms attestation valid (hash: {TERMS_VERSION_HASH[:16]}...)")
     
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # MINER MODE SELECTION
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    print("\n" + "="*80)
-    print(" LEADPOET MINER — SELECT MODE")
-    print("="*80)
-    print("")
-    print("  1. Agent Competition — Submit your model/agent source code (default)")
-    print("  2. Fulfillment — Poll for client ICP requests and fulfill them")
-    print("  3. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
-    print("  4. Check API Source Submissions — View your private SOURCE_ADD decisions and rewards")
-    print("")
-    print("  You can run multiple active modes simultaneously in separate terminals.")
-    print("")
-
-    mode_input = input("❓ Select mode (1/2/3/4) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3", "4"):
-        mode_input = "1"
-
-    miner_mode = {
-        "1": "agent_competition",
-        "2": "fulfillment",
-        "3": "research_lab_source_add",
-        "4": "research_lab_source_add_status",
-    }[mode_input]
+    # Fulfillment remains callable for existing operators, but it is not a
+    # primary submission action in the miner menu.
+    miner_mode = (
+        "fulfillment"
+        if args.mode == "fulfillment"
+        else _choose_primary_miner_mode()
+    )
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
     if miner_mode == "agent_competition":

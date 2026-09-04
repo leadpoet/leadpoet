@@ -840,6 +840,26 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
     assert api.provider_frames[0]["operation_id"] == "openrouter.chat"
 
 
+@pytest.mark.parametrize("scoring_run", [False, True])
+def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, scoring_run):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key", provider_status=401)
+            return document
+
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="provider error")
+    api = MinerKeyApi([scoring_lease() if scoring_run else lease()], code="miner_credentials_unavailable")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
 class FlakyCompletionApi(FakeApi):
     """The completion call fails a given number of times before the Arena accepts it."""
 

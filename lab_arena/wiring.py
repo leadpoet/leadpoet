@@ -17,9 +17,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, signing
 from lab_arena.api import create_app
+from lab_arena.credentials import CredentialManager
 from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
 from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
+from lab_arena.submission_runtime import SubmissionProviderKeys
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -217,6 +219,13 @@ def build_service_from_environment(mode: str):
         "scrapingdog": _required("LAB_ARENA_SCRAPINGDOG_API_KEY"),
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
+    credential_key_id = os.environ.get("LAB_ARENA_CREDENTIAL_KMS_KEY_ID", "").strip()
+    # A missing miner vault must not interrupt baseline rebenchmarking. New
+    # miner admission fails closed until the vault is configured.
+    credential_manager = CredentialManager(kms_key_id=credential_key_id) if credential_key_id else None
+    submission_keys = SubmissionProviderKeys(
+        store=store, credentials=credential_manager, organizer_keys=provider_keys
+    )
     runners = _runner_hotkeys_from_environment()
     # The trusted scorer remains an organizer-owned internal image. Miner and
     # baseline agents enter as source archives and need no registry account.
@@ -257,7 +266,12 @@ def build_service_from_environment(mode: str):
 
     def broker_factory(service: ArenaService, round_row: Mapping[str, Any]) -> broker_module.Broker:
         judge_models = sorted({str(model) for model in (service.scorer_policy.get("judge_models") or {}).values() if model})
-        return broker_module.Broker(store=store, key_for=key_for, judge_models=judge_models, price_table=price_table, transport=broker_module.HttpxProviderTransport())
+        return broker_module.Broker(
+            store=store, key_for=key_for, judge_models=judge_models,
+            price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+            credential_for=submission_keys.credential_for,
+            funding_source_for=submission_keys.funding_source_for,
+        )
 
     def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:
         del active_at  # the database function uses its own UTC statement time
@@ -268,6 +282,7 @@ def build_service_from_environment(mode: str):
         daily_icp_source=daily_icp_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
+        credential_manager=credential_manager,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
     )
     service = ArenaService(config)

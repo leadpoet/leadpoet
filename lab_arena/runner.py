@@ -903,7 +903,7 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
-            if call.get("error_code") in ("budget_refused", "budget_exhausted") or call.get("outcome") == "refused":
+            if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
         return None, document
 
@@ -1239,7 +1239,22 @@ class AssignmentExecutor:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
-            provider_infrastructure_failed = any(operations.provider_status_is_infrastructure(call.get("provider_status")) for call in state.calls)
+            miner_credentials_failed = any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") == "miner_credentials_unavailable"
+                for call in state.calls
+            )
+            provider_infrastructure_failed = any(
+                call.get("error_code") in ("broker_unavailable", "provider_unavailable")
+                or (
+                    operations.provider_status_is_infrastructure(call.get("provider_status"))
+                    and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
+                )
+                for call in state.calls
+            )
+            if miner_credentials_failed and terminal != "accepted":
+                terminal = "credential_error"
+                output_document = None
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None

@@ -187,7 +187,7 @@ def test_source_add_cli_accepts_only_complete_admission_receipt(
     output = capsys.readouterr().out
     assert "SOURCE_ADD submission received" in output
     assert f"Submission ID: {SUBMISSION_ID}" in output
-    assert "select option 4 to check this submission" in output
+    assert "select Submit SOURCE_ADD, then check your submissions" in output
 
 
 @pytest.mark.parametrize(

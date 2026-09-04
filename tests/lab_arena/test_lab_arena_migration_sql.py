@@ -18,6 +18,9 @@ SOURCE_SQL = (SCRIPTS / "181-lab-arena-source-submissions.sql").read_text(
 SOURCE_EXECUTION_SQL = (SCRIPTS / "182-lab-arena-source-execution.sql").read_text(
     encoding="utf-8"
 )
+CREDENTIAL_SQL = (SCRIPTS / "185-lab-arena-miner-credentials.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -61,7 +64,8 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
     assert numbered[182] == ["182-lab-arena-source-execution.sql"]
     assert numbered[183] == ["183-lab-arena-miner-reward-basis.sql"]
     assert numbered[184] == ["184-lab-arena-scoring-failure-isolation.sql"]
-    assert max(numbered) == 184, "184 must sit directly above the production frontier"
+    assert numbered[185] == ["185-lab-arena-miner-credentials.sql"]
+    assert max(numbered) == 185, "185 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
@@ -126,7 +130,7 @@ def test_state_vocabularies_match_contracts():
     for outcome in contracts.KING_OUTCOMES:
         assert f"'{outcome}'" in SQL
     for cause in contracts.TERMINAL_CAUSES:
-        assert f"'{cause}'" in SQL
+        assert f"'{cause}'" in SQL + CREDENTIAL_SQL
     for kind in contracts.LEDGER_ENTRY_KINDS:
         assert f"'{kind}'" in SQL
 
@@ -149,6 +153,16 @@ def test_unique_indexes_enforce_plan_invariants():
     assert "'lab_arena.runner:' || p_round_id || ':' || p_runner_hotkey" in SQL
     assert "DROP INDEX IF EXISTS public.lab_arena_submissions_image_digest_uq" in SQL
     assert "CREATE UNIQUE INDEX IF NOT EXISTS lab_arena_submissions_image_digest_uq" not in SQL
+
+
+def test_miner_credentials_are_ciphertext_only_and_miner_calls_cannot_use_host_funds():
+    assert "CREATE TABLE IF NOT EXISTS public.lab_arena_submission_credentials" in CREDENTIAL_SQL
+    assert "ciphertext BYTEA NOT NULL" in CREDENTIAL_SQL
+    assert "openrouter_management" not in CREDENTIAL_SQL
+    assert "funding_source IN ('host', 'miner_key')" in CREDENTIAL_SQL
+    assert "lab_arena_funding_source_mismatch" in CREDENTIAL_SQL
+    assert "lab_arena_submission_credentials_required" in CREDENTIAL_SQL
+    assert "pg_catalog.replace(" in CREDENTIAL_SQL
 
 
 def test_attempt_completion_stores_only_the_result_and_output():

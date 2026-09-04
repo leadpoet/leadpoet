@@ -1,13 +1,42 @@
+import ast
+import getpass
 from pathlib import Path
+import warnings
 
 import pytest
 
+from lab_arena import miner_submit
 from lab_arena import contracts, source_bundle
-from lab_arena.miner_submit import MinerSubmissionError, submit_agent_source, validate_agent_source
+from lab_arena.miner_submit import (
+    MinerSubmissionError,
+    prompt_submission_credentials,
+    submit_agent_source,
+    validate_agent_source,
+)
 
 
 HOTKEY = "5" * 48
 NOW = 1_788_480_000
+CREDENTIALS = {
+    "openrouter_api_key": "openrouter-execution-secret",
+    "openrouter_management_key": "openrouter-management-secret",
+    "deepline_api_key": "deepline-execution-secret",
+}
+
+
+def _load_neuron_function(name: str):
+    source_path = Path(__file__).resolve().parents[2] / "neurons" / "miner.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    node = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == name
+    )
+    module = ast.Module(body=[node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {}
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace[name]
 
 
 class _Response:
@@ -30,8 +59,9 @@ class _Session:
         assert url == "https://arena.example/arena/v1/current" and timeout == 30
         return _Response(200, self.current)
 
-    def post(self, url, json, timeout):
-        self.posts.append((url, json, timeout))
+    def post(self, url, json, timeout, allow_redirects):
+        assert allow_redirects is False
+        self.posts.append((url, json, timeout, allow_redirects))
         if url.endswith("/presign"):
             return _Response(
                 200,
@@ -109,6 +139,7 @@ def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path)
         source_dir=source,
         api_base_url="https://arena.example/",
         keypair=_Keypair(),
+        credentials=CREDENTIALS,
         session=session,
         now=lambda: NOW,
     )
@@ -141,7 +172,151 @@ def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path)
         "source_ref": "arena/arena-2026-09-04/sources/%s.tar.gz"
         % result["submission_id"],
         "source_size_bytes": len(archive),
+        "credentials": CREDENTIALS,
     }
+    assert all(secret.encode() not in archive for secret in CREDENTIALS.values())
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    (
+        None,
+        {},
+        {
+            "openrouter_api_key": "value",
+            "openrouter_management_key": "value",
+        },
+        {
+            "openrouter_api_key": "value",
+            "openrouter_management_key": "value",
+            "deepline_api_key": "",
+        },
+        {**CREDENTIALS, "deepline_api_key": " deepline-execution-secret"},
+        {**CREDENTIALS, "deepline_api_key": "x" * 4097},
+        {**CREDENTIALS, "unexpected_key": "value"},
+    ),
+)
+def test_invalid_credentials_fail_before_network(tmp_path, credentials):
+    source = _agent_source(tmp_path)
+
+    class _NoNetwork:
+        def get(self, *_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("network call attempted")
+
+    with pytest.raises(MinerSubmissionError) as caught:
+        submit_agent_source(
+            source_dir=source,
+            api_base_url="https://arena.example",
+            keypair=_Keypair(),
+            credentials=credentials,
+            session=_NoNetwork(),
+        )
+    assert caught.value.code == "submission_credentials_required"
+
+
+def test_credential_prompts_are_masked_and_environment_values_skip_prompts():
+    prompts = []
+    prompted = prompt_submission_credentials(
+        environ={},
+        getpass_fn=lambda prompt: prompts.append(prompt) or "masked-secret-value",
+    )
+    assert prompted == {name: "masked-secret-value" for name in CREDENTIALS}
+    assert prompts == [
+        "OpenRouter API key: ",
+        "OpenRouter management key: ",
+        "Deepline API key: ",
+    ]
+
+    def fail_prompt(_prompt):  # pragma: no cover - must not run
+        raise AssertionError("environment credentials should not prompt")
+
+    assert prompt_submission_credentials(
+        environ={
+            "OPENROUTER_API_KEY": CREDENTIALS["openrouter_api_key"],
+            "OPENROUTER_MANAGEMENT_KEY": CREDENTIALS[
+                "openrouter_management_key"
+            ],
+            "DEEPLINE_API_KEY": CREDENTIALS["deepline_api_key"],
+        },
+        getpass_fn=fail_prompt,
+    ) == CREDENTIALS
+
+
+def test_getpass_warning_fails_instead_of_echoing_credentials():
+    def unsafe_prompt(_prompt):
+        warnings.warn("terminal unavailable", getpass.GetPassWarning)
+        raise AssertionError("warning must stop the prompt")  # pragma: no cover
+
+    with pytest.raises(MinerSubmissionError) as caught:
+        prompt_submission_credentials(environ={}, getpass_fn=unsafe_prompt)
+    assert caught.value.code == "credential_prompt_unavailable"
+
+
+def test_interactive_submission_keeps_credentials_out_of_input_and_output(monkeypatch):
+    ordinary_prompts = []
+    masked_prompts = []
+    output = []
+    submitted = {}
+    answers = iter(("./agent", "yes"))
+    secrets = iter(CREDENTIALS.values())
+
+    def fake_submit(**kwargs):
+        submitted.update(kwargs)
+        return {
+            "status": "accepted",
+            "submission_id": "sub-0123456789abcdef0123456789abcdef",
+            "round_id": "arena-2026-09-04",
+        }
+
+    monkeypatch.setattr(miner_submit, "submit_agent_source", fake_submit)
+    assert miner_submit.run_interactive_submission(
+        _Keypair(),
+        "https://arena.example",
+        input_fn=lambda prompt: ordinary_prompts.append(prompt) or next(answers),
+        output_fn=output.append,
+        getpass_fn=lambda prompt: masked_prompts.append(prompt) or next(secrets),
+        environ={},
+    )
+    assert len(ordinary_prompts) == 2
+    assert len(masked_prompts) == 3
+    assert submitted["credentials"] == CREDENTIALS
+    rendered = "\n".join(output + ordinary_prompts + masked_prompts)
+    assert all(secret not in rendered for secret in CREDENTIALS.values())
+
+
+def test_server_error_text_is_not_propagated():
+    secret = "server-echoed-secret"
+    response = _Response(
+        500,
+        {"detail": {"credentials": {"openrouter_api_key": secret}}},
+    )
+    with pytest.raises(MinerSubmissionError) as caught:
+        miner_submit._json_response(response, "submission_finalize")
+    assert caught.value.code == "arena_request_failed"
+    assert secret not in str(caught.value)
+
+
+def test_cli_rejects_submitted_credentials_embedded_in_source_before_upload(tmp_path):
+    source = _agent_source(tmp_path)
+    (source / "agent.py").write_text(
+        "KEY = %r\n" % CREDENTIALS["deepline_api_key"],
+        encoding="utf-8",
+    )
+    session = _Session(
+        {"open_round": {"round_id": "arena-2026-09-04", "status": "open"}}
+    )
+    with pytest.raises(MinerSubmissionError) as caught:
+        submit_agent_source(
+            source_dir=source,
+            api_base_url="https://arena.example",
+            keypair=_Keypair(),
+            credentials=CREDENTIALS,
+            session=session,
+            now=lambda: NOW,
+        )
+    assert caught.value.code == "source_contains_credentials"
+    assert session.posts == []
+    assert session.uploads == []
 
 
 def test_closed_round_stops_before_archive_or_upload(tmp_path):
@@ -152,6 +327,7 @@ def test_closed_round_stops_before_archive_or_upload(tmp_path):
             source_dir=source,
             api_base_url="https://arena.example",
             keypair=_Keypair(),
+            credentials=CREDENTIALS,
             session=session,
         )
     assert caught.value.code == "submission_window_closed"
@@ -167,6 +343,7 @@ def test_retry_can_finalize_when_the_write_once_upload_already_exists(tmp_path):
         source_dir=_agent_source(tmp_path),
         api_base_url="https://arena.example",
         keypair=_Keypair(),
+        credentials=CREDENTIALS,
         session=session,
         now=lambda: NOW,
     )
@@ -174,13 +351,42 @@ def test_retry_can_finalize_when_the_write_once_upload_already_exists(tmp_path):
     assert len(session.posts) == 2
 
 
-def test_miner_menu_has_agent_submission_and_no_autoresearch_choice():
+def test_miner_menu_has_two_primary_submission_actions():
     miner = (Path(__file__).resolve().parents[2] / "neurons" / "miner.py").read_text(
         encoding="utf-8"
     )
-    menu = miner.split("# MINER MODE SELECTION", 1)[1].split(
-        "# Create miner and run it properly", 1
+    menu = miner.split("def _choose_primary_miner_mode", 1)[1].split(
+        "def main", 1
     )[0]
-    assert "Agent Competition" in menu
-    assert "Submit your model/agent source code" in menu
+    assert "Submit SOURCE_ADD" in menu
+    assert "Submit Model" in menu
+    assert "Fulfillment —" not in menu
+    assert "Check my submissions" in menu
     assert "Auto Research" not in menu
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    (
+        (("",), "agent_competition"),
+        (("2",), "agent_competition"),
+        (("1", ""), "research_lab_source_add"),
+        (("1", "1"), "research_lab_source_add"),
+        (("1", "2"), "research_lab_source_add_status"),
+    ),
+)
+def test_miner_menu_routes_two_primary_actions_and_source_add_status(
+    answers,
+    expected,
+):
+    choose = _load_neuron_function("_choose_primary_miner_mode")
+    values = iter(answers)
+    output = []
+    assert choose(lambda _prompt: next(values), output.append) == expected
+    primary_lines = [
+        line for line in output if line.startswith("  1.") or line.startswith("  2.")
+    ][:2]
+    assert primary_lines == [
+        "  1. Submit SOURCE_ADD — Submit or check an API/source candidate",
+        "  2. Submit Model — Submit model source and run credentials (default)",
+    ]

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import getpass
 import ipaddress
 import os
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -21,6 +23,81 @@ class MinerSubmissionError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
         super().__init__(detail or code)
+
+
+SUBMISSION_CREDENTIAL_ENV_VARS = {
+    "openrouter_api_key": "OPENROUTER_API_KEY",
+    "openrouter_management_key": "OPENROUTER_MANAGEMENT_KEY",
+    "deepline_api_key": "DEEPLINE_API_KEY",
+}
+SUBMISSION_CREDENTIAL_MIN_LENGTH = 16
+SUBMISSION_CREDENTIAL_MAX_LENGTH = 4096
+
+
+def validate_submission_credentials(
+    credentials: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Return the exact, non-empty credential mapping required for a model run."""
+
+    if not isinstance(credentials, Mapping):
+        raise MinerSubmissionError("submission_credentials_required")
+    if set(credentials) != set(SUBMISSION_CREDENTIAL_ENV_VARS):
+        raise MinerSubmissionError("submission_credentials_required")
+    normalized: dict[str, str] = {}
+    for name in SUBMISSION_CREDENTIAL_ENV_VARS:
+        value = credentials.get(name)
+        if (
+            not isinstance(value, str)
+            or value != value.strip()
+            or not SUBMISSION_CREDENTIAL_MIN_LENGTH
+            <= len(value)
+            <= SUBMISSION_CREDENTIAL_MAX_LENGTH
+        ):
+            raise MinerSubmissionError("submission_credentials_required")
+        normalized[name] = value
+    return normalized
+
+
+def submission_credentials_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Load all model credentials from environment variables or fail closed."""
+
+    values = os.environ if environ is None else environ
+    return validate_submission_credentials(
+        {
+            name: values.get(environment_name, "")
+            for name, environment_name in SUBMISSION_CREDENTIAL_ENV_VARS.items()
+        }
+    )
+
+
+def prompt_submission_credentials(
+    *,
+    environ: Mapping[str, str] | None = None,
+    getpass_fn: Callable[[str], str] = getpass.getpass,
+) -> dict[str, str]:
+    """Read credentials from the environment or masked interactive prompts."""
+
+    values = os.environ if environ is None else environ
+    credentials: dict[str, str] = {}
+    prompts = {
+        "openrouter_api_key": "OpenRouter API key: ",
+        "openrouter_management_key": "OpenRouter management key: ",
+        "deepline_api_key": "Deepline API key: ",
+    }
+    for name, environment_name in SUBMISSION_CREDENTIAL_ENV_VARS.items():
+        value = values.get(environment_name, "")
+        if value:
+            credentials[name] = value
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                credentials[name] = getpass_fn(prompts[name])
+        except (getpass.GetPassWarning, EOFError) as exc:
+            raise MinerSubmissionError("credential_prompt_unavailable") from exc
+    return validate_submission_credentials(credentials)
 
 
 def validate_agent_source(source_dir: str | Path) -> Path:
@@ -58,8 +135,9 @@ def _json_response(response: Any, operation: str) -> Mapping[str, Any]:
     if not isinstance(document, Mapping):
         raise MinerSubmissionError("arena_response_invalid", operation)
     if not 200 <= int(response.status_code) < 300:
-        reason = str(document.get("code") or document.get("detail") or "request_failed")[:120]
-        raise MinerSubmissionError("arena_request_failed", reason)
+        # The gateway can include submitted credentials in a framework error.
+        # Keep all server-controlled response text out of local errors and logs.
+        raise MinerSubmissionError("arena_request_failed", operation)
     return document
 
 
@@ -126,11 +204,13 @@ def submit_agent_source(
     source_dir: str | Path,
     api_base_url: str,
     keypair: Any,
+    credentials: Mapping[str, str] | None = None,
     session: Any = requests,
     now: Callable[[], float] = time.time,
 ) -> Mapping[str, Any]:
     """Archive, upload, and finalize one local agent fork."""
 
+    submission_credentials = validate_submission_credentials(credentials)
     source = validate_agent_source(source_dir)
     base = _api_base_url(api_base_url)
     round_id = find_open_round(base, session=session)
@@ -140,8 +220,14 @@ def submit_agent_source(
     try:
         try:
             descriptor = source_bundle.write_source_archive(source, archive_path)
+            source_bundle.validate_source_archive(
+                archive_path.read_bytes(),
+                forbidden_values=submission_credentials.values(),
+            )
         except source_bundle.SourceBundleError as exc:
             raise MinerSubmissionError(exc.code) from exc
+        except OSError as exc:
+            raise MinerSubmissionError("source_archive_failed") from exc
         presign_body = {**descriptor, "consent": {"public_rerun": True}}
         contracts.validate_submission_presign_body(presign_body)
         presign = _signed_request(
@@ -153,7 +239,10 @@ def submit_agent_source(
         )
         try:
             response = session.post(
-                base + "/arena/v1/submissions/presign", json=presign, timeout=60
+                base + "/arena/v1/submissions/presign",
+                json=presign,
+                timeout=60,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
@@ -164,6 +253,7 @@ def submit_agent_source(
             "submission_id": submission_id,
             "source_ref": source_ref,
             **descriptor,
+            "credentials": submission_credentials,
         }
         try:
             contracts.validate_submission_finalize_body(finalize_body)
@@ -185,14 +275,19 @@ def submit_agent_source(
                 "%s/arena/v1/submissions/%s/finalize" % (base, submission_id),
                 json=finalize,
                 timeout=60,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
-        result = dict(_json_response(response, "submission_finalize"))
+        result = _json_response(response, "submission_finalize")
         if result.get("status") != "accepted" or result.get("submission_id") != submission_id:
             raise MinerSubmissionError("arena_response_invalid", "submission_finalize")
-        result["round_id"] = round_id
-        return result
+        # Return a minimal submission result. Never propagate an echoed request body.
+        return {
+            "status": "accepted",
+            "submission_id": submission_id,
+            "round_id": round_id,
+        }
     finally:
         archive_path.unlink(missing_ok=True)
 
@@ -203,13 +298,17 @@ def run_interactive_submission(
     *,
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
+    getpass_fn: Callable[[str], str] = getpass.getpass,
+    environ: Mapping[str, str] | None = None,
 ) -> bool:
-    """Ask only for the agent source directory, then submit it."""
+    """Collect local source and masked credentials, then submit the model."""
 
     output_fn("")
-    output_fn("AGENT COMPETITION SUBMISSION")
+    output_fn("MODEL SUBMISSION")
     output_fn("Your source must contain harness.py with synchronous run_icp(icp).")
-    output_fn("The Arena supplies provider credentials. Do not put API keys in your source.")
+    output_fn("Do not put API keys in your source; credentials are sent separately.")
+    output_fn("The OpenRouter API key and Deepline API key pay for model execution and scoring.")
+    output_fn("The OpenRouter management key is used by the gateway only.")
     source_dir = input_fn("Agent source directory: ").strip()
     if not source_dir:
         output_fn("Submission cancelled: a source directory is required.")
@@ -218,10 +317,15 @@ def run_interactive_submission(
         output_fn("Submission cancelled.")
         return False
     try:
+        credentials = prompt_submission_credentials(
+            environ=environ,
+            getpass_fn=getpass_fn,
+        )
         result = submit_agent_source(
             source_dir=source_dir,
             api_base_url=api_base_url,
             keypair=keypair,
+            credentials=credentials,
         )
     except MinerSubmissionError as exc:
         output_fn("Submission failed: %s" % exc.code)

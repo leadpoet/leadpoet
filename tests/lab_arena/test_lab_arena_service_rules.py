@@ -762,6 +762,11 @@ def test_finalize_rejects_an_invalid_source_archive():
                 "submission_id": row["submission_id"],
                 "source_ref": row["source_ref"],
                 "source_size_bytes": row["source_size_bytes"],
+                "credentials": {
+                    "openrouter_api_key": "sk-or-v1-" + "a" * 32,
+                    "openrouter_management_key": "sk-or-v1-" + "b" * 32,
+                    "deepline_api_key": "deepline-" + "c" * 32,
+                },
             },
         },
         {

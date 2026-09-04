@@ -1904,7 +1904,7 @@ def run_research_lab_source_add_flow(
         print(f"   Precheck: {result.get('precheck_status')}")
     for reason in (result.get("precheck_reasons") or [])[:8]:
         print(f"     - {reason}")
-    print("   Run the miner again and select option 5 to check this submission.")
+    print("   Run the miner again and select option 4 to check this submission.")
     return True
 
 

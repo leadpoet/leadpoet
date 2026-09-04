@@ -3131,6 +3131,13 @@ def test_bootstrap_uses_the_canonical_paired_coordination_deadline():
     )
 
 
+def test_candidate_bootstrap_protected_source_binding_matches_current_source():
+    # Bootstrap calls this same fixed-purpose verifier before it mutates or
+    # waits.  Use the real candidate manifest so a changed protected helper
+    # cannot pass tests with only placeholder commitments.
+    maintenance._verify_protected_source()
+
+
 def test_candidate_runtime_rejects_missing_source_add_intake_field(
     monkeypatch: pytest.MonkeyPatch,
 ):

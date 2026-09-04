@@ -62,6 +62,7 @@ RUNTIME_TABLES = frozenset(
         "research_lab_source_add_reward_current",
         "research_lab_stateful_subnet_epoch_cutover_state_v1",
         "research_lab_stateful_subnet_epoch_cutovers_v1",
+        "lab_arena_reward_basis_v1",
         "transparency_log",
         "validation_evidence_private",
     }
@@ -665,6 +666,8 @@ def _migration_schema_contract(
             "175-research-lab-source-add-provenance-leg1.sql",
             "176-research-lab-source-add-provenance-origin-repair.sql",
             "177-research-lab-source-add-provenance-authority-acl.sql",
+            "178-research-lab-source-add-miner-status.sql",
+            "179-lab-arena-v1.sql",
         ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -746,6 +749,7 @@ def _migration_schema_contract(
         "research_lab_candidate_waterfall_receipts",
         "research_lab_candidate_waterfall_metrics",
         "research_lab_source_add_provenance_leg1_authority_v1",
+        "research_lab_source_add_miner_status_v1",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -780,6 +784,8 @@ def _migration_schema_contract(
         "research_lab_source_add_post_accept_leg1_contract_v2",
         "research_lab_source_add_post_accept_leg1_contract_v3",
         "research_lab_source_add_post_accept_leg1_contract_v4",
+        "research_lab_source_add_miner_status_contract_v1",
+        "research_lab_source_add_miner_status_page_v1",
         "research_lab_source_add_configure_probe_v3",
         "research_lab_source_add_enqueue_leg1_after_provenance_v1",
         "research_lab_source_add_enqueue_provision_smoke_v2",
@@ -1269,6 +1275,24 @@ class LocalPostgRESTState:
         self.source_add_provenance_origin_repair_function_authority = (
             _candidate_provenance_origin_repair_function_authority(
                 source_root
+            )
+        )
+        self.source_add_miner_status_view_authority = (
+            _candidate_source_add_leg1_authority(
+                source_root,
+                "SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256",
+            )
+        )
+        self.source_add_miner_status_page_authority = (
+            _candidate_source_add_leg1_authority(
+                source_root,
+                "SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256",
+            )
+        )
+        self.source_add_miner_status_contract_authority = (
+            _candidate_source_add_leg1_authority(
+                source_root,
+                "SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256",
             )
         )
         self.durable_revision = 0
@@ -4155,6 +4179,63 @@ class Handler(BaseHTTPRequestHandler):
                 response = _source_add_claim_control_contract_v2(
                     self.server.state.source_root
                 )
+            elif name == (
+                "research_lab_source_add_miner_status_contract_v1"
+            ):
+                if body not in ({}, None):
+                    raise ValueError(
+                        "SOURCE_ADD miner-status contract body is invalid"
+                    )
+                response = {
+                    "schema_version": (
+                        "leadpoet.source_add_miner_status_contract.v1"
+                    ),
+                    "view_name": "research_lab_source_add_miner_status_v1",
+                    "page_rpc": "research_lab_source_add_miner_status_page_v1",
+                    "page_signature": "text,text,integer",
+                    "view_columns": [
+                        "schema_version",
+                        "submission_id",
+                        "miner_hotkey",
+                        "source_name",
+                        "submitted_at",
+                        "updated_at",
+                        "decision_status",
+                        "decision_reason_code",
+                        "decision_reason",
+                        "reward_status",
+                        "alpha_percent",
+                        "reward_epochs",
+                        "start_epoch",
+                        "end_epoch",
+                    ],
+                    "view_security_invoker": True,
+                    "view_security_barrier": True,
+                    "page_security_invoker": True,
+                    "page_stable": True,
+                    "view_authority_sha256": (
+                        self.server.state.source_add_miner_status_view_authority
+                    ),
+                    "page_authority_sha256": (
+                        self.server.state.source_add_miner_status_page_authority
+                    ),
+                    "contract_authority_sha256": (
+                        self.server.state.source_add_miner_status_contract_authority
+                    ),
+                    "permissions": {
+                        "view_service_role_select": True,
+                        "view_anon_select": False,
+                        "view_authenticated_select": False,
+                        "view_public_select": False,
+                        "page_service_role_callable": True,
+                        "page_anon_callable": False,
+                        "page_authenticated_callable": False,
+                        "page_public_callable": False,
+                        "contract_service_role_callable": True,
+                        "contract_anon_callable": False,
+                        "contract_authenticated_callable": False,
+                    },
+                }
             elif name == "persist_research_lab_ancestry_checkpoint_v2":
                 response = self.server.state.persist_ancestry_checkpoint(body)
                 self.server.state.record(

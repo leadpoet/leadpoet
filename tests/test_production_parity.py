@@ -1030,6 +1030,10 @@ def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value)
 
 def test_schema_only_source_add_acl_is_exact_migration_bound():
     migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
+    arena_migration = parity_snapshot._LAB_ARENA_MIGRATION
+    assert parity_snapshot.file_sha256(
+        ROOT / str(arena_migration["path"])
+    ) == arena_migration["sha256"]
     sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
         "utf-8"
     )
@@ -1058,6 +1062,10 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
         )
     )
     assert provenance_authority_acl_migration["sha256"] in sql
+    miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/178-research-lab-source-add-miner-status.sql"
+    )
+    assert miner_status_migration["sha256"] in sql
     assert (
         "public.research_lab_source_add_admit_v3"
         "(jsonb,text,text,text,text,text,integer,integer,integer,integer)"
@@ -1068,6 +1076,21 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     assert "public.enforce_research_lab_source_add_leg1_obligation_v2()" in sql
     assert "public.research_lab_source_add_finalize_leg1_v4" in sql
     assert "public.research_lab_source_add_post_accept_leg1_contract_v4()" in sql
+    assert (
+        "public.research_lab_source_add_miner_status_page_v1"
+        "(text,text,integer)"
+    ) in sql
+    assert "public.research_lab_source_add_miner_status_contract_v1()" in sql
+    assert (
+        "REVOKE ALL ON TABLE public.research_lab_source_add_miner_status_v1"
+        in sql
+    )
+    assert (
+        "GRANT SELECT ON TABLE public.research_lab_source_add_miner_status_v1"
+        in sql
+    )
+    assert "'security_invoker=true', 'security_barrier=true'" in sql
+    assert "miner_status_view_acl_bound" in sql
     assert "provenance_leg1_trigger_authority_bound" in sql
     assert "provenance_leg1_view_authority_bound" in sql
     assert "provenance_origin_repair_authority_bound" in sql
@@ -1077,7 +1100,7 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     assert "pg_catalog.aclexplode" in sql
     assert "FROM PUBLIC, anon, authenticated, service_role" in sql
     assert "TO PUBLIC" in sql
-    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 77
+    assert len(parity_snapshot._schema_only_source_add_acl_expectations()) == 79
 
     rewritten = [dict(item) for item in migrations]
     next(
@@ -1092,9 +1115,19 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     ):
         parity_snapshot._schema_only_source_add_acl_sql(rewritten)
 
+    arena_extended = [
+        *migrations,
+        arena_migration,
+    ]
+    parity_snapshot._schema_only_source_add_acl_sql(arena_extended)
+
     extended = [
         *migrations,
-        {**migrations[-1], "path": "scripts/178-next.sql", "sequence": 178},
+        {
+            **migrations[-1],
+            "path": "scripts/179-next.sql",
+            "sequence": 179,
+        },
     ]
     with pytest.raises(
         ProductionParityError,
@@ -1127,6 +1160,9 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
             "scripts/177-research-lab-source-add-provenance-authority-acl.sql"
         )
     )
+    miner_status_migration = parity_snapshot._schema_only_source_add_acl_migration(
+        "scripts/178-research-lab-source-add-miner-status.sql"
+    )
     readback = {
         "schema_version": parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_SCHEMA_VERSION,
         "migration_count": len(
@@ -1136,6 +1172,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
         "migration_175_sha256": provenance_leg1_migration["sha256"],
         "migration_176_sha256": provenance_origin_repair_migration["sha256"],
         "migration_177_sha256": provenance_authority_acl_migration["sha256"],
+        "migration_178_sha256": miner_status_migration["sha256"],
         "function_signature_count": len(expectations),
         "service_role_function_count": sum(
             privileges["service_role_callable"]
@@ -1155,6 +1192,7 @@ def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(
             privileges["authenticated_callable"]
             for privileges in expectations.values()
         ),
+        "miner_status_view_acl_bound": True,
         "function_acl_inventory": expectations,
         "duplicate_privacy_authority_bound": True,
         "duplicate_privacy_permissions_bound": True,

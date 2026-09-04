@@ -15,7 +15,7 @@
 
 ---
 
-Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. In the Research Lab, miners direct research and compute through auto-research loops that try to improve an AI sales agent. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
+Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. The Research Lab includes an open agent-bundle Arena beside the existing research reward path. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
 
 ## Dashboard
 
@@ -78,12 +78,40 @@ The miner will ask which mode to run:
 - **Auto Research**
 - **Fulfillment**
 - **Submit API Source**
+- **Check API Source Submissions**
 
 ### Research Lab
 
-Research Lab lets miners contribute direction and compute toward improving the AI sales agent.
+Research Lab supports the agent-bundle Arena and the existing research reward
+path. They are separate. The Arena can be disabled without changing the old
+path.
 
-The current sourcing model and sealed benchmark are not published in full. Keeping them private helps prevent benchmark overfitting, fixture memorization, and leakage of evaluation data while still letting miners submit and evaluate improvements through the Research Lab flow.
+#### Agent Bundle Arena
+
+The Arena rebenchmarks the public baseline on the daily ICPs and evaluates
+miner-submitted forks on the same ICPs. A miner can change the harness, model,
+prompts, dependencies, provider use, and internal logic. The benchmark score is
+the quality authority.
+
+The stable boundary is one public OCI image and one fixed `/agent/run`
+entrypoint. The bundle reads the documented ICP input and writes the documented
+company output. Provider credentials come from the host. Miners do not submit
+keys or OCI process settings. The image location does not determine identity,
+rank, or the winner.
+
+Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
+[input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
+[provider adapter and socket protocol](lab_arena/shim.py), and
+[submission helper](scripts/lab_arena_miner.py). The existing
+[qualification model](miner_models/qualification_model/README.md) is an
+optional sourcing-logic example; a competition image must wrap any chosen
+logic with `/agent/run`. Examples are documentation, not admission or scoring
+requirements.
+
+The registered `LAB_ARENA_BASELINE_HOTKEY` submits the initial public baseline
+for each mode through the same endpoint and image checks as every miner. It
+becomes that mode's first incumbent. Later winners use the normal carry-forward
+behavior.
 
 #### Submit API Source
 
@@ -91,7 +119,7 @@ Choose **Submit API Source** in the miner menu. You only need to provide the API
 
 - The source/API name and source kind.
 - Its HTTPS API base URL and public documentation URL.
-- The authentication type and rate-limit notes.
+- The authentication type (`none`, API key, or bearer token) and rate-limit notes.
 - At least one working endpoint example: `GET` or `POST`, a relative path, what it does, and an example query or JSON body.
 
 Provenance notes and third-party reference URLs are optional. Do not submit API keys or other secrets; an operator adds any required credential after submission.
@@ -104,6 +132,15 @@ emissions per epoch for 20 epochs**. Leg 1 is processed FIFO and currently
 allows up to 50 approvals per UTC day; separate per-hotkey anti-spam limits also
 apply. Operator testing and catalog provisioning happen later and do not gate
 Leg 1; only provisioned catalog sources can be used by improvement loops.
+
+Choose **Check API Source Submissions** to view your own submission decisions
+and Leg 1 reward state. The miner signs this read request with the same hotkey
+that made the submission. The gateway returns only that hotkey's records and
+safe, public reason categories. It does not show another miner's submissions,
+raw validation evidence, duplicate matches, catalog contents, or sources used
+by the current model. An **approved** result means that the automated Leg 1
+approval boundary passed; it does not mean that the source is already in the
+catalog or model.
 
 #### Auto Research
 
@@ -144,7 +181,7 @@ winner_reward = remaining_lab_allocation * winner_improvement_credit / total_win
 
 The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. The validator and verifier code contain the replayable reward and weight checks.
 
-### Research Runtime
+### Existing Research Runtime
 
 Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
 

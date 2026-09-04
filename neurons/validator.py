@@ -155,7 +155,7 @@ import aiohttp
 from urllib.parse import urlparse
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
-    compute_final_weights as compute_canonical_final_weights,
+    compute_final_weights_with_lab_arena as compute_canonical_final_weights,
     normalize_to_u16_with_uids_pure,
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
@@ -5402,7 +5402,55 @@ class Validator(BaseValidatorNeuron):
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
-            CHAMPION_SHARE = 0.0           # 0% — model competition retired 2026-06-23; its 10% folded into the fulfillment pool
+            # LAB ARENA KING (labarena.md section 13). With LAB_ARENA_REWARDS_ENABLED
+            # the king's weekly share of total emissions comes from the governing
+            # signed reward basis, served by the gateway from the durable row,
+            # verified here against the Arena key pinned by
+            # LAB_ARENA_SIGNING_PUBLIC_KEY_HASH, and derived with the shared kernel
+            # (leadpoet_canonical.lab_arena_rewards) the coordinator re-runs. It is
+            # resolved before the fulfillment residual and before every early exit,
+            # so an eligible king is never burned by a short-circuit. Any failure
+            # refuses publication: an unreachable or invalid basis is never an
+            # empty king. With the flag off nothing below changes.
+            lab_arena_rewards_enabled = _env_flag("LAB_ARENA_REWARDS_ENABLED")
+            lab_arena_reward_basis = None
+            lab_arena_values = {
+                "champion_share": 0.0,
+                "effective_champion_share": 0.0,
+                "champion_uid": None,
+                "reward_week_index": None,
+                "eligible": False,
+            }
+            if lab_arena_rewards_enabled:
+                try:
+                    from Leadpoet.utils.cloud_db import gateway_get_lab_arena_reward_basis
+                    from leadpoet_canonical import lab_arena_rewards as _lab_arena_rewards
+
+                    pinned_key_hash = _lab_arena_rewards.signing_key_hash_from_environment(os.environ)
+                    arena_snapshot = await asyncio.to_thread(
+                        gateway_get_lab_arena_reward_basis, self.wallet, int(current_epoch)
+                    )
+                    if arena_snapshot.get("reward_basis") is not None:
+                        basis = _lab_arena_rewards.validate_reward_basis(arena_snapshot["reward_basis"])
+                        key_der = _lab_arena_rewards.signing_key_from_document(
+                            arena_snapshot.get("signing_key"), pinned_key_hash
+                        )
+                        _lab_arena_rewards.verify_reward_basis_signature(
+                            basis, public_key_der=key_der, expected_public_key_hash=pinned_key_hash
+                        )
+                        lab_arena_values = _lab_arena_rewards.champion_values(
+                            basis, int(current_epoch), list(self.metagraph.hotkeys)
+                        )
+                        lab_arena_reward_basis = basis
+                except Exception as exc:
+                    print(
+                        "   ❌ Lab Arena reward basis unavailable or invalid; "
+                        f"refusing weight publication: {type(exc).__name__}: {exc}"
+                    )
+                    return False
+            # 0% without an eligible Arena king; the legacy model competition stays retired.
+            CHAMPION_SHARE = float(lab_arena_values["champion_share"])
+            arena_has_live_reward = float(lab_arena_values["effective_champion_share"]) > 0.0
             # FULFILLMENT-FLAVORED TOTAL is the residual after Research Lab.
             # That residual is split into a per-epoch fulfillment pool and a top-3
             # rolling-window leaderboard bonus. Operators may disable paying the
@@ -5488,15 +5536,15 @@ class Validator(BaseValidatorNeuron):
 
             def _weight_snapshot(
                 *,
-                champion_uid_value=None,
-                effective_champion_share_value=0.0,
+                champion_uid_value=lab_arena_values["champion_uid"],
+                effective_champion_share_value=lab_arena_values["effective_champion_share"],
                 fulfillment_share_value=0.0,
                 fulfillment_rows_value=None,
                 fulfillment_fetch_ok_value=True,
                 leaderboard_entries_value=None,
                 leaderboard_fetch_ok_value=True,
             ):
-                return _finalize_attested_weight_snapshot({
+                values = {
                     "netuid": int(self.config.netuid),
                     "epoch_id": int(current_epoch),
                     "block": int(current_block),
@@ -5537,7 +5585,12 @@ class Validator(BaseValidatorNeuron):
                     ],
                     "sourcing_floor_threshold": SOURCING_FLOOR_THRESHOLD,
                     "min_total_rep_for_distribution": MIN_TOTAL_REP_FOR_DISTRIBUTION,
-                })
+                }
+                if lab_arena_reward_basis is not None:
+                    # The signed basis rides in the snapshot so the coordinator can
+                    # measure it and every side can check the triple against it.
+                    values["lab_arena_reward_basis"] = lab_arena_reward_basis
+                return _finalize_attested_weight_snapshot(values)
 
             if ff_enabled and leaderboard_emissions_enabled:
                 try:
@@ -5578,7 +5631,7 @@ class Validator(BaseValidatorNeuron):
             # sourcing data, otherwise fulfillment miners get nothing despite
             # successfully scoring requests this epoch (the 90% fulfillment pool
             # would silently burn).
-            if not miner_scores and not rolling_scores and not ff_enabled and not research_lab_has_live_allocations:
+            if not miner_scores and not rolling_scores and not ff_enabled and not research_lab_has_live_allocations and not arena_has_live_reward:
                 print(f"   ⚠️  No current epoch OR rolling epoch data for epoch {current_epoch}")
                 print(f"   🔥 Submitting 100% burn weights (sourcing-only validator, no data)...")
                 
@@ -5642,8 +5695,21 @@ class Validator(BaseValidatorNeuron):
             champion_uid = None
             effective_champion_share = 0.0
             champion_active = False
-            
-            if CHAMPION_SHARE > 0 and _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
+
+            if lab_arena_rewards_enabled:
+                champion_uid = lab_arena_values["champion_uid"]
+                effective_champion_share = float(lab_arena_values["effective_champion_share"])
+                champion_active = champion_uid is not None
+                print(
+                    "   👑 LAB ARENA KING: share=%.4f uid=%s week=%s eligible=%s"
+                    % (
+                        effective_champion_share,
+                        champion_uid,
+                        lab_arena_values.get("reward_week_index"),
+                        lab_arena_values.get("eligible"),
+                    )
+                )
+            elif CHAMPION_SHARE > 0 and _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
                 try:
                     champion_data = self._read_qualification_champion()
 
@@ -5723,7 +5789,7 @@ class Validator(BaseValidatorNeuron):
             # the fulfillment pool using metagraph.hotkeys directly (it does
             # not depend on hotkey_to_uid, which is sourcing-only), so an
             # empty sourcing roster must NOT block fulfillment payouts.
-            if not hotkey_to_uid and not ff_enabled and not research_lab_has_live_allocations:
+            if not hotkey_to_uid and not ff_enabled and not research_lab_has_live_allocations and not arena_has_live_reward:
                 # FALLBACK: No valid miner UIDs found - submit burn weights
                 print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")

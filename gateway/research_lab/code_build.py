@@ -2855,7 +2855,7 @@ if scoring_adapter_version == "qualification-company-scorer:v2":
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")).hexdigest() == (
-        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
     )
 capability_contract_version = metadata.get("capability_contract_version")
 expected_runtime_capabilities = {{

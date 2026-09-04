@@ -348,6 +348,10 @@ def _atomic_credit_resume_fixture() -> dict[str, Any]:
     return json.loads(json.dumps(EXPECTED_ATOMIC_CREDIT_RESUME_EVIDENCE))
 
 
+def _source_add_miner_status_contract_fixture() -> dict[str, Any]:
+    return rehearsal_sitecustomize._source_add_miner_status_contract()
+
+
 def test_local_schema_adapter_returns_full_source_add_origin_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -478,6 +482,39 @@ def test_local_schema_adapter_returns_source_add_claim_control_contract(
         contract = json.loads(response.read().decode("utf-8"))
 
     assert contract == _source_add_claim_control_contract()
+
+
+def test_local_schema_adapter_returns_source_add_miner_status_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    request = urllib.request.Request(
+        (
+            "https://qplwoislplkcegvdmbim.supabase.co/rest/v1/rpc/"
+            "research_lab_source_add_miner_status_contract_v1"
+        ),
+        data=b"{}",
+        headers={
+            "apikey": "rehearsal-secret",
+            "Authorization": "Bearer rehearsal-secret",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    with rehearsal_sitecustomize._local_urlopen(
+        request,
+        timeout=10.0,
+    ) as response:
+        contract = json.loads(response.read().decode("utf-8"))
+
+    assert contract == _source_add_miner_status_contract_fixture()
 
 
 def test_gateway_cli_secret_matches_initial_durable_secret(
@@ -1559,6 +1596,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_candidate_waterfall_receipts",
             "research_lab_candidate_waterfall_metrics",
             "research_lab_source_add_provenance_leg1_authority_v1",
+            "research_lab_source_add_miner_status_v1",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -1617,6 +1655,8 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_source_add_post_accept_leg1_contract_v2",
             "research_lab_source_add_post_accept_leg1_contract_v3",
             "research_lab_source_add_post_accept_leg1_contract_v4",
+            "research_lab_source_add_miner_status_contract_v1",
+            "research_lab_source_add_miner_status_page_v1",
             "research_lab_source_add_configure_probe_v3",
             "research_lab_source_add_enqueue_leg1_after_provenance_v1",
             "research_lab_source_add_enqueue_provision_smoke_v2",
@@ -1928,6 +1968,8 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_source_add_post_accept_leg1_contract_v2",
             "research_lab_source_add_post_accept_leg1_contract_v3",
             "research_lab_source_add_post_accept_leg1_contract_v4",
+            "research_lab_source_add_miner_status_contract_v1",
+            "research_lab_source_add_miner_status_page_v1",
             "research_lab_source_add_configure_probe_v3",
             "research_lab_source_add_enqueue_leg1_after_provenance_v1",
             "research_lab_source_add_enqueue_provision_smoke_v2",

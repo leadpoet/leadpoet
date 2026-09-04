@@ -498,3 +498,39 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             "total_burn_share_before_deregistered_fulfillment": total_burn_share,
         },
     }
+
+
+# Arena reward data is an optional extension around the frozen V1 calculation
+# schema. Keeping it outside compute_final_weights preserves exact-attested
+# rollback compatibility while current releases still bind and verify it.
+LAB_ARENA_REWARD_BASIS_FIELD = "lab_arena_reward_basis"
+
+
+def compute_final_weights_with_lab_arena(
+    snapshot: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate an optional Arena basis, then use the frozen weight formula."""
+
+    if (
+        not isinstance(snapshot, Mapping)
+        or LAB_ARENA_REWARD_BASIS_FIELD not in snapshot
+    ):
+        return compute_final_weights(snapshot)
+
+    calculation = dict(snapshot)
+    calculation.pop(LAB_ARENA_REWARD_BASIS_FIELD)
+    result = compute_final_weights(calculation)
+
+    from leadpoet_canonical.lab_arena_rewards import (
+        LabArenaRewardError,
+        check_snapshot_champion_triple,
+    )
+
+    try:
+        check_snapshot_champion_triple(snapshot)
+    except LabArenaRewardError as exc:
+        raise WeightComputationError("lab_arena_reward_basis: %s" % exc) from exc
+
+    extended_result = dict(result)
+    extended_result["snapshot_hash"] = sha256_json(dict(snapshot))
+    return extended_result

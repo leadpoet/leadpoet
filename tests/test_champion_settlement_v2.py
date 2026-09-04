@@ -1203,6 +1203,123 @@ def test_chain_realized_stale_vector_credits_each_epoch_exactly(
         assert credit["attribution_doc"]["source_bundle_epoch_id"] == 100
 
 
+def test_v2_chain_settlement_summaries_round_trip_raw_block_hashes(
+    monkeypatch,
+):
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
+    proof = _timelocked_reveal_proof(bundle_digit="1")
+    observation = _chain_observation_v2(reveal_proof=proof)
+    authority, verified = _chain_package_authority(
+        source_epoch_id=101,
+        allocations=[],
+    )
+    allocation = authority["bundle_doc"]["weight_snapshot"][
+        "calculation_snapshot"
+    ]["research_lab_allocation_doc"]
+    allocation["source_add_allocations"] = [
+        {
+            "source_id": "source_add_reward:test",
+            "miner_hotkey": "miner-hotkey",
+            "uid": 7,
+            "paid_alpha_percent": 0.2,
+            "base_desired_alpha_percent": 0.2,
+        }
+    ]
+    allocation["allocation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in allocation.items()
+            if key != "allocation_hash"
+        }
+    )
+    authority["finalized_block"] = proof["commit_finalized_block"]
+    authority["finalized_block_hash"] = proof["commit_finalized_block_hash"]
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+    attributed = settlement.build_chain_realized_settlement_package_v1(
+        observation=observation,
+        authority=authority,
+    )
+    unattributed = settlement.build_unattributed_chain_realized_settlement_package_v2(
+        observation=_chain_observation_v2(),
+    )
+
+    for index, package in enumerate((attributed, unattributed), start=7):
+        settlement_doc = package["settlement_doc"]
+        settlement_hash = package["settlement_hash"]
+        receipt_hash = "sha256:" + str(index) * 64
+        rows = settlement.validate_chain_realized_epoch_settlements_v1(
+            [
+                {
+                    "netuid": 71,
+                    "epoch_id": 102,
+                    "schema_version": settlement_doc["schema_version"],
+                    "settlement_hash": settlement_hash,
+                    "settlement_receipt_hash": receipt_hash,
+                    "settlement_doc": settlement_doc,
+                }
+            ],
+            receipt_graphs={
+                receipt_hash: _minimal_receipt_graph(
+                    receipt_hash,
+                    purpose=(
+                        settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1
+                    ),
+                    output_root=settlement_hash,
+                )
+            },
+        )
+
+        assert rows[0]["settlement_hash"] == settlement_hash
+
+    assert attributed["credits"][0]["credit_doc"]["obligation_kind"] == (
+        "source_add"
+    )
+
+
+def test_v2_chain_settlement_rejects_prefixed_window_block_hash(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
+    package = settlement.build_unattributed_chain_realized_settlement_package_v2(
+        observation=_chain_observation_v2(),
+    )
+    settlement_doc = copy.deepcopy(package["settlement_doc"])
+    summary = settlement_doc["observation_summary"]
+    summary["reveal_window_start_block_hash"] = (
+        "sha256:" + summary["reveal_window_start_block_hash"]
+    )
+    settlement_hash = sha256_json(settlement_doc)
+    receipt_hash = "sha256:" + "9" * 64
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="observation summary is invalid",
+    ):
+        settlement.validate_chain_realized_epoch_settlements_v1(
+            [
+                {
+                    "netuid": 71,
+                    "epoch_id": 102,
+                    "schema_version": settlement_doc["schema_version"],
+                    "settlement_hash": settlement_hash,
+                    "settlement_receipt_hash": receipt_hash,
+                    "settlement_doc": settlement_doc,
+                }
+            ],
+            receipt_graphs={
+                receipt_hash: _minimal_receipt_graph(
+                    receipt_hash,
+                    purpose=(
+                        settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1
+                    ),
+                    output_root=settlement_hash,
+                )
+            },
+        )
+
+
 def test_chain_realized_lifetime_policy_credits_actual_attribution(
     monkeypatch,
 ):

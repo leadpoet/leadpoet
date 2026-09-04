@@ -3315,7 +3315,11 @@ class QualificationStyleCompanyScorer:
             )
             if not company_bucket or company_bucket not in allowed_buckets:
                 continue
-            scoring_icp["employee_count"] = company_bucket
+            # Score against the authoritative ICP range, not the candidate's
+            # submitted bucket. The candidate bucket is only the admission
+            # check above; narrowing the ICP here made an independently
+            # observed, different-but-still-allowed bucket a false mismatch.
+            scoring_icp["employee_count"] = list(allowed_buckets)
             try:
                 normalized_company, normalized_icp = prepare_autoresearch_scoring_payload(
                     company,

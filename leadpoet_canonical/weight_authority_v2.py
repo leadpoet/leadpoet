@@ -37,7 +37,9 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PORT,
 )
-from leadpoet_canonical.weight_computation import compute_final_weights
+from leadpoet_canonical.weight_computation import (
+    compute_final_weights_with_lab_arena as compute_final_weights,
+)
 
 
 WEIGHT_SNAPSHOT_V2_SCHEMA_VERSION = "leadpoet.weight_snapshot.v2"
@@ -260,6 +262,14 @@ def _weight_input_value_documents_v2(
                 ),
                 "queued_champion_allocations": list(
                     allocation.get("queued_champion_allocations") or []
+                ),
+                # The signed Lab Arena reward basis the triple was derived from,
+                # only when the snapshot carries one (labarena.md 13.4): with
+                # rewards off the document is byte-identical to before.
+                **(
+                    {"lab_arena_reward_basis": dict(calculation["lab_arena_reward_basis"])}
+                    if "lab_arena_reward_basis" in calculation
+                    else {}
                 ),
             },
         ),

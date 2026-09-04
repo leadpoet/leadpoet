@@ -42,7 +42,9 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_weight_input_source_evidence_v2,
     weight_input_value_documents_v2,
 )
-from leadpoet_canonical.weight_computation import compute_final_weights
+from leadpoet_canonical.weight_computation import (
+    compute_final_weights_with_lab_arena as compute_final_weights,
+)
 
 
 class ValidatorWeightAuthorityV2Error(RuntimeError):

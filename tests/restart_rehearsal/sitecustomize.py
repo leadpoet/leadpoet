@@ -188,6 +188,57 @@ def _candidate_provenance_origin_repair_function_authority() -> str:
     )
 
 
+def _source_add_miner_status_contract() -> dict[str, Any]:
+    return {
+        "schema_version": "leadpoet.source_add_miner_status_contract.v1",
+        "view_name": "research_lab_source_add_miner_status_v1",
+        "page_rpc": "research_lab_source_add_miner_status_page_v1",
+        "page_signature": "text,text,integer",
+        "view_columns": [
+            "schema_version",
+            "submission_id",
+            "miner_hotkey",
+            "source_name",
+            "submitted_at",
+            "updated_at",
+            "decision_status",
+            "decision_reason_code",
+            "decision_reason",
+            "reward_status",
+            "alpha_percent",
+            "reward_epochs",
+            "start_epoch",
+            "end_epoch",
+        ],
+        "view_security_invoker": True,
+        "view_security_barrier": True,
+        "page_security_invoker": True,
+        "page_stable": True,
+        "view_authority_sha256": _candidate_source_add_leg1_authority(
+            "SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256"
+        ),
+        "page_authority_sha256": _candidate_source_add_leg1_authority(
+            "SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256"
+        ),
+        "contract_authority_sha256": _candidate_source_add_leg1_authority(
+            "SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256"
+        ),
+        "permissions": {
+            "view_service_role_select": True,
+            "view_anon_select": False,
+            "view_authenticated_select": False,
+            "view_public_select": False,
+            "page_service_role_callable": True,
+            "page_anon_callable": False,
+            "page_authenticated_callable": False,
+            "page_public_callable": False,
+            "contract_service_role_callable": True,
+            "contract_anon_callable": False,
+            "contract_authenticated_callable": False,
+        },
+    }
+
+
 def _source_add_claim_control_contract() -> dict[str, Any]:
     try:
         from gateway_boundary_service import (
@@ -4907,6 +4958,25 @@ def _local_urlopen(
                     "rollback_v2_callable": True,
                 },
             },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/rpc/research_lab_source_add_miner_status_contract_v1"
+    ):
+        if str(getattr(request, "method", None) or "GET").upper() != "POST":
+            raise ValueError(
+                "SOURCE_ADD miner-status contract method differs"
+            )
+        request_body = getattr(request, "data", None)
+        if request_body not in {b"{}", None}:
+            raise ValueError(
+                "SOURCE_ADD miner-status contract body differs"
+            )
+        body = json.dumps(
+            _source_add_miner_status_contract(),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()

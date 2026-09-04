@@ -1,0 +1,32 @@
+{
+  "billing": {
+    "cost_usd": 0.002,
+    "credits_charged": 0.02
+  },
+  "captured_at": "2026-09-02",
+  "cli_version": "0.3.20",
+  "status": "completed",
+  "tool": "exa_contents",
+  "tool_response_raw": {
+    "requestId": "5f641fb1cc3f7e41e41b13730f5e804e",
+    "results": [
+      {
+        "author": null,
+        "entities": [],
+        "favicon": "data:,",
+        "id": "https://example.com/",
+        "text": "Example Domain\n\n# Example Domain\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nExample Domain\n# Example Domain\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n[Learn more](https://iana.org",
+        "title": "Example Domain",
+        "url": "https://example.com/"
+      }
+    ],
+    "searchTime": 13.543868000153452,
+    "statuses": [
+      {
+        "id": "https://example.com/",
+        "source": "cached",
+        "status": "success"
+      }
+    ]
+  }
+}

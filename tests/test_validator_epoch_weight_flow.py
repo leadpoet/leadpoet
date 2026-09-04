@@ -72,6 +72,18 @@ def test_research_lab_fallback_uses_shared_allocation_default():
     assert "20.0" not in snippet
 
 
+def test_burn_shortcuts_do_not_skip_an_eligible_arena_reward():
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    submission = _between(
+        source,
+        "async def _submit_weights_at_epoch_end_locked(self):",
+        "def archive_weights_to_history(",
+    )
+
+    assert 'arena_has_live_reward = float(lab_arena_values["effective_champion_share"]) > 0.0' in submission
+    assert submission.count("and not arena_has_live_reward:") == 2
+
+
 def test_leaderboard_disable_uses_canonical_window_without_changing_snapshot_schema():
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
     submission = _between(

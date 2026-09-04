@@ -24,6 +24,7 @@ from gateway.research_lab.official_baseline_authority import (
     GatewayLocalProtectedActionBridge,
     OfficialBaselineProtectedPreparation,
     OfficialBaselineProtectedAuthorityError,
+    OfficialBaselineProviderPendingError,
     OfficialBaselineProtectedTerminal,
     OfficialBaselineReleaseComponents,
     OfficialBaselineTerminalUncertainError,
@@ -744,6 +745,49 @@ def test_unknown_call_is_terminal_uncertain_and_never_redispatched():
 
     assert bridge.execute_count == 1
     assert "uncertain" in store.events
+
+
+def test_pending_provider_run_reattaches_same_reservation_without_redispatch():
+    authority, bridge, store, _custody, run_identity, unit_ref = _authority()
+    action = _provider_action({})
+    bridge.next_execute = OfficialBaselineProtectedTerminal(
+        state="pending",
+        protected_action_result=None,
+        protected_result_sha256=None,
+        protected_terminal_receipt_ref=None,
+        protected_terminal_receipt_sha256=None,
+        provider_request_ref="provider_request:pending",
+        model_provider_response_sha256=None,
+        uncertainty_sha256=None,
+    )
+    dispatcher = authority.dispatcher_for_unit(
+        run_identity=run_identity, unit_ref=unit_ref
+    )
+
+    with pytest.raises(OfficialBaselineProviderPendingError, match="still pending"):
+        dispatcher.dispatch_provider_action(
+            action=action, variant_id="official_baseline", unit_ref=unit_ref
+        )
+
+    bridge.next_reconcile = _known_provider_terminal(action, unit_ref)
+    recovered = dispatcher.dispatch_provider_action(
+        action=action, variant_id="official_baseline", unit_ref=unit_ref
+    )
+
+    assert recovered.host_result.outcome == "succeeded"
+    assert recovered.provider_receipt == (
+        bridge.next_reconcile.protected_action_result.provider_receipt
+    )
+    assert bridge.execute_count == 1
+    assert bridge.reconcile_count == 1
+    assert "uncertain" not in store.events
+    assert store.load_replay(
+        identity=official_baseline_action_replay_identity(
+            run_sha256=sha256_json(run_identity),
+            unit_ref=unit_ref,
+            action=action,
+        )
+    )["state"] == "terminal_known"
 
 
 def test_gateway_bridge_claims_before_execute_and_restarts_without_redispatch():

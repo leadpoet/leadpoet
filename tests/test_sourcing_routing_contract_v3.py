@@ -39,7 +39,7 @@ def test_private_model_commands_require_reviewed_routing_adapters() -> None:
         DEFAULT_PRIVATE_TEST_CMD
     )
     assert (
-        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
         in DEFAULT_PRIVATE_TEST_CMD
     )
     assert "sourcing-model-runtime-capabilities:v2" in DEFAULT_PRIVATE_TEST_CMD

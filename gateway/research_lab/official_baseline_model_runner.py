@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from gateway.qualification.models import CompanyOutput
 from gateway.research_lab.common_model_experiment import (
+    CommonModelExperimentRecoveryError,
     ExactModelActionDispatcher,
     ExactModelExperimentCoordinator,
     ExactModelUnitResult,
@@ -98,6 +99,10 @@ class OfficialBaselineReleaseSelectionError(OfficialBaselineModelError):
 
 class OfficialBaselineAuthorityUnavailable(OfficialBaselineModelError):
     """A v3 release has no protected baseline execution authority."""
+
+
+class OfficialBaselineProviderPendingError(CommonModelExperimentRecoveryError):
+    """An authorized asynchronous provider run is still reconciling."""
 
 
 def _require_sha256(value: Any, label: str) -> str:
@@ -1183,6 +1188,7 @@ __all__ = [
     "OfficialBaselineExactDependencies",
     "OfficialBaselineModelError",
     "OfficialBaselineModelOutput",
+    "OfficialBaselineProviderPendingError",
     "OfficialBaselineReleaseSelection",
     "OfficialBaselineReleaseSelectionError",
     "OfficialBaselineTerminalAuthority",

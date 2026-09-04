@@ -37,10 +37,12 @@ PROVENANCE_ORIGIN_REPAIR_MIGRATION = (
 PROVENANCE_AUTHORITY_ACL_MIGRATION = (
     "177-research-lab-source-add-provenance-authority-acl.sql"
 )
+MINER_STATUS_MIGRATION = "178-research-lab-source-add-miner-status.sql"
 ACL_MIGRATIONS = MIGRATIONS + (
     PROVENANCE_LEG1_MIGRATION,
     PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     PROVENANCE_AUTHORITY_ACL_MIGRATION,
+    MINER_STATUS_MIGRATION,
 )
 GUARD_A = "source_add_restart_guard:" + "a" * 64
 GUARD_B = "source_add_restart_guard:" + "b" * 64
@@ -454,6 +456,9 @@ def test_schema_only_parity_stages_paused_empty_clone_before_migration(
                 (SCRIPTS / PROVENANCE_AUTHORITY_ACL_MIGRATION).read_text(
                     encoding="utf-8"
                 )
+            )
+            cursor.execute(
+                (SCRIPTS / MINER_STATUS_MIGRATION).read_text(encoding="utf-8")
             )
             cursor.execute(
                 "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role"

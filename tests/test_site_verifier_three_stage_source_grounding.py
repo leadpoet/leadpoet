@@ -187,6 +187,41 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertIn("Acme", result["content"])
 
+    async def test_exa_retries_a_successful_empty_envelope(self):
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={"results": [], "statuses": [{"status": "pending"}]},
+                )
+            return httpx.Response(200, request=request, json={
+                "results": [{"text": "Acme " + ("verified evidence " * 30)}],
+            })
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+        with (
+            patch.dict(os.environ, {"EXA_API_KEY": "test-key"}),
+            patch(
+                "qualification.scoring.intent_verification_three_stage.httpx.AsyncClient",
+                side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+            ),
+            patch(
+                "qualification.scoring.intent_verification_three_stage.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await _scrape_exa("https://acme.example/evidence")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, 2)
+        self.assertIn("Acme", result["content"])
+
     async def test_exa_does_not_retry_a_deterministic_client_error(self):
         calls = 0
 
@@ -293,6 +328,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.await_count, 1)
         fetch.assert_awaited_once_with([url])
         self.assertFalse(result["client_ready"])
+        self.assertEqual(result["decision"], "unavailable")
         self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
         self.assertEqual(result["verdict"]["signal_evaluations"][0]["signal_status"], "unable_to_verify")
 

@@ -278,26 +278,42 @@ def _provider_doc(
 
 def _builtwith_execution_plan() -> dict:
     return {
-        "schema_version": "source-add-static-json-intent-plan:v1",
+        "schema_version": "source-add-signal-bound-json-intent-plan:v1",
         "provider_id": "builtwith_trends",
         "tool_id": "intent.source_add.builtwith_trends",
         "request": {
             "method": "GET",
             "path": "/api.json",
-            "query": {"TECH": "Shopify"},
+            "query": {
+                "TECH": {
+                    "source": "signal_temporal_parameter",
+                    "name": "technology",
+                    "max_length": 120,
+                }
+            },
         },
         "response_projection": {
             "kind": "technology_context",
             "category": "TECHSTACK",
             "object_field": "Tech",
             "identity_field": "name",
-            "expected_identity": "Shopify",
+            "expected_identity_query_key": "TECH",
             "canonical_url_field": "trends_link",
             "canonical_source_domain": "trends.builtwith.com",
             "canonical_url_path_prefix": "/shop/",
             "excerpt_fields": ["description"],
         },
     }
+
+
+def _builtwith_static_execution_plan() -> dict:
+    plan = _builtwith_execution_plan()
+    plan["schema_version"] = "source-add-static-json-intent-plan:v1"
+    plan["request"]["query"] = {"TECH": "Shopify"}
+    projection = plan["response_projection"]
+    projection.pop("expected_identity_query_key")
+    projection["expected_identity"] = "Shopify"
+    return plan
 
 
 def _builtwith_probe_endpoint() -> dict:
@@ -312,6 +328,7 @@ def _builtwith_probe_endpoint() -> dict:
                 "type": "string",
                 "required": True,
                 "location": "query",
+                "max_length": 120,
             }
         ],
     }
@@ -420,7 +437,9 @@ def test_source_add_execution_plan_is_bound_to_tested_provisioned_route():
         context,
         existing_runtime_source=_EMPTY_V8_ROUTER_RUNTIME,
     ) == []
-    changed = generated.replace("'Shopify'", "'WooCommerce'", 1)
+    changed = generated.replace(
+        "'name': 'technology'", "'name': 'product_name'", 1
+    )
     assert validate_source_add_registration_diff(
         _router_runtime_diff(_EMPTY_V8_ROUTER_RUNTIME, changed),
         context,
@@ -502,7 +521,32 @@ def test_source_add_execution_plan_rejects_ambiguous_domain_fields():
         ),
         (
             [_builtwith_probe_endpoint()],
-            [{**_builtwith_tested_probe(), "query": {"TECH": "React"}}],
+            [{**_builtwith_tested_probe(), "query": {"OTHER": "React"}}],
+            "must match one successful test probe",
+        ),
+        (
+            [
+                {
+                    **_builtwith_probe_endpoint(),
+                    "params": [
+                        {
+                            **_builtwith_probe_endpoint()["params"][0],
+                            "max_length": 119,
+                        }
+                    ],
+                }
+            ],
+            [_builtwith_tested_probe()],
+            "query differs from the provisioned endpoint",
+        ),
+        (
+            [_builtwith_probe_endpoint()],
+            [
+                {
+                    **_builtwith_tested_probe(),
+                    "query": {"TECH": "x" * 121},
+                }
+            ],
             "must match one successful test probe",
         ),
         (
@@ -544,6 +588,48 @@ def test_source_add_execution_plan_rejects_untested_route_drift(
             probe_endpoints=probe_endpoints,
             tested_probes=tested_probes,
         )
+
+
+def test_source_add_signal_bound_plan_accepts_another_tested_value():
+    normalized = normalize_source_add_planner_contract(
+        "builtwith_trends",
+        {
+            "stage": "intent_evidence",
+            "cost_class": "free",
+            "unit_cost": 0.0,
+            "max_calls": 1,
+            "max_results": 1,
+            "intent_categories": ["TECHSTACK"],
+            "execution_plan_identity": _builtwith_execution_plan(),
+        },
+        probe_endpoints=[_builtwith_probe_endpoint()],
+        tested_probes=[
+            {**_builtwith_tested_probe(), "query": {"TECH": "WooCommerce"}}
+        ],
+    )
+
+    assert normalized["execution_plan_identity"] == _builtwith_execution_plan()
+
+
+def test_source_add_static_plan_remains_supported():
+    normalized = normalize_source_add_planner_contract(
+        "builtwith_trends",
+        {
+            "stage": "intent_evidence",
+            "cost_class": "free",
+            "unit_cost": 0.0,
+            "max_calls": 1,
+            "max_results": 1,
+            "intent_categories": ["TECHSTACK"],
+            "execution_plan_identity": _builtwith_static_execution_plan(),
+        },
+        probe_endpoints=[_builtwith_probe_endpoint()],
+        tested_probes=[_builtwith_tested_probe()],
+    )
+
+    assert normalized["execution_plan_identity"] == (
+        _builtwith_static_execution_plan()
+    )
 
 
 def _private_row(*providers: dict) -> dict:

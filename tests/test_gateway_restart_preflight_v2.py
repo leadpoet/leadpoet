@@ -753,6 +753,59 @@ def _source_add_post_accept_leg1_contract_response(**overrides) -> bytes:
     return json.dumps(contract).encode()
 
 
+def _source_add_miner_status_contract_response(**overrides) -> bytes:
+    contract = {
+        "schema_version": "leadpoet.source_add_miner_status_contract.v1",
+        "view_name": "research_lab_source_add_miner_status_v1",
+        "page_rpc": "research_lab_source_add_miner_status_page_v1",
+        "page_signature": "text,text,integer",
+        "view_columns": [
+            "schema_version",
+            "submission_id",
+            "miner_hotkey",
+            "source_name",
+            "submitted_at",
+            "updated_at",
+            "decision_status",
+            "decision_reason_code",
+            "decision_reason",
+            "reward_status",
+            "alpha_percent",
+            "reward_epochs",
+            "start_epoch",
+            "end_epoch",
+        ],
+        "view_security_invoker": True,
+        "view_security_barrier": True,
+        "page_security_invoker": True,
+        "page_stable": True,
+        "view_authority_sha256": (
+            schema_preflight.SOURCE_ADD_MINER_STATUS_VIEW_AUTHORITY_SHA256
+        ),
+        "page_authority_sha256": (
+            schema_preflight.SOURCE_ADD_MINER_STATUS_PAGE_AUTHORITY_SHA256
+        ),
+        "contract_authority_sha256": (
+            schema_preflight.SOURCE_ADD_MINER_STATUS_CONTRACT_AUTHORITY_SHA256
+        ),
+        "permissions": {
+            "view_service_role_select": True,
+            "view_anon_select": False,
+            "view_authenticated_select": False,
+            "view_public_select": False,
+            "page_service_role_callable": True,
+            "page_anon_callable": False,
+            "page_authenticated_callable": False,
+            "page_public_callable": False,
+            "contract_service_role_callable": True,
+            "contract_anon_callable": False,
+            "contract_authenticated_callable": False,
+        },
+    }
+    contract.update(overrides)
+    return json.dumps(contract).encode()
+
+
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     requests = []
 
@@ -806,6 +859,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
             return _SchemaResponse(
                 body=_source_add_claim_control_contract_response()
             )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_miner_status_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_miner_status_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -819,14 +878,14 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 6
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 7
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
-    assert result["data_probe_count"] == 6
+    assert result["data_probe_count"] == 7
     assert result["schema_document_probe_count"] == 1
     assert result["chain_realized_settlement_activation_http_probe_count"] == 1
     assert result["chain_realized_settlement_activation_source"] == "postgrest"
@@ -866,6 +925,9 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["source_add_claim_control_contract"] == json.loads(
         _source_add_claim_control_contract_response()
     )
+    assert result["source_add_miner_status_contract"] == json.loads(
+        _source_add_miner_status_contract_response()
+    )
     assert result["source_add_leg1_release_policy"] == {
         "schema_version": "leadpoet.source_add_leg1_release_policy.v1",
         "leg1_alpha_percent": 0.2,
@@ -873,7 +935,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "reward_epochs": 20,
         "daily_cap": 50,
     }
-    assert len(requests) == result["table_probe_count"] + 8
+    assert len(requests) == result["table_probe_count"] + 9
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -934,6 +996,13 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 "/rpc/research_lab_source_add_claim_control_contract_v2"
         )
     ]
+    miner_status_contract_requests = [
+        request
+        for request in table_requests
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_miner_status_contract_v1"
+        )
+    ]
     schema_table_requests = [
         request
         for request in table_requests
@@ -944,6 +1013,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         and request not in privacy_contract_requests
         and request not in leg1_contract_requests
         and request not in claim_control_contract_requests
+        and request not in miner_status_contract_requests
     ]
     assert all(
         "limit=0" in request.full_url for request in schema_table_requests
@@ -955,6 +1025,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert len(privacy_contract_requests) == 1
     assert len(leg1_contract_requests) == 1
     assert len(claim_control_contract_requests) == 1
+    assert len(miner_status_contract_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
@@ -989,6 +1060,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/171-research-lab-source-add-duplicate-privacy.sql",
         "scripts/172-research-lab-source-add-claim-control.sql",
         "scripts/173-research-lab-source-add-leg1-release-policy.sql",
+        "scripts/178-research-lab-source-add-miner-status.sql",
     }.issubset(set(result["migration_files"]))
     assert (
         "scripts/163-research-lab-model-transition-artifact-custody.sql"
@@ -1060,6 +1132,12 @@ def test_routing_activation_requires_exact_transition_custody_rpcs(
         ):
             return _SchemaResponse(
                 body=_source_add_claim_control_contract_response()
+            )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_miner_status_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_miner_status_contract_response()
             )
         return _SchemaResponse()
 
@@ -1168,6 +1246,12 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
             return _SchemaResponse(
                 body=_source_add_claim_control_contract_response()
             )
+        if request.full_url.endswith(
+            "/rpc/research_lab_source_add_miner_status_contract_v1"
+        ):
+            return _SchemaResponse(
+                body=_source_add_miner_status_contract_response()
+            )
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -1181,7 +1265,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
     )
 
     assert result["status"] == "ready"
-    assert result["data_probe_count"] == 6
+    assert result["data_probe_count"] == 7
     assert result["chain_realized_settlement_activation_http_probe_count"] == 0
     assert result["chain_realized_settlement_activation_source"] == (
         "provided-authority"
@@ -1198,7 +1282,7 @@ def test_schema_preflight_provided_activation_avoids_data_request() -> None:
         and "limit=2" in request.full_url
         for request, _timeout in requests
     )
-    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 7
+    assert len(requests) == len(schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA) + 8
 
 
 def test_candidate_hybrid_purpose_contract_rejects_scope_drift() -> None:
@@ -1286,6 +1370,56 @@ def test_source_add_duplicate_privacy_contract_rejects_drift(
         match="SOURCE_ADD duplicate-privacy contract differs",
     ):
         schema_preflight._verify_source_add_duplicate_privacy_contract_v1(
+            headers={},
+            supabase_url="https://project.supabase.co",
+            opener=opener,
+            timeout_seconds=10.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    (
+        (None, "view_authority_sha256"),
+        (None, "page_authority_sha256"),
+        (None, "contract_authority_sha256"),
+        (None, "view_security_invoker"),
+        (None, "view_security_barrier"),
+        (None, "page_security_invoker"),
+        (None, "page_stable"),
+        ("permissions", "view_service_role_select"),
+        ("permissions", "view_anon_select"),
+        ("permissions", "view_authenticated_select"),
+        ("permissions", "view_public_select"),
+        ("permissions", "page_service_role_callable"),
+        ("permissions", "page_anon_callable"),
+        ("permissions", "page_authenticated_callable"),
+        ("permissions", "page_public_callable"),
+        ("permissions", "contract_service_role_callable"),
+        ("permissions", "contract_anon_callable"),
+        ("permissions", "contract_authenticated_callable"),
+    ),
+)
+def test_source_add_miner_status_contract_rejects_privacy_drift(
+    section,
+    field,
+) -> None:
+    contract = json.loads(_source_add_miner_status_contract_response())
+    target = contract if section is None else contract[section]
+    if field.endswith("_sha256"):
+        target[field] = "sha256:" + "f" * 64
+    else:
+        target[field] = not target[field]
+
+    def opener(_request, *, timeout):
+        assert timeout == 10.0
+        return _SchemaResponse(body=json.dumps(contract).encode())
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="SOURCE_ADD miner-status privacy contract differs",
+    ):
+        schema_preflight._verify_source_add_miner_status_contract_v1(
             headers={},
             supabase_url="https://project.supabase.co",
             opener=opener,
@@ -1465,6 +1599,35 @@ def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
     }
 
     assert (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_v1",
+    ) in schema_contract
+    assert {
+        "schema_version",
+        "submission_id",
+        "miner_hotkey",
+        "source_name",
+        "submitted_at",
+        "updated_at",
+        "decision_status",
+        "decision_reason_code",
+        "decision_reason",
+        "reward_status",
+        "alpha_percent",
+        "reward_epochs",
+        "start_epoch",
+        "end_epoch",
+    } == relation_columns["research_lab_source_add_miner_status_v1"]
+    assert (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_page_v1",
+    ) in rpc_contract
+    assert (
+        "scripts/178-research-lab-source-add-miner-status.sql",
+        "research_lab_source_add_miner_status_contract_v1",
+    ) in rpc_contract
+
+    assert (
         "scripts/95-research-lab-git-tree-autoresearch.sql",
         "research_lab_autoresearch_tree_node_current",
     ) in schema_contract
@@ -1567,6 +1730,73 @@ def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
             "research_lab_autoresearch_run_evaluation_usage",
         ),
     }.issubset(rpc_contract)
+
+
+def test_required_supabase_v2_schema_rejects_missing_source_add_miner_status_view() -> None:
+    def opener(request, *, timeout):
+        del timeout
+        if "research_lab_source_add_miner_status_v1?" in request.full_url:
+            raise HTTPError(
+                request.full_url,
+                404,
+                "miner status view missing",
+                {},
+                None,
+            )
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_source_add_miner_status_v1.*"
+            r"178-research-lab-source-add-miner-status"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_rejects_missing_source_add_miner_status_rpc() -> None:
+    required_function = "research_lab_source_add_miner_status_page_v1"
+
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+                if function_name != required_function
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_source_add_miner_status_page_v1.*"
+            r"178-research-lab-source-add-miner-status"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
 
 
 def test_required_supabase_v2_schema_rejects_incomplete_git_tree_current_view() -> None:

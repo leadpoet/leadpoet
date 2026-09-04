@@ -813,7 +813,7 @@ def test_segmented_model_parity_fixture_joins_outer_and_nested_proofs() -> None:
     receipt = {
         "schema_version": "company-fit-proof-receipt:v1",
         "contract_sha256": (
-            "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+            "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
         ),
         "outcome_binding": (
             "qualification_outcome.route_completion_receipt.extensions."
@@ -855,7 +855,7 @@ def test_segmented_model_parity_fixture_joins_outer_and_nested_proofs() -> None:
             "evidence_quote": "",
         },
         "receipt_sha256": (
-            "e9e510776515657771d1d49b3c06c03e5666c04b871653beaf8c8aca53b58bf4"
+            "f434b494850385e001f5c225822c742fd4882d388bbb6918f70a21e4c483833f"
         ),
     }
     companies = [
@@ -871,7 +871,7 @@ def test_segmented_model_parity_fixture_joins_outer_and_nested_proofs() -> None:
         }
     ]
     assert _plain_hash(companies) == (
-        "296d55a78ca34b8cfa557d5aef7f5e5785f19071f25531c9db5ebd2971d9ed56"
+        "e6ffd85b7689fbe23b448114ce378655170b803d65bb4c29d91c13fffd0c0c4c"
     )
     envelope = _production_company_envelope(companies)
     envelope["route_completion_receipt"]["invocation_sha256"] = (

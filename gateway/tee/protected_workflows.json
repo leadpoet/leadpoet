@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "b52963d25090c5be57e21c0a7f90e679219fe449",
+  "baseline_commit": "d0db977777ea72a8836a837d35c28db186a6ba0f",
   "entries": [
     {
       "ast_sha256": "sha256:da4f1f7963737c796207bd8013762fdde3d22f13dc194bd8b1ccc6a7e4032fbf",
@@ -62,7 +62,7 @@
       "symbol": "_SOURCE_ADD_INDEPENDENT_PATHS"
     },
     {
-      "ast_sha256": "sha256:43810a07d7b9ad96a98d9c6ae593d37e5769d9b037cf3644885ff2ad0c6d3c2e",
+      "ast_sha256": "sha256:f1a3533cfb14718cfd6cededb67047aee769e4be0d4a080ad298087aaf2f8d24",
       "path": "gateway/main.py",
       "symbol": "_WORKER_STARTUP_DIAGNOSTIC_PATHS"
     },
@@ -97,7 +97,7 @@
       "symbol": "require_worker_authority_after_liveness"
     },
     {
-      "ast_sha256": "sha256:23cd1d1fc77c0f12eb180753a86ce3630b9070ecdb579a15adac6d94ff6c2257",
+      "ast_sha256": "sha256:d4fe414133acde1f7772c992c0a7c325307df9dd507c51540678584fb5bf9861",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_build_allocation_v2_singleflight"
     },
@@ -567,7 +567,7 @@
       "symbol": "select_compact_chain_realized_bundle_candidate_v2"
     },
     {
-      "ast_sha256": "sha256:65612af75343911c9247e5c16c2cc9a1d15d3301d23e49b46b358b31a9fc6468",
+      "ast_sha256": "sha256:06ea679b6f081a0c7ec1da0b7a07c9f5922f126eab5af663a3caa1e0281c651c",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "validate_chain_realized_epoch_settlements_v1"
     },
@@ -717,7 +717,7 @@
       "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
     },
     {
-      "ast_sha256": "sha256:21146e46679ecbb28c88b62b6562fd633862da4fec0f27b5dc7dba3eb1f964b2",
+      "ast_sha256": "sha256:9d71cc73042b4cda61551af751f4fdc3cf6a36f3346f9ca320173279def1c747",
       "path": "gateway/research_lab/config.py",
       "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
@@ -1012,12 +1012,12 @@
       "symbol": "AppendOnlyOfficialBaselineAuthority.transition_repository_for_unit"
     },
     {
-      "ast_sha256": "sha256:0a95aca20c8d42067e431e4822bee1c2d2392cfc8055aab5db63daf04200cacf",
+      "ast_sha256": "sha256:21928df0010c632611184742226ebc76e89478e42683a4a9297fddad131c6911",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge"
     },
     {
-      "ast_sha256": "sha256:9df0a085581e01b9faf099aff077ee3a1fcf4f69dc45949ed598d4e937db156a",
+      "ast_sha256": "sha256:50ffa933aad3737dd1cb43aae30a67ca201272d62da43dfa69e339bbd36b3ef9",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge.execute_prepared"
     },
@@ -1027,7 +1027,7 @@
       "symbol": "GatewayLocalProtectedActionBridge.prepare"
     },
     {
-      "ast_sha256": "sha256:0f205e5cfb769d560316f4399bef1115d142f429e39d0ef951697b4f4dc0a82e",
+      "ast_sha256": "sha256:cbf437ea6d98c7f16121d9d58c3d27edcdc4d3df725e9415445c19ae2fe6ac78",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "GatewayLocalProtectedActionBridge.reconcile"
     },
@@ -1077,7 +1077,7 @@
       "symbol": "PROTECTED_ACTION_AUTHORITY_SHA256"
     },
     {
-      "ast_sha256": "sha256:b9922ab60cc51c9804ab14cca8ddf1d8a4c9f4b04ae13436140d870eb8aadaaf",
+      "ast_sha256": "sha256:30a72a575e5686a9f3a6cb7310e12e8f7cc8b15497da5ecee2b788f1d3c38fc8",
       "path": "gateway/research_lab/official_baseline_authority.py",
       "symbol": "_ReservedOfficialBaselineDispatcher"
     },
@@ -1397,7 +1397,7 @@
       "symbol": "validate_official_baseline_provider_closure"
     },
     {
-      "ast_sha256": "sha256:951c832a607574bc78afd0534de1ac371ce17c0415166bdb7c9939ef4c70a366",
+      "ast_sha256": "sha256:b6dc0a70a4ac094e511d7b250ff76c62c58f63c0ce76718dfe64c751b0fd9cbe",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "ArtifactPreparedActionExecutor"
     },
@@ -1482,7 +1482,7 @@
       "symbol": "_catalog_bindings"
     },
     {
-      "ast_sha256": "sha256:1d9932b7894a80f6aeb053e8a988fd50134d909b61343f4abbb97c1e020f0fe0",
+      "ast_sha256": "sha256:13bebc64b84308551589b449fa79083165fe9ea810caffd98d7ff21e8ab32dab",
       "path": "gateway/research_lab/official_baseline_release_authorities.py",
       "symbol": "_official_host_availability"
     },
@@ -3462,7 +3462,7 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:27d16495fb5ad9e8d703571b694c75dd5e1e57e7b6ccc66b7e85b78583ce41a7",
+      "ast_sha256": "sha256:81a08d87424ac087e74926bf4fb9dac0f149522e8feca48a3cbb546fdcb63e04",
       "path": "gateway/tee/coordinator_weight_source_v2.py",
       "symbol": "CoordinatorWeightSourceV2"
     },
@@ -6092,12 +6092,12 @@
       "symbol": "_verify_source_add_post_accept_leg1_contract_v4"
     },
     {
-      "ast_sha256": "sha256:2d04188589aa9e59f6af9637f0c238569d46e4afe3bac22582612163ef0be71e",
+      "ast_sha256": "sha256:48c3bd2c9d2c59114f447e88cea8f5ddfe2931f23762b1e6949f97574e5f00c1",
       "path": "gateway/tee/supabase_schema_preflight_v2.py",
       "symbol": "verify_required_supabase_v2_schema"
     },
     {
-      "ast_sha256": "sha256:5c3f0032f96a2545cc3853dff96e1ee9aab586072614f362eb1f97313f15920c",
+      "ast_sha256": "sha256:17379910aba04a9cd08d3176ff99c70b55f8b2b6475a848e24a094e17e8564b4",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "QUERY_POLICIES"
     },
@@ -6107,7 +6107,7 @@
       "symbol": "SupabaseSourceReaderV2"
     },
     {
-      "ast_sha256": "sha256:ffe376124c823b2f9cabc04504c7cd566a7fb6e190836edf4b1734ef6e44ac2c",
+      "ast_sha256": "sha256:e8e72cbe467b4c5729cb1e66f3cc431997982a2c43e642defce4b74baef18ec0",
       "path": "gateway/tee/supabase_source_v2.py",
       "symbol": "_filters"
     },
@@ -6772,7 +6772,7 @@
       "symbol": "CHAIN_MAX_RUNTIME_METADATA_BYTES"
     },
     {
-      "ast_sha256": "sha256:3666226ea35482e5f8f82825b3a7eef5b9651713ae27290859d4a5f0fdc80328",
+      "ast_sha256": "sha256:e70053e14cbcaa67a4b1d31d2de15e3bb0f1980a6e60637c889a10ec32268ea3",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "_REVEAL_PERIOD_METADATA_DEFAULTS_V2"
     },
@@ -6952,6 +6952,71 @@
       "symbol": "decrypt_kms_recipient_ciphertext"
     },
     {
+      "ast_sha256": "sha256:87089ca9a367c1cf38d0666663410c9a81f332f018c6a812a5d00b4074c49e4b",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_share_for_week"
+    },
+    {
+      "ast_sha256": "sha256:f82f58496cc8c1c10e5671d56e89bff1ca552f8c662d024a60ec457249438db3",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_uid_for_hotkey"
+    },
+    {
+      "ast_sha256": "sha256:b84338d026ad965eb2ee02b4407cb86526c70a874a1aabb1036d1c1443d01718",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "champion_values"
+    },
+    {
+      "ast_sha256": "sha256:535735990f43ba20e12525d423ffc76751433eec1dce2e722dda607f1684b4e0",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "check_snapshot_champion_triple"
+    },
+    {
+      "ast_sha256": "sha256:beda3283580a90a922e4dd75fdbadc46ce4ff1738191931e7d2efe960a765c19",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "epoch_eligible"
+    },
+    {
+      "ast_sha256": "sha256:901cbe79b00a733e0a9bdba493c8caa8d52dafd5403386259bb78116bd24c046",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "governing_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:1bdc2e94fa1d19f9af0d7787bc2bea1834109aa0aa87c06e573b87c1a1e3d843",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "reward_week_index"
+    },
+    {
+      "ast_sha256": "sha256:8c02ed1e42042e0edaec0020a082a77d8e741cd9bdc576c2276a30a4983c6f94",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "rewards_enabled_from_environment"
+    },
+    {
+      "ast_sha256": "sha256:27f913bd6e37891fb44a7e95fc4e89bdd81798b775fa6b2e5267f8526883acac",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "signing_key_from_document"
+    },
+    {
+      "ast_sha256": "sha256:b40301508cf3f4bb10aa2a8edd4632c91e6cc3b86646b290154e95c26ed732ce",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "signing_key_hash_from_environment"
+    },
+    {
+      "ast_sha256": "sha256:4ab33d17ecaf00cf051175e216c2f604fb20f72848f30bbc75367f8c937d765a",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "validate_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:56e2b55fb865883ff8b29e8e3458ffec09cb9773b00957ea6b8baad4dfefd0e4",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "validate_reward_constants"
+    },
+    {
+      "ast_sha256": "sha256:b3669b6300ba1e97fe10356f1da57be53b7e9640701f92dde2bf4654430e3399",
+      "path": "leadpoet_canonical/lab_arena_rewards.py",
+      "symbol": "verify_reward_basis_signature"
+    },
+    {
       "ast_sha256": "sha256:8d6fa22037e4f06bee76059f43068f0f44b1574a3740ce1b3be459fa171d23b5",
       "path": "leadpoet_canonical/legacy_settlement_v2.py",
       "symbol": "legacy_chain_vector_matches_bundle_v2"
@@ -7092,6 +7157,11 @@
       "symbol": "compute_final_weights"
     },
     {
+      "ast_sha256": "sha256:3c72540c2f019ed6358bbc785baea828eb453f56d6adbfe2fbcca2c04edf3e71",
+      "path": "leadpoet_canonical/weight_computation.py",
+      "symbol": "compute_final_weights_with_lab_arena"
+    },
+    {
       "ast_sha256": "sha256:2774126b08622ad116a094b08c95e1ecd6986a16356778792dd26c7e713de000",
       "path": "leadpoet_canonical/weight_computation.py",
       "symbol": "normalize_to_u16_with_uids_pure"
@@ -7227,7 +7297,7 @@
       "symbol": "_decision_from_observed_employee_size"
     },
     {
-      "ast_sha256": "sha256:9f67a345d632ddce0fd73b7ae37a0368160311092f64edabbefa24e43a677074",
+      "ast_sha256": "sha256:5774b0732f24d11f655d0e61c6cc2301b7f5d17a855711d3740bd10af7fcc2b9",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -7272,7 +7342,7 @@
       "symbol": "build_loop_direction_reference_repair_messages"
     },
     {
-      "ast_sha256": "sha256:89c775d602a65d1db28566f1bb7f75b975c67630e7a0224ad94ff5954d02794c",
+      "ast_sha256": "sha256:01055837803b234aeed5eecfc38116b5df534148ba0f2d48c8c5207f12658e08",
       "path": "research_lab/code_editing.py",
       "symbol": "build_plan_alignment_judge_messages"
     },
@@ -8827,7 +8897,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:4e1c6b241e68a502191b1a62e0ac74602222633560be0f0828d9847ab9a0934c",
-  "protected_source_commit": "d021b759a44f7adfe705b7c199acedaa04428770",
+  "manifest_hash": "sha256:1aa1b9a8084805d6e18ff36165a0492d53ade0feffdd774b44b1628436321dbd",
+  "protected_source_commit": "69aaf6cd03efdf6df06a5105fb656729a6244465",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

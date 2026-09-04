@@ -29,6 +29,7 @@ from gateway.research_lab.official_baseline_release_authorities import (
     protected_action_authority_contract_identity,
 )
 from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
     SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
 )
 from research_lab.canonical import sha256_bytes, sha256_json
@@ -397,7 +398,10 @@ def _openrouter_provider_fixture():
     return action, dispatch, catalog, inventory
 
 
-def _source_add_provider_fixture():
+def _source_add_provider_fixture(
+    *,
+    compiler_id: str = SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+):
     binding = "c" * 64
     provider_id = "builtwith_trends"
     tool_id = f"intent.source_add.{provider_id}"
@@ -430,7 +434,7 @@ def _source_add_provider_fixture():
         "action_sha256": action["action_sha256"],
         "action_type": action["action_type"],
         "tool_id": action["tool_id"],
-        "compiler_id": SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+        "compiler_id": compiler_id,
         "compiler_contract_sha256": binding,
         "provider": provider_id,
         "request": request,
@@ -782,6 +786,86 @@ def test_deepline_progress_survives_interruption_and_restart_never_reposts():
         .model_provider_response_ingestion
         is None
     )
+
+
+def test_deepline_transient_poll_failure_remains_pending_and_reattachable():
+    action, dispatch, catalog, inventory = _provider_fixture()
+    protocol = _Protocol(dispatch=dispatch, current=True)
+    custody = _custody()
+    now = [0.0]
+    proxy = _Proxy(
+        [
+            (
+                200,
+                {"run": {"id": "run-fixture", "status": "running"}},
+                {},
+            ),
+            (502, {"error": "upstream unreachable"}, {}),
+        ]
+    )
+    executor = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=proxy,
+        clock=lambda: now[0],
+        sleep=lambda _seconds: now.__setitem__(0, 900.0),
+    )
+    preparation = executor.prepare(
+        run_identity={"schema_version": "fixture-run:v1", "run": "transient"},
+        unit_ref="baseline_icp:" + "e" * 64,
+        action=action,
+    )
+
+    pending = executor.execute_prepared(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert pending.state == "pending"
+    assert pending.uncertainty_sha256 is None
+    assert [call["method"] for call in proxy.calls] == ["POST", "GET"]
+    assert custody.load_protected_action_progress(
+        preparation_sha256=preparation.preparation_sha256
+    )["run_id"] == "run-fixture"
+
+    restarted_proxy = _Proxy(
+        [
+            (
+                200,
+                {
+                    "id": "run-fixture",
+                    "status": "completed",
+                    "output": {
+                        "schema_version": 3,
+                        "segment_id": "aggregate-fixture",
+                        "rows": [],
+                    },
+                },
+                {},
+            )
+        ]
+    )
+    restarted = ArtifactPreparedActionExecutor(
+        registration=_registration(protocol),
+        catalog=catalog,
+        inventory=inventory,
+        custody=custody,
+        proxy_url="http://127.0.0.1:8765",
+        proxy_client=restarted_proxy,
+        sleep=lambda _seconds: None,
+    )
+
+    terminal = restarted.reconcile(
+        preparation=preparation,
+        action=action,
+    )
+
+    assert terminal.state == "known"
+    assert terminal.protected_action_result.host_result.outcome == "succeeded"
+    assert [call["method"] for call in restarted_proxy.calls] == ["GET"]
 
 
 def test_deepline_model_owned_run_id_path_encoding_is_applied_exactly():
@@ -1376,8 +1460,19 @@ def test_source_add_proxy_path_rejects_host_or_path_drift(upstream_url, path):
         )
 
 
-def test_source_add_dispatch_requires_exact_registry_credential_and_request():
-    action, dispatch, catalog, inventory = _source_add_provider_fixture()
+@pytest.mark.parametrize(
+    "compiler_id",
+    (
+        SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+        SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
+    ),
+)
+def test_source_add_dispatch_requires_exact_registry_credential_and_request(
+    compiler_id,
+):
+    action, dispatch, catalog, inventory = _source_add_provider_fixture(
+        compiler_id=compiler_id
+    )
 
     def executor(candidate_dispatch):
         return ArtifactPreparedActionExecutor(

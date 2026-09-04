@@ -2466,7 +2466,6 @@ def validate_chain_realized_epoch_settlements_v1(
             hash_fields.append("source_bundle_hash")
         if summary_v2:
             hash_fields.append("chain_signing_profile_hash")
-            hash_fields.append("reveal_window_start_block_hash")
             if finalized_authority:
                 hash_fields.append("reveal_proof_hash")
         for field in hash_fields:
@@ -2487,6 +2486,16 @@ def validate_chain_realized_epoch_settlements_v1(
         if not re.fullmatch(
             r"[0-9a-f]{64}",
             str(observation_summary.get("last_update_block_hash") or ""),
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        if summary_v2 and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(
+                observation_summary.get("reveal_window_start_block_hash")
+                or ""
+            ),
         ):
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"

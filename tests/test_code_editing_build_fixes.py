@@ -1611,6 +1611,8 @@ def test_plan_alignment_judge_does_not_require_v8_manifest_metadata_keywords():
     assert "binding_manifest is an approved request-side attestation" in content
     assert "Do not fail a v8 registration merely because" in content
     assert "omits binding_manifest, revision, or manifest_sha256" in content
+    assert "execution_plan_identity is an approved manifest-defining" in content
+    assert "still fail fixed public-ICP values" in content
 
 
 def test_code_edit_prompt_requires_direct_git_parent_and_safe_branch_feedback():
@@ -2250,7 +2252,7 @@ def test_build_scaffold_binds_v2_metadata_to_signed_source_constant(
     assert "signed_scoring_adapter_version" in dockerfile
     assert "company_fit_proof_receipt_contract_identity" in dockerfile
     assert (
-        "4f04e894073903c427beb607f19ce9c4069255d69804c1a6480f820d2f96c198"
+        "3efefb93374b8a34c5866374083da556d40c1fb6cf69fd38cf065c177b18d61b"
         in dockerfile
     )
     clear_parent_app = (

@@ -44,6 +44,7 @@ from gateway.research_lab.official_baseline_store import (
     official_baseline_action_replay_identity,
 )
 from gateway.research_lab.source_add_execution_plan import (
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
     SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
 )
 from research_lab.canonical import sha256_json
@@ -65,6 +66,10 @@ from research_lab.routing_experiments import (
 OFFICIAL_BINDING_CATALOG_SCHEMA_VERSION = (
     "model-runner-official-host-binding-catalog:v1"
 )
+_SOURCE_ADD_EXECUTION_COMPILER_IDS = frozenset({
+    SOURCE_ADD_SIGNAL_BOUND_JSON_INTENT_COMPILER_ID,
+    SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID,
+})
 PROTECTED_PROVIDER_PROGRESS_SCHEMA_VERSION = (
     "leadpoet.research_lab.official_baseline_provider_progress.v1"
 )
@@ -648,8 +653,7 @@ def _source_add_registry_transport_available(
     return bool(
         entry.get("action_type") == "execute_intent_tool"
         and entry.get("tool_id") == f"intent.source_add.{provider_id}"
-        and entry.get("compiler_id")
-        == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+        and entry.get("compiler_id") in _SOURCE_ADD_EXECUTION_COMPILER_IDS
         and _SOURCE_ADD_PROVIDER_ID_RE.fullmatch(provider_id)
         and provider_id in ready_provider_ids
     )
@@ -730,7 +734,7 @@ def _official_host_availability(
             static_transport_ready = bool(
                 not source_add_transport_ready
                 and entry.get("compiler_id")
-                != SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+                not in _SOURCE_ADD_EXECUTION_COMPILER_IDS
                 and _reviewed_provider_transport_available(entry.get("provider"))
                 and _PROXY_ROUTE_BY_PROVIDER.get(
                     str(entry.get("provider") or "")
@@ -1127,11 +1131,10 @@ class ArtifactPreparedActionExecutor:
             and inventory.get("action_type") == "execute_intent_tool"
             and inventory.get("tool_id") == f"intent.source_add.{provider}"
             and inventory.get("compiler_id")
-            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            in _SOURCE_ADD_EXECUTION_COMPILER_IDS
             and value.get("action_type") == "execute_intent_tool"
             and value.get("tool_id") == f"intent.source_add.{provider}"
-            and value.get("compiler_id")
-            == SOURCE_ADD_STATIC_JSON_INTENT_COMPILER_ID
+            and value.get("compiler_id") == inventory.get("compiler_id")
         )
         credential_valid = bool(
             isinstance(credential, Mapping)
@@ -1704,6 +1707,19 @@ class ArtifactPreparedActionExecutor:
                     timeout_seconds=min(remaining, 30.0),
                 )
             if not 200 <= status < 300:
+                # A poll transport/concurrency failure is not the terminal
+                # state of the already-authorized Deepline run. Preserve its
+                # durable run ID and keep reconciling within the action bound;
+                # if the bound expires, return terminal uncertainty so a
+                # restart reattaches instead of recording a false adapter
+                # failure and reposting paid work.
+                if status == 429 or 500 <= status < 600:
+                    if self._clock() >= deadline:
+                        break
+                    self._sleep(
+                        min(1.0, max(0.0, deadline - self._clock()))
+                    )
+                    continue
                 return status, body
             state = self._deepline_status(body)
             if state in _DEEPLINE_TERMINAL_STATUSES:
@@ -1795,7 +1811,7 @@ class ArtifactPreparedActionExecutor:
                     started=started,
                 )
             if terminal is None:
-                return self._uncertain(request_ref)
+                return self._pending(request_ref)
             status, body = terminal
         elif request.get("method") == "BATCH_GET":
             terminal = self._batch_request(
@@ -1835,6 +1851,19 @@ class ArtifactPreparedActionExecutor:
             body=body,
             calls=calls,
             started=started,
+        )
+
+    @staticmethod
+    def _pending(provider_request_ref: str) -> OfficialBaselineProtectedTerminal:
+        return OfficialBaselineProtectedTerminal(
+            state="pending",
+            protected_action_result=None,
+            protected_result_sha256=None,
+            protected_terminal_receipt_ref=None,
+            protected_terminal_receipt_sha256=None,
+            provider_request_ref=provider_request_ref,
+            model_provider_response_sha256=None,
+            uncertainty_sha256=None,
         )
 
     @staticmethod

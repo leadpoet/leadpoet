@@ -1,0 +1,1411 @@
+"""Arena service: daily benchmark, execution, scoring, and publication."""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+
+from lab_arena import benchmark, broker as broker_module, contracts, images, rewards, scoring, signing, verify
+from lab_arena.contracts import ArenaContractError, ArenaSignatureError
+from lab_arena.output import OutputInvalid, validate_output_document
+from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
+
+MODES = ("off", "shadow", "live")
+HOT_ROUND_TTL_SECONDS = 2.0
+TERMINAL_STATUSES = ("published", "cancelled")
+DEFAULT_STAGE_MINUTES = {
+    "benchmark": 30,
+    "stage_1": 210,
+    "stage_1_scoring": 60,
+    "stage_2": 210,
+    "final_scoring": 90,
+}
+CANCEL_REASONS = {
+    "benchmark_leak": "benchmark_leaked_before_cutoff",
+    "generation": "generation_could_not_fill_slots",
+    "benchmark_invalid": "benchmark_data_invalid",
+    "capacity": "runner_capacity",
+    "scoring": "scoring_window_closed",
+    "publication": "publication_sanitizer_failed",
+    "operator": "operator",
+}
+
+
+class ServiceError(RuntimeError):
+    """A request or transition failed closed."""
+
+    def __init__(self, code: str, status: int = 400) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+# ---------------------------------------------------------------------------
+# Object store
+# ---------------------------------------------------------------------------
+
+
+class ObjectStore(Protocol):
+    def put(self, ref: str, data: bytes) -> None: ...
+
+    def get(self, ref: str) -> bytes: ...
+
+
+class LocalObjectStore:
+    """Directory-backed object store for tests and local runs; refs are write-once."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, ref: str) -> Path:
+        if not ref or ref.startswith("/") or ".." in Path(ref).parts:
+            raise ArenaContractError("object ref is invalid")
+        return self._root / ref
+
+    def put(self, ref: str, data: bytes) -> None:
+        path = self._path(ref)
+        if path.exists() and path.read_bytes() != bytes(data):
+            raise ArenaContractError("object ref %s already holds different bytes" % ref)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(data))
+
+    def get(self, ref: str) -> bytes:
+        path = self._path(ref)
+        if not path.exists():
+            raise ArenaContractError("object store has no object at %s" % ref)
+        return path.read_bytes()
+
+
+class S3ObjectStore:
+    """Versioned, delete-denied Arena bucket (section 3.1); boto3 imported lazily."""
+
+    def __init__(self, bucket: str, *, client: Any = None, region_name: Optional[str] = None) -> None:
+        if client is None:
+            import boto3  # noqa: WPS433
+
+            client = boto3.client("s3", region_name=region_name)
+        self._client = client
+        self._bucket = bucket
+
+    def put(self, ref: str, data: bytes) -> None:
+        payload = bytes(data)
+        for attempt in range(2):
+            try:
+                self._client.put_object(
+                    Bucket=self._bucket,
+                    Key=ref,
+                    Body=payload,
+                    ContentType="application/json",
+                    IfNoneMatch="*",
+                )
+                return
+            except Exception as exc:
+                response = getattr(exc, "response", {})
+                error = response.get("Error", {}) if isinstance(response, Mapping) else {}
+                metadata = response.get("ResponseMetadata", {}) if isinstance(response, Mapping) else {}
+                code = str(error.get("Code") or "") if isinstance(error, Mapping) else ""
+                status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+                conditional_conflict = code in ("ConditionalRequestConflict", "409") or status == 409
+                already_exists = code in ("PreconditionFailed", "412") or status == 412
+                if conditional_conflict and attempt == 0:
+                    continue
+                if not (conditional_conflict or already_exists):
+                    raise
+                try:
+                    existing = self.get(ref)
+                except Exception:
+                    raise exc
+                if existing != payload:
+                    raise ArenaContractError("object ref %s already holds different bytes" % ref) from exc
+                return
+        raise ArenaContractError("object ref %s could not be written safely" % ref)
+
+    def get(self, ref: str) -> bytes:
+        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        return response["Body"].read()
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+class ChainReads(Protocol):
+    def finalized_head(self) -> Any: ...
+
+    def metagraph(self, finalized: bool = True) -> Any: ...
+
+    def current_settlement_epoch(self) -> int: ...
+
+    def hotkeys_owned_by_same_coldkey(self, hotkey: str) -> List[str]: ...
+
+    def uid_for_hotkey(self, hotkey: str) -> Optional[int]: ...
+
+@dataclass
+class RoundDefaults:
+    execution_cap_microusd: int = 5_000_000
+    scoring_cap_microusd: int = 50_000_000
+    runner_hotkeys: Tuple[str, ...] = ()
+    baseline_hotkey: str = ""
+    stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
+    max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
+    # The trusted scorer is resolved once and copied into each round. A service
+    # restart therefore cannot change the scorer midway through that round.
+    scorer_image_digest: str = "sha256:" + "0" * 64
+    scorer_image_reference: str = ""
+    # Public limits for submitted images and the Arena mirror repository.
+    image_rules: images.ImageRules = field(default_factory=images.ImageRules)
+    registry_repository: str = ""
+    # Automatic daily rounds: the UTC hour of each day's submission cutoff, or
+    # None to leave round creation to the operator (``lab_arena_admin.py create``).
+    daily_cutoff_hour_utc: Optional[int] = None
+    # A new round's cutoff lies at least this far ahead so miners can submit.
+    min_submission_hours: int = 6
+    # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
+    # Announced in every round configuration and carried by every reward basis,
+    # so a change applies from the next round and never rewrites a published one.
+    pool_percent: int = contracts.LAB_ARENA_POOL_PERCENT
+    # Frozen into each round. A later environment change cannot activate an
+    # older round that was intentionally published without rewards.
+    rewards_enabled: bool = False
+
+
+@dataclass
+class ServiceConfig:
+    mode: str
+    store: ArenaStore
+    object_store: ObjectStore
+    # Reward signing is downstream of competition publication. Production
+    # supplies a lazy factory; tests may supply a signer directly.
+    signer: Optional[signing.ArenaSigner]
+    chain: ChainReads
+    verify_signature: Callable[[str, str, str], bool]
+    generation_provider: benchmark.GenerationProvider
+    banned_hotkeys_source: Callable[[], Iterable[str]]
+    broker_factory: Callable[["ArenaService", Mapping[str, Any]], broker_module.Broker]
+    defaults: RoundDefaults = field(default_factory=RoundDefaults)
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    network_name: str = "finney"
+    # The registry client that resolves and mirrors submitted images (None
+    # disables admission, for tests that accept submissions directly).
+    registry: Optional[images.RegistryClient] = None
+    # Submitted source images are always read without destination credentials.
+    source_registry: Optional[images.RegistryClient] = None
+    # One driver tick admits images for at most this long, then the next tick continues.
+    admission_tick_seconds: float = 300.0
+    reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in MODES:
+            raise ServiceError("mode_invalid", 500)
+        if self.mode == "off":
+            raise ServiceError("mode_off", 500)
+        if self.registry is not None and (
+            self.source_registry is None or self.source_registry is self.registry
+        ):
+            raise ServiceError("anonymous_source_registry_required", 500)
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def round_id_for_cutoff(cutoff: datetime) -> str:
+    return "arena-%s" % cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+
+class ArenaService:
+    def __init__(self, config: ServiceConfig) -> None:
+        self._config = config
+        self._store = config.store
+        self._objects = config.object_store
+        self._signer = config.signer
+        self._signer_lock = threading.Lock()
+        self._clock = config.clock
+        self._lock = threading.RLock()
+        self._hot_round_lock = threading.Lock()
+        self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._scorer_policy = scoring.build_scorer_policy()
+        self._brokers: Dict[str, broker_module.Broker] = {}
+
+    # -- accessors -------------------------------------------------------------
+
+    @property
+    def config(self) -> ServiceConfig:
+        return self._config
+
+    @property
+    def store(self) -> ArenaStore:
+        return self._store
+
+    @property
+    def scorer_policy(self) -> Dict[str, Any]:
+        return dict(self._scorer_policy)
+
+    def signing_key_document(self) -> Dict[str, Any]:
+        return signing.signing_key_document(self._reward_signer().public_key_der)
+
+    def now(self) -> datetime:
+        return self._clock().astimezone(timezone.utc)
+
+    def _sign(self, document: Mapping[str, Any], hash_field: str) -> Dict[str, Any]:
+        return signing.sign_document(self._reward_signer(), document, hash_field=hash_field)
+
+    def _reward_signer(self) -> signing.ArenaSigner:
+        """Create the downstream reward signer only when activation needs it."""
+
+        with self._signer_lock:
+            if self._signer is None:
+                factory = self._config.reward_signer_factory
+                if factory is None:
+                    raise ServiceError("reward_signer_unavailable", 503)
+                self._signer = factory()
+            return self._signer
+
+    def _round(self, round_id: str) -> Dict[str, Any]:
+        row = self._store.get_round(round_id)
+        if row is None:
+            raise ServiceError("round_missing", 404)
+        return self._require_round_mode(row)
+
+    def _require_round_mode(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Refuse a round owned by another Arena mode."""
+
+        if (row.get("configuration_doc") or {}).get("mode") != self._config.mode:
+            raise ServiceError("round_mode_mismatch", 409)
+        return row
+
+    def startup_checks(self) -> Dict[str, Any]:
+        """Check competition database and object-store dependencies.
+
+        Checks the database role, every Arena table and function grant, the
+        object store. Reward signing and epoch cutover are lazy downstream
+        dependencies and cannot block service startup or publication.
+        """
+
+        identity = self._store.require_service_role()
+        for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
+            try:
+                self._store._transport.select(table, limit=1)
+            except ArenaStoreError as exc:
+                raise ServiceError("table_unavailable:%s" % table, 500) from exc
+        # Every service function must exist and be granted: a missing round is the
+        # expected structured failure; a permission or undefined-function error is not.
+        for function, params in (
+            ("lab_arena_expire_leases", {"p_round_id": "arena-0000-00-00"}),
+            ("lab_arena_close_stage", {"p_round_id": "arena-0000-00-00", "p_stage": 1}),
+            ("lab_arena_cancel_round", {"p_round_id": "arena-0000-00-00", "p_reason": "startup-probe"}),
+        ):
+            try:
+                self._store._transport.rpc(function, params)
+            except ArenaStoreError as exc:
+                if "lab_arena_round_missing" not in str(exc):
+                    raise ServiceError("function_unavailable:%s" % function, 500) from exc
+        probe_ref = "arena/_startup/object-store.json"
+        probe_bytes = contracts.canonical_json({"probe": "lab_arena_object_store_v1"}).encode("utf-8")
+        try:
+            self._objects.put(probe_ref, probe_bytes)
+            if self._objects.get(probe_ref) != probe_bytes:
+                raise ServiceError("object_store_mismatch", 500)
+        except ServiceError:
+            raise
+        except Exception as exc:
+            raise ServiceError("object_store_unavailable", 500) from exc
+        current = self.current_round()
+        return {
+            "database_identity": identity,
+            "scoring_adapter_version": self._scorer_policy["scoring_adapter_version"],
+            "current_round": current["round_id"] if current else None,
+        }
+
+    # -- round creation (section 5.1) ----------------------------------------
+
+    def build_schedule(self, cutoff: datetime) -> Dict[str, str]:
+        minutes = self._config.defaults.stage_minutes
+        cutoff = cutoff.astimezone(timezone.utc)
+        benchmark_deadline = cutoff + timedelta(minutes=minutes["benchmark"])
+        stage_1_start = benchmark_deadline + timedelta(seconds=1)
+        stage_1_close = stage_1_start + timedelta(minutes=minutes["stage_1"])
+        stage_1_scoring_close = stage_1_close + timedelta(minutes=minutes["stage_1_scoring"])
+        stage_2_start = stage_1_scoring_close + timedelta(seconds=1)
+        stage_2_close = stage_2_start + timedelta(minutes=minutes["stage_2"])
+        final_scoring_close = stage_2_close + timedelta(minutes=minutes["final_scoring"])
+        return {
+            "submission_open": _iso(cutoff - timedelta(days=1)),
+            "submission_cutoff": _iso(cutoff),
+            "benchmark_deadline": _iso(benchmark_deadline),
+            "stage_1_start": _iso(stage_1_start),
+            "stage_1_close": _iso(stage_1_close),
+            "stage_1_scoring_close": _iso(stage_1_scoring_close),
+            "stage_2_start": _iso(stage_2_start),
+            "stage_2_close": _iso(stage_2_close),
+            "final_scoring_close": _iso(final_scoring_close),
+            "publication_deadline": _iso(final_scoring_close + timedelta(seconds=1)),
+        }
+
+    def runner_settings(self) -> Tuple[List[str], List[str]]:
+        banned = sorted(set(str(item) for item in self._config.banned_hotkeys_source()))
+        runners = sorted(set(self._config.defaults.runner_hotkeys))
+        for hotkey in runners:
+            if hotkey in banned:
+                raise ServiceError("runner_banned", 500)
+        # Only the explicit Arena runner configuration grants execution and
+        # scoring authority. A chain validator permit does not grant access.
+        return runners, banned
+
+    def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
+        defaults = self._config.defaults
+        round_id = round_id or round_id_for_cutoff(cutoff)
+        runner_hotkeys, banned_hotkeys = self.runner_settings()
+        document = {
+            "schema_version": contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,
+            "round_id": round_id,
+            "mode": self._config.mode,
+            "rewards_enabled": bool(defaults.rewards_enabled and self._config.mode == "live"),
+            "schedule": self.build_schedule(cutoff),
+            "generator": benchmark.generator_configuration(),
+            "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
+            "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
+            "finalist_count": contracts.FINALIST_COUNT,
+            "max_challengers": int(defaults.max_challengers),
+            "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
+            "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
+            "lease_ttl_seconds": contracts.LEASE_TTL_SECONDS,
+            "companies_per_icp": benchmark.apply_arena_contract({"company_stage": "Seed", "employee_count": ["11-50"]})["max_companies"],
+            "providers": list(contracts.PROVIDERS),
+            "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
+            "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
+            "icp_wall_clock_seconds": contracts.ICP_WALL_CLOCK_SECONDS,
+            "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
+            "scorer_policy": self._scorer_policy,
+            "execution_cap_microusd": defaults.execution_cap_microusd,
+            "scoring_cap_microusd": defaults.scoring_cap_microusd,
+            "scorer_image_digest": defaults.scorer_image_digest,
+            "scorer_image_reference": defaults.scorer_image_reference,
+            "baseline_hotkey": defaults.baseline_hotkey,
+            "runner_hotkeys": runner_hotkeys,
+            "banned_hotkeys": banned_hotkeys,
+            "image_rules": defaults.image_rules.to_document(),
+            "registry_repository": defaults.registry_repository,
+            "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
+        }
+        configuration = contracts.validate_round_configuration(document)
+        result = self._store.create_round(round_id, configuration)
+        if result.get("status") not in ("created", "existing"):
+            raise ServiceError("round_create_failed", 500)
+        if result.get("status") == "existing":
+            self._round(round_id)
+        return configuration
+
+    def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Create the next daily round when no round is open for submissions.
+
+        Rounds overlap: the day's round runs its benchmark while the next
+        round is already open, so miners can always submit. Every signed
+        request names its round, and the driver advances every round that is
+        not published or cancelled. The new round's cutoff is the next
+        configured UTC hour at least ``min_submission_hours`` ahead; a date
+        whose round already exists (published or cancelled that day) moves to
+        the next day, because a round id is its cutoff date. Idempotent: a
+        second call finds the round it created.
+        """
+
+        defaults = self._config.defaults
+        open_round = self.open_round()
+        if open_round is not None:
+            return {"status": "existing", "round_id": open_round["round_id"], "round_status": open_round["status"]}
+        if defaults.daily_cutoff_hour_utc is None:
+            return {"status": "disabled"}
+        hour = int(defaults.daily_cutoff_hour_utc)
+        if not 0 <= hour <= 23:
+            raise ServiceError("daily_cutoff_hour_invalid", 500)
+        moment = (now or self.now()).astimezone(timezone.utc)
+        earliest = moment + timedelta(hours=max(0, int(defaults.min_submission_hours)))
+        cutoff = earliest.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if cutoff < earliest:
+            cutoff += timedelta(days=1)
+        for _ in range(14):
+            if self._store.get_round(round_id_for_cutoff(cutoff)) is None:
+                created = self.create_round(cutoff)
+                return {"status": "created", "round_id": created["round_id"], "cutoff": _iso(cutoff)}
+            cutoff += timedelta(days=1)
+        raise ServiceError("daily_round_dates_exhausted", 500)
+
+    def current_round(self) -> Optional[Dict[str, Any]]:
+        """The newest round that is not published or cancelled (operator status)."""
+
+        # Scan ids and statuses only; a full row can be large at hundreds of participants.
+        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+            if row["status"] not in TERMINAL_STATUSES and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
+                return self._round(row["round_id"])
+        return None
+
+    def active_rounds(self) -> List[Dict[str, Any]]:
+        """Every round that is not published or cancelled, oldest first: ids and statuses only.
+
+        Rounds overlap (one open for submissions while the previous one runs),
+        so the driver advances each of them on every tick.
+        """
+
+        rows = [
+            row
+            for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc")
+            if row["status"] not in TERMINAL_STATUSES
+            and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
+        ]
+        return [{"round_id": row["round_id"], "status": row["status"]} for row in reversed(rows)]
+
+    def open_round(self) -> Optional[Dict[str, Any]]:
+        """The round open for submissions, if any (at most one at a time)."""
+
+        for row in self._store.list_rounds(limit=20, columns="round_id,status,created_at,configuration_doc"):
+            if row["status"] == "open" and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
+                return self._round(row["round_id"])
+        return None
+
+    def _hot_round(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """One round's row for runner-facing handlers, cached for a few seconds.
+
+        Claims and completions arrive by the thousand per stage; the SQL
+        functions remain the authority for status, so a briefly stale row
+        only yields a structured refusal.
+        """
+
+        now = time.monotonic()
+        with self._hot_round_lock:
+            cached = self._hot_rounds.get(round_id)
+            if cached is not None and now - cached[0] < HOT_ROUND_TTL_SECONDS:
+                return cached[1]
+        row = self._store.get_round(round_id)
+        if row is None:
+            return None
+        row = self._require_round_mode(row)
+        with self._hot_round_lock:
+            self._hot_rounds[round_id] = (now, row)
+        return row
+
+    def _request_round(self, envelope: Any, *, scope: str, hot: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Validate a signed request and resolve the round its envelope names.
+
+        Rounds overlap, so the envelope, not "the current round", says which
+        round a submission, claim, or completion belongs to. An unknown round
+        is refused before any banned-list or status check.
+        """
+
+        validated = self.validate_request(envelope, scope=scope, round_id=None)
+        round_id = str(validated["round_id"])
+        round_row = self._hot_round(round_id) if hot else self._store.get_round(round_id)
+        if round_row is None:
+            raise ServiceError("round_unknown", 404)
+        round_row = self._require_round_mode(round_row)
+        if validated["hotkey"] in self._banned_hotkeys(round_row):
+            raise ServiceError("hotkey_banned", 403)
+        return validated, round_row
+
+    def latest_published_round(self) -> Optional[Dict[str, Any]]:
+        rows = self._store.list_rounds(status="published", limit=200)
+        return next(
+            (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),
+            None,
+        )
+
+    # -- signed requests ------------------------------------------------------
+
+    def validate_request(self, envelope: Any, *, scope: str, round_id: Optional[str]) -> Dict[str, Any]:
+        try:
+            validated = contracts.validate_signed_request(envelope, expected_scope=scope, now=int(self.now().timestamp()), verify_signature=self._config.verify_signature, expected_round_id=round_id)
+        except ArenaSignatureError:
+            raise ServiceError("signature_invalid", 401)
+        except ArenaContractError as exc:
+            raise ServiceError("request_invalid:%s" % str(exc)[:80], 400)
+        if round_id is not None and validated["hotkey"] in self._banned_hotkeys(self._round(round_id)):
+            raise ServiceError("hotkey_banned", 403)
+        return validated
+
+    @staticmethod
+    def _banned_hotkeys(round_row: Mapping[str, Any]) -> set:
+        """Return the plain banned-hotkey list stored with the round."""
+
+        return set(str(item) for item in (round_row.get("configuration_doc") or {}).get("banned_hotkeys") or [])
+
+    # -- submissions (sections 6, 7, 14.2) -------------------------------------
+
+    def handle_submission(self, envelope: Any) -> Dict[str, Any]:
+        """Register one miner bundle; its digest is only an execution detail."""
+
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_SUBMISSION)
+        if round_row["status"] != "open":
+            raise ServiceError("submission_window_closed", 409)
+        schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+        now = self.now()
+        if now < _parse_iso(schedule["submission_open"]) or now >= _parse_iso(schedule["submission_cutoff"]):
+            raise ServiceError("submission_window_closed", 409)
+        round_id = round_row["round_id"]
+        if self._config.chain.uid_for_hotkey(validated["hotkey"]) is None:
+            raise ServiceError("hotkey_unregistered", 403)
+        body = contracts.validate_submission_body(validated["body"])
+        try:
+            reference = images.parse_reference(body["image_reference"])
+        except images.ImageError as exc:
+            raise ServiceError("submission_rejected:%s" % exc.rule_id, 400) from exc
+        # A miner gets one stable slot per round. The bundle digest does not
+        # affect admission, identity, rank, or the winner decision.
+        submission_id = "sub-%s" % contracts.document_hash({"round_id": round_id, "miner_hotkey": validated["hotkey"]})[7:39]
+        try:
+            registration = self._store.register_submission(round_id, submission_id, validated["hotkey"], {"submitted_reference": str(reference), "image_reference": str(reference), "consent": dict(body["consent"])})
+        except ArenaStoreError as exc:
+            if "lab_arena_submission_conflict" in str(exc):
+                raise ServiceError("submission_conflict", 409) from exc
+            raise
+        if registration.get("status") == "window_closed":
+            raise ServiceError("submission_window_closed", 409)
+        return {"status": "uploaded", "submission_id": submission_id, "image_reference": str(reference)}
+
+    def admit_uploaded_submissions(self, round_id: str, *, final: bool = False) -> Dict[str, Any]:
+        """Resolve, check, and mirror every uploaded image of the open round (the driver's tick step).
+
+        Each submission ends accepted with its resolved source reference and
+        internal Arena image reference, or rejected under a published rule. A
+        registry that cannot be reached leaves the submission
+        uploaded for the next tick until ``final`` (the cutoff), when it is
+        rejected as unavailable. Work stops after ``admission_tick_seconds`` so
+        one tick never blocks the driver for hours; the next tick continues.
+        """
+
+        if self._config.registry is None:
+            return {"status": "disabled"}
+        round_row = self._round(round_id)
+        if round_row["status"] != "open":
+            return {"status": "stale", "round_status": round_row["status"]}
+        configuration = round_row["configuration_doc"]
+        rules = images.ImageRules.from_document(configuration["image_rules"])
+        repository = str(configuration.get("registry_repository") or "")
+        if not repository:
+            raise ServiceError("registry_repository_missing", 500)
+        outcomes: Dict[str, Any] = {"status": "ok", "accepted": 0, "rejected": 0, "deferred": 0, "remaining": 0}
+        started = time.monotonic()
+        deadline = started + float(self._config.admission_tick_seconds)
+        pending = [row for row in self._store.list_submissions(round_id, status="uploaded") if not row.get("is_king")]
+        for index, row in enumerate(pending):
+            if time.monotonic() >= deadline:
+                outcomes["remaining"] = len(pending) - index
+                break
+            outcomes[self._admit_one(round_id, row, rules=rules, repository=repository, final=final, deadline=deadline)] += 1
+        return outcomes
+
+    def _admit_one(self, round_id: str, row: Mapping[str, Any], *, rules: images.ImageRules, repository: str, final: bool, deadline: float) -> str:
+        registry = self._config.registry
+        source_registry = self._config.source_registry
+        submission_id = str(row["submission_id"])
+        reference_text = str(row.get("submitted_reference") or (row.get("submission_doc") or {}).get("image_reference") or "")
+        try:
+            reference = images.parse_reference(reference_text)
+            descriptor = images.resolve_image(source_registry, reference, rules, deadline=deadline)
+            mirrored = images.mirror_image(source_registry, descriptor, repository, destination_client=registry, deadline=deadline)
+        except images.ImageError as exc:
+            if exc.rule_id == images.RULE_UNAVAILABLE and not final:
+                return "deferred"
+            self._store.update_submission(round_id, submission_id, "uploaded", "rejected", {"rejection_rule": exc.rule_id})
+            return "rejected"
+        # Publish the resolved public source reference. A submitted tag is never
+        # reused after admission; execution uses the immutable Arena mirror.
+        patch = dict(descriptor.to_document(), image_reference=str(mirrored), submitted_reference=str(descriptor.reference))
+        result = self._store.update_submission(round_id, submission_id, "uploaded", "accepted", patch)
+        return "accepted" if result.get("status") == "ok" else "deferred"
+
+    @staticmethod
+    def _participant(row: Mapping[str, Any], *, is_king: bool) -> Dict[str, Any]:
+        """The small frozen participant record used for leases and publication."""
+
+        return {
+            "submission_id": row["submission_id"], "miner_hotkey": row["miner_hotkey"], "image_digest": row["image_digest"],
+            "image_reference": str(row.get("image_reference") or ""),
+            "submitted_reference": str(row.get("submitted_reference") or (row.get("submission_doc") or {}).get("image_reference") or ""),
+            "is_king": bool(is_king),
+        }
+
+    # -- participant freeze and benchmark (sections 7.1, 8) --------------------
+
+    def freeze_participants(self, round_id: str) -> List[Dict[str, Any]]:
+        round_row = self._round(round_id)
+        participants: List[Dict[str, Any]] = []
+        accepted = [row for row in self._store.list_submissions(round_id, status="accepted") if not row.get("is_king")]
+        # The reigning king re-enters with its winning image unless its hotkey
+        # holds a fresh, eligible submission for this round: then that
+        # submission is the king's entry (still the king, so a resubmission
+        # can never restart the reward decay) and no carried copy is
+        # registered under the same hotkey, which the one-entry-per-miner
+        # index would refuse.
+        king_hotkey = self._reigning_king_hotkey()
+        initial_baseline = king_hotkey is None
+        if initial_baseline:
+            king_hotkey = str((round_row.get("configuration_doc") or {}).get("baseline_hotkey") or "").strip()
+            if not king_hotkey:
+                raise ServiceError("baseline_hotkey_missing", 500)
+        fresh_king = next((row for row in accepted if king_hotkey and row["miner_hotkey"] == king_hotkey), None)
+        if initial_baseline and fresh_king is None:
+            # The baseline uses the normal signed submission and image
+            # admission path. Freeze does not create or bypass that entry.
+            raise ServiceError("baseline_submission_missing", 409)
+        king = None if fresh_king is not None else self._entering_king(round_id)
+        cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
+        # Freeze order (acceptance order) decides who enters when the cap binds.
+        frozen_count = 0
+        for row in accepted:
+            is_king = fresh_king is not None and row["submission_id"] == fresh_king["submission_id"]
+            if not is_king and frozen_count >= cap:
+                self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "capacity.round_full"})
+                continue
+            if not is_king:
+                frozen_count += 1
+            result = self._store.update_submission(round_id, row["submission_id"], "accepted", "frozen", {"is_king": True} if is_king else {})
+            if result.get("status") in ("ok", "stale"):
+                participants.append(self._participant(row, is_king=is_king))
+        if king is not None:
+            participants.append(king)
+        for row in self._store.list_submissions(round_id, status="frozen"):
+            if not any(p["submission_id"] == row["submission_id"] for p in participants):
+                participants.append(self._participant(row, is_king=bool(row.get("is_king"))))
+        return participants
+
+    def _reigning_king_hotkey(self) -> Optional[str]:
+        """The hotkey of the king the most recent published round left reigning, if any."""
+
+        latest = self.latest_published_round()
+        if latest is None or not latest.get("king_hotkey") or latest.get("king_outcome") == "no_king":
+            return None
+        return str(latest["king_hotkey"])
+
+    def _entering_king(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """The king published by the most recent published round enters automatically."""
+
+        latest = self.latest_published_round()
+        if latest is None or not latest.get("king_hotkey") or latest.get("king_outcome") == "no_king":
+            return None
+        king_hotkey = latest["king_hotkey"]
+        previous_round = self._store.get_round(latest["round_id"])
+        decision = (previous_round or {}).get("publication_doc", {}).get("king_decision", {})
+        king_submission = self._store.get_submission(str(decision.get("king_submission_id") or ""))
+        if king_submission is None:
+            raise ServiceError("incumbent_submission_missing", 500)
+        submission_id = "king-%s" % round_id
+        existing = self._store.get_submission(submission_id)
+        if existing is None:
+            # The king re-enters with the exact pinned image of its winning submission.
+            self._store.register_submission(round_id, submission_id, king_hotkey, {"submitted_reference": str(king_submission.get("submitted_reference") or king_submission.get("image_reference") or ""), "image_reference": str(king_submission.get("image_reference") or ""), "consent": king_submission.get("consent") or {}, "is_king": True})
+            self._store.update_submission(round_id, submission_id, "uploaded", "accepted", {
+                "image_digest": king_submission["image_digest"], "image_reference": str(king_submission.get("image_reference") or ""),
+                "image_size_bytes": king_submission.get("image_size_bytes"), "is_king": True,
+            })
+            self._store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": True})
+        return self._participant(dict(king_submission, submission_id=submission_id, miner_hotkey=king_hotkey), is_king=True)
+
+    def commit_benchmark(self, round_id: str) -> Dict[str, Any]:
+        round_row = self._round(round_id)
+        if round_row["status"] != "open":
+            return {"status": "existing", "round_status": round_row["status"]}
+        configuration = round_row["configuration_doc"]
+        participants = self.freeze_participants(round_id)
+        started = self.now()
+        try:
+            result = benchmark.generate_benchmark(
+                round_id=round_id,
+                set_id=int(round_id.replace("arena-", "").replace("-", "")[:8]),
+                provider=self._config.generation_provider,
+                clock=self._clock,
+                max_attempts=int(configuration["generator"]["max_generation_attempts"]),
+            )
+        except benchmark.BenchmarkGenerationFailed:
+            self._store.cancel_round(round_id, CANCEL_REASONS["generation"])
+            return {"status": "cancelled", "reason": CANCEL_REASONS["generation"]}
+        evaluation_date = round_id.replace("arena-", "")[:10]
+        benchmark_ref = "arena/%s/benchmark.json" % round_id
+        self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": list(result.icps)}).encode("utf-8"))
+        transition = self._store.transition_round(round_id, "open", "committed", {
+            "participants": participants,
+            "benchmark_ref": benchmark_ref,
+            "evaluation_date": evaluation_date,
+        })
+        return {"status": transition.get("status"), "participants": len(participants)}
+
+    def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
+        round_row = self._round(round_id)
+        ref = round_row.get("benchmark_ref")
+        if not ref:
+            raise ServiceError("benchmark_not_committed", 409)
+        document = json.loads(self._objects.get(ref).decode("utf-8"))
+        if not isinstance(document, Mapping) or set(document) != {"schema_version", "round_id", "icps"}:
+            raise ServiceError("benchmark_data_invalid", 500)
+        if document.get("schema_version") != "leadpoet.lab_arena.benchmark.v1" or document.get("round_id") != round_id:
+            raise ServiceError("benchmark_data_invalid", 500)
+        icps = list(document["icps"])
+        if len(icps) != contracts.BENCHMARK_ICP_COUNT:
+            raise ServiceError("benchmark_data_invalid", 500)
+        return icps
+
+    # -- stages (sections 2, 9) ----------------------------------------------
+
+    def open_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
+        round_row = self._round(round_id)
+        if stage not in (1, 2):
+            raise ServiceError("stage_invalid", 400)
+        participants = list(round_row.get("participants") or [])
+        if stage == 2:
+            finalists = set(str(item) for item in (round_row.get("finalists") or []))
+            participants = [participant for participant in participants if participant["submission_id"] in finalists or participant.get("is_king")]
+        self.benchmark_icps(round_id)
+        positions = list(contracts.stage_positions(stage))
+        rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"]} for p in participants]
+        return self._store.open_stage(round_id, stage, rows, positions)
+
+    def stage_is_complete(self, round_id: str, stage: int) -> bool:
+        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        return bool(runs) and all(run["status"] in ("accepted", "failed") for run in runs)
+
+    def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
+        closed = self._store.close_stage(round_id, stage)
+        if closed.get("status") != "closed":
+            return closed
+        return self.commit_scoring_plan(round_id, stage)
+
+    def commit_scoring_plan(self, round_id: str, stage: int) -> Dict[str, Any]:
+        round_row = self._round(round_id)
+        self.benchmark_icps(round_id)
+        plan = scoring.build_scoring_plan(
+            round_id=round_id, stage=stage, runs=self._store.list_runs(round_id, stage=stage, kind="execute"),
+        )
+        status = "stage%d_closed" % stage
+        result = self._store.transition_round(round_id, status, status, {"stage%d_scoring_plan_doc" % stage: plan})
+        return {"status": result.get("status"), "work_items": len(plan["work_items"])}
+
+    def _load_scoring_plan(self, round_row: Mapping[str, Any], stage: int) -> Dict[str, Any]:
+        plan = round_row.get("stage%d_scoring_plan_doc" % stage)
+        if not plan:
+            raise ServiceError("scoring_plan_missing", 409)
+        try:
+            validated = contracts.validate_scoring_plan(plan)
+        except ArenaContractError as exc:
+            raise ServiceError("scoring_plan_invalid", 500) from exc
+        if validated["round_id"] != round_row["round_id"] or int(validated["stage"]) != stage:
+            raise ServiceError("scoring_plan_invalid", 500)
+        return validated
+
+    def _outputs_by_run(self, round_id: str, stage: int) -> Dict[str, List[Dict[str, Any]]]:
+        outputs: Dict[str, List[Dict[str, Any]]] = {}
+        for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
+            document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+            outputs[str(run["run_id"])] = list(document["companies"])
+        return outputs
+
+    # -- validator scoring (sections 10 and 16 as revised) ----------------------
+
+    def open_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
+        """Turn the committed plan into scoring assignments validators claim."""
+
+        round_row = self._round(round_id)
+        if round_row["status"] != "stage%d_closed" % stage:
+            return {"status": "stale", "round_status": round_row["status"]}
+        plan = self._load_scoring_plan(round_row, stage)
+        accepted = {}
+        for run in self._store.list_runs(round_id, stage=stage, status="accepted", kind="execute"):
+            accepted[str(run["run_id"])] = run
+        items: List[Dict[str, Any]] = []
+        for item in plan["work_items"]:
+            submission_id = item["submission_id"]
+            run = accepted.get(str(item["scored_run_id"]))
+            if run is None or run["submission_id"] != submission_id or int(run["icp_position"]) != int(item["icp_position"]) or run.get("output_ref") != item["output_ref"]:
+                raise ServiceError("scoring_plan_run_mismatch", 500)
+            items.append({
+                "scored_run_id": run["run_id"],
+                "submission_id": run["submission_id"],
+                "icp_position": int(run["icp_position"]),
+                "output_ref": run["output_ref"],
+            })
+        result = self._store.open_scoring(round_id, stage, items)
+        return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
+
+    def scoring_is_complete(self, round_id: str, stage: int) -> bool:
+        runs = self._store.list_runs(round_id, stage=stage, kind="score")
+        return all(run["status"] in ("accepted", "failed") for run in runs)
+
+    def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
+        return self._store.close_scoring(round_id, stage)
+
+    def _scoring_outputs(self, round_id: str, stage: int) -> Dict[str, Dict[str, Any]]:
+        """The score run that counts for each scored execution run."""
+
+        chosen: Dict[str, Dict[str, Any]] = {}
+        for run in self._store.list_runs(round_id, stage=stage, kind="score"):
+            current = chosen.get(run["scored_run_id"])
+            if current is None or (run["status"] == "accepted" and current["status"] != "accepted") or (run["status"] == current["status"] and int(run["attempt"]) > int(current["attempt"])):
+                chosen[run["scored_run_id"]] = run
+        return chosen
+
+    def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        document = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        output = scoring.validate_scoring_output_document(document)
+        if output["scored_run_id"] != run["scored_run_id"]:
+            raise ServiceError("scoring_output_item_mismatch", 500)
+        return scoring.validate_breakdowns_for_item(output["breakdowns"], icp=icp, companies=companies, max_scored_companies=int(policy["max_scored_companies"]))
+
+    def score_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
+        """Assemble the stage bundle from configured-runner scoring results."""
+
+        round_row = self._round(round_id)
+        if round_row["status"] != "stage%d_judged" % stage:
+            return {"status": "stale", "round_status": round_row["status"]}
+        policy = contracts.validate_scorer_policy(round_row["configuration_doc"]["scorer_policy"])
+        plan = self._load_scoring_plan(round_row, stage)
+        icps = self.benchmark_icps(round_id)
+        outputs = self._outputs_by_run(round_id, stage)
+        chosen = self._scoring_outputs(round_id, stage)
+        breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
+        judge_executions = 0
+        for item in plan["work_items"]:
+            scored_run_id = item["scored_run_id"]
+            run = chosen.get(scored_run_id)
+            if run is None:
+                raise ServiceError("scoring_assignment_missing", 500)
+            icp = icps[int(item["icp_position"])]
+            companies = outputs[scored_run_id]
+            if run["status"] != "accepted":
+                raise scoring.ScoringError("run %s was not judged" % scored_run_id)
+            breakdowns_by_item[scored_run_id] = self._verified_breakdowns(run, icp=icp, companies=companies, policy=policy)
+            judge_executions += 1
+        stage_scores = scoring.build_stage_scores(
+            plan=plan,
+            policy=policy,
+            icps_by_position=dict(enumerate(icps)),
+            outputs_by_run=outputs,
+            breakdowns_by_item=breakdowns_by_item,
+        )
+        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        recorded = self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(stage_scores, runs))
+        if recorded.get("status") != "ok":
+            # The per-run scores are part of the published result; a write the
+            # database refused must stop the stage, never pass silently.
+            raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
+        if stage == 1:
+            ranking = verify.stage1_ranking(
+                self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
+            )
+            finalists = verify.select_finalists(ranking)
+            transition = self._store.transition_round(
+                round_id,
+                "stage1_judged",
+                "stage1_scored",
+                {"finalists": finalists},
+            )
+            return {"status": transition.get("status"), "judge_executions": judge_executions, "finalists": finalists}
+        transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
+        return {"status": transition.get("status"), "judge_executions": judge_executions}
+
+    def _score_entries_from_runs(
+        self,
+        round_row: Mapping[str, Any],
+        positions: Sequence[int],
+        score_key: str,
+    ) -> List[Dict[str, Any]]:
+        """Derive one score per participant from write-once run scores."""
+
+        wanted = set(int(position) for position in positions)
+        selected: Dict[Tuple[str, int], Mapping[str, Any]] = {}
+        for run in self._store.list_runs(str(round_row["round_id"]), kind="execute"):
+            position = int(run["icp_position"])
+            if position not in wanted or run.get("per_icp_score") is None:
+                continue
+            key = (str(run["submission_id"]), position)
+            current = selected.get(key)
+            if current is None or int(run.get("attempt") or 0) > int(current.get("attempt") or 0):
+                selected[key] = run
+        entries = []
+        for participant in round_row.get("participants") or []:
+            submission_id = str(participant["submission_id"])
+            rows = [selected.get((submission_id, position)) for position in sorted(wanted)]
+            if any(row is None for row in rows):
+                continue
+            values = [float(row["per_icp_score"]) for row in rows if row is not None]
+            entry = {
+                "submission_id": submission_id,
+                score_key: verify.stage_score(values, len(wanted)),
+                "is_king": bool(participant.get("is_king")),
+            }
+            if score_key == "final_score":
+                entry["hotkey"] = str(participant["miner_hotkey"])
+                if not any(row.get("terminal_cause") == "accepted" for row in rows if row is not None):
+                    entry[score_key] = None
+            entries.append(entry)
+        return entries
+
+    # -- publication and downstream reward activation -------------------------
+
+    def publish(self, round_id: str) -> Dict[str, Any]:
+        round_row = self._round(round_id)
+        if round_row["status"] != "scored":
+            return {"status": "stale", "round_status": round_row["status"]}
+        stage1_ranking = verify.stage1_ranking(
+            self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
+        )
+        finalists = list(round_row.get("finalists") or [])
+        final_entries = self._score_entries_from_runs(
+            round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
+        )
+        king_entry = next((e for e in final_entries if e["is_king"]), None)
+        decision = verify.king_decision([e for e in final_entries if not e["is_king"]], king_entry)
+        published_at = _iso(self.now())
+        publication = {
+            "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
+            "round_id": round_id,
+            # The miner's source reference is public. The Arena's private mirror
+            # digest is only an execution detail and is not a promotion gate.
+            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "public_image_reference": str(p.get("submitted_reference") or ""), "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
+            "stage1_ranking": stage1_ranking,
+            "finalists": finalists,
+            "final_ranking": verify.final_ranking(final_entries),
+            "king_decision": decision,
+            "published_at": published_at,
+        }
+        contracts.check_strict_document(publication, contracts.PUBLICATION_LIMITS)
+        transition = self._store.transition_round(round_id, "scored", "published", {
+            "publication_doc": publication,
+            "published_at": published_at,
+        })
+        return {
+            "status": transition.get("status"),
+            "king_outcome": decision["outcome"],
+            "king_hotkey": str(decision.get("king_hotkey") or ""),
+        }
+
+    def activate_pending_rewards(self) -> Dict[str, Any]:
+        """Activate eligible live rounds oldest-first after publication.
+
+        Publication never calls this method. A transient chain, cutover, KMS,
+        or database failure leaves the compact competition result published
+        and the next driver tick retries the same oldest round.
+        """
+
+        if self._config.mode != "live":
+            return {"status": "disabled", "activated": 0}
+        rows = list(reversed(self._store.list_rounds(status="published", limit=200)))
+        pending = [
+            row for row in rows
+            if (row.get("configuration_doc") or {}).get("mode") == "live"
+            and (row.get("configuration_doc") or {}).get("rewards_enabled") is True
+            and not row.get("reward_activated_at")
+        ]
+        activated = 0
+        for row in pending:
+            result = self.activate_reward(str(row["round_id"]))
+            if result.get("status") not in ("activated", "existing"):
+                return {"status": str(result.get("status") or "stale"), "activated": activated}
+            activated += int(result.get("status") == "activated")
+        return {"status": "ok", "activated": activated}
+
+    def activate_reward(self, round_id: str) -> Dict[str, Any]:
+        """Sign and atomically activate one already-published live result."""
+
+        row = self._round(round_id)
+        if row.get("reward_activated_at"):
+            return {"status": "existing", "effective_reward_epoch": row.get("effective_reward_epoch")}
+        configuration = row.get("configuration_doc") or {}
+        if row.get("status") != "published":
+            return {"status": "stale", "round_status": row.get("status")}
+        if configuration.get("mode") != "live" or configuration.get("rewards_enabled") is not True:
+            return {"status": "disabled"}
+        publication = row.get("publication_doc") or {}
+        decision = publication.get("king_decision") or {}
+        prior = self._store.published_reward_bases(limit=200)
+        maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
+        effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)
+        king_hotkey = str(decision.get("king_hotkey") or "")
+        previous = next(
+            (
+                item for item in prior
+                if item.get("king_start_epoch") is not None
+                and str(item.get("king_hotkey") or "") == king_hotkey
+            ),
+            None,
+        )
+        previous_start = int(previous["king_start_epoch"]) if previous is not None else None
+        basis = self._sign(
+            rewards.reward_basis_document(
+                round_id=round_id,
+                published_at=str(publication["published_at"]),
+                finalized_epoch=effective_epoch - 1,
+                king_hotkey=king_hotkey,
+                king_outcome=str(decision["outcome"]),
+                previous_king_start_epoch=previous_start,
+                reward_constants=configuration["reward_constants"],
+            ),
+            "reward_basis_hash",
+        )
+        return self._store.activate_reward(round_id, basis, self.signing_key_document())
+
+    # -- runner handlers (section 14.3) ----------------------------------------
+
+    def _lease_token(self, validated: Mapping[str, Any]) -> str:
+        return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
+
+    def handle_claim(self, envelope: Any) -> Dict[str, Any]:
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_CLAIM, hot=True)
+        round_id = round_row["round_id"]
+        if round_row["status"] in TERMINAL_STATUSES:
+            raise ServiceError("round_ended", 409)
+        body = validated["body"]
+        declared = body.get("declared_parallelism")
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+            raise ServiceError("declared_parallelism_invalid", 400)
+        configuration = round_row["configuration_doc"]
+        if validated["hotkey"] not in configuration["runner_hotkeys"]:
+            raise ServiceError("runner_not_allowlisted", 403)
+        excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
+        token = self._lease_token(validated)
+        response = self._store.claim_assignment(
+            round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
+            excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
+            lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
+        )
+        if response.get("status") != "leased":
+            return response
+        icps = self.benchmark_icps(round_id)
+        position = int(response["icp_position"])
+        if not 0 <= position < len(icps):
+            raise ServiceError("benchmark_data_invalid", 500)
+        lease = dict(response, icp=icps[position], lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        if response.get("kind") == "score":
+            # A scoring assignment: the validator runs the pinned judge image on
+            # the scored output with the signed scorer policy.
+            scored = self._store.get_run(str(response.get("scored_run_id") or ""))
+            if scored is None or not scored.get("output_ref"):
+                raise ServiceError("scored_run_missing", 500)
+            output = json.loads(self._objects.get(scored["output_ref"]).decode("utf-8"))
+            lease.update({
+                "image_digest": configuration["scorer_image_digest"],
+                "image_reference": configuration["scorer_image_reference"],
+                "scored_output": output, "scorer_policy": configuration["scorer_policy"],
+            })
+            return lease
+        # An execution uses the participant's immutable mirrored image. The
+        # runner always invokes the competition entrypoint /agent/run.
+        participant = next((p for p in round_row.get("participants") or [] if p["submission_id"] == response.get("submission_id")), None)
+        if participant is None:
+            raise ServiceError("participant_missing", 500)
+        lease.update({
+            "image_digest": participant["image_digest"], "image_reference": str(participant.get("image_reference") or ""),
+        })
+        return lease
+
+    def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
+
+    def _broker_for(self, round_id: str) -> broker_module.Broker:
+        with self._lock:
+            broker = self._brokers.get(round_id)
+            if broker is None:
+                broker = self._config.broker_factory(self, self._round(round_id))
+                self._brokers[round_id] = broker
+            return broker
+
+    def handle_provider(self, run_id: str, lease_token: str, frame: Any) -> Dict[str, Any]:
+        if not isinstance(frame, Mapping) or set(frame) != {"operation_id", "parameters", "timeout_ms", "action_sequence"}:
+            raise ServiceError("frame_invalid", 400)
+        contracts.check_strict_document(frame, contracts.PROVIDER_FRAME_LIMITS)
+        run, context = self._run_context(run_id, lease_token)
+        broker = self._broker_for(run["round_id"])
+        result = broker.execute(context, operation_id=str(frame["operation_id"]), parameters=frame["parameters"], action_sequence=frame["action_sequence"], timeout_ms=int(frame["timeout_ms"]))
+        return result.to_document()
+
+    def handle_complete(self, envelope: Any) -> Dict[str, Any]:
+        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_COMPLETE, hot=True)
+        round_id = round_row["round_id"]
+        body = validated["body"]
+        run_id = str(body.get("run_id") or "")
+        try:
+            run_result = contracts.validate_run_result(body.get("result"))
+        except ArenaContractError as exc:
+            raise ServiceError("run_result_invalid:%s" % str(exc)[:80], 400)
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        if str(run.get("round_id") or "") != round_id:
+            raise ServiceError("run_round_mismatch", 400)
+        if run.get("runner_hotkey") != validated["hotkey"]:
+            raise ServiceError("run_runner_mismatch", 403)
+        kind = str(run.get("kind") or "execute")
+        terminal_status = run_result["terminal_status"]
+        if kind == "score" and terminal_status not in contracts.SCORE_TERMINAL_CAUSES:
+            raise ServiceError("run_result_cause_kind_mismatch", 400)
+        if kind == "execute" and terminal_status in ("judge_error", "judge_timeout"):
+            raise ServiceError("run_result_cause_kind_mismatch", 400)
+        lease_token = self._lease_token_for_run(validated, run)
+        output_ref = ""
+        if terminal_status == "accepted" and kind == "score":
+            try:
+                output = scoring.validate_scoring_output_document(body.get("output"))
+            except scoring.ScoringError:
+                raise ServiceError("output_invalid", 400)
+            if "failure" in output or output["scored_run_id"] != run.get("scored_run_id"):
+                raise ServiceError("output_invalid", 400)
+            output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
+            self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
+        elif terminal_status == "accepted":
+            try:
+                output = validate_output_document(body.get("output"))
+            except OutputInvalid:
+                raise ServiceError("output_invalid", 400)
+            output_ref = "arena/%s/outputs/%s.json" % (round_id, run_id)
+            self._objects.put(output_ref, contracts.canonical_json(output).encode("utf-8"))
+        result = self._store.complete_attempt(
+            run_id=run_id, lease_token_hash=hash_lease_token(lease_token), result=run_result, terminal_cause=terminal_status,
+            output_ref=output_ref,
+        )
+        return result
+
+    def _lease_token_for_run(self, validated: Mapping[str, Any], run: Mapping[str, Any]) -> str:
+        token = validated["body"].get("lease_token")
+        if not isinstance(token, str) or hash_lease_token(token) != run.get("lease_token_hash"):
+            raise ServiceError("lease_token_invalid", 403)
+        return token
+
+    def _ledger_calls(self, run_id: str) -> List[Dict[str, Any]]:
+        heads: Dict[str, Dict[str, Any]] = {}
+        reservations: Dict[str, Dict[str, Any]] = {}
+        for entry in self._store.list_ledger(run_id=run_id):
+            identity = entry.get("call_identity")
+            if not identity:
+                continue
+            heads[identity] = entry
+            if entry["entry_kind"] == "reservation":
+                reservations[identity] = entry
+        calls = []
+        for identity, head in heads.items():
+            reservation = reservations.get(identity, head)
+            doc = reservation.get("entry_doc") or {}
+            outcome = {"settlement": "settled", "uncertain": "uncertain", "refusal": "refused", "recovery": "recovered", "reservation": "reserved", "dispatch": "dispatched"}[head["entry_kind"]]
+            terminal = head.get("terminal_response") or {}
+            status = terminal.get("status") if head["entry_kind"] == "settlement" else None
+            response_hash = None
+            if head["entry_kind"] == "settlement" and terminal.get("body_b64") is not None:
+                import base64
+
+                response_hash = contracts.hash_bytes(base64.b64decode(terminal["body_b64"]))
+            calls.append({
+                "call_identity": identity, "operation_id": reservation.get("operation_id"), "request_hash": doc.get("request_hash"), "outcome": outcome, "status": status, "response_hash": response_hash,
+                "reserved_microusd": int(reservation.get("amount_microusd") or 0) if head["entry_kind"] != "refusal" else 0, "actual_microusd": int(head.get("amount_microusd") or 0) if head["entry_kind"] in ("settlement", "uncertain") else (0 if head["entry_kind"] in ("refusal", "recovery") else int(reservation.get("amount_microusd") or 0)),
+            })
+        return calls
+
+    # -- daily driver (section 14.4) -------------------------------------------
+
+    def advance_round(self, round_id: str) -> Dict[str, Any]:
+        """One idempotent compare-and-set step for the round's current state."""
+
+        # Every driver step may change the round's status; the runner-facing
+        # cache must never serve a row from before this process's own transition.
+        self._invalidate_hot_round()
+        try:
+            row = self._round(round_id)
+            if row["status"] == "open" and self._config.registry is not None:
+                # Admission runs outside the driver lock: mirroring images is
+                # slow and must never block an operator command. At the cutoff
+                # every image still unresolved is rejected before the freeze.
+                final = self.now() >= _parse_iso(row["configuration_doc"]["schedule"]["submission_cutoff"])
+                admission = self.admit_uploaded_submissions(round_id, final=final)
+                if final and int(admission.get("remaining") or 0) > 0:
+                    return {
+                        "status": "retry",
+                        "round_status": "open",
+                        "remaining_admissions": int(admission["remaining"]),
+                    }
+            return self._advance_round_locked(round_id)
+        finally:
+            self._invalidate_hot_round()
+
+    def _invalidate_hot_round(self) -> None:
+        with self._hot_round_lock:
+            self._hot_rounds.clear()
+
+    def _advance_round_locked(self, round_id: str) -> Dict[str, Any]:
+        with self._lock:
+            round_row = self._round(round_id)
+            status = round_row["status"]
+            schedule = round_row["configuration_doc"]["schedule"]
+            now = self.now()
+            if status == "open":
+                if now < _parse_iso(schedule["submission_cutoff"]):
+                    return {"status": "waiting", "round_status": status}
+                return self.commit_benchmark(round_id)
+            if status == "committed":
+                if now < _parse_iso(schedule["stage_1_start"]):
+                    return {"status": "waiting", "round_status": status}
+                return self.open_stage(round_id, 1)
+            if status in ("stage1", "stage2"):
+                stage = 1 if status == "stage1" else 2
+                self._store.expire_leases(round_id)
+                if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
+                    return self.close_stage(round_id, stage)
+                return {"status": "waiting", "round_status": status}
+            if status in ("stage1_closed", "stage2_closed"):
+                stage = 1 if status == "stage1_closed" else 2
+                if not round_row.get("stage%d_scoring_plan_doc" % stage):
+                    return self.commit_scoring_plan(round_id, stage)
+                return self.open_scoring(round_id, stage)
+            if status in ("stage1_scoring", "stage2_scoring"):
+                stage = 1 if status == "stage1_scoring" else 2
+                self._store.expire_leases(round_id)
+                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+                if now >= _parse_iso(window) or self.scoring_is_complete(round_id, stage):
+                    return self.close_scoring(round_id, stage)
+                return {"status": "waiting", "round_status": status}
+            if status in ("stage1_judged", "stage2_judged"):
+                stage = 1 if status == "stage1_judged" else 2
+                window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+                try:
+                    return self.score_stage(round_id, stage)
+                except scoring.ScoringError:
+                    if now >= _parse_iso(window) + timedelta(hours=2):
+                        return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
+                    return {"status": "retry", "round_status": status}
+            if status == "stage1_scored":
+                if now < _parse_iso(schedule["stage_2_start"]):
+                    return {"status": "waiting", "round_status": status}
+                return self.open_stage(round_id, 2)
+            if status == "scored":
+                try:
+                    return self.publish(round_id)
+                except ServiceError as exc:
+                    if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
+                        return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])
+                    raise
+            return {"status": "terminal", "round_status": status}
+
+    def cancel(self, round_id: str, reason: str) -> Dict[str, Any]:
+        if reason not in CANCEL_REASONS.values():
+            raise ServiceError("cancel_reason_invalid", 400)
+        self._round(round_id)
+        self._invalidate_hot_round()
+        return self._store.cancel_round(round_id, reason)
+
+    # -- public reads (section 14.1) -------------------------------------------
+
+    def public_current(self) -> Dict[str, Any]:
+        active = self.active_rounds()
+        current = active[-1] if active else None
+        open_round = next((row for row in active if row["status"] == "open"), None)
+        running = [row for row in active if row["status"] != "open"]
+        latest = self.latest_published_round()
+        epoch = None
+        try:
+            epoch = int(self._config.chain.current_settlement_epoch())
+        except Exception:
+            epoch = None
+        eligibility = None
+        week = None
+        if epoch is not None:
+            governing = self.public_reward_basis(epoch)
+            if governing is None:
+                eligibility = False
+            else:
+                eligibility = rewards.epoch_eligible(governing, epoch)
+                if eligibility:
+                    week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
+        return {
+            "mode": self._config.mode,
+            "round": {"round_id": current["round_id"], "status": current["status"]} if current else None,
+            # Rounds overlap: miners submit to the open round while runners work the running ones.
+            "open_round": dict(open_round) if open_round else None,
+            "running_rounds": [dict(row) for row in running],
+            "king": {"hotkey": latest.get("king_hotkey"), "outcome": latest.get("king_outcome"), "round_id": latest.get("round_id"), "king_start_epoch": latest.get("king_start_epoch")} if latest else None,
+            "reward_week_index": week,
+            "epoch_eligible": eligibility,
+            "current_epoch": epoch,
+        }
+
+    def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
+        if self._config.mode != "live":
+            return None
+        rows = [
+            row["reward_basis_doc"]
+            for row in self._store.list_rounds(status="published", limit=200)
+            if (row.get("configuration_doc") or {}).get("mode") == "live"
+            and row.get("reward_activated_at")
+            and row.get("reward_basis_doc")
+        ]
+        return rewards.governing_reward_basis(rows, int(epoch))
+
+    def public_round(self, round_id: str) -> Dict[str, Any]:
+        row = self._round(round_id)
+        view = {
+            "round_id": round_id, "status": row["status"], "configuration": row["configuration_doc"],
+            "participants": row.get("participants") if row["status"] not in ("open",) else None,
+            "finalists": row.get("finalists"),
+            "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
+            "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
+            "final_ranking": None, "reward_basis": row.get("reward_basis_doc"),
+        }
+        if row["status"] == "published":
+            publication = row.get("publication_doc") or {}
+            view.update({"final_ranking": publication.get("final_ranking"), "king_decision": publication.get("king_decision")})
+        return view
+
+    def public_benchmark(self, round_id: str) -> Dict[str, Any]:
+        row = self._round(round_id)
+        # The benchmark is public once every execution has ended.
+        if row["status"] not in ("stage2_closed", "stage2_scoring", "stage2_judged", "scored", "published"):
+            raise ServiceError("benchmark_not_public", 403)
+        icps = self.benchmark_icps(round_id)
+        return {"round_id": round_id, "icps": icps}
+
+    def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
+        if not submission_id or not isinstance(submission_id, str):
+            raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
+        row = self._round(round_id)
+        if row["status"] != "published":
+            raise ServiceError("results_not_public", 403)
+        runs = [run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")]
+        outputs = {}
+        for run in runs:
+            if run.get("output_ref"):
+                outputs[run["run_id"]] = json.loads(self._objects.get(run["output_ref"]).decode("utf-8"))
+        scores = {
+            "stage_1": [
+                {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
+                for run in runs
+                if int(run.get("stage") or 0) == 1 and run.get("per_icp_score") is not None
+            ],
+            "stage_2": [
+                {"run_id": run["run_id"], "icp_position": run["icp_position"], "per_icp_score": run["per_icp_score"]}
+                for run in runs
+                if int(run.get("stage") or 0) == 2 and run.get("per_icp_score") is not None
+            ],
+        }
+        publication = row.get("publication_doc") or {}
+        stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
+        final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
+        return {
+            "round_id": round_id, "submission_id": submission_id, "submission": {k: v for k, v in (self._store.get_submission(submission_id) or {}).items() if k in ("miner_hotkey", "submitted_reference", "is_king")},
+            "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
+            "scores": scores,
+            "submission_scores": {
+                "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
+                "final": None if final_entry is None else final_entry.get("final_score"),
+            },
+        }

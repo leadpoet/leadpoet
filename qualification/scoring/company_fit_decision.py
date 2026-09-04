@@ -177,6 +177,7 @@ def evaluate_company_identity(
 ) -> dict[str, str]:
     """Bind the submitted name, website, and LinkedIn to one observed entity."""
 
+    submitted_linkedin_raw = str(submitted_linkedin or "").strip()
     submitted = {
         "name": _company_name(submitted_name),
         "domain": _canonical_domain(submitted_website),
@@ -199,20 +200,23 @@ def evaluate_company_identity(
         "observed_linkedin_slug": observed["linkedin_slug"],
         "evidence_source": source,
     }
-    if not all(submitted.values()):
+    if not submitted["name"] or not submitted["domain"]:
+        receipt.update(decision="mismatch", reason_code="identity_unresolved")
+        return receipt
+    if submitted_linkedin_raw and not submitted["linkedin_slug"]:
         receipt.update(decision="mismatch", reason_code="identity_unresolved")
         return receipt
     if not observed["name"] or not observed["domain"]:
         return receipt
-    if (
-        observed["name"] != submitted["name"]
-        or observed["domain"] != submitted["domain"]
-    ):
+    if observed["domain"] != submitted["domain"]:
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
-    if not observed["linkedin_slug"]:
+    if submitted["linkedin_slug"] and not observed["linkedin_slug"]:
         return receipt
-    if observed["linkedin_slug"] != submitted["linkedin_slug"]:
+    if (
+        submitted["linkedin_slug"]
+        and observed["linkedin_slug"] != submitted["linkedin_slug"]
+    ):
         # LinkedIn may expose an opaque numeric company ID on a first-party
         # homepage while the submitted record has the company's vanity slug.
         # Those two identifiers do not prove a conflict by themselves; a later
@@ -222,6 +226,27 @@ def evaluate_company_identity(
             return receipt
         receipt.update(decision="mismatch", reason_code="identity_mismatch")
         return receipt
+    if observed["name"] != submitted["name"]:
+        # A matching registrable domain with a different common/legal name is
+        # not proof of a conflict by itself. Keep the result unavailable when
+        # there is no second stable identifier to bind the alias.
+        if submitted["linkedin_slug"]:
+            shorter_name = min(
+                (submitted["name"], observed["name"]),
+                key=len,
+            )
+            longer_name = max(
+                (submitted["name"], observed["name"]),
+                key=len,
+            )
+            if len(shorter_name) < 4 or not longer_name.startswith(shorter_name):
+                receipt.update(
+                    decision="mismatch",
+                    reason_code="identity_mismatch",
+                )
+                return receipt
+        else:
+            return receipt
     receipt.update(decision="match", reason_code="verifier_accepted")
     return receipt
 

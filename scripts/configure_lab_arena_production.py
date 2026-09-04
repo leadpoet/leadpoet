@@ -89,6 +89,7 @@ def gateway_updates(values: Mapping[str, str], args: argparse.Namespace, service
         "LAB_ARENA_RUNNER_HOTKEYS": args.runner_hotkey,
         "LAB_ARENA_BASELINE_HOTKEY": args.baseline_hotkey,
         "LAB_ARENA_CHAIN_ENDPOINT": args.chain_endpoint,
+        "LAB_ARENA_DAILY_CUTOFF_UTC": str(args.daily_cutoff_utc),
     }
 
 
@@ -111,6 +112,7 @@ def gateway_nonsecret_updates(args: argparse.Namespace) -> dict[str, str]:
         "LAB_ARENA_RUNNER_HOTKEYS": args.runner_hotkey,
         "LAB_ARENA_BASELINE_HOTKEY": args.baseline_hotkey,
         "LAB_ARENA_CHAIN_ENDPOINT": args.chain_endpoint,
+        "LAB_ARENA_DAILY_CUTOFF_UTC": str(args.daily_cutoff_utc),
     }
 
 
@@ -176,43 +178,50 @@ try:
     values = json.loads(raw)
 except Exception:
     values = None
+occurrences = {}
 if isinstance(values, dict):
     document_format = "json"
+    occurrences = {str(key): 1 for key in values}
 else:
     if values is not None:
         fail("secret_document_invalid")
     document_format = "dotenv"
     values = {}
-    seen = set()
     for line in raw.replace("\x00", "\n").splitlines():
         key = key_of(line)
         if not key:
             continue
-        if key in seen:
-            fail("secret_document_duplicate_key")
-        seen.add(key)
         value = line.strip()
         if value.startswith("export "):
             value = value[7:].strip()
-        try:
-            parts = shlex.split(value)
-        except ValueError:
-            fail("secret_document_invalid")
-        if len(parts) != 1 or "=" not in parts[0]:
-            fail("secret_document_invalid")
-        values[key] = parts[0].split("=", 1)[1]
+        raw_value = value.split("=", 1)[1]
+        occurrences[key] = occurrences.get(key, 0) + 1
+        if key in values and values[key] != raw_value:
+            fail("secret_document_conflicting_duplicate")
+        values[key] = raw_value
 
 updates = dict(request["updates"])
 if request["role"] == "gateway":
     for source, target in request["aliases"].items():
-        value = str(values.get(source) or "").strip()
-        if not value:
+        raw_value = str(values.get(source) or "").strip()
+        try:
+            parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
+        except ValueError:
+            fail("required_existing_value_invalid")
+        if len(parts) != 1 or not parts[0].startswith("VALUE="):
+            fail("required_existing_value_invalid")
+        value = parts[0].split("=", 1)[1]
+        if not value.strip():
             fail("required_existing_value_missing")
         updates[target] = value
     service_key = str(request.get("service_key") or "")
     if not service_key.startswith("sb_secret_") or any(ch.isspace() for ch in service_key):
         fail("service_key_malformed")
     updates["LAB_ARENA_SERVICE_KEY"] = service_key
+
+for key in updates:
+    if occurrences.get(key, 0) > 1:
+        fail("target_key_duplicate")
 
 if document_format == "json":
     merged = dict(values)
@@ -416,6 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-hotkey")
     parser.add_argument("--chain-endpoint")
     parser.add_argument("--api-base-url")
+    parser.add_argument("--daily-cutoff-utc", type=int, default=0)
     return parser
 
 
@@ -425,6 +435,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("allowed account must be in the repository allowlist")
     if args.apply and os.getenv(AUTH_ENV) != "1":
         raise ConfigurationError("--apply requires %s=1" % AUTH_ENV)
+    if not 0 <= args.daily_cutoff_utc <= 23:
+        raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
     if not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     if not args.prepare_runner and args.service_key_fd is None:

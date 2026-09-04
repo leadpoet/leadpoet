@@ -1,7 +1,10 @@
 import argparse
 import importlib.util
 import json
+import os
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,7 @@ def args():
         baseline_hotkey="baseline-key",
         chain_endpoint="wss://chain.example",
         api_base_url="https://gateway.example",
+        daily_cutoff_utc=0,
     )
 
 
@@ -50,6 +54,23 @@ def test_gateway_configuration_uses_existing_aliases_and_disables_rewards():
 def test_gateway_nonsecret_configuration_derives_registry_repository():
     updates = MODULE.gateway_nonsecret_updates(args())
     assert updates["LAB_ARENA_REGISTRY_REPOSITORY"] == "registry.example/team/scorer"
+    assert updates["LAB_ARENA_DAILY_CUTOFF_UTC"] == "0"
+
+
+def test_daily_cutoff_accepts_hour_six_and_rejects_out_of_range(tmp_path):
+    parsed = MODULE.build_parser().parse_args(["--allowed-account", "493765492819", "--daily-cutoff-utc", "6"])
+    assert parsed.daily_cutoff_utc == 6
+    parsed.prepare_runner = True
+    parsed.apply = False
+    parsed.ssh_key = tmp_path / "key"
+    parsed.ssh_key.write_text("x")
+    MODULE._validate_args(parsed)
+    configured = args()
+    configured.daily_cutoff_utc = 6
+    assert MODULE.gateway_nonsecret_updates(configured)["LAB_ARENA_DAILY_CUTOFF_UTC"] == "6"
+    parsed.daily_cutoff_utc = 24
+    with pytest.raises(MODULE.ConfigurationError, match="between 0 and 23"):
+        MODULE._validate_args(parsed)
 
 
 def test_validator_uses_dedicated_host_only_runner_wallet():
@@ -112,7 +133,8 @@ def test_remote_protocol_checks_version_again_before_stage_move():
     assert "current_id != before_id or current_raw != raw" in source
     assert 'fail("version_race")' in source
     assert '"--remove-from-version-id", before_id' in source
-    assert 'fail("secret_document_duplicate_key")' in source
+    assert 'fail("secret_document_conflicting_duplicate")' in source
+    assert 'comments=True, posix=True' in source
 
 
 def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monkeypatch, tmp_path):
@@ -131,6 +153,80 @@ def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monke
     assert "generate_mnemonic" in MODULE._RUNNER_WALLET_REMOTE
     assert '"ss58_address": address' in MODULE._RUNNER_WALLET_REMOTE
     assert "redirect_stdout(sink)" in MODULE._RUNNER_WALLET_REMOTE
+
+
+def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"current": "initial", "versions": {"initial": raw}}))
+    aws = tmp_path / "aws"
+    aws.write_text("""#!/usr/bin/env python3
+import json, os, sys
+path = os.environ["TEST_AWS_STATE"]
+state = json.load(open(path))
+args = sys.argv[1:]
+if args[:2] == ["sts", "get-caller-identity"]:
+    print(json.dumps({"Account": "493765492819", "Arn": "redacted"}))
+elif args[:2] == ["secretsmanager", "get-secret-value"]:
+    version = args[args.index("--version-id") + 1] if "--version-id" in args else state["current"]
+    print(json.dumps({"VersionId": version, "SecretString": state["versions"][version]}))
+elif args[:2] == ["secretsmanager", "put-secret-value"]:
+    version = args[args.index("--client-request-token") + 1]
+    state["versions"][version] = sys.stdin.read()
+    json.dump(state, open(path, "w"))
+    print(json.dumps({"VersionId": version}))
+elif args[:2] == ["secretsmanager", "update-secret-version-stage"]:
+    state["current"] = args[args.index("--move-to-version-id") + 1]
+    json.dump(state, open(path, "w"))
+    print("{}")
+else:
+    raise SystemExit(2)
+""")
+    aws.chmod(0o755)
+    request = {
+        "secret_id": MODULE.GATEWAY_SECRET,
+        "allowed_accounts": ["493765492819"],
+        "apply": True,
+        "role": "gateway",
+        "updates": {"LAB_ARENA_MODE": "live"},
+        "service_key": "sb_secret_scoped-test",
+        "aliases": {
+            "OPENROUTER_API_KEY": "LAB_ARENA_OPENROUTER_API_KEY",
+            "SCRAPINGDOG_API_KEY": "LAB_ARENA_SCRAPINGDOG_API_KEY",
+            "DEEPLINE_API_KEY": "LAB_ARENA_DEEPLINE_API_KEY",
+            "SUPABASE_URL": "LAB_ARENA_SUPABASE_URL",
+            "SUPABASE_ANON_KEY": "LAB_ARENA_SUPABASE_ANON_KEY",
+        },
+    }
+    env = dict(os.environ, TEST_AWS_STATE=str(state), PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
+    result = subprocess.run([sys.executable, "-c", MODULE._REMOTE], input=json.dumps(request), text=True, capture_output=True, env=env)
+    if not expect_success:
+        assert result.returncode != 0
+        return json.loads(result.stdout)
+    assert result.returncode == 0, result.stdout
+    final = json.loads(state.read_text())
+    return final["versions"][final["current"]]
+
+
+def test_remote_fake_aws_preserves_space_values_and_identical_unrelated_duplicates(tmp_path):
+    raw = "SSH_CLIENT=10.0.0.1 123 22\nREPEAT=same\nREPEAT=same\nOPENROUTER_API_KEY=or\nSCRAPINGDOG_API_KEY=sd\nDEEPLINE_API_KEY=deep\nSUPABASE_URL=https://db.example\nSUPABASE_ANON_KEY=anon\n"
+    updated = _run_remote_with_fake_aws(tmp_path, raw)
+    assert "SSH_CLIENT=10.0.0.1 123 22\n" in updated
+    assert updated.count("REPEAT=same\n") == 2
+    assert "export LAB_ARENA_OPENROUTER_API_KEY=or\n" in updated
+
+
+def test_remote_fake_aws_preserves_json_alias_source_keys(tmp_path):
+    source = {"OPENROUTER_API_KEY": "or", "SCRAPINGDOG_API_KEY": "sd", "DEEPLINE_API_KEY": "deep", "SUPABASE_URL": "https://db.example", "SUPABASE_ANON_KEY": "anon", "KEEP": "same"}
+    updated = json.loads(_run_remote_with_fake_aws(tmp_path, json.dumps(source, separators=(",", ":"))))
+    assert updated["OPENROUTER_API_KEY"] == "or"
+    assert updated["LAB_ARENA_OPENROUTER_API_KEY"] == "or"
+    assert updated["KEEP"] == "same"
+
+
+def test_remote_fake_aws_rejects_duplicate_target_key(tmp_path):
+    raw = "LAB_ARENA_MODE=off\nLAB_ARENA_MODE=off\nOPENROUTER_API_KEY=or\nSCRAPINGDOG_API_KEY=sd\nDEEPLINE_API_KEY=deep\nSUPABASE_URL=https://db.example\nSUPABASE_ANON_KEY=anon\n"
+    result = _run_remote_with_fake_aws(tmp_path, raw, expect_success=False)
+    assert result == {"ok": False, "code": "target_key_duplicate"}
 
 
 def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypatch, tmp_path, capsys):

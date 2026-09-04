@@ -25,10 +25,10 @@ SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
-    "stage_1": 210,
-    "stage_1_scoring": 60,
-    "stage_2": 210,
-    "final_scoring": 90,
+    "stage_1": 240,
+    "stage_1_scoring": 360,
+    "stage_2": 180,
+    "final_scoring": 240,
 }
 CANCEL_REASONS = {
     "benchmark_leak": "benchmark_leaked_before_cutoff",
@@ -208,7 +208,7 @@ class RoundDefaults:
     baseline_hotkey: str = ""
     baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
-    max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
+    max_challengers: int = contracts.DEFAULT_MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     # The trusted scorer is resolved once and copied into each round. A service
     # restart therefore cannot change the scorer midway through that round.
     scorer_image_digest: str = "sha256:" + "0" * 64
@@ -1200,7 +1200,7 @@ class ArenaService:
         publication = {
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
             "round_id": round_id,
-            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
+            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "is_baseline": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
             "stage1_ranking": stage1_ranking,
             "finalists": finalists,
             "final_ranking": verify.final_ranking(final_entries),
@@ -1243,6 +1243,45 @@ class ArenaService:
             activated += int(result.get("status") == "activated")
         return {"status": "ok", "activated": activated}
 
+    def _usable_reward_bases(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return activated miner/no-winner bases, never organizer baselines."""
+
+        usable: List[Dict[str, Any]] = []
+        for row in rows:
+            configuration = row.get("configuration_doc")
+            if not isinstance(configuration, Mapping) or configuration.get("mode") != "live":
+                continue
+            document = row.get("reward_basis_doc")
+            try:
+                basis = rewards.validate_reward_basis(document)
+            except (ArenaContractError, TypeError, ValueError) as exc:
+                raise ServiceError("reward_history_invalid", 500) from exc
+            baseline_hotkey = str(configuration.get("baseline_hotkey") or "")
+            if basis["king_outcome"] != "no_king" and (
+                not baseline_hotkey or basis["king_hotkey"] == baseline_hotkey
+            ):
+                continue
+            usable.append(basis)
+        return usable
+
+    @staticmethod
+    def _latest_miner_basis(
+        bases: Sequence[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        candidates = [
+            dict(basis)
+            for basis in bases
+            if basis.get("king_outcome") in rewards.PAYING_KING_OUTCOMES
+            and str(basis.get("king_hotkey") or "")
+        ]
+        return max(
+            candidates,
+            key=lambda basis: int(basis["effective_reward_epoch"]),
+            default=None,
+        )
+
     def activate_reward(self, round_id: str) -> Dict[str, Any]:
         """Sign and atomically activate one already-published live result."""
 
@@ -1259,23 +1298,45 @@ class ArenaService:
         prior = self._store.published_reward_bases(limit=200)
         maximum_epoch = max((int(item["effective_reward_epoch"]) for item in prior if item.get("effective_reward_epoch") is not None), default=-1)
         effective_epoch = max(int(self._config.chain.current_settlement_epoch()) + 1, maximum_epoch + 1)
-        king_hotkey = str(decision.get("king_hotkey") or "")
-        previous = next(
-            (
-                item for item in prior
-                if item.get("king_start_epoch") is not None
-                and str(item.get("king_hotkey") or "") == king_hotkey
-            ),
-            None,
+        usable = self._usable_reward_bases(prior)
+        previous = self._latest_miner_basis(usable)
+        baseline_hotkey = str(configuration.get("baseline_hotkey") or "")
+        if previous is not None and previous["king_hotkey"] == baseline_hotkey:
+            previous = None
+        daily_hotkey = (
+            str(decision.get("king_hotkey") or "")
+            if decision.get("outcome") == "crowned"
+            else ""
         )
-        previous_start = int(previous["king_start_epoch"]) if previous is not None else None
+        # Old pending publications can name the organizer baseline. Treat them
+        # as no-winner days so migration cannot turn that baseline into a payee.
+        if not daily_hotkey or daily_hotkey == baseline_hotkey:
+            daily_hotkey = ""
+        if daily_hotkey:
+            king_hotkey = daily_hotkey
+            king_outcome = (
+                "defended"
+                if previous is not None and previous["king_hotkey"] == daily_hotkey
+                else "crowned"
+            )
+        elif previous is not None:
+            king_hotkey = str(previous["king_hotkey"])
+            king_outcome = "defended"
+        else:
+            king_hotkey = ""
+            king_outcome = "no_king"
+        previous_start = (
+            int(previous["king_start_epoch"])
+            if previous is not None and king_outcome == "defended"
+            else None
+        )
         basis = self._sign(
             rewards.reward_basis_document(
                 round_id=round_id,
                 published_at=str(publication["published_at"]),
                 finalized_epoch=effective_epoch - 1,
                 king_hotkey=king_hotkey,
-                king_outcome=str(decision["outcome"]),
+                king_outcome=king_outcome,
                 previous_king_start_epoch=previous_start,
                 reward_constants=configuration["reward_constants"],
             ),
@@ -1592,7 +1653,6 @@ class ArenaService:
         current = active[-1] if active else None
         open_round = next((row for row in active if row["status"] == "open"), None)
         running = [row for row in active if row["status"] != "open"]
-        latest = self.latest_published_round()
         epoch = None
         try:
             epoch = int(self._config.chain.current_settlement_epoch())
@@ -1600,6 +1660,7 @@ class ArenaService:
             epoch = None
         eligibility = None
         week = None
+        governing = None
         if epoch is not None:
             governing = self.public_reward_basis(epoch)
             if governing is None:
@@ -1608,13 +1669,20 @@ class ArenaService:
                 eligibility = rewards.epoch_eligible(governing, epoch)
                 if eligibility:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
+        elif self._config.mode == "live":
+            rows = self._store.published_reward_bases(limit=200)
+            bases = self._usable_reward_bases(rows)
+            if bases:
+                governing = max(
+                    bases, key=lambda basis: int(basis["effective_reward_epoch"])
+                )
         return {
             "mode": self._config.mode,
             "round": dict(current) if current else None,
             # Rounds overlap: miners submit to the open round while runners work the running ones.
             "open_round": dict(open_round) if open_round else None,
             "running_rounds": [dict(row) for row in running],
-            "king": {"hotkey": latest.get("king_hotkey"), "outcome": latest.get("king_outcome"), "round_id": latest.get("round_id"), "king_start_epoch": latest.get("king_start_epoch")} if latest else None,
+            "king": {"hotkey": governing.get("king_hotkey"), "outcome": governing.get("king_outcome"), "round_id": governing.get("round_id"), "king_start_epoch": governing.get("king_start_epoch")} if governing else None,
             "reward_week_index": week,
             "epoch_eligible": eligibility,
             "current_epoch": epoch,
@@ -1623,14 +1691,10 @@ class ArenaService:
     def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
         if self._config.mode != "live":
             return None
-        rows = [
-            row["reward_basis_doc"]
-            for row in self._store.list_rounds(status="published", limit=200)
-            if (row.get("configuration_doc") or {}).get("mode") == "live"
-            and row.get("reward_activated_at")
-            and row.get("reward_basis_doc")
-        ]
-        return rewards.governing_reward_basis(rows, int(epoch))
+        rows = self._store.published_reward_bases(limit=200)
+        return rewards.governing_reward_basis(
+            self._usable_reward_bases(rows), int(epoch)
+        )
 
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
@@ -1641,7 +1705,7 @@ class ArenaService:
                 {
                     "submission_id": participant["submission_id"],
                     "miner_hotkey": participant["miner_hotkey"],
-                    "is_king": bool(participant.get("is_king")),
+                    "is_baseline": bool(participant.get("is_king")),
                 }
                 for participant in (row.get("participants") or [])
             ]
@@ -1694,8 +1758,12 @@ class ArenaService:
         publication = row.get("publication_doc") or {}
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
+        submission = self._store.get_submission(submission_id) or {}
         return {
-            "round_id": round_id, "submission_id": submission_id, "submission": {k: v for k, v in (self._store.get_submission(submission_id) or {}).items() if k in ("miner_hotkey", "is_king")},
+            "round_id": round_id, "submission_id": submission_id, "submission": {
+                "miner_hotkey": submission.get("miner_hotkey"),
+                "is_baseline": bool(submission.get("is_king")),
+            },
             "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
             "scores": scores,
             "submission_scores": {

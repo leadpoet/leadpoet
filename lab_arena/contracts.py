@@ -26,6 +26,7 @@ STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
+DEFAULT_MAX_CHALLENGERS = 16  # fits one daily round on the default eight-slot runner while still making a stage-1 cut
 RUNNER_SLOT_CEILING = 8
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
 LAB_ARENA_POOL_PERCENT = 25  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round

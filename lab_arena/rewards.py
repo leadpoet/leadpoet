@@ -139,18 +139,15 @@ def king_start_epoch_for_outcome(
     effective_reward_epoch: int,
     previous_king_start_epoch: Optional[int],
 ) -> int:
-    """Start a new schedule for a crown or the baseline's first defense; otherwise keep it."""
+    """Start a new miner schedule on a crown; keep it on a defense."""
 
     outcome = require_king_outcome(king_outcome)
     effective = _require_epoch(effective_reward_epoch, "effective_reward_epoch")
     if outcome == "crowned":
         return effective
     if outcome == "defended":
-        # The organizer baseline is the incumbent in the first round, but it
-        # has no older Arena reward row. Its first defense starts the schedule
-        # at this publication; later defenses keep the stored start epoch.
         if previous_king_start_epoch is None:
-            return effective
+            raise ValueError("a defended miner requires a previous reward basis")
         previous = _require_epoch(previous_king_start_epoch, "previous_king_start_epoch")
         if previous >= effective:
             raise ValueError("a defended king's start epoch must precede this round's effective epoch")

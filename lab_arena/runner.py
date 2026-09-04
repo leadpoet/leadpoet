@@ -42,7 +42,7 @@ from lab_arena import contracts, images, operations, runtime, scoring, shim, sou
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
-DEFAULT_MAX_PARALLEL_RUNS = 1
+DEFAULT_MAX_PARALLEL_RUNS = contracts.RUNNER_SLOT_CEILING
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = "/tmp"
 AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
@@ -988,8 +988,15 @@ class RunnerConfig:
     agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_parallel_runs, bool) or not isinstance(self.max_parallel_runs, int) or self.max_parallel_runs < 1:
-            raise RunnerError("max_parallel_runs must be a positive integer")
+        if (
+            isinstance(self.max_parallel_runs, bool)
+            or not isinstance(self.max_parallel_runs, int)
+            or not 1 <= self.max_parallel_runs <= contracts.RUNNER_SLOT_CEILING
+        ):
+            raise RunnerError(
+                "max_parallel_runs must be between 1 and %d"
+                % contracts.RUNNER_SLOT_CEILING
+            )
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
         self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
@@ -1004,8 +1011,11 @@ def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) 
         value = int(raw)
     except ValueError as exc:
         raise RunnerError("%s must be a positive integer" % MAX_PARALLEL_ENV) from exc
-    if value < 1:
-        raise RunnerError("%s must be a positive integer" % MAX_PARALLEL_ENV)
+    if not 1 <= value <= contracts.RUNNER_SLOT_CEILING:
+        raise RunnerError(
+            "%s must be between 1 and %d"
+            % (MAX_PARALLEL_ENV, contracts.RUNNER_SLOT_CEILING)
+        )
     return value
 
 

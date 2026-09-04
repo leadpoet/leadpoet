@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, source_bundle
+from lab_arena import contracts, rewards, signing, source_bundle
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
 from lab_arena.store import hash_lease_token
 
@@ -209,6 +210,11 @@ def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_o
     }
     assert publication["stage1_ranking"][0]["stage1_score"] == 60.0
     assert publication["final_ranking"][0]["final_score"] == 60.0
+    assert publication["participants"] == [
+        {"submission_id": "king", "miner_hotkey": king, "is_baseline": True},
+        {"submission_id": "challenger", "miner_hotkey": challenger, "is_baseline": False},
+    ]
+    assert all("is_king" not in row for row in publication["final_ranking"])
 
 
 def test_reward_activation_processes_only_enabled_live_rounds_oldest_first():
@@ -229,6 +235,93 @@ def test_reward_activation_processes_only_enabled_live_rounds_oldest_first():
     calls.clear()
     assert service.activate_pending_rewards() == {"status": "disabled", "activated": 0}
     assert calls == []
+
+
+def test_reward_activation_carries_only_the_latest_miner_winner():
+    baseline = "5" + "A" * 47
+    miner_a = "5" + "B" * 47
+    miner_b = "5" + "C" * 47
+    constants = rewards.reward_constants_document()
+
+    def activate(daily_hotkey="", previous_hotkey="", previous_start=80):
+        signer = signing.LocalSigner.generate()
+        prior = []
+        if previous_hotkey:
+            prior_basis = signing.sign_document(
+                signer,
+                rewards.reward_basis_document(
+                    round_id="arena-2026-09-01",
+                    published_at="2026-09-01T00:00:00Z",
+                    finalized_epoch=99,
+                    king_hotkey=previous_hotkey,
+                    king_outcome="defended",
+                    previous_king_start_epoch=previous_start,
+                    reward_constants=constants,
+                ),
+                hash_field="reward_basis_hash",
+            )
+            prior = [{
+                "effective_reward_epoch": 100,
+                "reward_basis_doc": prior_basis,
+                "reward_activated_at": "2026-09-01T00:00:01Z",
+                "configuration_doc": {"mode": "live", "baseline_hotkey": baseline},
+            }]
+
+        captured = {}
+
+        class Store:
+            @staticmethod
+            def published_reward_bases(**_kwargs):
+                return prior
+
+            @staticmethod
+            def activate_reward(_round_id, basis, key):
+                captured.update(basis=basis, key=key)
+                return {"status": "activated"}
+
+        service = object.__new__(ArenaService)
+        service._store = Store()
+        service._signer = signer
+        service._signer_lock = threading.Lock()
+        service._config = SimpleNamespace(
+            mode="live",
+            chain=SimpleNamespace(current_settlement_epoch=lambda: 100),
+            reward_signer_factory=None,
+        )
+        service._round = lambda _round_id: {
+            "round_id": "arena-2026-09-02",
+            "status": "published",
+            "reward_activated_at": None,
+            "configuration_doc": {
+                "mode": "live",
+                "rewards_enabled": True,
+                "baseline_hotkey": baseline,
+                "reward_constants": constants,
+            },
+            "publication_doc": {
+                "published_at": "2026-09-02T00:00:00Z",
+                "king_decision": {
+                    "outcome": "crowned" if daily_hotkey else "no_king",
+                    "king_hotkey": daily_hotkey,
+                },
+            },
+        }
+        assert service.activate_reward("arena-2026-09-02")["status"] == "activated"
+        return captured["basis"]
+
+    assert activate()["king_outcome"] == "no_king"
+    defended = activate(previous_hotkey=miner_a)
+    assert (defended["king_outcome"], defended["king_hotkey"], defended["king_start_epoch"]) == (
+        "defended", miner_a, 80,
+    )
+    same = activate(daily_hotkey=miner_a, previous_hotkey=miner_a)
+    assert (same["king_outcome"], same["king_start_epoch"]) == ("defended", 80)
+    changed = activate(daily_hotkey=miner_b, previous_hotkey=miner_a)
+    assert (changed["king_outcome"], changed["king_hotkey"], changed["king_start_epoch"]) == (
+        "crowned", miner_b, 101,
+    )
+    # A historical organizer-baseline basis is never carried or paid.
+    assert activate(previous_hotkey=baseline)["king_outcome"] == "no_king"
 
 
 def test_round_selection_and_direct_access_are_scoped_to_service_mode():
@@ -285,7 +378,7 @@ def test_public_round_does_not_expose_source_transport_fields():
         {
             "submission_id": "sub-random",
             "miner_hotkey": "5" + "A" * 47,
-            "is_king": False,
+            "is_baseline": False,
         }
     ]
     assert "configuration" not in view

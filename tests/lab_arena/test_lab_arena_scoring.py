@@ -201,11 +201,11 @@ def test_stage_cut_uses_ten_then_ten_and_final_mean_uses_all_twenty():
     assert len(scoring.run_scores_for_store(stage_2_bundle, stage_2_runs)) == 20
 
 
-def test_exact_final_tie_keeps_the_incumbent():
+def test_exact_final_tie_crowns_no_miner():
     king = {"submission_id": "king", "hotkey": "king-hotkey", "final_score": 75.0, "is_king": True}
     challenger = {"submission_id": "c1", "hotkey": "challenger-hotkey", "final_score": 75.0, "is_king": False}
     assert verify.final_ranking([challenger, king])[0]["submission_id"] == "king"
-    assert verify.king_decision([challenger], king)["outcome"] == "defended"
+    assert verify.king_decision([challenger], king)["outcome"] == "no_king"
     challenger["final_score"] = 75.000001
     decision = verify.king_decision([challenger], king)
     assert (decision["outcome"], decision["winner_submission_id"]) == ("crowned", "c1")

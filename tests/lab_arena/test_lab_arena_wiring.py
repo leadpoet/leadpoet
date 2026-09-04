@@ -79,7 +79,7 @@ def test_banned_hotkeys_snapshot_must_be_a_json_list(tmp_path, monkeypatch):
     assert wiring.banned_hotkeys_from_environment() == []
 
 
-@pytest.mark.parametrize("raw, expected", [("", None), ("0", 0), ("23", 23)])
+@pytest.mark.parametrize("raw, expected", [("", 0), ("0", 0), ("23", 23)])
 def test_daily_cutoff_hour_is_read_from_the_environment(monkeypatch, raw, expected):
     from lab_arena import wiring
 
@@ -95,3 +95,9 @@ def test_daily_cutoff_hour_rejects_values_outside_the_day(monkeypatch, raw):
     monkeypatch.setenv("LAB_ARENA_DAILY_CUTOFF_UTC", raw)
     with pytest.raises(ServiceError):
         wiring._daily_cutoff_hour_from_environment()
+
+
+def test_daily_capacity_defaults_are_bounded(monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_MAX_CHALLENGERS", raising=False)
+    assert wiring._max_challengers_from_environment() == 16
+    assert wiring._max_challengers_from_environment() < wiring.contracts.MAX_CHALLENGERS

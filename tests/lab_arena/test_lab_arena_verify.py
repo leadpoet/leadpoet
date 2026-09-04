@@ -203,13 +203,14 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
 
     king = _entry("king", 50.0, True)
     tie = verify.king_decision([_entry("a", 50.0)], king)
-    assert tie["outcome"] == "defended" and tie["winner_submission_id"] is None
+    assert tie["outcome"] == "no_king" and tie["winner_submission_id"] is None
     crowned = verify.king_decision([_entry("b", 60.0), _entry("a", 60.0)], king)
     assert crowned["outcome"] == "crowned" and crowned["winner_submission_id"] == "a"
     zero_wins = verify.king_decision([_entry("a", 0.0)], _entry("king", None, True))
-    assert zero_wins["outcome"] == "crowned" and zero_wins["winner_submission_id"] == "a"
+    assert zero_wins["outcome"] == "no_king" and zero_wins["winner_submission_id"] is None
     zero_tie = verify.king_decision([_entry("a", 0.0)], _entry("king", 0.0, True))
-    assert zero_tie["outcome"] == "defended" and zero_tie["winner_submission_id"] is None
+    assert zero_tie["outcome"] == "no_king" and zero_tie["winner_submission_id"] is None
+    assert verify.king_decision([_entry("a", 100.0)], None)["outcome"] == "no_king"
 
     final = verify.final_ranking([
         _entry("a", 40.0),
@@ -218,6 +219,8 @@ def test_ranking_finalist_cut_and_king_decisions_do_not_use_image_identity():
         _entry("c", 55.0),
     ])
     assert [row["submission_id"] for row in final] == ["c", "king", "a", "b"]
+    assert [row["is_baseline"] for row in final] == [False, True, False, False]
+    assert all("is_king" not in row for row in final)
 
 
 def _walk_keys(value: Any) -> set:

@@ -72,7 +72,8 @@ Set these values on the Arena service host:
 
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
-`LAB_ARENA_DAILY_CUTOFF_UTC`, `LAB_ARENA_MAX_CHALLENGERS`,
+`LAB_ARENA_DAILY_CUTOFF_UTC` (default `0`),
+`LAB_ARENA_MAX_CHALLENGERS` (default `16`, hard limit `256`),
 `LAB_ARENA_MAX_IMAGE_BYTES` for the trusted scorer image,
 `LAB_ARENA_POOL_PERCENT`, and
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
@@ -95,8 +96,8 @@ Start the service:
 python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8791
 ```
 
-Create rounds automatically with `LAB_ARENA_DAILY_CUTOFF_UTC`, or create one
-manually:
+The service creates a daily round at 00:00 UTC by default. Set
+`LAB_ARENA_DAILY_CUTOFF_UTC` to select another hour, or create one manually:
 
 ```bash
 python3 scripts/lab_arena_admin.py create --cutoff 2026-09-05T00:00:00Z
@@ -114,7 +115,8 @@ executable gVisor `runsc`. It also needs:
 - `LAB_ARENA_RUNNER_WORK_DIR`
 - `LAB_ARENA_RUNSC_PATH`
 
-`LAB_ARENA_MAX_PARALLEL_RUNS` and `LAB_ARENA_ROUND_ID` are optional. Provider
+`LAB_ARENA_MAX_PARALLEL_RUNS` (default `8`, maximum `8`) and
+`LAB_ARENA_ROUND_ID` are optional. Provider
 keys, database access, source upload access, and the signing key stay on the
 service host. The runner needs read access to the organizer's common trusted
 Python/scorer image. It downloads source only through the active run lease,

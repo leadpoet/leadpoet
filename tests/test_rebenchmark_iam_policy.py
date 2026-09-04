@@ -2004,9 +2004,8 @@ def test_managed_principal_context_inventory_is_exact_and_complete():
 
     def simulate_principal_policy(**_kwargs):
         iam.set_default_document(MANAGED_ARN, prior)
-        return _semantic_context_response(
-            top=["kms:ResourceAliases"], nested=[]
-        )
+        # Test live inventory drift without depending on a retired KMS condition.
+        return _semantic_context_response(top=[], nested=[])
 
     iam.simulate_principal_policy = simulate_principal_policy
 

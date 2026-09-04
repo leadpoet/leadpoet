@@ -149,6 +149,10 @@ def test_rehearsal_secret_enables_every_candidate_selected_worker(
     assert not any(
         key.startswith("QUALIFICATION_WEBSHARE_PROXY_") for key in secret
     )
+    restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    required_keys = restart.split("required_keys=(", 1)[1].split(")", 1)[0].split()
+    assert "ENABLE_QUALIFICATION_EVALUATION" not in required_keys
+    assert "QUALIFICATION_WEBSHARE_PROXY_1" not in required_keys
     enabled_fulfillment_ids = tuple(
         sorted(
             int(key.rsplit("_", 1)[1])

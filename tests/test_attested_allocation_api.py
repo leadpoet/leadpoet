@@ -205,3 +205,51 @@ async def test_attested_allocation_is_unavailable_when_v2_authority_did_not_matc
     with pytest.raises(HTTPException) as exc_info:
         await api.get_research_lab_attested_allocation(8)
     assert exc_info.value.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_status"),
+    [
+        (TimeoutError("bundle build exceeded its budget"), 504),
+        (RuntimeError("durable allocation retry generations are exhausted"), 503),
+        (ValueError("champion lifetime credit is duplicated within epoch"), 500),
+        (KeyError("score_bundle_id"), 500),
+    ],
+)
+@pytest.mark.asyncio
+async def test_attested_allocation_failure_class_is_visible_in_the_status_code(
+    monkeypatch, raised, expected_status
+):
+    """A failed build must be separable by status code alone.
+
+    Only the status code reaches request telemetry, so a timeout, a refusal to
+    attempt the build, and a build that genuinely broke have to leave the
+    endpoint as three different codes or an operator cannot tell them apart.
+    """
+
+    async def _build(**kwargs):
+        raise raised
+
+    monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
+    monkeypatch.setattr(api, "build_research_lab_allocation_bundle", _build)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.get_research_lab_attested_allocation(11)
+    assert exc_info.value.status_code == expected_status
+
+
+@pytest.mark.asyncio
+async def test_attested_allocation_timeout_is_not_reported_as_a_refusal(monkeypatch):
+    """asyncio.TimeoutError subclasses nothing useful here — pin it explicitly."""
+
+    import asyncio as _asyncio
+
+    async def _build(**kwargs):
+        raise _asyncio.TimeoutError()
+
+    monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
+    monkeypatch.setattr(api, "build_research_lab_allocation_bundle", _build)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.get_research_lab_attested_allocation(12)
+    assert exc_info.value.status_code == 504

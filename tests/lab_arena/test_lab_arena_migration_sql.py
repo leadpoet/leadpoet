@@ -15,6 +15,9 @@ DAILY_SQL = (SCRIPTS / "180-lab-arena-daily-competition.sql").read_text(
 SOURCE_SQL = (SCRIPTS / "181-lab-arena-source-submissions.sql").read_text(
     encoding="utf-8"
 )
+SOURCE_EXECUTION_SQL = (SCRIPTS / "182-lab-arena-source-execution.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -55,7 +58,8 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
     assert numbered[179] == ["179-lab-arena-v1.sql"]
     assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
     assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
-    assert max(numbered) == 181, "181 must sit directly above the production frontier"
+    assert numbered[182] == ["182-lab-arena-source-execution.sql"]
+    assert max(numbered) == 182, "182 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
@@ -229,6 +233,31 @@ def test_source_intake_migration_has_one_active_slot_and_no_image_identity():
     assert "manifest" not in SOURCE_SQL.lower()
     assert "receipt" not in SOURCE_SQL.lower()
     assert "hash_chain" not in SOURCE_SQL.lower()
+
+
+def test_source_execution_leases_source_and_removes_miner_image_columns():
+    assert SOURCE_EXECUTION_SQL.lstrip().startswith(
+        "-- 182-lab-arena-source-execution.sql"
+    )
+    assert "\nBEGIN;\n" in SOURCE_EXECUTION_SQL
+    assert SOURCE_EXECUTION_SQL.rstrip().endswith("COMMIT;")
+    assert "NOTIFY pgrst, 'reload schema';" in SOURCE_EXECUTION_SQL
+    assert "CREATE OR REPLACE FUNCTION public.lab_arena_claim_assignment(" in SOURCE_EXECUTION_SQL
+    assert "'source_ref', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "'source_sha256', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "'source_size_bytes', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
+    assert "'image_digest'," not in SOURCE_EXECUTION_SQL
+    for column in (
+        "submitted_reference",
+        "image_reference",
+        "image_digest",
+        "image_size_bytes",
+    ):
+        assert "DROP COLUMN IF EXISTS %s" % column in SOURCE_EXECUTION_SQL
+    assert "CASCADE" not in SOURCE_EXECUTION_SQL
+    assert "manifest" not in SOURCE_EXECUTION_SQL.lower()
+    assert "receipt" not in SOURCE_EXECUTION_SQL.lower()
+    assert "hash_chain" not in SOURCE_EXECUTION_SQL.lower()
 
 
 def test_host_openrouter_money_caps_are_atomic_and_round_wide_per_submission():

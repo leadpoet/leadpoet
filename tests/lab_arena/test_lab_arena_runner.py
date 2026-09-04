@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import base64
+import gzip
+import hashlib
+import io
 import json
 import os
 import shutil
 import socket
 import tempfile
+import tarfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -26,6 +30,22 @@ ROUND = "arena-2026-09-02"
 IMAGE = "sha256:" + "a" * 64
 ARENA_REPOSITORY = "arena.example/lab-arena/models"
 IMAGE_REFERENCE = ARENA_REPOSITORY + "@" + IMAGE
+
+
+def _source_archive() -> bytes:
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            data = b"def run_icp(icp):\n    return []\n"
+            info = tarfile.TarInfo("harness.py")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+SOURCE_BYTES = _source_archive()
+SOURCE_SHA256 = "sha256:" + hashlib.sha256(SOURCE_BYTES).hexdigest()
+SOURCE_REF = "arena/%s/sources/s1.tar.gz" % ROUND
 
 
 def sign(message: str) -> str:
@@ -61,6 +81,8 @@ class FakeApi:
         self.claims: List[Dict[str, Any]] = []
         self.provider_frames: List[Dict[str, Any]] = []
         self.completions: List[Dict[str, Any]] = []
+        self.source_requests: List[tuple[str, str]] = []
+        self.source_payload = SOURCE_BYTES
         self.broker_documents = list(broker_documents or [])
         self.lock = threading.Lock()
 
@@ -82,6 +104,10 @@ class FakeApi:
         self.completions.append(envelope)
         return {"status": "accepted"}
 
+    def source(self, run_id, lease_token):
+        self.source_requests.append((run_id, lease_token))
+        return self.source_payload
+
 
 def lease(run_id="r1", position=0):
     return {
@@ -90,6 +116,9 @@ def lease(run_id="r1", position=0):
         "lease_generation": 1, "stage_generation": 1, "lease_expires_at": "2026-09-02T01:07:00+00:00",
         "lease_token": "tok-" + run_id, "icp": {"icp_id": "arena:x", "prompt": "p", "max_companies": 5},
         "image_reference": IMAGE_REFERENCE,
+        "source_ref": SOURCE_REF,
+        "source_sha256": SOURCE_SHA256,
+        "source_size_bytes": len(SOURCE_BYTES),
         "round_id": ROUND, "evaluation_date": "2026-09-02",
     }
 
@@ -124,9 +153,12 @@ def fake_exporter(reference, digest, target):
 
 def make_config(tmp_path, api, sandbox_runtime, *, parallel=1):
     cache = rn.ImageCache(tmp_path / "images", fake_exporter)
+    source_cache = rn.SourceCache(
+        tmp_path / "sources", api.source, dependency_installer=lambda _requirements, _target: None
+    )
     return rn.RunnerConfig(
         round_id=ROUND, identity=rn.RunnerIdentity(hotkey=RUNNER.ss58_address, sign=sign), api=api, sandbox_runtime=sandbox_runtime,
-        image_cache=cache, work_dir=tmp_path / "work", max_parallel_runs=parallel,
+        image_cache=cache, source_cache=source_cache, work_dir=tmp_path / "work", max_parallel_runs=parallel,
         evaluation_date="2026-09-02", clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc), completion_retry_seconds=(0.0, 0.0),
     )
 
@@ -149,6 +181,9 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     spec = sandbox.specs[0]
     assert spec.rootfs_path == tmp_path / "images" / IMAGE.replace(":", "-") / "rootfs" and spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS
     assert spec.entry_command == runtime.AGENT_ENTRY_COMMAND and spec.working_dir == runtime.AGENT_WORKING_DIR
+    assert spec.source_dir is not None and (spec.source_dir / "harness.py").is_file()
+    assert spec.dependency_dir is not None
+    assert spec.agent_entrypoint_path == rn.AGENT_ENTRYPOINT_PATH
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
 
@@ -187,6 +222,7 @@ def test_local_slots_bound_claims_and_images_export_once(tmp_path):
     runner_ = rn.Runner(config)
     assert runner_.run_once() == 3  # three local slots, then the loop waits for completions
     assert exports == [IMAGE]
+    assert len(api.source_requests) == 1
     assert runner_.run_once() == 2 and len(api.completions) == 5
     assert runner_.run_once() == 0
     assert all(c["body"]["declared_parallelism"] == 3 for c in api.claims)
@@ -311,21 +347,19 @@ def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
-def test_miner_leases_outside_the_round_source_or_digest_are_refused(tmp_path):
-
-    foreign = lease("r1")
-    foreign["image_reference"] = "evil.example/models@" + IMAGE
+def test_source_integrity_and_runtime_image_mismatches_are_refused(tmp_path):
+    wrong_source = lease("r1")
+    wrong_source["source_sha256"] = "sha256:" + "b" * 64
     mismatched = lease("r2")
     mismatched["image_reference"] = ARENA_REPOSITORY + "@sha256:" + "b" * 64
     wrong_judge = scoring_lease("r3")
-    wrong_judge["image_reference"] = "arena.example/lab-arena/other@" + SCORER_IMAGE
-    api = FakeApi([foreign, mismatched, wrong_judge])
+    wrong_judge["image_reference"] = "arena.example/lab-arena/other@sha256:" + "b" * 64
+    api = FakeApi([wrong_source, mismatched, wrong_judge])
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}), parallel=3)
-    config.adopt_round({"registry_repository": ARENA_REPOSITORY})
     runner_ = rn.Runner(config)
     runner_.run_once()
-    assert runner_.abandoned == 2 and len(api.completions) == 1
+    assert runner_.abandoned == 3 and len(api.completions) == 0
     assert all(c["error"] == "RunnerError" for c in runner_.completed if "error" in c)
 
 
@@ -348,7 +382,7 @@ class FollowApi(FakeApi):
 
 
 def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code_identity_gates(tmp_path):
-    configuration = {"registry_repository": ARENA_REPOSITORY}
+    configuration = {"schedule": {}}
     api = FollowApi([lease("r1")], rounds={ROUND: configuration, "arena-2026-09-03": configuration, "arena-2026-09-04": configuration})
     (tmp_path / "work").mkdir()
     config = make_config(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}))
@@ -357,7 +391,7 @@ def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code
     # No round yet: nothing to claim, nothing signed.
     assert runner_.run_once() == 0 and runner_.round_id is None and api.claims == []
     api.current_round = ROUND
-    assert runner_.run_once() == 1 and runner_.round_id == ROUND and config.registry_repository == ARENA_REPOSITORY
+    assert runner_.run_once() == 1 and runner_.round_id == ROUND
     assert api.claims[-1]["round_id"] == ROUND and api.completions[0]["round_id"] == ROUND and api.completions[0]["body"]["run_id"] == "r1"
     api.current_round = "arena-2026-09-03"
     assert runner_.run_once() == 0 and runner_.round_id == "arena-2026-09-03"
@@ -369,7 +403,7 @@ def test_a_runner_without_a_pinned_round_follows_each_current_round_without_code
 
 @pytest.mark.parametrize("status", rn.WORKING_STATUSES)
 def test_an_unpinned_runner_follows_every_execution_and_scoring_window(tmp_path, status):
-    api = FollowApi([], rounds={ROUND: {"registry_repository": ARENA_REPOSITORY}})
+    api = FollowApi([], rounds={ROUND: {"schedule": {}}})
     api.current_round = ROUND
     api.current_status = status
     (tmp_path / "work").mkdir()

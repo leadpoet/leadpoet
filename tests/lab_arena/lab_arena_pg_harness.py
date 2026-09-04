@@ -24,6 +24,7 @@ from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_mi
 LAB_ARENA_MIGRATION = "179-lab-arena-v1.sql"
 LAB_ARENA_DAILY_COMPETITION_MIGRATION = "180-lab-arena-daily-competition.sql"
 LAB_ARENA_SOURCE_SUBMISSIONS_MIGRATION = "181-lab-arena-source-submissions.sql"
+LAB_ARENA_SOURCE_EXECUTION_MIGRATION = "182-lab-arena-source-execution.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,

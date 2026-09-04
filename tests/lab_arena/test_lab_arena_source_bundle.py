@@ -57,20 +57,42 @@ def test_archive_validation_rejects_links_traversal_and_missing_harness():
             source_bundle.validate_source_archive(raw.getvalue())
 
 
-@pytest.mark.parametrize(
-    "definition",
-    [
-        "async def run_icp(icp):\n    return []\n",
-        "def run_icp():\n    return []\n",
-        "def run_icp(icp, other):\n    return []\n",
-        "def run_icp(icp, *args):\n    return []\n",
-        "def run_icp(icp, **kwargs):\n    return []\n",
-        "def run_icp(icp, *, option=None):\n    return []\n",
-    ],
-)
-def test_harness_requires_one_synchronous_positional_parameter(definition):
-    with pytest.raises(source_bundle.SourceBundleError):
-        source_bundle.validate_harness_source(definition)
+def test_harness_syntax_accepts_the_public_pydantic_harness_reexport():
+    source_bundle.validate_harness_source(
+        '"""Stable public entrypoint for the PydanticAI lead-sourcing harness."""\n'
+        "from experiments.harness_bakeoff.adapters.pydantic_ai import (\n"
+        "    get_last_usage,\n"
+        "    run_icp,\n"
+        ")\n"
+        '__all__ = ["get_last_usage", "run_icp"]\n'
+    )
+
+
+def test_harness_syntax_rejects_invalid_python():
+    with pytest.raises(source_bundle.SourceBundleError, match="harness_invalid"):
+        source_bundle.validate_harness_source("def run_icp(:\n")
+
+
+def test_safe_extraction_removes_the_github_wrapper_and_writes_no_links(tmp_path):
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for name, data in (
+                (
+                    "pydantic-harness-main/harness.py",
+                    b"from package import run_icp\n",
+                ),
+                ("pydantic-harness-main/package.py", b"def run_icp(icp): return []\n"),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    target = tmp_path / "source"
+    target.mkdir()
+    facts = source_bundle.extract_source_archive(raw.getvalue(), target)
+    assert facts["source_root"] == "pydantic-harness-main"
+    assert (target / "harness.py").read_text() == "from package import run_icp\n"
+    assert not (target / "pydantic-harness-main").exists()
 
 
 def test_archive_member_count_is_bounded_while_streaming():

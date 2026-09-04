@@ -133,12 +133,22 @@ def make_spec(tmp_path: Path, **overrides) -> rt.SandboxSpec:
     (input_dir / rt.INPUT_FILE_NAME).write_text("{}", encoding="utf-8")
     socket_dir = tmp_path / "sock"
     socket_dir.mkdir(exist_ok=True)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir(exist_ok=True)
+    (source_dir / "harness.py").write_text("def run_icp(icp): return []\n")
+    dependency_dir = tmp_path / "deps"
+    dependency_dir.mkdir(exist_ok=True)
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text("pass\n", encoding="utf-8")
     values = dict(
         sandbox_id="arena-icp-7",
         rootfs_path=tmp_path / "rootfs",
         input_dir=input_dir,
         output_dir=tmp_path / "output",
         socket_path=socket_dir / rt.SANDBOX_SOCKET_NAME,
+        source_dir=source_dir,
+        dependency_dir=dependency_dir,
+        agent_entrypoint_path=entrypoint,
         entry_command=rt.AGENT_ENTRY_COMMAND,
         working_dir=rt.AGENT_WORKING_DIR,
         evaluation_date="2026-09-02",
@@ -216,7 +226,8 @@ def test_oci_spec_invariants(tmp_path):
     assert document["root"] == {"path": str(spec.rootfs_path), "readonly": True}
     process = document["process"]
     assert process["user"] == {"uid": 65534, "gid": 65534}
-    assert process["args"] == ["/agent/run"] and process["cwd"] == "/agent"
+    assert process["args"] == ["python3", "/agent/entrypoint.py"]
+    assert process["cwd"] == "/agent/source"
     assert process["noNewPrivileges"] is True
     assert process["terminal"] is False
     assert all(process["capabilities"][name] == [] for name in ("bounding", "effective", "inheritable", "permitted", "ambient"))
@@ -249,11 +260,20 @@ def test_oci_spec_invariants(tmp_path):
     assert set(deny_rule["names"]) == {"mount", "pivot_root", "ptrace", "bpf", "keyctl", "perf_event_open"}
     assert "/proc/kcore" in linux["maskedPaths"] and "/proc/sys" in linux["readonlyPaths"]
     mounts = {mount["destination"]: mount for mount in document["mounts"]}
-    assert set(mounts) == {"/proc", "/dev", "/tmp", "/input", "/output", "/run/lab_arena"}
+    assert set(mounts) == {
+        "/proc", "/dev", "/tmp", "/input", "/output", "/run/lab_arena",
+        "/agent/source", "/agent/deps", "/agent/entrypoint.py",
+    }
     assert mounts["/input"]["source"] == str(spec.input_dir) and "ro" in mounts["/input"]["options"]
     assert mounts["/output"]["source"] == str(spec.output_dir) and "rw" in mounts["/output"]["options"]
     assert "noexec" in mounts["/output"]["options"]
     assert mounts["/run/lab_arena"]["source"] == str(spec.socket_dir)
+    assert mounts["/agent/source"]["source"] == str(spec.source_dir)
+    assert "ro" in mounts["/agent/source"]["options"]
+    assert mounts["/agent/deps"]["source"] == str(spec.dependency_dir)
+    assert "ro" in mounts["/agent/deps"]["options"]
+    assert mounts["/agent/entrypoint.py"]["source"] == str(spec.agent_entrypoint_path)
+    assert "ro" in mounts["/agent/entrypoint.py"]["options"]
     assert mounts["/tmp"]["type"] == "tmpfs" and "size=%d" % spec.tmp_tmpfs_bytes in mounts["/tmp"]["options"]
     assert document["hostname"] == "leadpoet-lab-arena"
     assert "network" not in json.dumps(linux["namespaces"])
@@ -320,15 +340,16 @@ def test_sandbox_spec_defaults_follow_the_public_constants(tmp_path):
     assert spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS == 300
     assert spec.uid == 65534 and spec.gid == 65534
     assert spec.output_tmpfs_bytes == 64 * 1024 * 1024
-    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("/agent/run",)
-    assert spec.cwd == rt.AGENT_WORKING_DIR == "/agent"
+    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("python3", "/agent/entrypoint.py")
+    assert spec.cwd == rt.AGENT_WORKING_DIR == "/agent/source"
 
 
 def test_host_process_and_environment_are_independent_of_image_metadata(tmp_path):
     spec = make_spec(tmp_path, extra_environment={"TRUSTED_SCORER": "1", "TZ": "America/New_York"})
     document = rt.oci_spec(spec)
     process = document["process"]
-    assert process["args"] == ["/agent/run"] and process["cwd"] == "/agent"
+    assert process["args"] == ["python3", "/agent/entrypoint.py"]
+    assert process["cwd"] == "/agent/source"
     environment = dict(item.split("=", 1) for item in process["env"])
     assert environment["PATH"] == rt.PROCESS_ENV["PATH"] and environment["TRUSTED_SCORER"] == "1"
     assert environment["TZ"] == "UTC" and environment["LAB_ARENA_OUTPUT_PATH"] == rt.SANDBOX_OUTPUT_PATH and environment["HOME"] == "/tmp"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 import threading
@@ -152,7 +153,12 @@ class S3ObjectStore:
             raise ArenaContractError("object exceeds source size limit")
         response = self._client.get_object(Bucket=self._bucket, Key=ref)
         body = response["Body"]
-        data = body.read(int(max_bytes) + 1)
+        try:
+            data = body.read(int(max_bytes) + 1)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
         if len(data) > int(max_bytes):
             raise ArenaContractError("object exceeds source size limit")
         return data
@@ -1301,6 +1307,10 @@ class ArenaService:
         if not 0 <= position < len(icps):
             raise ServiceError("benchmark_data_invalid", 500)
         lease = dict(response, icp=icps[position], lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        lease.update({
+            "image_digest": configuration["scorer_image_digest"],
+            "image_reference": configuration["scorer_image_reference"],
+        })
         if response.get("kind") == "score":
             # A scoring assignment: the validator runs the pinned judge image on
             # the scored output with the signed scorer policy.
@@ -1308,20 +1318,25 @@ class ArenaService:
             if scored is None or not scored.get("output_ref"):
                 raise ServiceError("scored_run_missing", 500)
             output = json.loads(self._objects.get(scored["output_ref"]).decode("utf-8"))
-            lease.update({
-                "image_digest": configuration["scorer_image_digest"],
-                "image_reference": configuration["scorer_image_reference"],
-                "scored_output": output, "scorer_policy": configuration["scorer_policy"],
-            })
+            lease.update({"scored_output": output, "scorer_policy": configuration["scorer_policy"]})
             return lease
-        # An execution uses the participant's immutable mirrored image. The
-        # runner always invokes the competition entrypoint /agent/run.
+        # An execution uses the participant's private source archive under the
+        # same trusted Python image as every other agent.
         participant = next((p for p in round_row.get("participants") or [] if p["submission_id"] == response.get("submission_id")), None)
         if participant is None:
             raise ServiceError("participant_missing", 500)
-        lease.update({
-            "image_digest": participant["image_digest"], "image_reference": str(participant.get("image_reference") or ""),
-        })
+        if any(
+            participant.get(field) in (None, "")
+            for field in ("source_ref", "source_sha256", "source_size_bytes")
+        ):
+            raise ServiceError("participant_source_missing", 500)
+        lease.update(
+            {
+                "source_ref": participant["source_ref"],
+                "source_sha256": participant["source_sha256"],
+                "source_size_bytes": int(participant["source_size_bytes"]),
+            }
+        )
         return lease
 
     def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:
@@ -1329,6 +1344,52 @@ class ArenaService:
         if run is None:
             raise ServiceError("run_missing", 404)
         return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
+
+    def handle_source(self, run_id: str, lease_token: str) -> bytes:
+        """Return source bytes only to the runner that holds the active lease."""
+
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        if run.get("kind") != "execute":
+            raise ServiceError("run_source_unavailable", 409)
+        expected_token_hash = str(run.get("lease_token_hash") or "")
+        if not expected_token_hash or not hmac.compare_digest(
+            expected_token_hash, hash_lease_token(lease_token)
+        ):
+            raise ServiceError("lease_invalid", 401)
+        if run.get("status") != "leased":
+            raise ServiceError("lease_inactive", 409)
+        raw_expiry = run.get("lease_expires_at")
+        try:
+            expiry = (
+                raw_expiry
+                if isinstance(raw_expiry, datetime)
+                else datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
+            )
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise ServiceError("lease_invalid", 401)
+        if expiry.astimezone(timezone.utc) <= self.now():
+            raise ServiceError("lease_expired", 409)
+        submission = self._store.get_submission(str(run.get("submission_id") or ""))
+        if submission is None or submission.get("status") != "frozen":
+            raise ServiceError("run_source_unavailable", 409)
+        source_ref = str(submission.get("source_ref") or "")
+        expected_size = int(submission.get("source_size_bytes") or 0)
+        expected_sha256 = str(submission.get("source_sha256") or "")
+        try:
+            payload = self._objects.get_bounded(
+                source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+            )
+        except Exception as exc:
+            raise ServiceError("run_source_unavailable", 503) from exc
+        if len(payload) != expected_size:
+            raise ServiceError("run_source_integrity_failed", 500)
+        if "sha256:" + hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise ServiceError("run_source_integrity_failed", 500)
+        return payload
 
     def _broker_for(self, round_id: str) -> broker_module.Broker:
         with self._lock:

@@ -9,7 +9,7 @@ import json
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from lab_arena import contracts
@@ -140,6 +140,12 @@ def create_app(service: ArenaService) -> FastAPI:
         lease_token = _lease_header(x_lab_arena_lease)
         frame = await _read_json(request)
         return await run_in_threadpool(service.handle_provider, run_id, lease_token, frame)
+
+    @app.get("/arena/v1/runs/{run_id}/source")
+    async def source(run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
+        lease_token = _lease_header(x_lab_arena_lease)
+        payload = await run_in_threadpool(service.handle_source, run_id, lease_token)
+        return Response(content=payload, media_type="application/gzip")
 
     @app.post("/arena/v1/runs/{run_id}/complete")
     async def complete(run_id: str, request: Request) -> Any:

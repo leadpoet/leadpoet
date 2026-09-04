@@ -31,30 +31,18 @@ class SourceBundleError(ValueError):
 
 
 def validate_harness_source(source: str) -> None:
-    """Check the callable shape without importing or running miner code."""
+    """Check only Python syntax without importing or running miner code.
+
+    A public harness can define ``run_icp`` here or re-export it from another
+    module.  The sandbox entrypoint imports the completed bundle and enforces
+    the callable contract before it runs untrusted code.
+    """
 
     try:
         tree = ast.parse(source, filename="harness.py")
     except (SyntaxError, ValueError) as exc:
         raise SourceBundleError("harness_invalid") from exc
-    definitions = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "run_icp"
-    ]
-    if not definitions:
-        raise SourceBundleError("run_icp_missing")
-    definition = definitions[-1]
-    if isinstance(definition, ast.AsyncFunctionDef):
-        raise SourceBundleError("run_icp_must_be_sync")
-    positional = list(definition.args.posonlyargs) + list(definition.args.args)
-    if len(positional) != 1:
-        raise SourceBundleError("run_icp_must_take_one_input")
-    if definition.args.vararg is not None or definition.args.kwarg is not None:
-        raise SourceBundleError("run_icp_must_take_one_input")
-    if definition.args.kwonlyargs:
-        raise SourceBundleError("run_icp_must_take_one_input")
+    del tree
 
 
 def validate_source_directory(source_dir: str | Path) -> Path:
@@ -226,3 +214,92 @@ def validate_source_archive(data: bytes) -> Dict[str, Any]:
         "source_size_bytes": len(payload),
         "source_root": harness_name.rsplit("/", 1)[0] if "/" in harness_name else "",
     }
+
+
+def extract_source_archive(data: bytes, target_dir: str | Path) -> Dict[str, Any]:
+    """Validate and safely extract an archive into one empty host directory.
+
+    The implementation never calls ``TarFile.extract``.  It creates only the
+    validated regular files and directories below ``target_dir`` and removes
+    the optional single GitHub wrapper directory.
+    """
+
+    payload = bytes(data)
+    facts = validate_source_archive(payload)
+    target = Path(target_dir)
+    if target.is_symlink() or not target.is_dir() or any(target.iterdir()):
+        raise SourceBundleError("source_extract_target_invalid")
+    source_root = str(facts["source_root"])
+    prefix = source_root + "/" if source_root else ""
+    extracted_files = 0
+    extracted_bytes = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r|gz") as archive:
+            for member in archive:
+                path = PurePosixPath(member.name)
+                if path.is_absolute() or not path.parts or any(
+                    part in ("", ".", "..") for part in path.parts
+                ):
+                    raise SourceBundleError("source_path_invalid")
+                if source_root:
+                    if member.name == source_root or member.name == source_root + "/":
+                        continue
+                    if not member.name.startswith(prefix):
+                        raise SourceBundleError("source_path_invalid")
+                    relative_name = member.name[len(prefix) :]
+                else:
+                    relative_name = member.name
+                relative = PurePosixPath(relative_name)
+                if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+                    raise SourceBundleError("source_path_invalid")
+                destination = target.joinpath(*relative.parts)
+                if member.isdir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    raise SourceBundleError("source_entry_type_invalid")
+                extracted_files += 1
+                extracted_bytes += int(member.size)
+                if extracted_files > MAX_SOURCE_FILES:
+                    raise SourceBundleError("source_file_count_exceeded")
+                if extracted_bytes > MAX_SOURCE_UNPACKED_BYTES:
+                    raise SourceBundleError("source_unpacked_too_large")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise SourceBundleError("source_archive_invalid")
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(destination, flags, 0o444)
+                remaining = int(member.size)
+                try:
+                    with os.fdopen(descriptor, "wb") as output:
+                        while remaining:
+                            chunk = source.read(min(64 * 1024, remaining))
+                            if not chunk:
+                                raise SourceBundleError("source_archive_invalid")
+                            output.write(chunk)
+                            remaining -= len(chunk)
+                        if source.read(1):
+                            raise SourceBundleError("source_archive_invalid")
+                except Exception:
+                    try:
+                        destination.unlink()
+                    except OSError:
+                        pass
+                    raise
+        harness = target / "harness.py"
+        if harness.is_symlink() or not harness.is_file():
+            raise SourceBundleError("harness_file_missing")
+        for directory, names, files in os.walk(target, topdown=False, followlinks=False):
+            for name in files:
+                os.chmod(Path(directory) / name, 0o444)
+            for name in names:
+                os.chmod(Path(directory) / name, 0o555)
+        os.chmod(target, 0o555)
+    except SourceBundleError:
+        raise
+    except (OSError, EOFError, tarfile.TarError, zlib.error) as exc:
+        raise SourceBundleError("source_archive_invalid") from exc
+    return facts

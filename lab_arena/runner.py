@@ -1,8 +1,8 @@
 """Arena runner: sandbox one bundle on one benchmark input.
 
 A runner follows every running Arena round, claims one pending assignment per
-free local slot, materializes the pinned image's root filesystem from the
-Arena registry, executes the fixed ``/agent/run`` entrypoint in a fresh gVisor
+free local slot, downloads and caches the admitted source bytes, materializes
+the trusted Python root filesystem, and executes the host-owned agent entrypoint in a fresh gVisor
 sandbox for that single ICP, bridges the sandbox's provider requests (plain
 HTTP over the worker socket, or the judge shim's operation frames) to the
 service's provider endpoint, appends an operational event log, and submits one
@@ -13,17 +13,22 @@ credential, and never chooses a miner or ICP.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import socketserver
+import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,25 +38,40 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from lab_arena import contracts, images, operations, runtime, scoring, shim
+from lab_arena import contracts, images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 DEFAULT_MAX_PARALLEL_RUNS = 1
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = "/tmp"
+AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
 HTTP_ERROR_STATUS = {"budget_exhausted": 402, "worker_unavailable": 503, "request_too_large": 413}
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
+SOURCE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+REQUIREMENT_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+    r"(?:\[[A-Za-z0-9_,.-]{1,255}\])?"
+    r"(?:\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]{0,127}"
+    r"(?:\s*,\s*(?:===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]{0,127})*)?$"
+)
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
 PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
 MAX_PROVIDER_API_TIMEOUT_SECONDS = 135.0
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_IMAGE_CACHE_MAX_ENTRIES = 32
+DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_SOURCE_CACHE_MAX_ENTRIES = 64
+MAX_REQUIREMENTS_BYTES = 64 * 1024
+MAX_REQUIREMENTS = 128
+MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
+MAX_DEPENDENCY_FILES = 20_000
+DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 
@@ -75,6 +95,8 @@ class ArenaApiClient(Protocol):
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]: ...
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
+
+    def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def current(self) -> Dict[str, Any]: ...
 
@@ -151,6 +173,40 @@ class HttpArenaApiClient:
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["run_id"], envelope)
+
+    def source(self, run_id: str, lease_token: str) -> bytes:
+        """Download one bounded source archive under its active run lease."""
+
+        try:
+            with self._client.stream(
+                "GET",
+                self._base_url + "/arena/v1/runs/%s/source" % run_id,
+                headers={"x-lab-arena-lease": lease_token},
+                timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status_code != 200:
+                    raise RunnerError(
+                        "run source is unavailable: HTTP %d" % response.status_code
+                    )
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+                            raise RunnerError("run source exceeds the archive limit")
+                    except ValueError as exc:
+                        raise RunnerError("run source length is invalid") from exc
+                chunks = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+                        raise RunnerError("run source exceeds the archive limit")
+                    chunks.append(chunk)
+        except RunnerError:
+            raise
+        except httpx.HTTPError as exc:
+            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+        return b"".join(chunks)
 
     def round(self, round_id: str) -> Dict[str, Any]:
         return self._get("/arena/v1/rounds/%s" % round_id, "round %s" % round_id)
@@ -351,6 +407,308 @@ class ImageCache:
                     self._in_use[image_digest] = remaining
                 else:
                     self._in_use.pop(image_digest, None)
+                self._evict_locked()
+
+
+class SourceFetcher(Protocol):
+    def __call__(self, run_id: str, lease_token: str) -> bytes: ...
+
+
+class DependencyInstaller(Protocol):
+    def __call__(self, requirements_path: Path, target_dir: Path) -> None: ...
+
+
+def _validated_requirements(path: Path) -> List[str]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise RunnerError("requirements.txt is unreadable") from exc
+    if len(data) > MAX_REQUIREMENTS_BYTES:
+        raise RunnerError("requirements.txt exceeds the size limit")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RunnerError("requirements.txt must be UTF-8") from exc
+    requirements = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+        if not REQUIREMENT_RE.fullmatch(line):
+            raise RunnerError(
+                "requirements.txt may contain only package names and version constraints"
+            )
+        requirements.append(line)
+        if len(requirements) > MAX_REQUIREMENTS:
+            raise RunnerError("requirements.txt has too many packages")
+    return requirements
+
+
+def install_binary_requirements(requirements_path: Path, target_dir: Path) -> None:
+    """Install listed wheels without source builds, dependency scripts, or pip config."""
+
+    requirements = _validated_requirements(requirements_path)
+    if not requirements:
+        return
+    environment = {
+        "HOME": str(target_dir.parent),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PIP_CONFIG_FILE": os.devnull,
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    command = [
+        sys.executable,
+        "-I",
+        "-m",
+        "pip",
+        "install",
+        "--isolated",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-cache-dir",
+        "--no-compile",
+        "--no-deps",
+        "--only-binary=:all:",
+        "--index-url=https://pypi.org/simple",
+        "--target",
+        str(target_dir),
+        "--requirement",
+        str(requirements_path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError("binary dependency installation failed") from exc
+    if result.returncode != 0:
+        raise RunnerError("binary dependency installation failed")
+
+
+def _lock_down_dependency_tree(path: Path) -> None:
+    total = 0
+    count = 0
+    directories = []
+    for directory, names, files in os.walk(path, topdown=True, followlinks=False):
+        directory_path = Path(directory)
+        directories.append(directory_path)
+        for name in list(names) + list(files):
+            candidate = directory_path / name
+            try:
+                details = candidate.lstat()
+            except OSError as exc:
+                raise RunnerError("installed dependency is unreadable") from exc
+            if not (stat.S_ISDIR(details.st_mode) or stat.S_ISREG(details.st_mode)):
+                raise RunnerError("installed dependency has an unsafe type")
+            count += 1
+            total += int(details.st_size)
+            if count > MAX_DEPENDENCY_FILES or total > MAX_DEPENDENCY_BYTES:
+                raise RunnerError("installed dependencies exceed the cache limit")
+            if stat.S_ISREG(details.st_mode):
+                os.chmod(candidate, 0o444)
+    for directory in reversed(directories):
+        os.chmod(directory, 0o555)
+
+
+class SourceCache:
+    """A bounded LRU keyed only by the archive transport checksum."""
+
+    def __init__(
+        self,
+        root: Path,
+        fetcher: SourceFetcher,
+        *,
+        dependency_installer: DependencyInstaller = install_binary_requirements,
+        max_bytes: int = DEFAULT_SOURCE_CACHE_MAX_BYTES,
+        max_entries: int = DEFAULT_SOURCE_CACHE_MAX_ENTRIES,
+    ) -> None:
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+            raise RunnerError("source cache byte limit is invalid")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise RunnerError("source cache entry limit is invalid")
+        self._root = Path(root)
+        self._fetcher = fetcher
+        self._dependency_installer = dependency_installer
+        self._max_bytes = max_bytes
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+        self._ready: "OrderedDict[str, Tuple[Path, Path]]" = OrderedDict()
+        self._sizes: Dict[str, int] = {}
+        self._in_use: Dict[str, int] = {}
+        self._root.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._load_existing_locked()
+
+    def _load_existing_locked(self) -> None:
+        existing = []
+        for target in sorted(self._root.glob("sha256-*"), key=lambda item: item.name):
+            marker = target / ".ready"
+            archive = target / "source.tar.gz"
+            source = target / "source"
+            dependencies = target / "deps"
+            try:
+                digest = marker.read_text(encoding="utf-8").strip()
+                marker_time = marker.stat().st_mtime_ns
+                archive_size = archive.stat().st_size
+            except (OSError, UnicodeError):
+                _remove_cache_path(target)
+                continue
+            expected_name = "sha256-" + digest.removeprefix("sha256:")
+            if (
+                not SOURCE_DIGEST_RE.fullmatch(digest)
+                or target.name != expected_name
+                or not 1 <= archive_size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                or source.is_symlink()
+                or not source.is_dir()
+                or dependencies.is_symlink()
+                or not dependencies.is_dir()
+            ):
+                _remove_cache_path(target)
+                continue
+            try:
+                actual = "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest()
+            except OSError:
+                _remove_cache_path(target)
+                continue
+            if actual != digest:
+                _remove_cache_path(target)
+                continue
+            existing.append(
+                (marker_time, target.name, digest, source, dependencies, _cache_path_bytes(target))
+            )
+        for _time, _name, digest, source, dependencies, size in sorted(existing):
+            self._ready[digest] = (source, dependencies)
+            self._sizes[digest] = size
+        self._evict_locked()
+
+    def _within_limits_locked(self) -> bool:
+        return len(self._ready) <= self._max_entries and sum(self._sizes.values()) <= self._max_bytes
+
+    def _evict_locked(self, *, protected: Sequence[str] = ()) -> None:
+        protected_set = set(protected)
+        while not self._within_limits_locked():
+            victim = next(
+                (digest for digest in self._ready if digest not in protected_set and self._in_use.get(digest, 0) == 0),
+                None,
+            )
+            if victim is None:
+                return
+            source, _dependencies = self._ready.pop(victim)
+            self._sizes.pop(victim, None)
+            self._in_use.pop(victim, None)
+            _remove_cache_path(source.parent)
+
+    def _source_for_locked(
+        self,
+        run_id: str,
+        lease_token: str,
+        source_ref: str,
+        source_sha256: str,
+        source_size_bytes: int,
+    ) -> Tuple[Path, Path]:
+        cached = self._ready.get(source_sha256)
+        if cached is not None:
+            archive = cached[0].parent / "source.tar.gz"
+            if archive.is_file() and archive.stat().st_size == source_size_bytes:
+                self._ready.move_to_end(source_sha256)
+                return cached
+            self._ready.pop(source_sha256, None)
+            self._sizes.pop(source_sha256, None)
+            _remove_cache_path(cached[0].parent)
+        target = self._root / ("sha256-" + source_sha256.removeprefix("sha256:"))
+        if target.exists() or target.is_symlink():
+            _remove_cache_path(target)
+        target.mkdir(parents=True, mode=0o700)
+        archive_path = target / "source.tar.gz"
+        source_path = target / "source"
+        dependency_path = target / "deps"
+        try:
+            payload = bytes(self._fetcher(run_id, lease_token))
+            if len(payload) != source_size_bytes:
+                raise RunnerError("run source size does not match its lease")
+            actual_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+            if actual_sha256 != source_sha256:
+                raise RunnerError("run source checksum does not match its lease")
+            facts = source_bundle.validate_source_archive(payload)
+            if facts["source_sha256"] != source_sha256:
+                raise RunnerError("run source checksum does not match its lease")
+            archive_path.write_bytes(payload)
+            os.chmod(archive_path, 0o400)
+            source_path.mkdir(mode=0o700)
+            source_bundle.extract_source_archive(payload, source_path)
+            dependency_path.mkdir(mode=0o700)
+            requirements = source_path / "requirements.txt"
+            if requirements.is_file():
+                self._dependency_installer(requirements, dependency_path)
+            _lock_down_dependency_tree(dependency_path)
+            (target / ".ready").write_text(source_sha256, encoding="utf-8")
+            size = _cache_path_bytes(target)
+            if size > self._max_bytes:
+                raise RunnerError("source exceeds runner cache capacity")
+        except source_bundle.SourceBundleError as exc:
+            _remove_cache_path(target)
+            raise RunnerError("run source archive is invalid: %s" % exc.code) from exc
+        except Exception:
+            _remove_cache_path(target)
+            raise
+        self._ready[source_sha256] = (source_path, dependency_path)
+        self._sizes[source_sha256] = size
+        self._evict_locked(protected=(source_sha256,))
+        if not self._within_limits_locked():
+            self._ready.pop(source_sha256, None)
+            self._sizes.pop(source_sha256, None)
+            _remove_cache_path(target)
+            raise RunnerError("source cache capacity is in use")
+        return source_path, dependency_path
+
+    @contextmanager
+    def acquire(
+        self,
+        run_id: str,
+        lease_token: str,
+        source_ref: str,
+        source_sha256: str,
+        source_size_bytes: int,
+    ) -> Iterator[Tuple[Path, Path]]:
+        if not isinstance(source_ref, str) or not source_ref or len(source_ref) > 1024:
+            raise RunnerError("source ref is invalid")
+        if not isinstance(source_sha256, str) or not SOURCE_DIGEST_RE.fullmatch(source_sha256):
+            raise RunnerError("source checksum is invalid")
+        if (
+            isinstance(source_size_bytes, bool)
+            or not isinstance(source_size_bytes, int)
+            or not 1 <= source_size_bytes <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+        ):
+            raise RunnerError("source size is invalid")
+        with self._lock:
+            paths = self._source_for_locked(
+                run_id,
+                lease_token,
+                source_ref,
+                source_sha256,
+                source_size_bytes,
+            )
+            self._in_use[source_sha256] = self._in_use.get(source_sha256, 0) + 1
+        try:
+            yield paths
+        finally:
+            with self._lock:
+                remaining = self._in_use.get(source_sha256, 0) - 1
+                if remaining > 0:
+                    self._in_use[source_sha256] = remaining
+                else:
+                    self._in_use.pop(source_sha256, None)
                 self._evict_locked()
 
 
@@ -618,6 +976,7 @@ class RunnerConfig:
     api: ArenaApiClient
     sandbox_runtime: SandboxRuntime
     image_cache: ImageCache
+    source_cache: SourceCache
     work_dir: Path
     max_parallel_runs: int = DEFAULT_MAX_PARALLEL_RUNS
     slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
@@ -627,38 +986,15 @@ class RunnerConfig:
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
-    # Where miner leases may point (empty: not checked).
-    registry_repository: str = ""
-    # Rounds overlap, so retain each followed round's repository.
-    round_sources: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
 
     def __post_init__(self) -> None:
         if isinstance(self.max_parallel_runs, bool) or not isinstance(self.max_parallel_runs, int) or self.max_parallel_runs < 1:
             raise RunnerError("max_parallel_runs must be a positive integer")
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
+        self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
-
-    def adopt_round(self, configuration: Mapping[str, Any]) -> None:
-        """Use the miner image repository named by a round configuration.
-
-        The sources are kept per round because a runner follows every running
-        round at once; the flat fields hold the last adopted round's sources
-        for a runner pinned to one round.
-        """
-
-        sources = {
-            "registry_repository": str(configuration.get("registry_repository") or ""),
-        }
-        round_id = str(configuration.get("round_id") or "")
-        if round_id:
-            self.round_sources[round_id] = sources
-        self.registry_repository = sources["registry_repository"]
-
-    def sources_for(self, round_id: str) -> Dict[str, str]:
-        """The image sources pinned for ``round_id`` (the flat fields when the round was not adopted by id)."""
-
-        return dict(self.round_sources.get(str(round_id)) or {"registry_repository": self.registry_repository})
 
 
 def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
@@ -723,17 +1059,37 @@ class AssignmentExecutor:
                 }
                 extra_environment = {}
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
-            # The lease names immutable image bytes. The host owns both process
-            # commands; miner OCI ENTRYPOINT, CMD, ENV, and WORKDIR are ignored.
+            # Both assignment kinds use the service-selected trusted Python
+            # image. Execute assignments add the admitted source bundle under
+            # read-only mounts; no miner image metadata is accepted.
             image_reference = str(lease.get("image_reference") or "")
-            _check_lease_image(config, kind, image_reference, str(lease["image_digest"]), round_id=str(lease.get("round_id") or config.round_id or ""))
-            with config.image_cache.acquire(str(lease["image_digest"]), image_reference) as rootfs:
+            _check_runtime_image(image_reference, str(lease["image_digest"]))
+            with ExitStack() as resources:
+                rootfs = resources.enter_context(
+                    config.image_cache.acquire(str(lease["image_digest"]), image_reference)
+                )
+                source_dir = dependency_dir = None
+                if not scoring_run:
+                    source_dir, dependency_dir = resources.enter_context(
+                        config.source_cache.acquire(
+                            str(lease["run_id"]),
+                            lease_token,
+                            lease.get("source_ref"),
+                            lease.get("source_sha256"),
+                            lease.get("source_size_bytes"),
+                        )
+                    )
                 spec = runtime.SandboxSpec(
                     sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
                     rootfs_path=rootfs,
                     input_dir=input_dir,
                     output_dir=output_dir,
                     socket_path=socket_path,
+                    source_dir=source_dir,
+                    dependency_dir=dependency_dir,
+                    agent_entrypoint_path=(
+                        None if scoring_run else config.agent_entrypoint_path
+                    ),
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,
                     evaluation_date=evaluation_date,
@@ -804,17 +1160,14 @@ class AssignmentExecutor:
         )
 
 
-def _check_lease_image(config: RunnerConfig, kind: str, image_reference: str, image_digest: str, *, round_id: str = "") -> None:
-    """A lease names pinned bytes; miner images stay in the Arena repository."""
+def _check_runtime_image(image_reference: str, image_digest: str) -> None:
+    """Require one pinned service-selected Python root filesystem."""
 
     if not image_reference:
         raise RunnerError("lease carries no image reference")
     reference = images.parse_reference(image_reference)
     if reference.digest != image_digest:
         raise RunnerError("lease image reference does not name the lease digest")
-    sources = config.sources_for(round_id)
-    if kind != "score" and sources["registry_repository"] and reference.name != sources["registry_repository"]:
-        raise RunnerError("lease image is outside the round's Arena repository")
 
 
 # ---------------------------------------------------------------------------
@@ -871,8 +1224,7 @@ class Runner:
                 wanted.append(str(row["round_id"]))
         for round_id in wanted:
             if round_id not in self._round_ids:
-                configuration = dict(config.api.round(round_id).get("configuration") or {})
-                config.adopt_round(dict(configuration, round_id=round_id))
+                config.api.round(round_id)
         self._round_ids = wanted
         return self.round_id
 

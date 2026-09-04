@@ -3600,51 +3600,43 @@ def main():
     print(" LEADPOET MINER — SELECT MODE")
     print("="*80)
     print("")
-    print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
-    print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
-    print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
-    print("  4. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
-    print("  5. Check API Source Submissions — View your private SOURCE_ADD decisions and rewards")
+    print("  1. Agent Competition — Submit your model/agent source code (default)")
+    print("  2. Fulfillment — Poll for client ICP requests and fulfill them")
+    print("  3. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
+    print("  4. Check API Source Submissions — View your private SOURCE_ADD decisions and rewards")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    mode_input = input("❓ Select mode (1/2/3/4/5) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3", "4", "5"):
+    mode_input = input("❓ Select mode (1/2/3/4) [default: 1]: ").strip()
+    if mode_input not in ("1", "2", "3", "4"):
         mode_input = "1"
 
     miner_mode = {
-        "1": "research_lab",
+        "1": "agent_competition",
         "2": "fulfillment",
-        "3": "research_lab_resume_credit",
-        "4": "research_lab_source_add",
-        "5": "research_lab_source_add_status",
+        "3": "research_lab_source_add",
+        "4": "research_lab_source_add_status",
     }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
-    if miner_mode == "research_lab":
+    if miner_mode == "agent_competition":
         try:
             temp_wallet = bt.Wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_auto_research_flow(temp_wallet, config, config.netuid)
-        except Exception as e:
-            bt.logging.error(f"❌ Error during Research Lab mode: {e}")
-            import traceback
-            traceback.print_exc()
-        print("\n👋 Done. Run the miner again to select another mode.")
-        raise SystemExit(0)
+            from lab_arena.miner_submit import run_interactive_submission
 
-    if miner_mode == "research_lab_resume_credit":
-        try:
-            temp_wallet = bt.Wallet(config=config)
-            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
-            run_research_lab_resume_credit_blocked_flow(temp_wallet, config, config.netuid)
+            submitted = run_interactive_submission(
+                temp_wallet.hotkey,
+                os.environ.get("LAB_ARENA_API_BASE_URL", QUALIFICATION_GATEWAY_URL),
+            )
         except Exception as e:
-            bt.logging.error(f"❌ Error during resume-credit-blocked mode: {e}")
+            bt.logging.error(f"❌ Error during Agent Competition mode: {e}")
             import traceback
             traceback.print_exc()
+            submitted = False
         print("\n👋 Done. Run the miner again to select another mode.")
-        raise SystemExit(0)
+        raise SystemExit(0 if submitted else 1)
 
     if miner_mode == "research_lab_source_add":
         raise SystemExit(_run_research_lab_source_add_mode(config))

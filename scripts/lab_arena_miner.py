@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Lab Arena miner helper for bundle submission and request signing.
+"""Lab Arena miner helper for agent source submission and request signing.
 
+    python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+        --image ghcr.io/you/agent:v1 --wallet-name W --hotkey-name H
     python3 scripts/lab_arena_miner.py submission-body --image ghcr.io/you/agent:latest --out body.json
     python3 scripts/lab_arena_miner.py sign --scope submission --round-id arena-2026-09-02 \\
         --body body.json --out envelope.json [--wallet-name W --hotkey-name H | --hotkey-uri //Alice]
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import contracts, images  # noqa: E402
+from lab_arena.miner_submit import MinerSubmissionError, submit_agent_source  # noqa: E402
 
 SCOPES = {
     "submission": contracts.SCOPE_SUBMISSION,
@@ -33,6 +37,17 @@ SCOPES = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Leadpoet Lab Arena miner helper")
     commands = parser.add_subparsers(dest="command", required=True)
+    source = commands.add_parser("submit-source", help="build, push, sign, and submit a local agent fork")
+    source.add_argument("--source", required=True, help="directory with harness.py and Dockerfile")
+    source.add_argument("--image", required=True, help="public registry/repository:tag to build and push")
+    source.add_argument(
+        "--api-base-url",
+        default=os.environ.get("LAB_ARENA_API_BASE_URL")
+        or os.environ.get("GATEWAY_URL", "https://gateway.subnet71.com"),
+    )
+    source.add_argument("--wallet-name", default=None)
+    source.add_argument("--hotkey-name", default=None)
+    source.add_argument("--hotkey-uri", default=None, help="development only: derive the hotkey from a URI")
     body = commands.add_parser("submission-body", help="write the signed-request body that names one public image")
     body.add_argument("--image", required=True, help="registry/repository:tag or registry/repository@sha256:<digest>")
     body.add_argument("--out", required=True)
@@ -85,12 +100,38 @@ def sign(args) -> int:
         timestamp=int(time.time()), sign_message=lambda message: keypair.sign(message.encode("utf-8")).hex(),
     )
     Path(args.out).write_text(json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"hotkey": envelope["hotkey"], "scope": envelope["scope"], "request_id": envelope["request_id"], "out": args.out}))
+    print(
+        json.dumps(
+            {
+                "hotkey": envelope["hotkey"],
+                "scope": envelope["scope"],
+                "request_id": envelope["request_id"],
+                "out": args.out,
+            }
+        )
+    )
+    return 0
+
+
+def submit_source(args) -> int:
+    try:
+        result = submit_agent_source(
+            source_dir=args.source,
+            image_reference=args.image,
+            api_base_url=args.api_base_url,
+            keypair=_keypair(args),
+        )
+    except MinerSubmissionError as exc:
+        print("submission failed: %s" % exc.code, file=sys.stderr)
+        return 2
+    print(json.dumps(dict(result), sort_keys=True))
     return 0
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "submit-source":
+        return submit_source(args)
     if args.command == "submission-body":
         return submission_body(args)
     if args.command == "sign":

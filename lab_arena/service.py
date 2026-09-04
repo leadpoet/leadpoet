@@ -514,7 +514,14 @@ class ArenaService:
             if row["status"] not in TERMINAL_STATUSES
             and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
         ]
-        return [{"round_id": row["round_id"], "status": row["status"]} for row in reversed(rows)]
+        return [
+            {
+                "round_id": row["round_id"],
+                "status": row["status"],
+                "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
+            }
+            for row in reversed(rows)
+        ]
 
     def open_round(self) -> Optional[Dict[str, Any]]:
         """The round open for submissions, if any (at most one at a time)."""
@@ -1603,7 +1610,7 @@ class ArenaService:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         return {
             "mode": self._config.mode,
-            "round": {"round_id": current["round_id"], "status": current["status"]} if current else None,
+            "round": dict(current) if current else None,
             # Rounds overlap: miners submit to the open round while runners work the running ones.
             "open_round": dict(open_round) if open_round else None,
             "running_rounds": [dict(row) for row in running],
@@ -1627,6 +1634,7 @@ class ArenaService:
 
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
+        configuration = row.get("configuration_doc") or {}
         participants = None
         if row["status"] != "open":
             participants = [
@@ -1638,7 +1646,9 @@ class ArenaService:
                 for participant in (row.get("participants") or [])
             ]
         view = {
-            "round_id": round_id, "status": row["status"], "configuration": row["configuration_doc"],
+            "round_id": round_id,
+            "status": row["status"],
+            "schedule": dict(configuration.get("schedule") or {}),
             "participants": participants,
             "finalists": row.get("finalists"),
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),

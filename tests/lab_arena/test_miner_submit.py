@@ -85,23 +85,19 @@ def _valid_signature(envelope, scope):
     )
 
 
-def test_source_validation_checks_exact_callable_without_importing_code(tmp_path):
+def test_source_validation_checks_syntax_without_importing_code(tmp_path):
     source = _agent_source(
         tmp_path,
         "raise RuntimeError('must not run')\ndef run_icp(icp):\n    return []\n",
     )
     assert validate_agent_source(source) == source.resolve()
-    for invalid in (
-        "def other(value):\n    return value\n",
-        "async def run_icp(icp):\n    return []\n",
-        "def run_icp():\n    return []\n",
-        "def run_icp(icp, other=None):\n    return []\n",
-        "def run_icp(icp, *, option=None):\n    return []\n",
-        "def run_icp(icp, *args):\n    return []\n",
-    ):
-        (source / "harness.py").write_text(invalid, encoding="utf-8")
-        with pytest.raises(MinerSubmissionError):
-            validate_agent_source(source)
+    (source / "harness.py").write_text(
+        "from package.adapter import run_icp\n", encoding="utf-8"
+    )
+    assert validate_agent_source(source) == source.resolve()
+    (source / "harness.py").write_text("def run_icp(:\n", encoding="utf-8")
+    with pytest.raises(MinerSubmissionError, match="harness_invalid"):
+        validate_agent_source(source)
 
 
 def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path):

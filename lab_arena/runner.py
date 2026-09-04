@@ -472,7 +472,6 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
         "--no-input",
         "--no-cache-dir",
         "--no-compile",
-        "--no-deps",
         "--only-binary=:all:",
         "--index-url=https://pypi.org/simple",
         "--target",

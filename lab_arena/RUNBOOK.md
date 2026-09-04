@@ -20,12 +20,20 @@ that the uploaded bytes arrived unchanged. It is not a submission ID, model
 identity, ranking input, or activation gate. A miner can use any harness,
 model, prompts, packages, routing, or orchestration behind the one callable.
 
-The source contract is `harness.run_icp(icp) -> list[dict]`. The function must
-be synchronous and have exactly one positional parameter. It cannot have
+The source contract is `harness.run_icp(icp) -> list[dict]`. `harness.py` can
+define the function or re-export it from vendored source. The function must be
+synchronous and have exactly one positional parameter. It cannot have
 keyword-only parameters, `*args`, or `**kwargs`. It returns at most five
 company objects. The public baseline README gives the full input and output
 example:
 [`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
+
+Vendored Python modules run directly from the read-only source mount. An
+optional `requirements.txt` can contain package names and version constraints.
+The runner installs binary wheels only into a bounded cache and mounts those
+dependencies read-only. It rejects URLs, local paths, nested requirements,
+VCS dependencies, and source builds. The common trusted scorer image supplies
+Python for every agent; it is not a miner image or a miner identity.
 
 The organizer supplies one host key for each provider:
 
@@ -73,7 +81,8 @@ needed only when a live, reward-enabled published round is activated.
 
 Apply `scripts/179-lab-arena-v1.sql` and
 `scripts/180-lab-arena-daily-competition.sql`, then
-`scripts/181-lab-arena-source-submissions.sql` with the database owner before
+`scripts/181-lab-arena-source-submissions.sql` and
+`scripts/182-lab-arena-source-execution.sql` with the database owner before
 service startup. Then check the service wiring:
 
 ```bash
@@ -101,13 +110,16 @@ executable gVisor `runsc`. It also needs:
 - `LAB_ARENA_API_BASE_URL`
 - `LAB_ARENA_WALLET_NAME`
 - `LAB_ARENA_HOTKEY_NAME`
+- `LAB_ARENA_WALLET_PATH` when the wallet is outside the default wallet path
 - `LAB_ARENA_RUNNER_WORK_DIR`
 - `LAB_ARENA_RUNSC_PATH`
 
 `LAB_ARENA_MAX_PARALLEL_RUNS` and `LAB_ARENA_ROUND_ID` are optional. Provider
 keys, database access, source upload access, and the signing key stay on the
-service host. The runner can need read access to the organizer's trusted
-scorer image. Start the runner with:
+service host. The runner needs read access to the organizer's common trusted
+Python/scorer image. It downloads source only through the active run lease,
+then mounts source, installed wheels, and the host-owned entrypoint read-only
+inside gVisor. Start the runner with:
 
 ```bash
 python3 scripts/run_lab_arena_runner.py

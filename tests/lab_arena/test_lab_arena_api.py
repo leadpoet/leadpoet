@@ -71,6 +71,10 @@ class StubService:
             self.calls["provider_has_event_loop"] = False
         return {"status": 200, "headers": {}, "body_b64": "e30=", "call": {}}
 
+    def handle_source(self, run_id, lease_token):
+        self.calls["source"] = (run_id, lease_token)
+        return b"source archive"
+
     def handle_complete(self, envelope):
         if envelope.get("bad"):
             raise ServiceError("run_result_invalid", 400)
@@ -116,6 +120,13 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     ok = http.post("/arena/v1/runs/r1/provider", content=json.dumps(frame), headers={"x-lab-arena-lease": token})
     assert ok.status_code == 200 and service.calls["provider"] == ("r1", token, frame)
     assert service.calls["provider_has_event_loop"] is False
+    assert http.get("/arena/v1/runs/r1/source").status_code == 401
+    source = http.get(
+        "/arena/v1/runs/r1/source", headers={"x-lab-arena-lease": token}
+    )
+    assert source.status_code == 200 and source.content == b"source archive"
+    assert source.headers["content-type"] == "application/gzip"
+    assert service.calls["source"] == ("r1", token)
     assert http.post("/arena/v1/runs/r1/events", content=json.dumps({"events": []}), headers={"x-lab-arena-lease": token}).status_code == 404
     mismatch = http.post("/arena/v1/runs/r1/complete", content=json.dumps({"body": {"run_id": "r2"}}))
     assert mismatch.status_code == 400

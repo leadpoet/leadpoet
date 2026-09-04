@@ -24,7 +24,7 @@ class MinerSubmissionError(RuntimeError):
 
 
 def validate_agent_source(source_dir: str | Path) -> Path:
-    """Validate the callable without importing or running miner code."""
+    """Validate the bounded source shape and Python syntax without importing it."""
 
     try:
         return source_bundle.validate_source_directory(source_dir)

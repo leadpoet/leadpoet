@@ -247,6 +247,12 @@ def test_source_execution_leases_source_and_removes_miner_image_columns():
     assert "'source_sha256', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
     assert "'source_size_bytes', CASE WHEN v_run.kind = 'execute'" in SOURCE_EXECUTION_SQL
     assert "'image_digest'," not in SOURCE_EXECUTION_SQL
+    assert "source_submission.status = 'frozen'" in SOURCE_EXECUTION_SQL
+    assert "PERFORM public.lab_arena_cancel_round(v_round_id, 'source_bundle_cutover')" in SOURCE_EXECUTION_SQL
+    assert "DISABLE TRIGGER lab_arena_submissions_frozen" in SOURCE_EXECUTION_SQL
+    assert "ENABLE TRIGGER lab_arena_submissions_frozen" in SOURCE_EXECUTION_SQL
+    assert "baseline_submission.is_king" in SOURCE_EXECUTION_SQL
+    assert "(v_round.configuration_doc ->> 'baseline_hotkey')" in SOURCE_EXECUTION_SQL
     for column in (
         "submitted_reference",
         "image_reference",

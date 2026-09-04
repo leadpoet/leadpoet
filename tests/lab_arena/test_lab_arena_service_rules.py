@@ -10,6 +10,7 @@ import pytest
 
 from lab_arena import contracts, source_bundle
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError
+from lab_arena.store import hash_lease_token
 
 
 def _schedule():
@@ -91,6 +92,26 @@ def test_source_upload_target_is_write_once_and_size_bound():
     }
     params = calls[0][1]["Params"]
     assert params["ContentLength"] == 123 and params["IfNoneMatch"] == "*"
+
+
+def test_bounded_s3_read_always_closes_the_streaming_body():
+    class Body:
+        closed = False
+
+        @staticmethod
+        def read(_limit):
+            return b"source"
+
+        def close(self):
+            self.closed = True
+
+    body = Body()
+    client = SimpleNamespace(
+        head_object=lambda **_kwargs: {"ContentLength": 6},
+        get_object=lambda **_kwargs: {"Body": body},
+    )
+    assert S3ObjectStore("arena-bucket", client=client).get_bounded("ref", 10) == b"source"
+    assert body.closed is True
 
 
 def test_completion_cannot_cross_the_signed_round_boundary():
@@ -235,7 +256,9 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
 
     assert service.current_round()["round_id"] == "live-round"
     assert service.open_round()["round_id"] == "live-round"
-    assert service.active_rounds() == [{"round_id": "live-round", "status": "open"}]
+    assert service.active_rounds() == [
+        {"round_id": "live-round", "status": "open", "schedule": {}}
+    ]
     with pytest.raises(ServiceError, match="round_mode_mismatch"):
         service._round("shadow-round")
 
@@ -265,6 +288,130 @@ def test_public_round_does_not_expose_source_transport_fields():
             "is_king": False,
         }
     ]
+    assert "configuration" not in view
+
+
+def test_public_views_never_serialize_source_or_private_runtime_fields():
+    source_ref = "arena/private/source-secret.tar.gz"
+    source_sha256 = "sha256:" + "d" * 64
+    hotkey = "5" + "A" * 47
+    schedule = {"submission_cutoff": "2026-09-02T01:00:00Z"}
+    raw_configuration = {
+        "mode": "shadow",
+        "schedule": schedule,
+        "runner_hotkeys": ["private-runner"],
+        "scorer_image_reference": "private.example/scorer@sha256:" + "a" * 64,
+        "source_ref": source_ref,
+        "source_sha256": source_sha256,
+    }
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "configuration_doc": raw_configuration,
+        "participants": [
+            {
+                "submission_id": "sub-random",
+                "miner_hotkey": hotkey,
+                "is_king": False,
+                "source_ref": source_ref,
+                "source_sha256": source_sha256,
+                "source_size_bytes": 321,
+            }
+        ],
+        "publication_doc": {
+            "participants": [
+                {"submission_id": "sub-random", "miner_hotkey": hotkey, "is_king": False}
+            ],
+            "stage1_ranking": [],
+            "final_ranking": [],
+        },
+    }
+    active = dict(published, round_id="arena-2026-09-03", status="open")
+
+    class Store:
+        @staticmethod
+        def list_rounds(**_kwargs):
+            return [active]
+
+        @staticmethod
+        def list_runs(*_args, **_kwargs):
+            return []
+
+        @staticmethod
+        def get_submission(_submission_id):
+            return {
+                "miner_hotkey": hotkey,
+                "is_king": False,
+                "source_ref": source_ref,
+                "source_sha256": source_sha256,
+                "source_size_bytes": 321,
+            }
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(
+        mode="shadow",
+        chain=SimpleNamespace(
+            current_settlement_epoch=lambda: (_ for _ in ()).throw(RuntimeError())
+        ),
+    )
+    service._round = lambda _round_id: published
+    service.latest_published_round = lambda: None
+    service._objects = SimpleNamespace(get=lambda _ref: b"{}")
+
+    current = service.public_current()
+    round_view = service.public_round("arena-2026-09-02")
+    results = service.public_results("arena-2026-09-02", "sub-random")
+    serialized = json.dumps([current, round_view, results], sort_keys=True)
+    for private_value in (
+        source_ref,
+        source_sha256,
+        "source_size_bytes",
+        "private-runner",
+        "private.example/scorer",
+    ):
+        assert private_value not in serialized
+    assert current["open_round"] == {
+        "round_id": "arena-2026-09-03",
+        "status": "open",
+        "schedule": schedule,
+    }
+    assert round_view["participants"] == [
+        {"submission_id": "sub-random", "miner_hotkey": hotkey, "is_king": False}
+    ]
+
+
+def test_source_download_requires_the_active_execute_lease():
+    token = "a" * 64
+    payload = b"private source bytes"
+    submission = {
+        "status": "frozen",
+        "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+        "source_sha256": "sha256:" + __import__("hashlib").sha256(payload).hexdigest(),
+        "source_size_bytes": len(payload),
+    }
+    run = {
+        "run_id": "run-1",
+        "submission_id": "sub-1",
+        "kind": "execute",
+        "status": "leased",
+        "lease_token_hash": hash_lease_token(token),
+        "lease_expires_at": "2026-09-02T01:10:00+00:00",
+    }
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: run,
+        get_submission=lambda _submission_id: submission,
+    )
+    service._objects = SimpleNamespace(get_bounded=lambda *_args: payload)
+    service._clock = lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)
+
+    assert service.handle_source("run-1", token) == payload
+    with pytest.raises(ServiceError, match="lease_invalid"):
+        service.handle_source("run-1", "b" * 64)
+    run["status"] = "accepted"
+    with pytest.raises(ServiceError, match="lease_inactive"):
+        service.handle_source("run-1", token)
 
 
 def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
@@ -431,6 +578,69 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
 
     lease = service.handle_claim({})
     assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
+
+
+def test_execute_lease_uses_private_source_and_the_common_trusted_python_image():
+    runner = "5" * 48
+    digest = "sha256:" + "a" * 64
+    reference = "registry.example/lab/scorer@" + digest
+    participant = {
+        "submission_id": "sub-1",
+        "miner_hotkey": "5" + "A" * 47,
+        "source_ref": "arena/arena-2026-09-02/sources/sub-1.tar.gz",
+        "source_sha256": "sha256:" + "b" * 64,
+        "source_size_bytes": 123,
+        "is_king": False,
+    }
+
+    class Store:
+        @staticmethod
+        def claim_assignment(**_kwargs):
+            return {
+                "status": "leased",
+                "kind": "execute",
+                "submission_id": "sub-1",
+                "icp_position": 0,
+            }
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._config = SimpleNamespace(
+        chain=SimpleNamespace(hotkeys_owned_by_same_coldkey=lambda _hotkey: [])
+    )
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": runner,
+            "body": {"declared_parallelism": 1},
+            "request_id": "0" * 32,
+            "signature": "sig",
+        },
+        {
+            "round_id": "arena-2026-09-02",
+            "status": "stage1",
+            "participants": [participant],
+            "evaluation_date": "2026-09-02",
+            "configuration_doc": {
+                "runner_hotkeys": [runner],
+                "runner_slot_ceiling": 8,
+                "lease_ttl_seconds": 420,
+                "scorer_image_digest": digest,
+                "scorer_image_reference": reference,
+            },
+        },
+    )
+    service._lease_token = lambda _validated: "token"
+    service.benchmark_icps = lambda _round_id: [{}]
+
+    lease = service.handle_claim({})
+    assert (lease["image_digest"], lease["image_reference"]) == (digest, reference)
+    assert {
+        key: lease[key]
+        for key in ("source_ref", "source_sha256", "source_size_bytes")
+    } == {
+        key: participant[key]
+        for key in ("source_ref", "source_sha256", "source_size_bytes")
+    }
 
 
 def test_finalize_rejects_uploaded_bytes_that_do_not_match_transport_facts():

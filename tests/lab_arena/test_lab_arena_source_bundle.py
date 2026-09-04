@@ -31,7 +31,14 @@ def test_archive_validation_accepts_one_github_wrapper_directory():
     raw = io.BytesIO()
     with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as archive:
-            data = b"def run_icp(icp):\n    return []\n"
+            data = (
+                b'"""Stable public entrypoint for the PydanticAI lead-sourcing harness."""\n'
+                b"from experiments.harness_bakeoff.adapters.pydantic_ai import (\n"
+                b"    get_last_usage,\n"
+                b"    run_icp,\n"
+                b")\n"
+                b'__all__ = ["get_last_usage", "run_icp"]\n'
+            )
             info = tarfile.TarInfo("pydantic-harness-main/harness.py")
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))

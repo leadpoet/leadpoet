@@ -37,6 +37,13 @@ def database():
     yield from database_with_lab_arena_migration(MIGRATIONS)
 
 
+@pytest.fixture(scope="module")
+def pre_source_execution_database():
+    """A disposable database stopped at 181 for the 182 cutover test."""
+
+    yield from database_with_lab_arena_migration(MIGRATIONS[:-1])
+
+
 @pytest.fixture()
 def store(database):
     psycopg2, dsn = database
@@ -238,6 +245,214 @@ def test_claim_persists_source_for_execution_and_nulls_it_for_scoring(store, dat
         "image_digest",
         "image_size_bytes",
     }.intersection(row)
+
+
+def test_configured_baseline_bypasses_only_the_coldkey_exclusion(store):
+    round_id = "arena-2098-01-03-baseline"
+    runner = _hotkey("source-runner")
+    baseline = _hotkey("source-baseline")
+    submission_id = "baseline-2098-01-03-baseline"
+    source = _source_doc(round_id, submission_id, "9")
+    source["is_king"] = True
+    assert store.create_round(
+        round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")
+    )["status"] == "created"
+    assert store.register_submission(round_id, submission_id, baseline, source)[
+        "status"
+    ] == "registered"
+    assert store.update_submission(
+        round_id, submission_id, "uploading", "accepted", {"is_king": True}
+    )["status"] == "ok"
+    assert store.update_submission(
+        round_id, submission_id, "accepted", "frozen", {"is_king": True}
+    )["status"] == "ok"
+    participants = [
+        {"submission_id": submission_id, "miner_hotkey": baseline, "is_king": True}
+    ]
+    assert store.transition_round(
+        round_id,
+        "open",
+        "committed",
+        {
+            "participants": participants,
+            "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+            "evaluation_date": "2098-01-03",
+        },
+    )["status"] == "ok"
+    assert store.open_stage(round_id, 1, participants, list(range(10)))[
+        "status"
+    ] == "ok"
+
+    response = store.claim_assignment(
+        round_id=round_id,
+        runner_hotkey=runner,
+        declared_parallelism=1,
+        slot_ceiling=1,
+        excluded_miner_hotkeys=[baseline],
+        request_id=contracts.new_request_id(),
+        request_hash=contracts.document_hash({"request": "baseline"}),
+        lease_token_hash=hash_lease_token(new_lease_token()),
+    )
+    assert response["status"] == "leased"
+    assert response["submission_id"] == submission_id
+    assert response["source_ref"] == source["source_ref"]
+
+
+def test_retired_image_only_rows_cannot_become_execute_leases(store, database):
+    round_id = "arena-2098-01-04-source"
+    runner = _hotkey("source-runner")
+    miner = _hotkey("retired-image-miner")
+    submission_id = "sub-retired-image"
+    assert store.create_round(
+        round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")
+    )["status"] == "created"
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_submissions "
+                "(submission_id, round_id, miner_hotkey, status, is_king, consent, submission_doc) "
+                "VALUES (%s, %s, %s, 'frozen', FALSE, '{\"public_rerun\":true}', '{}')",
+                (submission_id, round_id, miner),
+            )
+    finally:
+        connection.close()
+    participants = [
+        {"submission_id": submission_id, "miner_hotkey": miner, "is_king": False}
+    ]
+    assert store.transition_round(
+        round_id,
+        "open",
+        "committed",
+        {
+            "participants": participants,
+            "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+            "evaluation_date": "2098-01-04",
+        },
+    )["status"] == "ok"
+    assert store.open_stage(round_id, 1, participants, list(range(10)))[
+        "status"
+    ] == "ok"
+    response = store.claim_assignment(
+        round_id=round_id,
+        runner_hotkey=runner,
+        declared_parallelism=1,
+        slot_ceiling=1,
+        excluded_miner_hotkeys=[],
+        request_id=contracts.new_request_id(),
+        request_hash=contracts.document_hash({"request": "retired"}),
+        lease_token_hash=hash_lease_token(new_lease_token()),
+    )
+    assert response == {"status": "no_pending"}
+
+
+def test_migration_cancels_an_active_legacy_image_round(
+    pre_source_execution_database,
+):
+    psycopg2, dsn = pre_source_execution_database
+    transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    legacy_store = ArenaStore(transport)
+    round_id = "arena-2098-01-05-cutover"
+    runner = _hotkey("source-runner")
+    miner = _hotkey("legacy-cutover-miner")
+    submission_id = "sub-legacy-cutover"
+    digest = "sha256:" + "8" * 64
+    assert legacy_store.create_round(
+        round_id, _round_config(round_id, cutoff="2099-01-01T00:00:00Z")
+    )["status"] == "created"
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_submissions "
+                "(submission_id, round_id, miner_hotkey, status, is_king, "
+                "submitted_reference, image_reference, image_digest, image_size_bytes, "
+                "consent, submission_doc, frozen_at) "
+                "VALUES (%s, %s, %s, 'frozen', FALSE, %s, %s, %s, 123, "
+                "'{\"public_rerun\":true}', '{}', clock_timestamp())",
+                (
+                    submission_id,
+                    round_id,
+                    miner,
+                    "registry.example/legacy:latest",
+                    "registry.example/legacy@" + digest,
+                    digest,
+                ),
+            )
+        participants = [
+            {
+                "submission_id": submission_id,
+                "miner_hotkey": miner,
+                "is_king": False,
+            }
+        ]
+        assert legacy_store.transition_round(
+            round_id,
+            "open",
+            "committed",
+            {
+                "participants": participants,
+                "benchmark_ref": "arena/%s/benchmark.json" % round_id,
+                "evaluation_date": "2098-01-05",
+            },
+        )["status"] == "ok"
+        assert legacy_store.open_stage(round_id, 1, participants, list(range(10)))[
+            "status"
+        ] == "ok"
+        legacy_lease = legacy_store.claim_assignment(
+            round_id=round_id,
+            runner_hotkey=runner,
+            declared_parallelism=1,
+            slot_ceiling=1,
+            excluded_miner_hotkeys=[],
+            request_id=contracts.new_request_id(),
+            request_hash=contracts.document_hash({"request": "legacy"}),
+            lease_token_hash=hash_lease_token(new_lease_token()),
+        )
+        assert legacy_lease["status"] == "leased"
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                (SCRIPTS / LAB_ARENA_SOURCE_EXECUTION_MIGRATION).read_text(
+                    encoding="utf-8"
+                )
+            )
+            cursor.execute(
+                "SELECT status, cancel_reason FROM public.lab_arena_rounds "
+                "WHERE round_id = %s",
+                (round_id,),
+            )
+            assert cursor.fetchone() == ("cancelled", "source_bundle_cutover")
+            cursor.execute(
+                "SELECT status, rejection_rule FROM public.lab_arena_submissions "
+                "WHERE submission_id = %s",
+                (submission_id,),
+            )
+            assert cursor.fetchone() == (
+                "rejected",
+                "source_reupload_required",
+            )
+            cursor.execute(
+                "SELECT COUNT(*) FROM public.lab_arena_runs "
+                "WHERE round_id = %s AND status = 'failed' "
+                "AND terminal_cause = 'stage_closed'",
+                (round_id,),
+            )
+            assert cursor.fetchone()[0] == 10
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'lab_arena_submissions' "
+                "AND column_name IN "
+                "('submitted_reference', 'image_reference', 'image_digest', 'image_size_bytes')"
+            )
+            assert cursor.fetchone()[0] == 0
+    finally:
+        connection.close()
+        transport.close()
 
 
 def test_source_migrations_apply_again(database):

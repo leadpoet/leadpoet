@@ -102,11 +102,19 @@ def run_icp(icp: dict) -> list[dict]:
     """Return at most five companies for one ICP."""
 ```
 
-The function must be in `harness.py`, must be synchronous, and must have
+`harness.py` must expose this function. It can define the function or re-export
+it from vendored code. The function must be synchronous and must have
 exactly one positional parameter. It cannot have keyword-only parameters,
 `*args`, or `**kwargs`. It must return JSON-ready company objects in the schema
 documented by the public harness. Provider credentials come from the Arena
 host and never from a miner submission.
+
+An agent can vendor its Python code and can include an optional
+`requirements.txt`. The runner accepts normal package names and version
+constraints and installs binary wheels only. URLs, local paths, nested
+requirements files, VCS dependencies, and source builds are not accepted.
+This lets miners use PydanticAI, Pi, Codex, or another Python agent design
+without submitting a container image.
 
 Submit the local source directory. No Dockerfile, public registry, image tag,
 commit identity, receipt, or release manifest is part of miner admission:

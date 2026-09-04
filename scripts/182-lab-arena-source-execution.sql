@@ -5,6 +5,53 @@
 
 BEGIN;
 
+-- A round that already admitted an image-only submission cannot continue in
+-- the source competition. Cancel it once, fail its open work through the
+-- existing cancellation function, and retire its incomplete submissions.
+DO $lab_arena_source_cutover$
+DECLARE
+  v_round_id TEXT;
+BEGIN
+  FOR v_round_id IN
+    SELECT DISTINCT rounds.round_id
+    FROM public.lab_arena_rounds AS rounds
+    JOIN public.lab_arena_submissions AS submissions
+      ON submissions.round_id = rounds.round_id
+    WHERE rounds.status NOT IN ('published', 'cancelled')
+      AND submissions.status IN ('uploading', 'accepted', 'frozen')
+      AND (
+        submissions.source_ref IS NULL
+        OR submissions.source_sha256 IS NULL
+        OR submissions.source_size_bytes IS NULL
+      )
+    ORDER BY rounds.round_id
+  LOOP
+    PERFORM public.lab_arena_cancel_round(v_round_id, 'source_bundle_cutover');
+  END LOOP;
+END;
+$lab_arena_source_cutover$;
+
+-- The immutable-frozen trigger correctly protects normal competition data.
+-- Disable only that trigger for this one migration transition, after the
+-- affected rounds are terminal, then enable it in the same transaction.
+ALTER TABLE public.lab_arena_submissions
+  DISABLE TRIGGER lab_arena_submissions_frozen;
+UPDATE public.lab_arena_submissions AS submissions
+SET status = 'rejected',
+    rejection_rule = 'source_reupload_required',
+    updated_at = pg_catalog.clock_timestamp()
+FROM public.lab_arena_rounds AS rounds
+WHERE rounds.round_id = submissions.round_id
+  AND rounds.status = 'cancelled'
+  AND submissions.status IN ('uploading', 'accepted', 'frozen')
+  AND (
+    submissions.source_ref IS NULL
+    OR submissions.source_sha256 IS NULL
+    OR submissions.source_size_bytes IS NULL
+  );
+ALTER TABLE public.lab_arena_submissions
+  ENABLE TRIGGER lab_arena_submissions_frozen;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_claim_assignment(
   p_round_id TEXT,
   p_runner_hotkey TEXT,
@@ -82,7 +129,36 @@ BEGIN
   SELECT * INTO v_run FROM public.lab_arena_runs AS runs
   WHERE runs.round_id = p_round_id AND runs.stage = v_stage AND runs.status = 'pending'
     AND runs.stage_generation = v_round.stage_generation
-    AND runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
+    -- A configured organizer baseline remains claimable when its hotkey shares
+    -- a coldkey with a runner. Self-execution exclusion still applies to every
+    -- miner submission.
+    AND (
+      runs.miner_hotkey <> ALL (COALESCE(p_excluded_miner_hotkeys, ARRAY[]::TEXT[]))
+      OR EXISTS (
+        SELECT 1
+        FROM public.lab_arena_submissions AS baseline_submission
+        WHERE baseline_submission.submission_id = runs.submission_id
+          AND baseline_submission.round_id = runs.round_id
+          AND baseline_submission.status = 'frozen'
+          AND baseline_submission.is_king
+          AND baseline_submission.miner_hotkey =
+              (v_round.configuration_doc ->> 'baseline_hotkey')
+      )
+    )
+    -- No execute lease can use a retired image-only submission.
+    AND (
+      runs.kind <> 'execute'
+      OR EXISTS (
+        SELECT 1
+        FROM public.lab_arena_submissions AS source_submission
+        WHERE source_submission.submission_id = runs.submission_id
+          AND source_submission.round_id = runs.round_id
+          AND source_submission.status = 'frozen'
+          AND source_submission.source_ref IS NOT NULL
+          AND source_submission.source_sha256 IS NOT NULL
+          AND source_submission.source_size_bytes IS NOT NULL
+      )
+    )
     AND (runs.previous_runner_hotkey IS NULL OR runs.previous_runner_hotkey <> p_runner_hotkey
          OR NOT EXISTS (
            SELECT 1 FROM public.lab_arena_runs AS others

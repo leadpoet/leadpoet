@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+import httpx
 from bittensor_wallet import Keypair
 
-from lab_arena import contracts, runner as rn, runtime, shim
+from lab_arena import contracts, runner as rn, runtime, shim, source_bundle
 from lab_arena.output import output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
@@ -40,6 +41,20 @@ def _source_archive() -> bytes:
             info = tarfile.TarInfo("harness.py")
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
+def _source_archive_with_requirements(requirement: str) -> bytes:
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for name, data in (
+                ("harness.py", b"def run_icp(icp):\n    return []\n"),
+                ("requirements.txt", requirement.encode("utf-8")),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
     return raw.getvalue()
 
 
@@ -253,6 +268,84 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
     with pytest.raises(rn.RunnerError, match="exceeds runner cache capacity"):
         oversized.rootfs_for(first)
     assert list((tmp_path / "small").iterdir()) == []
+
+
+def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tmp_path):
+    payload = _source_archive_with_requirements("pydantic-ai==1.0.0\n")
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    fetches = []
+    installs = []
+
+    def fetch(run_id, lease_token):
+        fetches.append((run_id, lease_token))
+        return payload
+
+    def install(requirements, target):
+        installs.append(requirements.read_text(encoding="utf-8"))
+        (target / "installed.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    cache = rn.SourceCache(tmp_path / "sources", fetch, dependency_installer=install)
+    arguments = ("run-1", "a" * 64, SOURCE_REF, digest, len(payload))
+    with cache.acquire(*arguments) as (source, dependencies):
+        assert (source / "harness.py").is_file()
+        assert (dependencies / "installed.py").is_file()
+    with cache.acquire("run-2", "b" * 64, SOURCE_REF, digest, len(payload)):
+        pass
+    assert fetches == [("run-1", "a" * 64)]
+    assert installs == ["pydantic-ai==1.0.0\n"]
+
+
+def test_binary_requirement_install_rejects_urls_options_and_source_builds(
+    tmp_path, monkeypatch
+):
+    requirements = tmp_path / "requirements.txt"
+    target = tmp_path / "deps"
+    target.mkdir()
+    for unsafe in ("-r other.txt\n", "agent @ https://example.test/a.whl\n", "../agent\n"):
+        requirements.write_text(unsafe, encoding="utf-8")
+        with pytest.raises(rn.RunnerError, match="package names and version constraints"):
+            rn.install_binary_requirements(requirements, target)
+
+    calls = []
+    requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(
+        rn.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or type("Result", (), {"returncode": 0})(),
+    )
+    rn.install_binary_requirements(requirements, target)
+    command, kwargs = calls[0]
+    assert "--only-binary=:all:" in command
+    assert "--no-deps" not in command and "--no-compile" in command
+    assert kwargs["timeout"] == rn.DEPENDENCY_INSTALL_TIMEOUT_SECONDS
+
+
+def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():
+    token = "a" * 64
+
+    def handler(request):
+        assert request.headers["x-lab-arena-lease"] == token
+        return httpx.Response(200, content=SOURCE_BYTES)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    api = rn.HttpArenaApiClient("http://localhost", client=client)
+    assert api.source("run-1", token) == SOURCE_BYTES
+
+    oversized = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={
+                    "content-length": str(source_bundle.MAX_SOURCE_ARCHIVE_BYTES + 1)
+                },
+                content=b"x",
+            )
+        )
+    )
+    api = rn.HttpArenaApiClient("http://localhost", client=oversized)
+    with pytest.raises(rn.RunnerError, match="exceeds the archive limit"):
+        api.source("run-1", token)
 
 
 def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_path):

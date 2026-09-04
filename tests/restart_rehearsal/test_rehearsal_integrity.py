@@ -100,6 +100,7 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 from tests.restart_rehearsal.verify_evidence import (
     events,
     selected_weight_storage_preflight_capability,
+    selected_weight_storage_preflight_pins_epoch,
     verify_gateway_provider_preflight,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
@@ -6569,7 +6570,7 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
         + "parser.add_argument('--storage-read-preflight', action='store_true')\n",
         encoding="utf-8",
     )
-    assert selected_weight_storage_preflight_capability((tmp_path,)) is False
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
     source.write_text(
         source.read_text(encoding="utf-8")
@@ -6577,6 +6578,35 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
         encoding="utf-8",
     )
     assert selected_weight_storage_preflight_capability((tmp_path,)) is True
+
+
+def test_weight_storage_preflight_epoch_binding_tracks_restart_wrapper(
+    tmp_path,
+) -> None:
+    restart = tmp_path / "gw_restart.sh"
+    prefix = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"\n'
+        "run_prepared_gateway_module \\\n"
+        "  gateway.tee.verify_weight_submission_ready_v2 \\\n"
+    )
+    suffix = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"\n'
+    restart.write_text(
+        prefix + "  --storage-read-preflight\n" + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is False
+
+    restart.write_text(
+        prefix
+        + "  --storage-read-preflight \\\n"
+        + '  --epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"\n'
+        + suffix,
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_pins_epoch((tmp_path,)) is True
+    assert selected_weight_storage_preflight_pins_epoch(
+        (Path(__file__).resolve().parents[2],)
+    ) is True
 
 
 def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
@@ -8344,6 +8374,7 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
 
     recovered_rows = [
@@ -8357,14 +8388,24 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     verify_gateway_weight_readiness_invocations(
         recovered_rows,
         candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
     )
 
-    mismatched_epoch_rows = copy.deepcopy(rows)
-    mismatched_epoch_rows[0]["argv"][-1] = "24303"
-    with pytest.raises(SystemExit, match="changed their pinned epoch"):
+    advanced_epoch_rows = copy.deepcopy(rows)
+    advanced_epoch_rows[0]["argv"][-1] = "24303"
+    verify_gateway_weight_readiness_invocations(
+        advanced_epoch_rows,
+        candidate_sha=COMMIT,
+        storage_preflight_pins_epoch=True,
+    )
+
+    malformed_epoch_rows = copy.deepcopy(rows)
+    malformed_epoch_rows[0]["argv"][-1] = "not-an-epoch"
+    with pytest.raises(SystemExit, match="exact production"):
         verify_gateway_weight_readiness_invocations(
-            mismatched_epoch_rows,
+            malformed_epoch_rows,
             candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
         )
 
     rows[3]["argv"][-1] = "30"
@@ -8372,7 +8413,16 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=COMMIT,
+            storage_preflight_pins_epoch=True,
         )
+
+    legacy_rows = copy.deepcopy(rows)
+    legacy_rows[0]["argv"] = ["-m", module, "--storage-read-preflight"]
+    legacy_rows[3]["argv"][-1] = "360"
+    verify_gateway_weight_readiness_invocations(
+        legacy_rows,
+        candidate_sha=COMMIT,
+    )
 
 
 def test_gateway_storage_preflight_routes_only_canonical_supabase_locally(

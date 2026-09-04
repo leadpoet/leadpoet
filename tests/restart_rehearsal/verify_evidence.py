@@ -1409,24 +1409,70 @@ def selected_weight_storage_preflight_capability(
             source_path.read_text(encoding="utf-8"),
             filename=str(source_path),
         )
-        supported_arguments = {
-            node.args[0].value
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and bool(node.args)
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "--storage-read-preflight"
             for node in ast.walk(tree)
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "add_argument"
-                and bool(node.args)
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            )
-        }
-        return {
-            "--storage-read-preflight",
-            "--epoch",
-        }.issubset(supported_arguments)
+        )
     raise SystemExit(
         "candidate weight-readiness source is unavailable for capability proof"
+    )
+
+
+def selected_weight_storage_preflight_pins_epoch(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("gw_restart.sh")
+    stage_marker = (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"'
+    )
+    end_marker = 'GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"'
+    module = "gateway.tee.verify_weight_submission_ready_v2"
+    for root in candidate_roots:
+        source_path = root / relative
+        if not source_path.is_file():
+            continue
+        source = source_path.read_text(encoding="utf-8")
+        stage_start = source.find(stage_marker)
+        stage_end = source.find(end_marker, stage_start + len(stage_marker))
+        if stage_start < 0 or stage_end < 0:
+            raise SystemExit(
+                "candidate gateway restart storage preflight stage is unavailable"
+            )
+        stage_lines = source[stage_start:stage_end].splitlines()
+        invocations: list[list[str]] = []
+        for ordinal, line in enumerate(stage_lines):
+            if line.strip() != "run_prepared_gateway_module \\":
+                continue
+            arguments: list[str] = []
+            for argument_line in stage_lines[ordinal + 1 :]:
+                argument = argument_line.strip()
+                continued = argument.endswith("\\")
+                if continued:
+                    argument = argument[:-1].rstrip()
+                arguments.append(argument)
+                if not continued:
+                    break
+            if arguments[:2] == [module, "--storage-read-preflight"]:
+                invocations.append(arguments)
+        legacy_arguments = [module, "--storage-read-preflight"]
+        pinned_arguments = [
+            *legacy_arguments,
+            '--epoch "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_EPOCH"',
+        ]
+        if invocations == [legacy_arguments]:
+            return False
+        if invocations == [pinned_arguments]:
+            return True
+        raise SystemExit(
+            "candidate gateway restart storage preflight invocation is unknown"
+        )
+    raise SystemExit(
+        "candidate gateway restart source is unavailable for capability proof"
     )
 
 
@@ -1436,6 +1482,7 @@ def verify_gateway_weight_readiness_invocations(
     candidate_sha: str,
     transition: str = "forward",
     storage_preflight_supported: bool = True,
+    storage_preflight_pins_epoch: bool = False,
 ) -> None:
     module = "gateway.tee.verify_weight_submission_ready_v2"
     if not storage_preflight_supported and transition != "rollback":
@@ -1449,24 +1496,24 @@ def verify_gateway_weight_readiness_invocations(
         and row.get("module") == module
     ]
     expected_prefix = []
-    storage_preflight_epoch = None
     if storage_preflight_supported:
-        argv = observed[0].get("argv") if observed else None
-        if (
-            not isinstance(argv, list)
-            or len(argv) != 5
-            or argv[:4]
-            != ["-m", module, "--storage-read-preflight", "--epoch"]
-            or not str(argv[4]).isdigit()
-        ):
-            raise SystemExit(
-                "gateway launcher did not execute the exact production "
-                f"weight storage preflight: {observed!r}"
-            )
-        storage_preflight_epoch = str(argv[4])
+        argv = ["-m", module, "--storage-read-preflight"]
+        if storage_preflight_pins_epoch:
+            observed_argv = observed[0].get("argv") if observed else None
+            if (
+                not isinstance(observed_argv, list)
+                or len(observed_argv) != 5
+                or observed_argv[:4] != [*argv, "--epoch"]
+                or not str(observed_argv[4]).isdigit()
+            ):
+                raise SystemExit(
+                    "gateway launcher did not execute the exact production "
+                    f"weight storage preflight: {observed!r}"
+                )
+            argv = list(observed_argv)
         expected_prefix.append(
             {
-                "argv": list(argv),
+                "argv": argv,
                 "source_kind": "candidate_archive",
             }
         )
@@ -1554,14 +1601,6 @@ def verify_gateway_weight_readiness_invocations(
         raise SystemExit(
             "gateway launcher did not execute pinned weight readiness repair"
         )
-    if (
-        storage_preflight_epoch is not None
-        and storage_preflight_epoch != active_epoch
-    ):
-        raise SystemExit(
-            "gateway weight storage preflight and repair changed their "
-            "pinned epoch"
-        )
     expected.append(http_contract)
     injected = any(
         row.get("kind") == "fault-injection"
@@ -1648,19 +1687,26 @@ def main() -> int:
             raise SystemExit(
                 "targeted fault scenario cannot satisfy exact restart evidence"
             )
+        candidate_roots = (
+            Path("/home/ec2-user/leadpoet_repo"),
+            Path("/home/ec2-user/leadpoet/leadpoet"),
+        )
         storage_preflight_supported = (
             selected_weight_storage_preflight_capability(
-                (
-                    Path("/home/ec2-user/leadpoet_repo"),
-                    Path("/home/ec2-user/leadpoet/leadpoet"),
-                )
+                candidate_roots
             )
+        )
+        storage_preflight_pins_epoch = (
+            selected_weight_storage_preflight_pins_epoch(candidate_roots)
+            if storage_preflight_supported
+            else False
         )
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=candidate_sha,
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
+            storage_preflight_pins_epoch=storage_preflight_pins_epoch,
         )
         if transition == "forward":
             launcher_log = Path(

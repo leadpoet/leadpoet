@@ -516,9 +516,11 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     _run_stage_one_to_scoring(harness, len(second["participants"]), runners=2)
     harness.advance_until("published", runners=2)
     second = harness.service.store.get_round(harness.round_id)
-    assert second["king_outcome"] in ("crowned", "defended")
+    assert second["king_outcome"] in ("crowned", "no_king")
     decision = second["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or decision["king_submission_id"]
+    winner = decision["winner_submission_id"] or second["publication_doc"][
+        "final_ranking"
+    ][0]["submission_id"]
     public = harness.service.public_results(harness.round_id, winner)
     assert len(public["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
     assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
@@ -954,7 +956,9 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert public.status_code == 200
     row = harness.service.store.get_round(harness.round_id)
     decision = row["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or decision["king_submission_id"]
+    winner = decision["winner_submission_id"] or row["publication_doc"][
+        "final_ranking"
+    ][0]["submission_id"]
     results = original_get(
         "http://localhost/arena/v1/rounds/%s/results/%s" % (harness.round_id, winner)
     )
@@ -966,7 +970,8 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path):
     assert len(benchmark.json()["icps"]) == contracts.BENCHMARK_ICP_COUNT
     current = original_get("http://localhost/arena/v1/current")
     assert current.status_code == 200
-    assert current.json()["king"]["hotkey"] == row["king_hotkey"]
+    assert row["king_outcome"] == "no_king"
+    assert current.json()["king"] is None
 
 
 def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
@@ -1174,7 +1179,9 @@ def test_result_writes_retry_after_transient_object_store_failures(connect, tmp_
     assert flaky.failures > 0
     row = harness.service.store.get_round(harness.round_id)
     decision = row["publication_doc"]["king_decision"]
-    winner = decision["winner_submission_id"] or decision["king_submission_id"]
+    winner = decision["winner_submission_id"] or row["publication_doc"][
+        "final_ranking"
+    ][0]["submission_id"]
     results = harness.service.public_results(harness.round_id, winner)
     assert len(results["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
     assert len(results["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT

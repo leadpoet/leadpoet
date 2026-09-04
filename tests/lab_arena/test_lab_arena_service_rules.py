@@ -470,7 +470,11 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "schedule": schedule,
     }
     assert round_view["participants"] == [
-        {"submission_id": "sub-random", "miner_hotkey": hotkey, "is_king": False}
+        {
+            "submission_id": "sub-random",
+            "miner_hotkey": hotkey,
+            "is_baseline": False,
+        }
     ]
 
 

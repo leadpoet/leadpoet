@@ -114,7 +114,7 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert len(publication["participants"]) == participant_count
     assert len(publication["stage1_ranking"]) == len(harness.challengers)
     assert len(publication["final_ranking"]) == participant_count
-    assert publication["king_decision"]["outcome"] in ("crowned", "defended")
+    assert publication["king_decision"]["outcome"] in ("crowned", "no_king")
     execution_runs = service.store.list_runs(round_id, kind="execute")
     assert len(execution_runs) == (
         contracts.STAGE_1_ICP_COUNT + contracts.STAGE_2_ICP_COUNT

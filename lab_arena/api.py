@@ -100,12 +100,24 @@ def create_app(service: ArenaService) -> FastAPI:
 
     # -- miner --------------------------------------------------------------
 
-    @app.post("/arena/v1/submissions")
-    async def submissions(request: Request) -> Any:
-        """A signed JSON body naming one public image by tag or digest."""
+    @app.post("/arena/v1/submissions/presign")
+    async def submission_presign(request: Request) -> Any:
+        """Reserve one bounded private source upload."""
 
         envelope = await _read_json(request)
-        return await run_in_threadpool(service.handle_submission, envelope)
+        return await run_in_threadpool(service.handle_submission_presign, envelope)
+
+    @app.post("/arena/v1/submissions/{submission_id}/finalize")
+    async def submission_finalize(submission_id: str, request: Request) -> Any:
+        """Verify and accept the source bytes uploaded for this submission."""
+
+        envelope = await _read_json(request)
+        body = envelope.get("body") if isinstance(envelope, dict) else None
+        if not isinstance(body, dict) or str(body.get("submission_id") or "") != submission_id:
+            raise HTTPException(status_code=400, detail="path submission id does not match body")
+        return await run_in_threadpool(
+            service.handle_submission_finalize, submission_id, envelope
+        )
 
     @app.get("/arena/v1/submissions/{submission_id}")
     async def submission_status(submission_id: str) -> Any:

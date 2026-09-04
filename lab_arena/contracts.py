@@ -90,12 +90,14 @@ SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 
 SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
-SCOPE_SUBMISSION = "lab_arena.submission.v1"
+SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
+SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
 REQUEST_SCOPES = frozenset(
     {
         SCOPE_CLAIM,
         SCOPE_COMPLETE,
-        SCOPE_SUBMISSION,
+        SCOPE_SUBMISSION_PRESIGN,
+        SCOPE_SUBMISSION_FINALIZE,
     }
 )
 
@@ -141,7 +143,7 @@ ROUND_TRANSITIONS = {
     "cancelled": (),
 }
 ATTEMPT_STATUSES = ("pending", "leased", "submitted", "accepted", "failed")
-SUBMISSION_STATUSES = ("uploaded", "accepted", "rejected", "frozen")
+SUBMISSION_STATUSES = ("uploading", "accepted", "rejected", "frozen")
 KING_OUTCOMES = ("crowned", "defended", "retained_ineligible", "no_king")
 TERMINAL_CAUSES = (
     "accepted",
@@ -338,6 +340,7 @@ SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 SS58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
 ROUND_ID_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[a-z0-9]{1,16})?$")
+SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 def document_hash(document: Any) -> str:
@@ -665,24 +668,9 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
     F("baseline_hotkey", "hotkey"),
-    F("baseline_image_reference", "str", minimum=1, maximum=512),
+    F("baseline_source_url", "str", minimum=8, maximum=2048),
     F("runner_hotkeys", "list[hotkey]", minimum=1, maximum=64),
     F("banned_hotkeys", "list[hotkey]", minimum=0, maximum=4096),
-    # Image by digest: the public limits every submitted image must meet and
-    # the Arena repository every accepted image is mirrored into.
-    F(
-        "image_rules",
-        "object",
-        fields=(
-            F("schema_version", "str", minimum=1, maximum=64),
-            F("max_image_bytes", "int", minimum=1),
-            F("max_layers", "int", minimum=1),
-            F("max_rootfs_bytes", "int", minimum=1),
-            F("platform", "object", fields=(F("os", "str", minimum=1, maximum=32), F("architecture", "str", minimum=1, maximum=32))),
-            F("layer_media_types", "list[str]", minimum=1, maximum=16),
-        ),
-    ),
-    F("registry_repository", "str", minimum=0, maximum=512),
     F("reward_constants", "object", fields=REWARD_CONSTANTS_FIELDS),
 )
 
@@ -707,6 +695,8 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("scoring call quotas are fixed public constants")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")
+    if not config["baseline_source_url"].startswith("https://"):
+        raise ArenaContractError("baseline source URL must use https")
     rewards = config["reward_constants"]
     # ``pool_percent`` is the one adjustable reward setting (LAB_ARENA_POOL_PERCENT,
     # 0..100 by the field bounds); the decay, week length, and window are fixed.
@@ -741,19 +731,37 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
 SUBMISSION_CONSENT_FIELDS = (
     F("public_rerun", "bool"),
 )
-SUBMISSION_BODY_FIELDS = (
-    F("image_reference", "str", minimum=1, maximum=512),
+SUBMISSION_PRESIGN_BODY_FIELDS = (
+    F("source_sha256", "sha256"),
+    F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
     F("consent", "object", fields=SUBMISSION_CONSENT_FIELDS),
+)
+SUBMISSION_FINALIZE_BODY_FIELDS = (
+    F("submission_id", "str", minimum=1, maximum=64),
+    F("source_ref", "str", minimum=1, maximum=512),
+    F("source_sha256", "sha256"),
+    F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
 )
 
 
-def validate_submission_body(body: Any) -> Dict[str, Any]:
-    """A miner's signed submission body: one image and public benchmark consent."""
+def validate_submission_presign_body(body: Any) -> Dict[str, Any]:
+    """Validate transport facts before the Arena permits one source upload."""
 
-    document = validate_document(body, SUBMISSION_BODY_FIELDS)
+    document = validate_document(body, SUBMISSION_PRESIGN_BODY_FIELDS)
     consent = document["consent"]
     if consent.get("public_rerun") is not True:
         raise ArenaContractError("public_rerun consent must be true")
+    return document
+
+
+def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
+    """Validate the facts repeated after the source upload."""
+
+    document = validate_document(body, SUBMISSION_FINALIZE_BODY_FIELDS)
+    if not SUBMISSION_ID_RE.match(document["submission_id"]):
+        raise ArenaContractError("submission_id has an invalid shape")
+    if not re.match(r"^arena/[A-Za-z0-9._:-]{1,64}/sources/[A-Za-z0-9._:-]{1,64}\.tar\.gz$", document["source_ref"]):
+        raise ArenaContractError("source_ref has an invalid shape")
     return document
 
 

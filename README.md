@@ -102,11 +102,19 @@ def run_icp(icp: dict) -> list[dict]:
     """Return at most five companies for one ICP."""
 ```
 
-The function must be in `harness.py`, must be synchronous, and must return
-JSON-ready company objects in the schema documented by the public harness.
-The bundle wrapper exposes `/agent/run`, reads `/input/icp.json`, and writes
-`/output/companies.json`. Provider credentials come from the Arena host and
-never from a miner submission.
+The function must be in `harness.py`, must be synchronous, and must have
+exactly one positional parameter. It cannot have keyword-only parameters,
+`*args`, or `**kwargs`. It must return JSON-ready company objects in the schema
+documented by the public harness. Provider credentials come from the Arena
+host and never from a miner submission.
+
+Submit the local source directory. No Dockerfile, public registry, image tag,
+commit identity, receipt, or release manifest is part of miner admission:
+
+```bash
+python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+  --wallet-name default --hotkey-name default
+```
 
 Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
 [input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
@@ -115,8 +123,11 @@ Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
 not admission or scoring requirements.
 
 At the first cutoff, the Arena automatically enters the configured public
-PydanticAI baseline through the same image checks, runner, provider limits, and
-scorer as miner bundles. Later winners become the next incumbent.
+PydanticAI source archive through the same source checks, runner, provider
+limits, and scorer as miner bundles. The downloaded bytes are frozen for that
+round. Every new daily round downloads and scores the public baseline again;
+the previous miner winner remains in reward history but is not the next day's
+threshold.
 
 #### Submit API Source
 

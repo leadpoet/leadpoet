@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -10,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, contracts, images, rewards, scoring, signing, verify
+from lab_arena import broker as broker_module, contracts, rewards, scoring, signing, source_bundle, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -18,6 +20,8 @@ from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+SOURCE_UPLOAD_EXPIRES_SECONDS = 900
+DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz"
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 210,
@@ -54,6 +58,10 @@ class ObjectStore(Protocol):
 
     def get(self, ref: str) -> bytes: ...
 
+    def get_bounded(self, ref: str, max_bytes: int) -> bytes: ...
+
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]: ...
+
 
 class LocalObjectStore:
     """Directory-backed object store for tests and local runs; refs are write-once."""
@@ -79,6 +87,15 @@ class LocalObjectStore:
         if not path.exists():
             raise ArenaContractError("object store has no object at %s" % ref)
         return path.read_bytes()
+
+    def get_bounded(self, ref: str, max_bytes: int) -> bytes:
+        data = self.get(ref)
+        if len(data) > max_bytes:
+            raise ArenaContractError("object exceeds source size limit")
+        return data
+
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+        raise ServiceError("source_upload_not_configured", 503)
 
 
 class S3ObjectStore:
@@ -129,6 +146,37 @@ class S3ObjectStore:
         response = self._client.get_object(Bucket=self._bucket, Key=ref)
         return response["Body"].read()
 
+    def get_bounded(self, ref: str, max_bytes: int) -> bytes:
+        head = self._client.head_object(Bucket=self._bucket, Key=ref)
+        if int(head.get("ContentLength") or 0) > int(max_bytes):
+            raise ArenaContractError("object exceeds source size limit")
+        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        body = response["Body"]
+        data = body.read(int(max_bytes) + 1)
+        if len(data) > int(max_bytes):
+            raise ArenaContractError("object exceeds source size limit")
+        return data
+
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+        headers = {
+            "content-type": str(content_type),
+            "content-length": str(int(size_bytes)),
+            "if-none-match": "*",
+        }
+        url = self._client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": ref,
+                "ContentType": str(content_type),
+                "ContentLength": int(size_bytes),
+                "IfNoneMatch": "*",
+            },
+            ExpiresIn=int(expires_seconds),
+            HttpMethod="PUT",
+        )
+        return {"upload_url": url, "upload_headers": headers, "expires_in_seconds": int(expires_seconds)}
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -152,16 +200,13 @@ class RoundDefaults:
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
     baseline_hotkey: str = ""
-    baseline_image_reference: str = ""
+    baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
     max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     # The trusted scorer is resolved once and copied into each round. A service
     # restart therefore cannot change the scorer midway through that round.
     scorer_image_digest: str = "sha256:" + "0" * 64
     scorer_image_reference: str = ""
-    # Public limits for submitted images and the Arena mirror repository.
-    image_rules: images.ImageRules = field(default_factory=images.ImageRules)
-    registry_repository: str = ""
     # Automatic daily rounds: the UTC hour of each day's submission cutoff, or
     # None to leave round creation to the operator (``lab_arena_admin.py create``).
     daily_cutoff_hour_utc: Optional[int] = None
@@ -192,13 +237,7 @@ class ServiceConfig:
     defaults: RoundDefaults = field(default_factory=RoundDefaults)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     network_name: str = "finney"
-    # The registry client that resolves and mirrors submitted images (None
-    # disables admission, for tests that accept submissions directly).
-    registry: Optional[images.RegistryClient] = None
-    # Submitted source images are always read without destination credentials.
-    source_registry: Optional[images.RegistryClient] = None
-    # One driver tick admits images for at most this long, then the next tick continues.
-    admission_tick_seconds: float = 300.0
+    baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
 
     def __post_init__(self) -> None:
@@ -206,10 +245,6 @@ class ServiceConfig:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
             raise ServiceError("mode_off", 500)
-        if self.registry is not None and (
-            self.source_registry is None or self.source_registry is self.registry
-        ):
-            raise ServiceError("anonymous_source_registry_required", 500)
 
 
 def _iso(moment: datetime) -> str:
@@ -404,11 +439,9 @@ class ArenaService:
             "scorer_image_digest": defaults.scorer_image_digest,
             "scorer_image_reference": defaults.scorer_image_reference,
             "baseline_hotkey": defaults.baseline_hotkey,
-            "baseline_image_reference": defaults.baseline_image_reference,
+            "baseline_source_url": defaults.baseline_source_url,
             "runner_hotkeys": runner_hotkeys,
             "banned_hotkeys": banned_hotkeys,
-            "image_rules": defaults.image_rules.to_document(),
-            "registry_repository": defaults.registry_repository,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
         configuration = contracts.validate_round_configuration(document)
@@ -552,138 +585,229 @@ class ArenaService:
 
     # -- submissions (sections 6, 7, 14.2) -------------------------------------
 
-    def handle_submission(self, envelope: Any) -> Dict[str, Any]:
-        """Register one miner bundle; its digest is only an execution detail."""
-
-        validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_SUBMISSION)
+    def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
             raise ServiceError("submission_window_closed", 409)
         schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
         now = self.now()
         if now < _parse_iso(schedule["submission_open"]) or now >= _parse_iso(schedule["submission_cutoff"]):
             raise ServiceError("submission_window_closed", 409)
+
+    def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
+        """Reserve one private source upload for a signed miner request."""
+
+        validated, round_row = self._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_PRESIGN
+        )
+        self._require_submission_window(round_row)
         round_id = round_row["round_id"]
         if self._config.chain.uid_for_hotkey(validated["hotkey"]) is None:
             raise ServiceError("hotkey_unregistered", 403)
-        body = contracts.validate_submission_body(validated["body"])
+        if validated["hotkey"] == (round_row.get("configuration_doc") or {}).get(
+            "baseline_hotkey"
+        ):
+            raise ServiceError("baseline_hotkey_reserved", 403)
+        body = contracts.validate_submission_presign_body(validated["body"])
+        # This random id is the submission identity. The source SHA is only a
+        # byte-integrity check and never identifies or ranks the agent.
+        submission_id = "sub-%s" % secrets.token_hex(16)
+        source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
+        document = {
+            "source_ref": source_ref,
+            "source_sha256": body["source_sha256"],
+            "source_size_bytes": body["source_size_bytes"],
+            "consent": dict(body["consent"]),
+        }
         try:
-            reference = images.parse_reference(body["image_reference"])
-        except images.ImageError as exc:
-            raise ServiceError("submission_rejected:%s" % exc.rule_id, 400) from exc
-        # A miner gets one stable slot per round. The bundle digest does not
-        # affect admission, identity, rank, or the winner decision.
-        submission_id = "sub-%s" % contracts.document_hash({"round_id": round_id, "miner_hotkey": validated["hotkey"]})[7:39]
-        try:
-            registration = self._store.register_submission(round_id, submission_id, validated["hotkey"], {"submitted_reference": str(reference), "image_reference": str(reference), "consent": dict(body["consent"])})
+            registration = self._store.register_submission(
+                round_id,
+                submission_id,
+                validated["hotkey"],
+                document,
+            )
         except ArenaStoreError as exc:
             if "lab_arena_submission_conflict" in str(exc):
                 raise ServiceError("submission_conflict", 409) from exc
             raise
         if registration.get("status") == "window_closed":
             raise ServiceError("submission_window_closed", 409)
-        return {"status": "uploaded", "submission_id": submission_id, "image_reference": str(reference)}
+        if registration.get("status") not in ("registered", "existing"):
+            raise ServiceError("submission_registration_failed", 500)
+        submission_id = str(registration.get("submission_id") or submission_id)
+        source_ref = str(registration.get("source_ref") or source_ref)
+        try:
+            upload = self._objects.presign_put(
+                source_ref,
+                size_bytes=int(body["source_size_bytes"]),
+                content_type=source_bundle.SOURCE_CONTENT_TYPE,
+                expires_seconds=SOURCE_UPLOAD_EXPIRES_SECONDS,
+            )
+        except Exception as exc:
+            raise ServiceError("source_upload_unavailable", 503) from exc
+        return {
+            "status": "upload_ready",
+            "submission_id": submission_id,
+            "source_ref": source_ref,
+            "upload_url": str(upload["upload_url"]),
+            "upload_headers": dict(upload["upload_headers"]),
+            "expires_in_seconds": int(upload["expires_in_seconds"]),
+        }
+
+    def _validate_uploaded_source(self, row: Mapping[str, Any]) -> None:
+        expected_size = int(row.get("source_size_bytes") or 0)
+        source_ref = str(row.get("source_ref") or "")
+        try:
+            payload = self._objects.get_bounded(
+                source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+            )
+        except Exception as exc:
+            raise ServiceError("source_upload_unavailable", 409) from exc
+        if len(payload) != expected_size:
+            raise ServiceError("submission_rejected:source_size_mismatch", 400)
+        actual_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if actual_sha256 != row.get("source_sha256"):
+            raise ServiceError("submission_rejected:source_sha256_mismatch", 400)
+        try:
+            source_bundle.validate_source_archive(payload)
+        except source_bundle.SourceBundleError as exc:
+            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+
+    def handle_submission_finalize(
+        self, submission_id: str, envelope: Any
+    ) -> Dict[str, Any]:
+        """Verify uploaded bytes and admit the source under the same signed owner."""
+
+        validated, round_row = self._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_FINALIZE
+        )
+        self._require_submission_window(round_row)
+        body = contracts.validate_submission_finalize_body(validated["body"])
+        if body["submission_id"] != submission_id:
+            raise ServiceError("submission_id_mismatch", 400)
+        row = self._store.get_submission(submission_id)
+        if (
+            row is None
+            or row.get("round_id") != round_row["round_id"]
+            or row.get("miner_hotkey") != validated["hotkey"]
+        ):
+            raise ServiceError("submission_missing", 404)
+        for field in ("source_ref", "source_sha256", "source_size_bytes"):
+            if body[field] != row.get(field):
+                raise ServiceError("submission_transport_mismatch", 409)
+        if row.get("status") == "accepted":
+            return {"status": "accepted", "submission_id": submission_id}
+        if row.get("status") != "uploading":
+            raise ServiceError("submission_not_uploading", 409)
+        try:
+            self._validate_uploaded_source(row)
+        except ServiceError as exc:
+            if exc.code.startswith("submission_rejected:"):
+                self._store.update_submission(
+                    str(round_row["round_id"]),
+                    submission_id,
+                    "uploading",
+                    "rejected",
+                    {"rejection_rule": exc.code.split(":", 1)[1]},
+                )
+            raise
+        result = self._store.update_submission(
+            str(round_row["round_id"]), submission_id, "uploading", "accepted"
+        )
+        if result.get("status") not in ("ok", "stale"):
+            raise ServiceError("submission_finalize_failed", 500)
+        return {"status": "accepted", "submission_id": submission_id}
 
     def admit_uploaded_submissions(self, round_id: str, *, final: bool = False) -> Dict[str, Any]:
-        """Resolve, check, and mirror every uploaded image of the open round (the driver's tick step).
+        """At cutoff, reject source slots that a miner did not finalize."""
 
-        Each submission ends accepted with its resolved source reference and
-        internal Arena image reference, or rejected under a published rule. A
-        registry that cannot be reached leaves the submission
-        uploaded for the next tick until ``final`` (the cutoff), when it is
-        rejected as unavailable. Work stops after ``admission_tick_seconds`` so
-        one tick never blocks the driver for hours; the next tick continues.
-        """
-
-        if self._config.registry is None:
-            return {"status": "disabled"}
         round_row = self._round(round_id)
         if round_row["status"] != "open":
             return {"status": "stale", "round_status": round_row["status"]}
-        configuration = round_row["configuration_doc"]
-        rules = images.ImageRules.from_document(configuration["image_rules"])
-        repository = str(configuration.get("registry_repository") or "")
-        if not repository:
-            raise ServiceError("registry_repository_missing", 500)
         outcomes: Dict[str, Any] = {"status": "ok", "accepted": 0, "rejected": 0, "deferred": 0, "remaining": 0}
-        started = time.monotonic()
-        deadline = started + float(self._config.admission_tick_seconds)
-        pending = self._store.list_submissions(round_id, status="uploaded")
-        for index, row in enumerate(pending):
-            if time.monotonic() >= deadline:
-                outcomes["remaining"] = len(pending) - index
-                break
-            outcomes[self._admit_one(round_id, row, rules=rules, repository=repository, final=final, deadline=deadline)] += 1
+        pending = self._store.list_submissions(round_id, status="uploading")
+        if not final:
+            outcomes["remaining"] = len(pending)
+            return outcomes
+        for row in pending:
+            result = self._store.update_submission(
+                round_id,
+                str(row["submission_id"]),
+                "uploading",
+                "rejected",
+                {"rejection_rule": "source_upload_incomplete"},
+            )
+            outcomes["rejected" if result.get("status") == "ok" else "deferred"] += 1
         return outcomes
-
-    def _admit_one(self, round_id: str, row: Mapping[str, Any], *, rules: images.ImageRules, repository: str, final: bool, deadline: float) -> str:
-        registry = self._config.registry
-        source_registry = self._config.source_registry
-        submission_id = str(row["submission_id"])
-        reference_text = str(row.get("submitted_reference") or (row.get("submission_doc") or {}).get("image_reference") or "")
-        try:
-            reference = images.parse_reference(reference_text)
-            descriptor = images.resolve_image(source_registry, reference, rules, deadline=deadline)
-            mirrored = images.mirror_image(source_registry, descriptor, repository, destination_client=registry, deadline=deadline)
-        except images.ImageError as exc:
-            if exc.rule_id == images.RULE_UNAVAILABLE and not final:
-                return "deferred"
-            self._store.update_submission(round_id, submission_id, "uploaded", "rejected", {"rejection_rule": exc.rule_id})
-            return "rejected"
-        # Publish the resolved public source reference. A submitted tag is never
-        # reused after admission; execution uses the immutable Arena mirror.
-        patch = dict(descriptor.to_document(), image_reference=str(mirrored), submitted_reference=str(descriptor.reference))
-        result = self._store.update_submission(round_id, submission_id, "uploaded", "accepted", patch)
-        return "accepted" if result.get("status") == "ok" else "deferred"
 
     @staticmethod
     def _participant(row: Mapping[str, Any], *, is_king: bool) -> Dict[str, Any]:
         """The small frozen participant record used for leases and publication."""
 
         return {
-            "submission_id": row["submission_id"], "miner_hotkey": row["miner_hotkey"], "image_digest": row["image_digest"],
-            "image_reference": str(row.get("image_reference") or ""),
-            "submitted_reference": str(row.get("submitted_reference") or (row.get("submission_doc") or {}).get("image_reference") or ""),
+            "submission_id": row["submission_id"],
+            "miner_hotkey": row["miner_hotkey"],
+            "source_ref": row["source_ref"],
+            "source_sha256": row["source_sha256"],
+            "source_size_bytes": int(row["source_size_bytes"]),
             "is_king": bool(is_king),
         }
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 
     def _initial_baseline(self, round_row: Mapping[str, Any]) -> Dict[str, Any]:
-        """Register and admit the public baseline through the normal image path.
-
-        The database permits only this service-owned ``is_king`` registration
-        after the miner cutoff. The image still passes the same public OCI
-        limits, mirror, sandbox, provider broker, and output validation as a
-        miner bundle. A transient registry failure leaves the row uploaded so
-        the next driver tick can retry it.
-        """
+        """Download and freeze the public baseline through the source path."""
 
         round_id = str(round_row["round_id"])
         configuration = round_row.get("configuration_doc") or {}
         hotkey = str(configuration.get("baseline_hotkey") or "").strip()
-        reference_text = str(
-            configuration.get("baseline_image_reference")
-            or self._config.defaults.baseline_image_reference
+        source_url = str(
+            configuration.get("baseline_source_url")
+            or self._config.defaults.baseline_source_url
             or ""
         ).strip()
         if not hotkey:
             raise ServiceError("baseline_hotkey_missing", 500)
-        if not reference_text:
-            raise ServiceError("baseline_image_missing", 500)
+        if not source_url.startswith("https://"):
+            raise ServiceError("baseline_source_url_invalid", 500)
+        fetcher = self._config.baseline_source_fetcher
+        if fetcher is None:
+            raise ServiceError("baseline_source_fetcher_missing", 500)
         submission_id = "baseline-%s" % round_id.removeprefix("arena-")
+        source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         row = self._store.get_submission(submission_id)
         if row is None:
             try:
-                reference = images.parse_reference(reference_text)
-            except images.ImageError as exc:
-                raise ServiceError("baseline_image_invalid:%s" % exc.rule_id, 500) from exc
+                payload = self._objects.get_bounded(
+                    source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                )
+            except Exception:
+                try:
+                    payload = bytes(
+                        fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+                    )
+                    facts = source_bundle.validate_source_archive(payload)
+                    self._objects.put(source_ref, payload)
+                except source_bundle.SourceBundleError as exc:
+                    raise ServiceError(
+                        "baseline_source_invalid:%s" % exc.code, 500
+                    ) from exc
+                except Exception as exc:
+                    raise ServiceError("baseline_source_not_ready", 503) from exc
+            else:
+                try:
+                    facts = source_bundle.validate_source_archive(payload)
+                except source_bundle.SourceBundleError as exc:
+                    raise ServiceError(
+                        "baseline_source_invalid:%s" % exc.code, 500
+                    ) from exc
             result = self._store.register_submission(
                 round_id,
                 submission_id,
                 hotkey,
                 {
-                    "submitted_reference": str(reference),
-                    "image_reference": str(reference),
+                    "source_ref": source_ref,
+                    "source_sha256": facts["source_sha256"],
+                    "source_size_bytes": facts["source_size_bytes"],
                     "consent": {"public_rerun": True},
                     "is_king": True,
                 },
@@ -699,25 +823,22 @@ class ArenaService:
         ):
             raise ServiceError("baseline_submission_invalid", 500)
         status = str(row.get("status") or "")
-        if status == "uploaded":
-            if self._config.registry is None or self._config.source_registry is None:
-                raise ServiceError("baseline_registry_unavailable", 503)
-            rules = images.ImageRules.from_document(configuration["image_rules"])
-            repository = str(configuration.get("registry_repository") or "")
-            outcome = self._admit_one(
-                round_id,
-                row,
-                rules=rules,
-                repository=repository,
-                final=False,
-                deadline=time.monotonic() + float(self._config.admission_tick_seconds),
+        if status == "uploading":
+            try:
+                self._validate_uploaded_source(row)
+            except ServiceError as exc:
+                if exc.code == "source_upload_unavailable":
+                    raise ServiceError("baseline_source_not_ready", 503) from exc
+                raise ServiceError("baseline_source_invalid", 500) from exc
+            result = self._store.update_submission(
+                round_id, submission_id, "uploading", "accepted"
             )
-            if outcome == "deferred":
-                raise ServiceError("baseline_image_not_ready", 503)
+            if result.get("status") not in ("ok", "stale"):
+                raise ServiceError("baseline_source_not_ready", 503)
             row = self._store.get_submission(submission_id)
             status = str((row or {}).get("status") or "")
         if status not in ("accepted", "frozen"):
-            raise ServiceError("baseline_image_rejected", 500)
+            raise ServiceError("baseline_source_rejected", 500)
         return dict(row)
 
     def freeze_participants(self, round_id: str) -> List[Dict[str, Any]]:
@@ -728,37 +849,33 @@ class ArenaService:
         frozen_kings = [row for row in frozen if row.get("is_king")]
         if len(frozen_kings) > 1:
             raise ServiceError("baseline_submission_invalid", 500)
-        # The reigning king re-enters with its winning image unless its hotkey
-        # holds a fresh, eligible submission for this round: then that
-        # submission is the king's entry (still the king, so a resubmission
-        # can never restart the reward decay) and no carried copy is
-        # registered under the same hotkey, which the one-entry-per-miner
-        # index would refuse.
+        baseline_id = "baseline-%s" % round_id.removeprefix("arena-")
+        baseline_hotkey = str(
+            (round_row.get("configuration_doc") or {}).get("baseline_hotkey") or ""
+        )
         if frozen_kings:
-            # A prior driver process already chose and froze the baseline.
-            # Recovery must keep that choice even if another round published
-            # while this process was down.
-            fresh_king = frozen_kings[0]
-            king_hotkey = str(fresh_king["miner_hotkey"])
+            baseline = frozen_kings[0]
         else:
-            king_hotkey = self._reigning_king_hotkey()
-            if king_hotkey is None:
-                fresh_king = self._initial_baseline(round_row)
-                king_hotkey = str(fresh_king["miner_hotkey"])
-                if fresh_king.get("status") == "accepted":
-                    accepted = self._store.list_submissions(round_id, status="accepted")
-            else:
-                fresh_king = next(
-                    (row for row in accepted if row["miner_hotkey"] == king_hotkey),
-                    None,
-                )
-        king = None if fresh_king is not None else self._entering_king(round_id)
+            baseline = self._initial_baseline(round_row)
+            if baseline.get("status") == "accepted":
+                accepted = self._store.list_submissions(round_id, status="accepted")
+        if (
+            baseline.get("submission_id") != baseline_id
+            or baseline.get("miner_hotkey") != baseline_hotkey
+            or not baseline.get("is_king")
+        ):
+            raise ServiceError("baseline_submission_invalid", 500)
+        if any(
+            row.get("is_king") and row.get("submission_id") != baseline_id
+            for row in accepted
+        ):
+            raise ServiceError("baseline_submission_invalid", 500)
         cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
         # Freeze order (acceptance order) decides who enters when the cap binds.
         participants.extend(self._participant(row, is_king=bool(row.get("is_king"))) for row in frozen)
         frozen_count = sum(1 for row in frozen if not row.get("is_king"))
         for row in accepted:
-            is_king = fresh_king is not None and row["submission_id"] == fresh_king["submission_id"]
+            is_king = row["submission_id"] == baseline_id
             if not is_king and frozen_count >= cap:
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": "capacity.round_full"})
                 continue
@@ -767,43 +884,9 @@ class ArenaService:
             result = self._store.update_submission(round_id, row["submission_id"], "accepted", "frozen", {"is_king": True} if is_king else {})
             if result.get("status") in ("ok", "stale"):
                 participants.append(self._participant(row, is_king=is_king))
-        if king is not None:
-            participants.append(king)
         if sum(1 for participant in participants if participant.get("is_king")) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
         return participants
-
-    def _reigning_king_hotkey(self) -> Optional[str]:
-        """The hotkey of the king the most recent published round left reigning, if any."""
-
-        latest = self.latest_published_round()
-        if latest is None or not latest.get("king_hotkey") or latest.get("king_outcome") == "no_king":
-            return None
-        return str(latest["king_hotkey"])
-
-    def _entering_king(self, round_id: str) -> Optional[Dict[str, Any]]:
-        """The king published by the most recent published round enters automatically."""
-
-        latest = self.latest_published_round()
-        if latest is None or not latest.get("king_hotkey") or latest.get("king_outcome") == "no_king":
-            return None
-        king_hotkey = latest["king_hotkey"]
-        previous_round = self._store.get_round(latest["round_id"])
-        decision = (previous_round or {}).get("publication_doc", {}).get("king_decision", {})
-        king_submission = self._store.get_submission(str(decision.get("king_submission_id") or ""))
-        if king_submission is None:
-            raise ServiceError("incumbent_submission_missing", 500)
-        submission_id = "king-%s" % round_id
-        existing = self._store.get_submission(submission_id)
-        if existing is None:
-            # The king re-enters with the exact pinned image of its winning submission.
-            self._store.register_submission(round_id, submission_id, king_hotkey, {"submitted_reference": str(king_submission.get("submitted_reference") or king_submission.get("image_reference") or ""), "image_reference": str(king_submission.get("image_reference") or ""), "consent": king_submission.get("consent") or {}, "is_king": True})
-            self._store.update_submission(round_id, submission_id, "uploaded", "accepted", {
-                "image_digest": king_submission["image_digest"], "image_reference": str(king_submission.get("image_reference") or ""),
-                "image_size_bytes": king_submission.get("image_size_bytes"), "is_king": True,
-            })
-            self._store.update_submission(round_id, submission_id, "accepted", "frozen", {"is_king": True})
-        return self._participant(dict(king_submission, submission_id=submission_id, miner_hotkey=king_hotkey), is_king=True)
 
     def commit_benchmark(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
@@ -863,7 +946,7 @@ class ArenaService:
         try:
             participants = self.freeze_participants(round_id)
         except ServiceError as exc:
-            if exc.code == "baseline_image_not_ready":
+            if exc.code == "baseline_source_not_ready":
                 return {"status": "retry", "reason": exc.code, "set_id": set_id}
             raise
         evaluation_date = round_id.replace("arena-", "")[:10]
@@ -1104,9 +1187,7 @@ class ArenaService:
         publication = {
             "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
             "round_id": round_id,
-            # The miner's source reference is public. The Arena's private mirror
-            # digest is only an execution detail and is not a promotion gate.
-            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "public_image_reference": str(p.get("submitted_reference") or ""), "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
+            "participants": [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"], "is_king": bool(p.get("is_king"))} for p in round_row.get("participants") or []],
             "stage1_ranking": stage1_ranking,
             "finalists": finalists,
             "final_ranking": verify.final_ranking(final_entries),
@@ -1356,10 +1437,9 @@ class ArenaService:
         self._invalidate_hot_round()
         try:
             row = self._round(round_id)
-            if row["status"] == "open" and self._config.registry is not None:
-                # Admission runs outside the driver lock: mirroring images is
-                # slow and must never block an operator command. At the cutoff
-                # every image still unresolved is rejected before the freeze.
+            if row["status"] == "open":
+                # At cutoff, reject source uploads that were not finalized
+                # before participant freeze.
                 final = self.now() >= _parse_iso(row["configuration_doc"]["schedule"]["submission_cutoff"])
                 admission = self.admit_uploaded_submissions(round_id, final=final)
                 if final and int(admission.get("remaining") or 0) > 0:
@@ -1486,9 +1566,19 @@ class ArenaService:
 
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
+        participants = None
+        if row["status"] != "open":
+            participants = [
+                {
+                    "submission_id": participant["submission_id"],
+                    "miner_hotkey": participant["miner_hotkey"],
+                    "is_king": bool(participant.get("is_king")),
+                }
+                for participant in (row.get("participants") or [])
+            ]
         view = {
             "round_id": round_id, "status": row["status"], "configuration": row["configuration_doc"],
-            "participants": row.get("participants") if row["status"] not in ("open",) else None,
+            "participants": participants,
             "finalists": row.get("finalists"),
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
             "effective_reward_epoch": row.get("effective_reward_epoch"), "cancel_reason": row.get("cancel_reason"),
@@ -1534,7 +1624,7 @@ class ArenaService:
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
         return {
-            "round_id": round_id, "submission_id": submission_id, "submission": {k: v for k, v in (self._store.get_submission(submission_id) or {}).items() if k in ("miner_hotkey", "submitted_reference", "is_king")},
+            "round_id": round_id, "submission_id": submission_id, "submission": {k: v for k, v in (self._store.get_submission(submission_id) or {}).items() if k in ("miner_hotkey", "is_king")},
             "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
             "scores": scores,
             "submission_scores": {

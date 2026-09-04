@@ -18,6 +18,7 @@ from research_lab.eval.conditional_validation import normalized_icp_intent_signa
 
 WINDOW_MODE_LEGACY_ROLLING = "legacy_rolling"
 WINDOW_MODE_HYBRID_FRESH_RETAINED = "hybrid_fresh_retained"
+WINDOW_MODE_DAILY_SET = "daily_set"
 SELECTION_POLICY_LEGACY = "diverse_intent_industry_stable_hash:v2"
 SELECTION_POLICY_HYBRID = "hybrid_fresh_retained_stable_diverse:v1"
 
@@ -414,6 +415,92 @@ async def fetch_rolling_icp_window(
         allow_partial=allow_partial,
         required_fresh_set_id=required_fresh_set_id,
         require_fresh_set_active_at=require_fresh_set_active_at,
+    )
+
+
+def select_daily_icp_window_from_set(
+    row: Mapping[str, Any],
+    *,
+    required_set_id: int,
+    active_at: datetime,
+) -> ResearchLabRollingIcpWindow:
+    """Build one benchmark window from every ICP in the current daily set."""
+
+    normalized = _normalize_set_row(row)
+    if int(normalized["set_id"]) != int(required_set_id):
+        raise RollingIcpWindowUnavailable(
+            f"required_daily_set_{int(required_set_id)}_missing"
+        )
+    if not _set_row_active_at(normalized, active_at):
+        raise RollingIcpWindowUnavailable(
+            f"required_daily_set_{int(required_set_id)}_not_active"
+        )
+    records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for rank, raw_icp in enumerate(normalized["icps"], start=1):
+        icp = dict(raw_icp)
+        icp_id = str(icp.get("icp_id") or "").strip()
+        if not icp_id:
+            raise RollingIcpWindowUnavailable(
+                f"daily_set_{int(required_set_id)}_icp_{rank}_missing_id"
+            )
+        if icp_id in seen_ids:
+            raise RollingIcpWindowUnavailable(
+                f"daily_set_{int(required_set_id)}_duplicate_icp_id:{icp_id}"
+            )
+        seen_ids.add(icp_id)
+        records.append(
+            {
+                "row": normalized,
+                "icp": icp,
+                "cohort": "daily",
+                "intent_signal_signature": intent_signal_signature(icp),
+            }
+        )
+    if not records:
+        raise RollingIcpWindowUnavailable(
+            f"daily_set_{int(required_set_id)}_has_no_icps"
+        )
+    return _build_window_from_selected_records(
+        records,
+        required_days=1,
+        icps_per_day=len(records),
+        schema_version="daily_set.v1",
+        selection_policy="all_daily_icps_in_source_order:v1",
+        extra_doc={
+            "window_mode": WINDOW_MODE_DAILY_SET,
+            "fresh_set_id": int(required_set_id),
+            "fresh_icp_count": len(records),
+            "retained_icp_count": 0,
+        },
+    )
+
+
+async def fetch_daily_icp_window(
+    *, set_id: int, active_at: datetime
+) -> ResearchLabRollingIcpWindow:
+    """Fetch the exact active UTC-day ICP set through the service-role client."""
+
+    from gateway.db.client import get_write_client
+
+    def _call() -> Any:
+        return (
+            get_write_client()
+            .table("qualification_private_icp_sets")
+            .select("set_id,icps,icp_set_hash,active_from,active_until,is_active")
+            .eq("set_id", int(set_id))
+            .limit(1)
+            .execute()
+        )
+
+    response = await asyncio.to_thread(_call)
+    rows = getattr(response, "data", None) or []
+    if not rows:
+        raise RollingIcpWindowUnavailable(f"required_daily_set_{int(set_id)}_missing")
+    return select_daily_icp_window_from_set(
+        rows[0],
+        required_set_id=int(set_id),
+        active_at=active_at,
     )
 
 

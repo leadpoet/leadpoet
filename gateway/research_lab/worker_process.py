@@ -153,7 +153,7 @@ def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -
                 ("Poll seconds", config.scoring_worker_poll_seconds),
                 ("Proxy required", config.scoring_worker_require_proxy),
                 ("Proxy ref", _proxy_ref(config.scoring_worker_proxy_url)),
-                ("Baseline daily", config.private_baseline_rebenchmark_enabled),
+                ("Public baseline daily", config.public_baseline_rebenchmark_enabled),
                 ("Baseline owner", baseline_owner),
                 ("Candidate batch", config.scoring_worker_max_candidates),
                 ("Model timeout", f"{config.scoring_worker_model_timeout_seconds}s"),

@@ -6527,6 +6527,35 @@ class ResearchLabGatewayScoringWorker:
             return {"processed": False, "status": "disabled"}
         if not self.config.production_writes_enabled or not self.config.evaluation_bundles_enabled:
             return {"processed": False, "status": "writes_or_eval_disabled"}
+        if not self.config.public_baseline_rebenchmark_enabled:
+            return {"processed": False, "status": "public_baseline_disabled"}
+        maintenance_state = await get_scoring_maintenance_state()
+        if _operator_scoring_pause_active(maintenance_state):
+            return {"processed": False, "status": "maintenance_paused"}
+        if not self._is_private_baseline_owner():
+            return {
+                "processed": False,
+                "status": "daily_rebenchmark_non_owner",
+            }
+        from gateway.research_lab.daily_rebenchmark import (
+            run_daily_public_rebenchmark,
+        )
+
+        result = await run_daily_public_rebenchmark(
+            config=self.config,
+            worker_ref=self.worker_ref,
+            evaluation_epoch=await self._resolve_evaluation_epoch(),
+        )
+        return {
+            "processed": str(result.get("status") or "") == "completed",
+            "status": str(result.get("status") or "daily_rebenchmark_failed"),
+            "baseline": result,
+        }
+
+        # The former closed-model and code-edit competition path below is
+        # intentionally unreachable during the public-baseline cutover. It is
+        # removed after the active PR166 Arena work no longer imports its
+        # protected modules.
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
             try:
                 require_worker_proxy_profile_v2(

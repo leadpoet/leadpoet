@@ -8,7 +8,8 @@ import re
 from typing import Any, Callable, Dict, Mapping, Sequence
 
 from gateway.tee.release_manifest_v2 import (
-    role_expectation,
+    prior_role_expectation,
+    validate_prior_release_manifest,
     validate_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS
@@ -38,11 +39,12 @@ class ReleaseLineageV2Error(RuntimeError):
     """A receipt ancestor is not bound to an approved V2 release."""
 
 
-def validate_compact_release_lineage_v2(
+def _validate_compact_release_lineage_v2(
     value: Mapping[str, Any],
     *,
     expected_current_commit: str | None = None,
     expected_current_gateway_release_hash: str | None = None,
+    allow_historical_current: bool,
 ) -> Dict[str, Any]:
     """Validate the immutable compact release authority used inside enclaves."""
 
@@ -90,7 +92,7 @@ def validate_compact_release_lineage_v2(
         observed_roles = set(roles) if isinstance(roles, Mapping) else set()
         allowed_roles = (
             {_APPROVED_RELEASE_ROLES}
-            if commit == current_commit
+            if commit == current_commit and not allow_historical_current
             else {_APPROVED_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
         )
         if not isinstance(roles, Mapping) or frozenset(observed_roles) not in allowed_roles:
@@ -174,6 +176,42 @@ def validate_compact_release_lineage_v2(
     ):
         raise ReleaseLineageV2Error("compact release lineage release differs")
     return {**body, "lineage_hash": str(value["lineage_hash"])}
+
+
+def validate_compact_release_lineage_v2(
+    value: Mapping[str, Any],
+    *,
+    expected_current_commit: str | None = None,
+    expected_current_gateway_release_hash: str | None = None,
+) -> Dict[str, Any]:
+    """Validate a compact lineage whose current release uses this topology."""
+
+    return _validate_compact_release_lineage_v2(
+        value,
+        expected_current_commit=expected_current_commit,
+        expected_current_gateway_release_hash=(
+            expected_current_gateway_release_hash
+        ),
+        allow_historical_current=False,
+    )
+
+
+def validate_prior_compact_release_lineage_v2(
+    value: Mapping[str, Any],
+    *,
+    expected_current_commit: str | None = None,
+    expected_current_gateway_release_hash: str | None = None,
+) -> Dict[str, Any]:
+    """Validate an installed prior lineage across the one retired role set."""
+
+    return _validate_compact_release_lineage_v2(
+        value,
+        expected_current_commit=expected_current_commit,
+        expected_current_gateway_release_hash=(
+            expected_current_gateway_release_hash
+        ),
+        allow_historical_current=True,
+    )
 
 
 def build_compact_release_lineage_boot_verifier_v2(
@@ -325,9 +363,9 @@ def _fetch_historical_release(commit: str) -> Dict[str, Any]:
     if channel.get("channel_hash") != sha256_json(body):
         raise ReleaseLineageV2Error("historical release channel hash differs")
 
-    from gateway.tee.release_channel_v2 import validate_release_channel_v2
+    from gateway.tee.release_channel_v2 import validate_prior_release_channel_v2
 
-    normalized_channel = validate_release_channel_v2(
+    normalized_channel = validate_prior_release_channel_v2(
         channel,
         expected_commit=normalized_commit,
     )
@@ -375,7 +413,7 @@ def load_approved_release_lineage_v2(
         if not isinstance(loaded, Mapping):
             raise ReleaseLineageV2Error("historical release channel is invalid")
         manifest = loaded.get("gateway_release_manifest", loaded)
-        release = validate_release_manifest(manifest)
+        release = validate_prior_release_manifest(manifest)
         if release.get("commit_sha") != commit:
             raise ReleaseLineageV2Error("historical release channel commit differs")
         if commit in required_validator_commits:
@@ -421,7 +459,7 @@ def build_release_lineage_boot_verifier_v2(
     for commit, entry in releases.items():
         normalized_commit = str(commit).lower()
         gateway_manifest = entry.get("gateway_release_manifest", entry)
-        approved_gateway[normalized_commit] = validate_release_manifest(
+        approved_gateway[normalized_commit] = validate_prior_release_manifest(
             gateway_manifest
         )
         validator_manifest = entry.get("validator_release_manifest")
@@ -472,7 +510,7 @@ def build_release_lineage_boot_verifier_v2(
             raise ReleaseLineageV2Error(
                 "boot commit is absent from approved V2 release lineage"
             )
-        expectation = role_expectation(release, physical_role)
+        expectation = prior_role_expectation(release, physical_role)
         for field in (
             "commit_sha",
             "pcr0",

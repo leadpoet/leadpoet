@@ -4057,6 +4057,71 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
     assert validator["eif_hash"] == eif_hash(COMMIT, "validator_weights")
 
 
+def test_release_channel_preserves_the_exact_historical_role_topology(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from gateway.tee.release_manifest_v2 import (
+        HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    )
+    from gateway.tee.topology import ROLE_SPECS
+
+    historical_commit = "2" * 40
+    role_names = {*ROLE_SPECS, "gateway_autoresearch"}
+    roles = {}
+    for role in role_names:
+        historical_role = role == "gateway_autoresearch"
+        roles[role] = {
+            "build_identity_hash": "sha256:" + "1" * 64,
+            "commit_sha": historical_commit,
+            "dependency_lock_hash": "sha256:" + "2" * 64,
+            "dockerfile_hash": "sha256:" + "3" * 64,
+            "eif_hash": (
+                "sha256:" + "5" * 64
+                if historical_role
+                else eif_hash(historical_commit, role)
+            ),
+            "execution_manifest_hash": "sha256:" + "4" * 64,
+            "normalized_image_hash": (
+                "sha256:" + "9" * 64
+                if historical_role
+                else normalized_image_id(
+                    historical_commit,
+                    role,
+                )
+            ),
+            "pcr0": pcr0(historical_commit),
+            "service_role": role,
+            "source_manifest_hash": "sha256:" + "6" * 64,
+            "topology_hash": HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+        }
+    (tmp_path / "release-build-input.json").write_text(
+        json.dumps(
+            {
+                "commit_sha": historical_commit,
+                "gateway_roles": roles,
+                "validator_app_manifest_hash": "sha256:" + "7" * 64,
+                "validator_dependency_lock_hash": "sha256:" + "8" * 64,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        Path(__file__).resolve().parents[2],
+    )
+
+    channel = rehearsal_sitecustomize._release_channel(historical_commit)
+
+    gateway = channel["gateway_release_manifest"]
+    assert gateway["topology_hash"] == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    assert set(gateway["roles"]) == role_names
+    assert gateway["verified_build_count"] == 18
+
+
 def test_release_channel_resolves_both_transition_release_inputs(
     monkeypatch,
     tmp_path,

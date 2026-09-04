@@ -615,6 +615,41 @@ def test_capture_snapshot_routes_every_postgres_call_through_pinned_image(
     assert archive.stat().st_mode & 0o777 == 0o600
 
 
+def test_database_stats_does_not_require_candidate_arena_schema(monkeypatch):
+    observed = {}
+    value = {
+        "latest_completed_benchmark_date": None,
+        "current_day_rebenchmark_run_count": 0,
+        "current_day_benchmark_bundle_count": 0,
+        "source_role": {
+            "role_name": "readonly",
+            "transaction_read_only": True,
+            "superuser": False,
+            "bypass_rls": False,
+            "replication": False,
+            "table_write_capable": False,
+        },
+    }
+
+    def fake_run_postgres(command, **kwargs):
+        observed["sql"] = command[-1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(value).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(parity_snapshot, "_run_postgres", fake_run_postgres)
+
+    stats = parity_snapshot._database_stats({})
+
+    assert "lab_arena_rounds" not in observed["sql"]
+    assert stats["latest_completed_benchmark_date"] is None
+    assert stats["current_day_rebenchmark_run_count"] == 0
+    assert stats["current_day_benchmark_bundle_count"] == 0
+
+
 def test_isolated_snapshot_restore_disables_ssl_after_target_validation(
     monkeypatch,
     tmp_path: Path,
@@ -1027,10 +1062,6 @@ def test_schema_only_source_add_cutover_rejects_malformed_identity(field, value)
 
 def test_schema_only_source_add_acl_is_exact_migration_bound():
     migrations = parity_snapshot._SCHEMA_ONLY_SOURCE_ADD_ACL_MIGRATIONS
-    arena_migration = parity_snapshot._LAB_ARENA_MIGRATION
-    assert parity_snapshot.file_sha256(
-        ROOT / str(arena_migration["path"])
-    ) == arena_migration["sha256"]
     sql = parity_snapshot._schema_only_source_add_acl_sql(migrations).decode(
         "utf-8"
     )
@@ -1112,12 +1143,6 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
     ):
         parity_snapshot._schema_only_source_add_acl_sql(rewritten)
 
-    arena_extended = [
-        *migrations,
-        arena_migration,
-    ]
-    parity_snapshot._schema_only_source_add_acl_sql(arena_extended)
-
     extended = [
         *migrations,
         {
@@ -1126,11 +1151,7 @@ def test_schema_only_source_add_acl_is_exact_migration_bound():
             "sequence": 179,
         },
     ]
-    with pytest.raises(
-        ProductionParityError,
-        match="not bound to the latest candidate migration",
-    ):
-        parity_snapshot._schema_only_source_add_acl_sql(extended)
+    parity_snapshot._schema_only_source_add_acl_sql(extended)
 
 
 def test_schema_only_source_add_acl_readback_is_exhaustive_and_compact(

@@ -33,8 +33,9 @@ from gateway.tee.release_channel_v2 import (
 from gateway.tee.release_lineage_v2 import (
     build_compact_release_lineage_boot_verifier_v2,
     validate_compact_release_lineage_v2,
+    validate_prior_compact_release_lineage_v2,
 )
-from gateway.tee.release_manifest_v2 import validate_release_manifest
+from gateway.tee.release_manifest_v2 import validate_prior_release_manifest
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
@@ -786,7 +787,7 @@ async def prepare_gateway_final_active_lineage_v2(
         "active release netuid is invalid",
     )
     _require(isinstance(policy, Mapping), "active release policy is invalid")
-    release = validate_release_manifest(running_gateway_release_manifest)
+    release = validate_prior_release_manifest(running_gateway_release_manifest)
     running_commit = _commit(release.get("commit_sha"), "running gateway commit")
     _require(
         (validator_requirements is None) != (fallback_lineage is None),
@@ -820,7 +821,7 @@ async def prepare_gateway_final_active_lineage_v2(
             fallback_context in _FALLBACK_CONTEXTS,
             "installed lineage fallback requires an explicit safe context",
         )
-        fallback = validate_compact_release_lineage_v2(
+        fallback = validate_prior_compact_release_lineage_v2(
             fallback_lineage,
             expected_current_commit=running_commit,
             expected_current_gateway_release_hash=release["release_hash"],

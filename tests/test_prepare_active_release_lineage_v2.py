@@ -489,7 +489,7 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
     fetched = _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     initial = _requirements(transitions=(RUNNING_VALIDATOR, JOURNAL_COMMIT))
@@ -536,13 +536,51 @@ async def test_gateway_final_reselects_frozen_epoch_and_unions_validator_authori
 
 
 @pytest.mark.asyncio
+async def test_gateway_final_accepts_exact_legacy_running_topology(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from tests.test_release_channel_v2 import _historical_gateway_manifest
+
+    fetched = _patch_lineage_boundaries(monkeypatch)
+
+    async def empty(**_kwargs):
+        return []
+
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    result = await prepare.prepare_gateway_final_active_lineage_v2(
+        candidate_commit_sha=CANDIDATE,
+        authority_commit_sha=AUTHORITY,
+        restart_invocation_id=RESTART_INVOCATION_ID,
+        running_gateway_release_manifest=_historical_gateway_manifest(
+            RUNNING_GATEWAY
+        ),
+        validator_requirements=initial,
+        epoch_id=24_745,
+        netuid=71,
+        policy={},
+        repository=tmp_path,
+        expected_lineage_id=LINEAGE_ID,
+        load_allocation_graphs=empty,
+        load_sourcing_graphs=empty,
+        load_source_add_graphs=empty,
+    )
+
+    expected = sorted(
+        {CANDIDATE, RUNNING_GATEWAY, RUNNING_VALIDATOR}
+    )
+    assert fetched == [expected]
+    assert result["requirements"]["required_commits"] == expected
+
+
+@pytest.mark.asyncio
 async def test_gateway_final_explicit_standalone_fallback_unions_installed_lineage(
     monkeypatch, tmp_path
 ) -> None:
     fetched = _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     fallback = _lineage(
@@ -586,7 +624,7 @@ async def test_gateway_final_fallback_fails_closed_when_union_exceeds_bound(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     installed = {RUNNING_GATEWAY}
@@ -624,7 +662,7 @@ async def test_gateway_final_rejects_implicit_or_paired_fallback_context(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     fallback = _lineage(
@@ -694,7 +732,7 @@ async def test_gateway_final_rejects_cross_invocation_or_authority_sidecar(
 ) -> None:
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
 
@@ -721,7 +759,7 @@ async def test_gateway_final_rejects_active_root_drift(monkeypatch, tmp_path) ->
     _patch_lineage_boundaries(monkeypatch)
     monkeypatch.setattr(
         prepare,
-        "validate_release_manifest",
+        "validate_prior_release_manifest",
         lambda value: dict(value),
     )
     initial = _requirements(transitions=(RUNNING_VALIDATOR,))

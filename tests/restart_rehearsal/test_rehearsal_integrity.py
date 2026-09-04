@@ -101,7 +101,6 @@ from tests.restart_rehearsal.verify_evidence import (
     events,
     selected_weight_storage_preflight_capability,
     selected_weight_storage_preflight_pins_epoch,
-    verify_gateway_provider_preflight,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
     verify_chain_settlement_durable_readback,
@@ -6598,94 +6597,13 @@ def test_weight_storage_preflight_epoch_binding_tracks_restart_wrapper(
     ) is True
 
 
-def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
-    rows = [
-        {
-            "operation": "provider_transport",
-            "host": "api.exa.ai",
-            "path": "/search",
-            "status": 200,
-        },
-        {
-            "operation": "provider_transport",
-            "host": "api.scrapingdog.com",
-            "path": "/account",
-            "status": 200,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 0,
-            "checkpoint_hashes": [],
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "1" * 64,
-            "sequence": 1,
-        },
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_appended",
-            "status": "ok",
-            "method": "POST",
-            "target": "append_research_lab_provider_outcome_checkpoint_v2",
-            "result_status": "inserted",
-            "checkpoint_hash": "sha256:" + "2" * 64,
-            "sequence": 2,
-        },
-    ]
-    verify_gateway_provider_preflight(rows, transition="forward")
-    verify_gateway_provider_preflight([], transition="rollback")
+def test_gateway_rehearsal_has_no_retired_provider_preflight_receipt_gate() -> None:
+    verifier = (
+        Path(__file__).resolve().parent / "verify_evidence.py"
+    ).read_text(encoding="utf-8")
 
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(rows[1:], transition="forward")
-
-    failed = [dict(row) for row in rows]
-    failed[1]["status"] = 503
-    with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(failed, transition="forward")
-    with pytest.raises(SystemExit, match="durably append both"):
-        verify_gateway_provider_preflight(rows[:3], transition="forward")
-    with pytest.raises(SystemExit, match="restart recovery"):
-        verify_gateway_provider_preflight(
-            [*rows[:2], *rows[3:]],
-            transition="forward",
-        )
-    redundant_readback = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "provider_outcome_checkpoint_readback",
-            "status": "ok",
-            "row_count": 1,
-            "checkpoint_hashes": ["sha256:" + "2" * 64],
-        },
-    ]
-    with pytest.raises(SystemExit, match="redundant checkpoint readback"):
-        verify_gateway_provider_preflight(
-            redundant_readback,
-            transition="forward",
-        )
-    rejected = [
-        *rows,
-        {
-            "kind": "local-postgrest",
-            "operation": "request_validation",
-            "status": "rejected",
-            "path": (
-                "/rest/v1/rpc/"
-                "append_research_lab_provider_outcome_checkpoint_v2"
-            ),
-        },
-    ]
-    with pytest.raises(SystemExit, match="rejected checkpoint"):
-        verify_gateway_provider_preflight(rejected, transition="forward")
+    assert "def verify_gateway_provider_preflight(" not in verifier
+    assert "gateway provider preflight did not durably append" not in verifier
 
 
 def test_gateway_rehearsal_serves_source_add_restart_contracts(

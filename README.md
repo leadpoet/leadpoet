@@ -15,7 +15,7 @@
 
 ---
 
-Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. In the Research Lab, miners direct research and compute through auto-research loops that try to improve an AI sales agent. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
+Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. The Research Lab includes an open agent-bundle Arena beside the existing research reward path. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
 
 ## Dashboard
 
@@ -82,9 +82,36 @@ The miner will ask which mode to run:
 
 ### Research Lab
 
-Research Lab lets miners contribute direction and compute toward improving the AI sales agent.
+Research Lab supports the agent-bundle Arena and the existing research reward
+path. They are separate. The Arena can be disabled without changing the old
+path.
 
-The current sourcing model and sealed benchmark are not published in full. Keeping them private helps prevent benchmark overfitting, fixture memorization, and leakage of evaluation data while still letting miners submit and evaluate improvements through the Research Lab flow.
+#### Agent Bundle Arena
+
+The Arena rebenchmarks the public baseline on the daily ICPs and evaluates
+miner-submitted forks on the same ICPs. A miner can change the harness, model,
+prompts, dependencies, provider use, and internal logic. The benchmark score is
+the quality authority.
+
+The stable boundary is one public OCI image and one fixed `/agent/run`
+entrypoint. The bundle reads the documented ICP input and writes the documented
+company output. Provider credentials come from the host. Miners do not submit
+keys or OCI process settings. The image location does not determine identity,
+rank, or the winner.
+
+Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
+[input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
+[provider adapter and socket protocol](lab_arena/shim.py), and
+[submission helper](scripts/lab_arena_miner.py). The existing
+[qualification model](miner_models/qualification_model/README.md) is an
+optional sourcing-logic example; a competition image must wrap any chosen
+logic with `/agent/run`. Examples are documentation, not admission or scoring
+requirements.
+
+The registered `LAB_ARENA_BASELINE_HOTKEY` submits the initial public baseline
+for each mode through the same endpoint and image checks as every miner. It
+becomes that mode's first incumbent. Later winners use the normal carry-forward
+behavior.
 
 #### Submit API Source
 
@@ -154,7 +181,7 @@ winner_reward = remaining_lab_allocation * winner_improvement_credit / total_win
 
 The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. The validator and verifier code contain the replayable reward and weight checks.
 
-### Research Runtime
+### Existing Research Runtime
 
 Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
 

@@ -261,6 +261,14 @@ def _weight_input_value_documents_v2(
                 "queued_champion_allocations": list(
                     allocation.get("queued_champion_allocations") or []
                 ),
+                # The signed Lab Arena reward basis the triple was derived from,
+                # only when the snapshot carries one (labarena.md 13.4): with
+                # rewards off the document is byte-identical to before.
+                **(
+                    {"lab_arena_reward_basis": dict(calculation["lab_arena_reward_basis"])}
+                    if "lab_arena_reward_basis" in calculation
+                    else {}
+                ),
             },
         ),
         "reimbursements": document(

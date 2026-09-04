@@ -319,6 +319,9 @@ SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION = (
 SOURCE_ADD_MINER_STATUS_MIGRATION = (
     "178-research-lab-source-add-miner-status.sql"
 )
+LAB_ARENA_MIGRATION = (
+    "179-lab-arena-v1.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -397,6 +400,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     SOURCE_ADD_PROVENANCE_ORIGIN_REPAIR_MIGRATION,
     SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION,
     SOURCE_ADD_MINER_STATUS_MIGRATION,
+    LAB_ARENA_MIGRATION,
 )
 EXPECTED_POSTGRES_CONTRACT_CHECKS = (
     "maintenance_lease_contract_valid",
@@ -6816,6 +6820,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION
         )
         applied.append(SOURCE_ADD_PROVENANCE_AUTHORITY_ACL_MIGRATION)
+        # The Lab Arena tables, roles, and the signed reward-basis view the
+        # weight path measures (labarena.md 13.4).
+        database.apply_migration(scripts / LAB_ARENA_MIGRATION)
+        applied.append(LAB_ARENA_MIGRATION)
         source_add_provenance_origin_contract = json.loads(
             database.psql(
                 """

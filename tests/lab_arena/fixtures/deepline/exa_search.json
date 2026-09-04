@@ -1,0 +1,29 @@
+{
+  "billing": {
+    "cost_usd": 0.01,
+    "credits_charged": 0.1
+  },
+  "captured_at": "2026-09-02",
+  "cli_version": "0.3.20",
+  "status": "completed",
+  "tool": "exa_search",
+  "tool_response_raw": {
+    "requestId": "7d997e962bafe8669d98ad9740cb87ed",
+    "resolvedSearchType": "",
+    "results": [
+      {
+        "id": "https://www.blacksmith.sh/blog/announcing-blacksmiths-series-b-led-by-peak-xv-partners",
+        "title": "Announcing Blacksmith\u2019s Series B led by Peak XV Partners | Blacksmith",
+        "url": "https://www.blacksmith.sh/blog/announcing-blacksmiths-series-b-led-by-peak-xv-partners"
+      },
+      {
+        "author": "Jagmeet Singh",
+        "id": "https://techcrunch.com/2026/08/12/blacksmiths-valuation-jumps-10x-to-550m-as-ai-coding-fuels-software-validation/",
+        "publishedDate": "2026-08-12T00:00:00.000Z",
+        "title": "AI code-testing startup Blacksmith's valuation jumps almost 10x in less than a year | TechCrunch",
+        "url": "https://techcrunch.com/2026/08/12/blacksmiths-valuation-jumps-10x-to-550m-as-ai-coding-fuels-software-validation/"
+      }
+    ],
+    "searchTime": 343.1
+  }
+}

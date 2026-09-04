@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-09-02",
+  "client": "deepline python cli 0.3.20 (raw response)",
+  "request": {
+    "body": {
+      "payload": {
+        "text": {
+          "maxCharacters": 50
+        },
+        "urls": [
+          "https://example.com/"
+        ]
+      }
+    },
+    "method": "POST",
+    "path": "/api/v2/integrations/exa_contents/execute"
+  },
+  "response": {
+    "billing": {
+      "cost_usd": 0.002,
+      "credits_charged": 0.02
+    },
+    "job_id": "iad1::2mbpc-1788404469177-1ddf5894f427",
+    "result": {
+      "data": {
+        "requestId": "7b5cf02a75c7544337ea0272d63ac928",
+        "results": [
+          {
+            "author": null,
+            "entities": [],
+            "favicon": "data:,",
+            "id": "https://example.com/",
+            "text": "Example Domain\n\n# Example Domain\n\nThis domain is f",
+            "title": "Example Domain",
+            "url": "https://example.com/"
+          }
+        ],
+        "searchTime": 15.491117000114173,
+        "statuses": [
+          {
+            "id": "https://example.com/",
+            "source": "cached",
+            "status": "success"
+          }
+        ]
+      }
+    },
+    "status": "completed"
+  }
+}

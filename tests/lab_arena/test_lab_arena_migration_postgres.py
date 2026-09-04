@@ -28,7 +28,7 @@ from lab_arena.store import (
     new_lease_token,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    LAB_ARENA_DAILY_SOURCE_MIGRATION,
+    LAB_ARENA_DAILY_COMPETITION_MIGRATION,
     LAB_ARENA_MIGRATION,
     database_with_lab_arena_migration,
 )
@@ -191,7 +191,7 @@ def test_migration_applies_twice_and_roles_have_exact_attributes(superuser):
     with superuser.cursor() as cursor:
         cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
         cursor.execute(
-            (SCRIPTS / LAB_ARENA_DAILY_SOURCE_MIGRATION).read_text(encoding="utf-8")
+            (SCRIPTS / LAB_ARENA_DAILY_COMPETITION_MIGRATION).read_text(encoding="utf-8")
         )
         cursor.execute("SELECT rolname, rolsuper, rolbypassrls, rolcanlogin, rolinherit, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname IN ('lab_arena_owner', 'lab_arena_service') ORDER BY rolname")
         rows = cursor.fetchall()
@@ -221,27 +221,21 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO public.research_lab_daily_rebenchmarks (
-                  run_id, benchmark_date, baseline_id, baseline_repository,
-                  baseline_entrypoint, window_doc, benchmark_input_doc,
-                  status, expected_icp_count, worker_ref
+                INSERT INTO public.qualification_private_icp_sets (
+                  set_id, icps, active_from, active_until, is_active
                 ) VALUES (
-                  gen_random_uuid(), %s, 'leadpoet/pydantic-harness',
-                  'https://github.com/leadpoet/pydantic-harness.git',
-                  'harness.run_icp', '{}'::jsonb,
-                  jsonb_build_object(
-                    'schema_version', 'research_lab_daily_icp_inputs.v1',
-                    'set_id', %s,
-                    'icps', %s::jsonb
-                  ),
-                  'running', 20, 'test-worker'
+                  %s, %s::jsonb,
+                  pg_catalog.statement_timestamp() - interval '1 hour',
+                  pg_catalog.statement_timestamp() + interval '23 hours',
+                  TRUE
                 )
-                ON CONFLICT (benchmark_date, baseline_id) DO UPDATE
-                SET benchmark_input_doc = EXCLUDED.benchmark_input_doc,
-                    status = 'running'
+                ON CONFLICT (set_id) DO UPDATE
+                SET icps = EXCLUDED.icps,
+                    active_from = EXCLUDED.active_from,
+                    active_until = EXCLUDED.active_until,
+                    is_active = TRUE
                 """,
                 (
-                    now.date(),
                     set_id,
                     json.dumps(icps),
                 ),
@@ -261,6 +255,25 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
             "status": "unavailable",
             "set_id": set_id - 1,
         }
+        control = psycopg2.connect(**dsn)
+        control.autocommit = True
+        try:
+            with control.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE public.qualification_private_icp_sets "
+                    "SET is_active = FALSE WHERE set_id = %s",
+                    (set_id,),
+                )
+            assert daily_store.current_daily_icp_set(set_id)["status"] == "unavailable"
+            with control.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE public.qualification_private_icp_sets "
+                    "SET is_active = TRUE, icps = %s::jsonb WHERE set_id = %s",
+                    (json.dumps(icps[:-1]), set_id),
+                )
+            assert daily_store.current_daily_icp_set(set_id)["status"] == "unavailable"
+        finally:
+            control.close()
     finally:
         transport.close()
 
@@ -274,12 +287,6 @@ def test_daily_icp_function_is_current_only_and_source_table_is_private(database
                     "SELECT icps FROM public.qualification_private_icp_sets"
                 )
             direct.rollback()
-            cursor.execute("SET ROLE lab_arena_service")
-            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-                cursor.execute(
-                    "SELECT benchmark_input_doc "
-                    "FROM public.research_lab_daily_rebenchmarks"
-                )
     finally:
         direct.close()
 
@@ -336,7 +343,7 @@ def test_migration_removes_the_draft_receipt_and_hash_chain_state(superuser):
         )
         cursor.execute((SCRIPTS / LAB_ARENA_MIGRATION).read_text(encoding="utf-8"))
         cursor.execute(
-            (SCRIPTS / LAB_ARENA_DAILY_SOURCE_MIGRATION).read_text(
+            (SCRIPTS / LAB_ARENA_DAILY_COMPETITION_MIGRATION).read_text(
                 encoding="utf-8"
             )
         )
@@ -444,6 +451,40 @@ def test_database_refuses_submissions_outside_the_half_open_window(store, round_
         {"submitted_reference": "source.example/model:latest", "consent": {"public_rerun": True}},
     )
     assert result["status"] == "window_closed"
+
+
+def test_service_can_add_only_the_round_baseline_after_miner_cutoff(store):
+    round_id = "arena-2026-09-02-baseline"
+    config = round_config(round_id, [hotkey("baseline-runner")])
+    config["schedule"] = {
+        "submission_open": "2000-01-01T00:00:00Z",
+        "submission_cutoff": "2000-01-02T00:00:00Z",
+    }
+    assert store.create_round(round_id, config)["status"] == "created"
+    ordinary = store.register_submission(
+        round_id,
+        "late-miner",
+        hotkey("late-miner"),
+        {
+            "submitted_reference": "source.example/miner:latest",
+            "consent": {"public_rerun": True},
+        },
+    )
+    assert ordinary["status"] == "window_closed"
+    baseline = store.register_submission(
+        round_id,
+        "baseline-2026-09-02-baseline",
+        hotkey("public-baseline"),
+        {
+            "submitted_reference": "ghcr.io/leadpoet/pydantic-harness:latest",
+            "consent": {"public_rerun": True},
+            "is_king": True,
+        },
+    )
+    assert baseline == {
+        "status": "registered",
+        "submission_status": "uploaded",
+    }
 
 
 def test_round_id_is_the_plain_configuration_idempotency_key(store):

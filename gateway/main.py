@@ -175,33 +175,6 @@ def _start_source_add_dispatcher_task(
     return task
 
 
-def _observe_research_lab_worker_startup_task(application, task) -> None:
-    """Consume and expose a fleet-start failure without coupling other tasks."""
-
-    application.state.research_lab_worker_startup_failure = None
-
-    def _record_outcome(completed_task):
-        if completed_task.cancelled():
-            application.state.research_lab_worker_startup_failure = {
-                "status": "cancelled",
-            }
-            return
-        failure = completed_task.exception()
-        if failure is None:
-            return
-        application.state.research_lab_worker_startup_failure = {
-            "status": "failed",
-            "exception_type": type(failure).__name__,
-        }
-        print(
-            "Research Lab worker startup failed type=%s; SOURCE_ADD remains independent"
-            % type(failure).__name__,
-            flush=True,
-        )
-
-    task.add_done_callback(_record_outcome)
-
-
 # ============================================================
 # Lifespan Context Manager (for background tasks)
 # ============================================================
@@ -386,8 +359,6 @@ async def lifespan(app: FastAPI):
     rate_limiter_task = None
     icp_task = None
     fulfillment_task_handle = None
-    research_lab_worker_supervisor = None
-    research_lab_worker_startup_task = None
     source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
 
@@ -532,63 +503,8 @@ async def lifespan(app: FastAPI):
                 fulfillment_task_handle = asyncio.create_task(fulfillment_lifecycle_task())
                 print("✅ Fulfillment lifecycle task started")
         
-        # SOURCE_ADD has its own queue and failure boundary. Start it before
-        # scoring/autoresearch supervisors so either fleet may fail or remain
-        # deferred without delaying miner submissions or SOURCE_ADD work.
+        # SOURCE_ADD has its own queue and failure boundary.
         source_add_dispatcher_task = _start_source_add_dispatcher_task(app)
-
-        # Start gateway-owned Research Lab worker fleets. Keep every import and
-        # constructor inside the observed task so a broken scoring/autoresearch
-        # fleet remains fail-closed without taking down independent SOURCE_ADD.
-        app.state.research_lab_worker_supervisor = None
-        app.state.research_lab_worker_health = None
-
-        async def _start_research_lab_worker_services() -> dict[str, object]:
-            nonlocal research_lab_worker_supervisor
-            from gateway.research_lab.worker_autostart import (
-                ResearchLabWorkerSupervisor,
-                start_worker_supervisor_without_blocking_event_loop,
-            )
-
-            research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
-            app.state.research_lab_worker_supervisor = (
-                research_lab_worker_supervisor
-            )
-            research_lab_worker_health = (
-                await start_worker_supervisor_without_blocking_event_loop(
-                    research_lab_worker_supervisor
-                )
-            )
-            app.state.research_lab_worker_health = research_lab_worker_health
-            print(
-                "✅ Research Lab authoritative workers ready: "
-                f"scoring={research_lab_worker_health['scoring_running']} "
-                "deferred_roles="
-                f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
-            )
-
-            # Current-release PCR0 and attestation are verified by the restart
-            # preflight before this process starts.  Begin optional historical
-            # cache warming only after both authoritative worker fleets have
-            # finished launching, so its Docker subprocesses cannot race the
-            # fork-based worker readiness handshake during a cold restart.
-            from gateway.utils.pcr0_builder import start_pcr0_builder
-
-            start_pcr0_builder()
-            print("✅ PCR0 builder started (trustless validator verification)")
-
-            return research_lab_worker_health
-
-        research_lab_worker_startup_task = asyncio.create_task(
-            _start_research_lab_worker_services()
-        )
-        app.state.research_lab_worker_startup_task = (
-            research_lab_worker_startup_task
-        )
-        _observe_research_lab_worker_startup_task(
-            app,
-            research_lab_worker_startup_task,
-        )
         app.state.event_signing_identity = dict(event_signing_identity)
         
         print("")
@@ -597,7 +513,7 @@ async def lifespan(app: FastAPI):
         print("   • Polling-based epoch monitor (same as validator)")
         print("   • Bulletproof: No WebSocket = No WebSocket failures")
         print("   • Proven stable: Validator uses polling for months")
-        print("   • PCR0 builder: Computes expected PCR0 from GitHub (trustless)")
+        print("   • Agent competition: operated by the independent Arena service")
         print("="*80 + "\n")
         
         # Yield control back to FastAPI (app runs here)
@@ -623,7 +539,6 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
-            research_lab_worker_startup_task,
             source_add_dispatcher_task,
         ]
         
@@ -645,12 +560,6 @@ async def lifespan(app: FastAPI):
         for i, result in enumerate(results):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 print(f"   ⚠️  Task {i} error during shutdown: {result}")
-
-        if research_lab_worker_supervisor is not None:
-            try:
-                research_lab_worker_supervisor.stop()
-            except Exception as e:
-                print(f"   ⚠️  Error stopping Research Lab worker fleets: {e}")
 
         print("   ✅ All background tasks stopped")
         print("")
@@ -680,35 +589,11 @@ app = FastAPI(
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
 
-_WORKER_STARTUP_DIAGNOSTIC_PATHS = frozenset(
-    {
-        "/",
-        "/build-info",
-        "/health",
-        "/health/v2-authority",
-        "/research-lab/status",
-        "/research-lab/source-adapters/status",
-    }
-)
 _SOURCE_ADD_INDEPENDENT_PATHS = frozenset(
     {
         "/research-lab/source-adapters",
     }
 )
-
-
-def _gateway_worker_startup_ready(application: FastAPI) -> bool:
-    startup_task = getattr(
-        application.state,
-        "research_lab_worker_startup_task",
-        None,
-    )
-    return bool(
-        startup_task is not None
-        and startup_task.done()
-        and not startup_task.cancelled()
-        and startup_task.exception() is None
-    )
 
 
 def _gateway_source_add_dispatcher_ready(application: FastAPI) -> bool:
@@ -724,13 +609,12 @@ def _gateway_source_add_dispatcher_ready(application: FastAPI) -> bool:
 
 
 @app.middleware("http")
-async def require_worker_authority_after_liveness(
+async def require_source_add_dispatcher(
     request: Request,
     call_next,
 ):
-    """Expose diagnostics while keeping authoritative routes fail closed."""
+    """Keep SOURCE_ADD writes closed when its queue consumer is not ready."""
 
-    worker_authority_ready = _gateway_worker_startup_ready(request.app)
     path_parts = request.url.path.split("/")
     source_add_admin_request = bool(
         request.method == "POST"
@@ -756,27 +640,10 @@ async def require_worker_authority_after_liveness(
         source_add_request
         and _gateway_source_add_dispatcher_ready(request.app)
     )
-    allocation_epoch = path_parts[4] if len(path_parts) == 5 else ""
-    required_allocation_read = bool(
-        request.method == "GET"
-        and path_parts[:4] == ["", "research-lab", "allocations", "attested"]
-        and allocation_epoch
-        and allocation_epoch.isascii()
-        and allocation_epoch.isdigit()
-    )
     if source_add_request and not source_add_independently_ready:
         return JSONResponse(
             status_code=503,
             content={"detail": "SOURCE_ADD dispatcher authority is not ready"},
-        )
-    if not worker_authority_ready and (
-        request.url.path not in _WORKER_STARTUP_DIAGNOSTIC_PATHS
-        and not source_add_independently_ready
-        and not required_allocation_read
-    ):
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "gateway worker authority is not ready"},
         )
     return await call_next(request)
 
@@ -915,13 +782,8 @@ async def health():
 
 @app.get("/health/v2-authority")
 async def v2_authority_health():
-    """Fail-closed readiness for the live V2 enclave and worker authority."""
+    """Fail-closed readiness for the retained live V2 enclave authority."""
     try:
-        if not _gateway_worker_startup_ready(app):
-            raise RuntimeError("gateway worker authority startup is incomplete")
-        supervisor = app.state.research_lab_worker_supervisor
-        worker_health = supervisor.health()
-
         from gateway.api.attestation import _event_signing_identity
         from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
 
@@ -955,7 +817,6 @@ async def v2_authority_health():
             "enclave_pubkey": event_identity["enclave_pubkey"],
             "code_hash": event_identity["code_hash"],
         },
-        "workers": worker_health,
         "enclaves": enclave_health,
     }
 

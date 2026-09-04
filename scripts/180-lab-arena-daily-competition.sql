@@ -1,6 +1,8 @@
--- 181-lab-arena-daily-icp-source.sql
--- Give the Arena one read-only function for the exact daily inputs frozen by
--- the public-baseline run. The service role cannot read either source table.
+-- 180-lab-arena-daily-competition.sql
+-- Use the active daily qualification set directly in the Arena. The public
+-- baseline and all miner bundles therefore run on one frozen set through one
+-- execution and scoring path. The Arena service can call the narrow function
+-- below, but it cannot read the private qualification table directly.
 
 BEGIN;
 
@@ -16,25 +18,105 @@ BEGIN
 END
 $roles$;
 
-REVOKE SELECT ON TABLE public.qualification_private_icp_sets FROM lab_arena_owner;
-
+GRANT SELECT ON TABLE public.qualification_private_icp_sets TO lab_arena_owner;
 DROP POLICY IF EXISTS lab_arena_owner_current_daily_icp_set
   ON public.qualification_private_icp_sets;
-
-GRANT SELECT ON TABLE public.research_lab_daily_rebenchmarks TO lab_arena_owner;
-DROP POLICY IF EXISTS lab_arena_owner_current_daily_baseline
-  ON public.research_lab_daily_rebenchmarks;
-CREATE POLICY lab_arena_owner_current_daily_baseline
-  ON public.research_lab_daily_rebenchmarks
+CREATE POLICY lab_arena_owner_current_daily_icp_set
+  ON public.qualification_private_icp_sets
   FOR SELECT
   TO lab_arena_owner
   USING (
-    benchmark_date = pg_catalog.timezone(
-      'UTC', pg_catalog.statement_timestamp()
-    )::DATE
-    AND baseline_id = 'leadpoet/pydantic-harness'
-    AND status IN ('running', 'completed')
+    is_active
+    AND set_id = pg_catalog.to_char(
+      pg_catalog.timezone('UTC', pg_catalog.statement_timestamp()),
+      'YYYYMMDD'
+    )::BIGINT
+    AND (
+      active_from IS NULL
+      OR active_from <= pg_catalog.statement_timestamp()
+    )
+    AND (
+      active_until IS NULL
+      OR active_until > pg_catalog.statement_timestamp()
+    )
   );
+
+-- The service creates the initial public baseline, and later carries the
+-- winner, after the miner submission cutoff. Only rows explicitly marked as
+-- the service-owned baseline can use that exception. Miner requests cannot
+-- supply this field through the public submission schema.
+CREATE OR REPLACE FUNCTION public.lab_arena_register_submission(
+  p_round_id TEXT,
+  p_submission_id TEXT,
+  p_miner_hotkey TEXT,
+  p_doc JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $lab_arena_register_submission$
+DECLARE
+  v_round public.lab_arena_rounds;
+  v_existing public.lab_arena_submissions;
+  v_is_baseline BOOLEAN;
+BEGIN
+  IF COALESCE(p_submission_id, '') !~ '^[A-Za-z0-9._:-]{1,64}$'
+     OR pg_catalog.jsonb_typeof(p_doc) IS DISTINCT FROM 'object'
+     OR pg_catalog.char_length(COALESCE(p_doc ->> 'submitted_reference', '')) NOT BETWEEN 1 AND 512 THEN
+    RAISE EXCEPTION 'lab_arena_submission_input_invalid' USING ERRCODE = '22023';
+  END IF;
+  v_is_baseline := COALESCE((p_doc ->> 'is_king')::BOOLEAN, FALSE);
+  SELECT * INTO v_round
+  FROM public.lab_arena_rounds
+  WHERE round_id = p_round_id
+  FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'lab_arena_round_missing' USING ERRCODE = 'P0002';
+  END IF;
+  IF v_round.status <> 'open'
+     OR (
+       NOT v_is_baseline
+       AND (
+         COALESCE(pg_catalog.clock_timestamp() < (v_round.configuration_doc #>> '{schedule,submission_open}')::TIMESTAMPTZ, TRUE)
+         OR COALESCE(pg_catalog.clock_timestamp() >= (v_round.configuration_doc #>> '{schedule,submission_cutoff}')::TIMESTAMPTZ, TRUE)
+       )
+     ) THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'status', 'window_closed',
+      'round_status', v_round.status
+    );
+  END IF;
+  SELECT * INTO v_existing
+  FROM public.lab_arena_submissions
+  WHERE submission_id = p_submission_id;
+  IF FOUND THEN
+    IF v_existing.round_id = p_round_id
+       AND v_existing.miner_hotkey = p_miner_hotkey
+       AND v_existing.submitted_reference = (p_doc ->> 'submitted_reference') THEN
+      RETURN pg_catalog.jsonb_build_object(
+        'status', 'existing',
+        'submission_status', v_existing.status
+      );
+    END IF;
+    RAISE EXCEPTION 'lab_arena_submission_conflict' USING ERRCODE = '23505';
+  END IF;
+  INSERT INTO public.lab_arena_submissions (
+    submission_id, round_id, miner_hotkey, status, is_king,
+    submitted_reference, consent, submission_doc
+  ) VALUES (
+    p_submission_id, p_round_id, p_miner_hotkey, 'uploaded', v_is_baseline,
+    p_doc ->> 'submitted_reference', p_doc -> 'consent', p_doc
+  );
+  RETURN pg_catalog.jsonb_build_object(
+    'status', 'registered',
+    'submission_status', 'uploaded'
+  );
+END;
+$lab_arena_register_submission$;
+ALTER FUNCTION public.lab_arena_register_submission(TEXT, TEXT, TEXT, JSONB)
+  OWNER TO lab_arena_owner;
 
 -- Migration 179 froze the original 10+20 position arrays in this function.
 -- Replace stage 2 with the remaining ten positions in the daily set.
@@ -191,19 +273,23 @@ BEGIN
 
   SELECT pg_catalog.jsonb_build_object(
            'status', 'ready',
-           'set_id', (source.benchmark_input_doc ->> 'set_id')::BIGINT,
-           'icps', source.benchmark_input_doc -> 'icps'
+           'set_id', source.set_id,
+           'icps', source.icps
          )
     INTO v_result
-    FROM public.research_lab_daily_rebenchmarks AS source
-   WHERE source.benchmark_date = pg_catalog.timezone(
-           'UTC', pg_catalog.statement_timestamp()
-         )::DATE
-     AND source.baseline_id = 'leadpoet/pydantic-harness'
-     AND source.status IN ('running', 'completed')
-     AND (source.benchmark_input_doc ->> 'set_id')::BIGINT = p_set_id
-     AND pg_catalog.jsonb_typeof(source.benchmark_input_doc -> 'icps') = 'array'
-     AND pg_catalog.jsonb_array_length(source.benchmark_input_doc -> 'icps') = 20
+    FROM public.qualification_private_icp_sets AS source
+   WHERE source.set_id = p_set_id
+     AND source.is_active
+     AND (
+       source.active_from IS NULL
+       OR source.active_from <= pg_catalog.statement_timestamp()
+     )
+     AND (
+       source.active_until IS NULL
+       OR source.active_until > pg_catalog.statement_timestamp()
+     )
+     AND pg_catalog.jsonb_typeof(source.icps) = 'array'
+     AND pg_catalog.jsonb_array_length(source.icps) = 20
    LIMIT 1;
 
   RETURN COALESCE(

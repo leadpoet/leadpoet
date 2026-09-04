@@ -14,10 +14,6 @@ from qualification.employee_buckets import (
     normalize_employee_count_bucket,
     normalize_observed_employee_count_bucket,
 )
-from qualification.scoring.competition_cache import (
-    get_competition_scoring_cache,
-    scoring_cache_key,
-)
 
 
 SCORING_ADAPTER_VERSION = "qualification-company-scorer:v1"
@@ -266,29 +262,6 @@ class CompetitionCompanyScorer:
         company_type = getattr(models, "CompanyOutput")
         score_company = scorer_module.score_company_competition_intent
 
-        scoring_cache = None
-        cache_key = ""
-        try:
-            scoring_cache = get_competition_scoring_cache()
-            if scoring_cache is not None:
-                cache_key = scoring_cache_key(
-                    icp,
-                    companies,
-                    SCORING_ADAPTER_VERSION,
-                )
-                cached = scoring_cache.get(cache_key)
-                if cached and not any(
-                    scorer_breakdown_has_retryable_infrastructure_failure(row)
-                    for row in cached
-                ):
-                    return [dict(row) for row in cached]
-        except Exception as exc:
-            logger.warning(
-                "competition_scoring_cache_unavailable type=%s",
-                type(exc).__name__,
-            )
-            scoring_cache = None
-
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
         for company in list(companies)[: _company_goal(icp)]:
@@ -313,16 +286,6 @@ class CompetitionCompanyScorer:
                 if hasattr(result, "model_dump")
                 else dict(result)
             )
-        if (
-            scoring_cache is not None
-            and cache_key
-            and breakdowns
-            and not any(
-                scorer_breakdown_has_retryable_infrastructure_failure(row)
-                for row in breakdowns
-            )
-        ):
-            scoring_cache.put(cache_key, breakdowns)
         return breakdowns
 
 

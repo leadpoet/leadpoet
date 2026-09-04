@@ -1,9 +1,8 @@
 # Research Lab Arena operator guide
 
-The Arena is a simple agent-bundle competition. Each round uses the same
-twenty ICPs as that day's public-baseline rebenchmark: ten in stage 1 and ten
-in stage 2. The Arena reads only the current active set through one database
-function; it does not generate a separate benchmark.
+The Arena is a simple agent-bundle competition. Each round uses the current
+daily set of twenty qualification ICPs: ten in stage 1 and ten in stage 2.
+The baseline and miners use that one set and one scoring path.
 
 ## Competition boundary
 
@@ -26,6 +25,11 @@ The bundle reads `/input/icp.json` and writes `/output/companies.json` by the
 documented schemas. It has no direct network interface. Provider calls go
 through the runner socket and the Arena broker. A miner can use any internal
 harness, model, prompts, packages, routing, or orchestration.
+
+The source contract is `harness.run_icp(icp) -> list[dict]`. The function is
+synchronous and returns at most five company objects. The public baseline
+README gives the full input and output example:
+[`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
 
 The organizer supplies one host key for each provider:
 
@@ -60,8 +64,10 @@ Set these values on the Arena service host:
 - `LAB_ARENA_SCORER_IMAGE`: a public tag or digest; startup resolves it to a
   digest for trusted scoring
 - `LAB_ARENA_RUNNER_HOTKEYS`: the runner hotkeys allowed to claim work
-- `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that submits the initial
+- `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns the initial
   public baseline
+- `LAB_ARENA_BASELINE_IMAGE`: the public PydanticAI baseline image tag or
+  digest
 
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
@@ -72,7 +78,7 @@ Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 needed only when a live, reward-enabled published round is activated.
 
 Apply `scripts/179-lab-arena-v1.sql` and
-`scripts/181-lab-arena-daily-icp-source.sql` with the database owner before
+`scripts/180-lab-arena-daily-competition.sql` with the database owner before
 service startup. Then check the service wiring:
 
 ```bash
@@ -113,8 +119,10 @@ python3 scripts/run_lab_arena_runner.py
 
 ## Miner flow
 
-Create and sign a submission with `scripts/lab_arena_miner.py`. The body has
-only the image reference and one public benchmark/reuse consent:
+Choose **Agent Competition** in `neurons/miner.py`. It asks for the local
+source directory and a public image tag, then builds, pushes, signs, and
+submits the bundle. It never asks for provider credentials. Advanced users can
+also create and sign the small image request with `scripts/lab_arena_miner.py`:
 
 ```json
 {
@@ -126,17 +134,16 @@ only the image reference and one public benchmark/reuse consent:
 See the repository README for example bundles and schema links. An example is
 documentation only; it is not part of admission or scoring.
 
-Before the first round cutoff in each mode, the baseline hotkey submits the
-public baseline through this same signed request and image-admission flow.
-Freeze fails if that submission did not reach `accepted`. The first accepted
-baseline is the incumbent. After a same-mode winner exists, that incumbent is
-carried forward normally, or its hotkey can submit a fresh bundle for the next
-round.
+At the first round cutoff, the service automatically admits the configured
+public baseline through the same image-admission flow. A temporary registry
+failure is retried. A rejected baseline prevents the round from starting.
+After a winner exists, that winner is carried into the next round, or its miner
+can submit a fresh bundle before the next cutoff.
 
 ## Rewards and independent disable controls
 
-The Arena is beside the old Research Lab reward path. With Arena rewards off,
-the old path continues without an Arena champion allocation.
+The Arena result is beside the retained reward settlement path. With Arena
+rewards off, no Arena champion allocation is added.
 
 If Arena rewards are enabled, the Arena and the reward-basis gateway must use
 the same Supabase database. The published Arena basis must be visible to the
@@ -155,7 +162,7 @@ created with rewards disabled cannot activate rewards later.
 To disable only the competition, set `LAB_ARENA_MODE=off` and stop the Arena
 service and runners. To disable only Arena rewards, turn off the Arena reward
 flag on the gateway/coordinator and validator. Neither action requires removal
-of the old Research Lab system.
+of retained reward history.
 
 ## Focused checks
 

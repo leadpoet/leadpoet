@@ -152,6 +152,7 @@ class RoundDefaults:
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
     baseline_hotkey: str = ""
+    baseline_image_reference: str = ""
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
     max_challengers: int = contracts.MAX_CHALLENGERS  # admitted challengers per round, at most MAX_CHALLENGERS
     # The trusted scorer is resolved once and copied into each round. A service
@@ -403,6 +404,7 @@ class ArenaService:
             "scorer_image_digest": defaults.scorer_image_digest,
             "scorer_image_reference": defaults.scorer_image_reference,
             "baseline_hotkey": defaults.baseline_hotkey,
+            "baseline_image_reference": defaults.baseline_image_reference,
             "runner_hotkeys": runner_hotkeys,
             "banned_hotkeys": banned_hotkeys,
             "image_rules": defaults.image_rules.to_document(),
@@ -605,7 +607,7 @@ class ArenaService:
         outcomes: Dict[str, Any] = {"status": "ok", "accepted": 0, "rejected": 0, "deferred": 0, "remaining": 0}
         started = time.monotonic()
         deadline = started + float(self._config.admission_tick_seconds)
-        pending = [row for row in self._store.list_submissions(round_id, status="uploaded") if not row.get("is_king")]
+        pending = self._store.list_submissions(round_id, status="uploaded")
         for index, row in enumerate(pending):
             if time.monotonic() >= deadline:
                 outcomes["remaining"] = len(pending) - index
@@ -646,31 +648,115 @@ class ArenaService:
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 
+    def _initial_baseline(self, round_row: Mapping[str, Any]) -> Dict[str, Any]:
+        """Register and admit the public baseline through the normal image path.
+
+        The database permits only this service-owned ``is_king`` registration
+        after the miner cutoff. The image still passes the same public OCI
+        limits, mirror, sandbox, provider broker, and output validation as a
+        miner bundle. A transient registry failure leaves the row uploaded so
+        the next driver tick can retry it.
+        """
+
+        round_id = str(round_row["round_id"])
+        configuration = round_row.get("configuration_doc") or {}
+        hotkey = str(configuration.get("baseline_hotkey") or "").strip()
+        reference_text = str(
+            configuration.get("baseline_image_reference")
+            or self._config.defaults.baseline_image_reference
+            or ""
+        ).strip()
+        if not hotkey:
+            raise ServiceError("baseline_hotkey_missing", 500)
+        if not reference_text:
+            raise ServiceError("baseline_image_missing", 500)
+        submission_id = "baseline-%s" % round_id.removeprefix("arena-")
+        row = self._store.get_submission(submission_id)
+        if row is None:
+            try:
+                reference = images.parse_reference(reference_text)
+            except images.ImageError as exc:
+                raise ServiceError("baseline_image_invalid:%s" % exc.rule_id, 500) from exc
+            result = self._store.register_submission(
+                round_id,
+                submission_id,
+                hotkey,
+                {
+                    "submitted_reference": str(reference),
+                    "image_reference": str(reference),
+                    "consent": {"public_rerun": True},
+                    "is_king": True,
+                },
+            )
+            if result.get("status") not in ("registered", "existing"):
+                raise ServiceError("baseline_registration_failed", 500)
+            row = self._store.get_submission(submission_id)
+        if (
+            row is None
+            or row.get("round_id") != round_id
+            or row.get("miner_hotkey") != hotkey
+            or not row.get("is_king")
+        ):
+            raise ServiceError("baseline_submission_invalid", 500)
+        status = str(row.get("status") or "")
+        if status == "uploaded":
+            if self._config.registry is None or self._config.source_registry is None:
+                raise ServiceError("baseline_registry_unavailable", 503)
+            rules = images.ImageRules.from_document(configuration["image_rules"])
+            repository = str(configuration.get("registry_repository") or "")
+            outcome = self._admit_one(
+                round_id,
+                row,
+                rules=rules,
+                repository=repository,
+                final=False,
+                deadline=time.monotonic() + float(self._config.admission_tick_seconds),
+            )
+            if outcome == "deferred":
+                raise ServiceError("baseline_image_not_ready", 503)
+            row = self._store.get_submission(submission_id)
+            status = str((row or {}).get("status") or "")
+        if status not in ("accepted", "frozen"):
+            raise ServiceError("baseline_image_rejected", 500)
+        return dict(row)
+
     def freeze_participants(self, round_id: str) -> List[Dict[str, Any]]:
         round_row = self._round(round_id)
         participants: List[Dict[str, Any]] = []
-        accepted = [row for row in self._store.list_submissions(round_id, status="accepted") if not row.get("is_king")]
+        frozen = self._store.list_submissions(round_id, status="frozen")
+        accepted = self._store.list_submissions(round_id, status="accepted")
+        frozen_kings = [row for row in frozen if row.get("is_king")]
+        if len(frozen_kings) > 1:
+            raise ServiceError("baseline_submission_invalid", 500)
         # The reigning king re-enters with its winning image unless its hotkey
         # holds a fresh, eligible submission for this round: then that
         # submission is the king's entry (still the king, so a resubmission
         # can never restart the reward decay) and no carried copy is
         # registered under the same hotkey, which the one-entry-per-miner
         # index would refuse.
-        king_hotkey = self._reigning_king_hotkey()
-        initial_baseline = king_hotkey is None
-        if initial_baseline:
-            king_hotkey = str((round_row.get("configuration_doc") or {}).get("baseline_hotkey") or "").strip()
-            if not king_hotkey:
-                raise ServiceError("baseline_hotkey_missing", 500)
-        fresh_king = next((row for row in accepted if king_hotkey and row["miner_hotkey"] == king_hotkey), None)
-        if initial_baseline and fresh_king is None:
-            # The baseline uses the normal signed submission and image
-            # admission path. Freeze does not create or bypass that entry.
-            raise ServiceError("baseline_submission_missing", 409)
+        if frozen_kings:
+            # A prior driver process already chose and froze the baseline.
+            # Recovery must keep that choice even if another round published
+            # while this process was down.
+            fresh_king = frozen_kings[0]
+            king_hotkey = str(fresh_king["miner_hotkey"])
+        else:
+            king_hotkey = self._reigning_king_hotkey()
+            if king_hotkey is None:
+                fresh_king = self._initial_baseline(round_row)
+                king_hotkey = str(fresh_king["miner_hotkey"])
+                if fresh_king.get("status") == "accepted":
+                    accepted = self._store.list_submissions(round_id, status="accepted")
+            else:
+                fresh_king = next(
+                    (row for row in accepted if row["miner_hotkey"] == king_hotkey),
+                    None,
+                )
         king = None if fresh_king is not None else self._entering_king(round_id)
         cap = int(round_row["configuration_doc"].get("max_challengers") or contracts.MAX_CHALLENGERS)
         # Freeze order (acceptance order) decides who enters when the cap binds.
-        frozen_count = 0
+        participants.extend(self._participant(row, is_king=bool(row.get("is_king"))) for row in frozen)
+        frozen_count = sum(1 for row in frozen if not row.get("is_king"))
         for row in accepted:
             is_king = fresh_king is not None and row["submission_id"] == fresh_king["submission_id"]
             if not is_king and frozen_count >= cap:
@@ -683,9 +769,8 @@ class ArenaService:
                 participants.append(self._participant(row, is_king=is_king))
         if king is not None:
             participants.append(king)
-        for row in self._store.list_submissions(round_id, status="frozen"):
-            if not any(p["submission_id"] == row["submission_id"] for p in participants):
-                participants.append(self._participant(row, is_king=bool(row.get("is_king"))))
+        if sum(1 for participant in participants if participant.get("is_king")) != 1:
+            raise ServiceError("baseline_submission_invalid", 500)
         return participants
 
     def _reigning_king_hotkey(self) -> Optional[str]:
@@ -775,7 +860,12 @@ class ArenaService:
                 "status": "cancelled",
                 "reason": CANCEL_REASONS["benchmark_invalid"],
             }
-        participants = self.freeze_participants(round_id)
+        try:
+            participants = self.freeze_participants(round_id)
+        except ServiceError as exc:
+            if exc.code == "baseline_image_not_ready":
+                return {"status": "retry", "reason": exc.code, "set_id": set_id}
+            raise
         evaluation_date = round_id.replace("arena-", "")[:10]
         benchmark_ref = "arena/%s/benchmark.json" % round_id
         self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))

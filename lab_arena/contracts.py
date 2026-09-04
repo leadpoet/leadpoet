@@ -19,8 +19,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------------
 
 # Every participant runs the first ten ICPs. The ten best challengers then run
-# the remaining ten ICPs; the incumbent always runs both stages. These are the
-# twenty ICPs in the organizer's current daily qualification set.
+# the remaining ten ICPs; the incumbent baseline always runs both stages.
+# These are the twenty ICPs in the organizer's current daily qualification set.
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
@@ -66,11 +66,6 @@ def stage_positions(stage: int) -> Tuple[int, ...]:
     if stage == 2:
         return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
     raise ArenaContractError("stage must be 1 or 2")
-
-# Generation requests are fixed (section 8): 20 + 10 across the ordered
-# industry list; the second request covers the first ten industries.
-GENERATION_BATCH_SIZES = (20, 10)
-MAX_GENERATION_ATTEMPTS = 12
 
 # Signed request timestamp window (section 9.1).
 REQUEST_TIMESTAMP_WINDOW_SECONDS = 300
@@ -670,6 +665,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
     F("baseline_hotkey", "hotkey"),
+    F("baseline_image_reference", "str", minimum=1, maximum=512),
     F("runner_hotkeys", "list[hotkey]", minimum=1, maximum=64),
     F("banned_hotkeys", "list[hotkey]", minimum=0, maximum=4096),
     # Image by digest: the public limits every submitted image must meet and
@@ -774,7 +770,6 @@ SCORER_POLICY_FIELDS = (
     F("company_cap_rule", "str", choices=("icp_max_companies",)),
     F("max_scored_companies", "int", minimum=0, maximum=50),
     F("judge_models", "object"),
-    F("cache_version", "str", minimum=1, maximum=64),
     F("provider_profile", "str", minimum=1, maximum=64),
     F("pre_slice_rule", "str", choices=("first_n_model_order",)),
     F("employee_bucket_rule", "str", choices=("lab_relaxed_buckets",)),

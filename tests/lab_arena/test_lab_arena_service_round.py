@@ -25,7 +25,7 @@ SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
 ARENA_REPOSITORY = "arena.example/lab-arena/models"  # every accepted image is mirrored here (private while a round runs)
 from lab_arena.store import ArenaStore, PsycopgTransport
 from lab_arena.images import RegistryClient
-from tests.lab_arena.lab_arena_benchmark_tape import batch_icps
+from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_images import FakeRegistry, layer_tar, public_test_resolver, simple_image
 
@@ -303,12 +303,13 @@ class Harness:
         self.flavors: Dict[str, str] = {}
         self.broken: set = set()
         self.challengers = challengers
-        self.baseline_hotkey = keypair("svc-miner-" + challengers[0]).ss58_address if challengers else keypair("svc-baseline").ss58_address
+        self.baseline_hotkey = keypair("svc-baseline").ss58_address
         self.max_challengers = contracts.MAX_CHALLENGERS
         self.daily_cutoff_hour_utc = None  # set to enable automatic daily round creation
         self.banned: List[str] = []  # the live ban list the service reads
         self.api_factory = None  # runners talk to the service in-process unless a test supplies an API client
         self.registry = SHARED_REGISTRY  # miners' source registry and the Arena repository, in memory
+        self.baseline_image_reference = self.publish_image("PublicBaseline")
         self.sandbox = ModelSandbox(flavor_by_digest=self.flavors, broken_digests=self.broken)
         self.service = self.build_service()
 
@@ -330,12 +331,12 @@ class Harness:
             daily_icp_source=lambda **kwargs: {
                 "status": "ready",
                 "set_id": int(kwargs["set_id"]),
-                "icps": batch_icps()[0],
+                "icps": daily_icps(),
             },
             banned_hotkeys_source=lambda: list(harness.banned),
             broker_factory=broker_factory,
             defaults=svc.RoundDefaults(
-                runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
+                runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey, baseline_image_reference=self.baseline_image_reference, max_challengers=self.max_challengers, daily_cutoff_hour_utc=self.daily_cutoff_hour_utc,
                 scorer_image_digest=SCORER_IMAGE_DIGEST, scorer_image_reference=SCORER_IMAGE_REFERENCE, registry_repository=ARENA_REPOSITORY,
             ),
             clock=self.clock,
@@ -468,6 +469,47 @@ def test_full_round_publishes_compact_results_and_carries_the_king(connect, tmp_
     assert len(public["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
     assert public["submission_scores"]["final"] is not None
     assert_canary_absent(harness, connect)
+
+
+def test_restart_finishes_a_partial_participant_freeze_without_changing_baseline(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Restart-A", "Restart-B"], runners=["alpha"])
+    configuration = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(hours=12),
+        round_id="arena-2026-10-04-restart",
+    )
+    harness.round_id = configuration["round_id"]
+    submitted = [harness.submit(flavor, harness.round_id) for flavor in harness.challengers]
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+
+    round_row = harness.service.store.get_round(harness.round_id)
+    baseline = harness.service._initial_baseline(round_row)
+    assert baseline["status"] == "accepted"
+    assert harness.service.store.update_submission(
+        harness.round_id,
+        baseline["submission_id"],
+        "accepted",
+        "frozen",
+        {"is_king": True},
+    )["status"] == "ok"
+    assert harness.service.store.update_submission(
+        harness.round_id,
+        submitted[0],
+        "accepted",
+        "frozen",
+        {},
+    )["status"] == "ok"
+
+    harness.service = harness.build_service()
+    committed = harness.service.commit_benchmark(harness.round_id)
+    assert committed == {"status": "ok", "participants": 3}
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    assert {item["submission_id"] for item in participants} == {
+        baseline["submission_id"],
+        *submitted,
+    }
+    kings = [item for item in participants if item["is_king"]]
+    assert len(kings) == 1 and kings[0]["submission_id"] == baseline["submission_id"]
+    harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
 
 
 def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_path):

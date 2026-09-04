@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 MIGRATION = SCRIPTS / "179-lab-arena-v1.sql"
 SQL = MIGRATION.read_text(encoding="utf-8")
+DAILY_SQL = (SCRIPTS / "180-lab-arena-daily-competition.sql").read_text(
+    encoding="utf-8"
+)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -47,9 +50,8 @@ def test_migration_is_the_frontier_and_uniquely_numbered():
             numbered.setdefault(int(match.group(1)), []).append(path.name)
     assert numbered[178] == ["178-research-lab-source-add-miner-status.sql"]
     assert numbered[179] == ["179-lab-arena-v1.sql"]
-    assert numbered[180] == ["180-public-baseline-rebenchmark.sql"]
-    assert numbered[181] == ["181-lab-arena-daily-icp-source.sql"]
-    assert max(numbered) == 181, "181 must sit directly above the production frontier"
+    assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
+    assert max(numbered) == 180, "180 must sit directly above the production frontier"
 
 
 def test_migration_transaction_and_reload_shape():
@@ -198,9 +200,18 @@ def test_two_stage_cut_uses_plain_finalist_ids_and_fixed_position_ranges():
     assert "v_patch -> 'final_scores_ref'" not in SQL
     assert "p_stage NOT IN (1, 2)" in SQL
     assert "ARRAY[0,1,2,3,4,5,6,7,8,9]" in SQL
-    assert "ARRAY[10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]" in SQL
+    assert "ARRAY[10,11,12,13,14,15,16,17,18,19]" in DAILY_SQL
     assert "pg_catalog.jsonb_array_length(v_patch -> 'finalists') <> LEAST(10, v_challenger_count)" in SQL
     assert "AVG(" not in SQL
+
+
+def test_daily_migration_has_one_private_input_and_no_parallel_baseline_state():
+    assert "qualification_private_icp_sets" in DAILY_SQL
+    assert "jsonb_array_length(source.icps) = 20" in DAILY_SQL
+    assert "research_lab_daily_rebenchmarks" not in DAILY_SQL
+    assert "receipt" not in DAILY_SQL.lower()
+    assert "manifest" not in DAILY_SQL.lower()
+    assert "hash_chain" not in DAILY_SQL.lower()
 
 
 def test_host_openrouter_money_caps_are_atomic_and_round_wide_per_submission():

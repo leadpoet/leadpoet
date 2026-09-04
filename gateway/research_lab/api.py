@@ -49,12 +49,6 @@ from .models import (
     ResearchLabSourceAdapterProvisionRequest,
     ResearchLabSourceAdapterProvisionResponse,
 )
-from .daily_baseline_readiness import daily_public_baseline_readiness
-from .public_baseline_runner import BASELINE_ID
-from .public_baseline_store import (
-    load_completed_run as load_completed_public_baseline,
-    load_latest_completed_run as load_latest_completed_public_baseline,
-)
 from .source_add_catalog import (
     ALREADY_SUBMITTED_DETAIL,
     SOURCE_ADD_SUBMISSION_FAILED_DETAIL,
@@ -305,15 +299,6 @@ def _source_add_dispatcher_runtime_ready(request: Request) -> bool:
 async def research_lab_status(request: Request) -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
     source_add_control = await source_add_control_state()
-    latest_public_benchmark = None
-    if config.api_enabled and config.reports_enabled:
-        try:
-            latest_public_benchmark = await daily_public_baseline_readiness(
-                config,
-            )
-        except Exception as exc:
-            logger.warning("research_lab_public_benchmark_status_unavailable: %s", str(exc)[:200])
-            latest_public_benchmark = {"status": "unavailable"}
     public_status = config.public_status()
     source_add_public = dict(public_status.get("source_add") or {})
     source_add_public["control"] = {
@@ -344,7 +329,6 @@ async def research_lab_status(request: Request) -> dict[str, object]:
         "status": "configured" if config.api_enabled else "disabled",
         **public_status,
         "source_add": source_add_public,
-        "latest_public_benchmark": latest_public_benchmark,
     }
 
 
@@ -1471,35 +1455,6 @@ async def provision_research_lab_source_adapter(
 
 
 _TERMINAL_CANDIDATE_STATUSES = {"scored", "rejected", "failed"}
-@router.get("/benchmarks/public/latest")
-async def get_latest_public_benchmark_report():
-    config = ResearchLabGatewayConfig.from_env()
-    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
-    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
-    row = await load_latest_completed_public_baseline(
-        baseline_id=BASELINE_ID,
-    )
-    report = row.get("public_report_doc") if isinstance(row, Mapping) else None
-    if not isinstance(report, Mapping) or not report:
-        raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
-    return dict(report)
-
-
-@router.get("/benchmarks/public/{benchmark_date}")
-async def get_public_benchmark_report_by_date(benchmark_date: str):
-    config = ResearchLabGatewayConfig.from_env()
-    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
-    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", benchmark_date):
-        raise HTTPException(status_code=400, detail="benchmark_date must be YYYY-MM-DD")
-    row = await load_completed_public_baseline(
-        benchmark_date=benchmark_date,
-        baseline_id=BASELINE_ID,
-    )
-    report = row.get("public_report_doc") if isinstance(row, Mapping) else None
-    if not isinstance(report, Mapping) or not report:
-        raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
-    return dict(report)
 
 
 async def _allocation_epoch_guard_and_persistence(

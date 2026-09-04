@@ -34,7 +34,6 @@ def signed(keypair: Keypair, **overrides):
 
 def test_public_constants_are_the_plan_values():
     assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 10, 20, 10)
-    assert c.GENERATION_BATCH_SIZES == (20, 10)
     assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 8, 2)
     assert c.LAB_ARENA_POOL_PERCENT == 25
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
@@ -144,6 +143,7 @@ def base_round_configuration():
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
         "baseline_hotkey": Keypair.create_from_uri("//Baseline").ss58_address,
+        "baseline_image_reference": "ghcr.io/leadpoet/pydantic-harness:latest",
         "runner_hotkeys": [Keypair.create_from_uri("//Alice").ss58_address, Keypair.create_from_uri("//Floor").ss58_address],
         "banned_hotkeys": [],
         "image_rules": {"schema_version": "leadpoet.lab_arena.image_rules.v1", "max_image_bytes": 2147483648, "max_layers": 64, "max_rootfs_bytes": 8589934592, "platform": {"os": "linux", "architecture": "amd64"}, "layer_media_types": ["application/vnd.oci.image.layer.v1.tar+gzip"]},

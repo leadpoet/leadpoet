@@ -22,12 +22,10 @@ import pytest
 from tests.test_source_add_end_to_end_postgres import SCRIPTS, _database_with_migrations
 
 LAB_ARENA_MIGRATION = "179-lab-arena-v1.sql"
-PUBLIC_BASELINE_MIGRATION = "180-public-baseline-rebenchmark.sql"
-LAB_ARENA_DAILY_SOURCE_MIGRATION = "181-lab-arena-daily-icp-source.sql"
+LAB_ARENA_DAILY_COMPETITION_MIGRATION = "180-lab-arena-daily-competition.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
-    PUBLIC_BASELINE_MIGRATION,
-    LAB_ARENA_DAILY_SOURCE_MIGRATION,
+    LAB_ARENA_DAILY_COMPETITION_MIGRATION,
 )
 
 _SHIM_SQL = """

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -36,9 +35,11 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
     icp = dict(document["icp"])
     companies = [dict(item) for item in document["companies"]]
     os.environ[shim.TRUSTED_SCORER_ENV] = "1"
-    # One process scores one work item, but a reused process keeps its cache directory.
-    cache_dir = os.environ.get(scoring.CACHE_DIR_ENV) or tempfile.mkdtemp(prefix="scoring-cache-")
-    scoring.apply_policy_to_environment(policy, environ=os.environ, cache_dir=cache_dir, credentials=dict(PLACEHOLDER_CREDENTIALS))
+    scoring.apply_policy_to_environment(
+        policy,
+        environ=os.environ,
+        credentials=dict(PLACEHOLDER_CREDENTIALS),
+    )
     scorer = scoring.lab_scorer(policy)
     item = {"scored_run_id": scored_run_id}
     try:

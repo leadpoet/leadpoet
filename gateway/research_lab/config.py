@@ -682,7 +682,6 @@ class ResearchLabGatewayConfig:
     # Additive execution telemetry for both daily baselines and authoritative
     # candidate scoring. Disabled until migration 83 is applied.
     scoring_telemetry_v2_enabled: bool = False
-    public_baseline_rebenchmark_enabled: bool = True
     private_baseline_rebenchmark_enabled: bool = True
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
@@ -1123,10 +1122,6 @@ class ResearchLabGatewayConfig:
             scoring_telemetry_v2_enabled=_truthy(
                 "RESEARCH_LAB_SCORING_TELEMETRY_V2",
                 "false",
-            ),
-            public_baseline_rebenchmark_enabled=_truthy(
-                "RESEARCH_LAB_PUBLIC_BASELINE_REBENCHMARK_ENABLED",
-                "true",
             ),
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
@@ -2014,9 +2009,6 @@ class ResearchLabGatewayConfig:
                 },
                 "baseline_health_gate_enforced": self.baseline_health_gate_enforced,
                 "scoring_telemetry_v2_enabled": self.scoring_telemetry_v2_enabled,
-                "public_baseline_rebenchmark_enabled": (
-                    self.public_baseline_rebenchmark_enabled
-                ),
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "private_baseline_concurrency": self.private_baseline_concurrency,
                 "private_baseline_retry_concurrency": self.private_baseline_retry_concurrency,

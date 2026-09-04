@@ -229,13 +229,15 @@ def test_open_stage_runs_everyone_on_ten_then_only_finalists_and_king_on_ten():
 
 def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
     configured = "5" + "A" * 47
-    changed_environment = "5" + "B" * 47
     baseline = {
-        "submission_id": "baseline",
+        "submission_id": "baseline-2026-09-02",
+        "round_id": "arena-2026-09-02",
         "miner_hotkey": configured,
         "image_digest": "sha256:" + "a" * 64,
         "image_reference": "arena.example/lab/baseline@sha256:" + "a" * 64,
         "submitted_reference": "source.example/lab/baseline:latest",
+        "status": "accepted",
+        "is_king": True,
     }
     updates = []
 
@@ -251,16 +253,25 @@ def test_first_round_baseline_is_read_from_the_frozen_round_configuration():
 
     service = object.__new__(ArenaService)
     service._store = Store()
-    service._config = SimpleNamespace(defaults=SimpleNamespace(baseline_hotkey=changed_environment))
     service._round = lambda _round_id: {
-        "configuration_doc": {"baseline_hotkey": configured, "max_challengers": 10},
+        "round_id": "arena-2026-09-02",
+        "configuration_doc": {
+            "baseline_hotkey": configured,
+            "baseline_image_reference": "source.example/lab/baseline:latest",
+            "max_challengers": 10,
+        },
     }
     service._reigning_king_hotkey = lambda: None
+    service._initial_baseline = lambda round_row: (
+        baseline
+        if round_row["configuration_doc"]["baseline_hotkey"] == configured
+        else pytest.fail("baseline did not use the frozen round configuration")
+    )
 
     participants = service.freeze_participants("arena-2026-09-02")
-    assert len(participants) == 1 and participants[0]["submission_id"] == "baseline"
+    assert len(participants) == 1 and participants[0]["submission_id"] == baseline["submission_id"]
     assert participants[0]["is_king"] is True
-    assert updates == [("arena-2026-09-02", "baseline", "accepted", "frozen", {"is_king": True})]
+    assert updates == [("arena-2026-09-02", baseline["submission_id"], "accepted", "frozen", {"is_king": True})]
 
 
 def test_score_lease_uses_the_round_pinned_scorer_after_restart():

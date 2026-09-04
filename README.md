@@ -75,16 +75,16 @@ python neurons/miner.py \
 
 The miner will ask which mode to run:
 
-- **Auto Research**
+- **Agent Competition**
 - **Fulfillment**
 - **Submit API Source**
 - **Check API Source Submissions**
 
 ### Research Lab
 
-Research Lab supports the agent-bundle Arena and the existing research reward
-path. They are separate. The Arena can be disabled without changing the old
-path.
+Research Lab now operates the agent-bundle Arena. It creates no model changes
+and runs no autoresearch or code-edit loop. Existing reward settlement remains
+downstream of the Arena result.
 
 #### Agent Bundle Arena
 
@@ -93,25 +93,30 @@ miner-submitted forks on the same ICPs. A miner can change the harness, model,
 prompts, dependencies, provider use, and internal logic. The benchmark score is
 the quality authority.
 
-The stable boundary is one public OCI image and one fixed `/agent/run`
-entrypoint. The bundle reads the documented ICP input and writes the documented
-company output. Provider credentials come from the host. Miners do not submit
-keys or OCI process settings. The image location does not determine identity,
-rank, or the winner.
+The public starting point is
+[`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
+Fork it or replace any part of it. The one source-code contract is:
+
+```python
+def run_icp(icp: dict) -> list[dict]:
+    """Return at most five companies for one ICP."""
+```
+
+The function must be in `harness.py`, must be synchronous, and must return
+JSON-ready company objects in the schema documented by the public harness.
+The bundle wrapper exposes `/agent/run`, reads `/input/icp.json`, and writes
+`/output/companies.json`. Provider credentials come from the Arena host and
+never from a miner submission.
 
 Operator and bundle details: [Arena operator guide](lab_arena/RUNBOOK.md),
 [input contract](lab_arena/runner.py), [output contract](lab_arena/output.py),
 [provider adapter and socket protocol](lab_arena/shim.py), and
-[submission helper](scripts/lab_arena_miner.py). The existing
-[qualification model](miner_models/qualification_model/README.md) is an
-optional sourcing-logic example; a competition image must wrap any chosen
-logic with `/agent/run`. Examples are documentation, not admission or scoring
-requirements.
+[submission helper](scripts/lab_arena_miner.py). Examples are documentation,
+not admission or scoring requirements.
 
-The registered `LAB_ARENA_BASELINE_HOTKEY` submits the initial public baseline
-for each mode through the same endpoint and image checks as every miner. It
-becomes that mode's first incumbent. Later winners use the normal carry-forward
-behavior.
+At the first cutoff, the Arena automatically enters the configured public
+PydanticAI baseline through the same image checks, runner, provider limits, and
+scorer as miner bundles. Later winners become the next incumbent.
 
 #### Submit API Source
 
@@ -141,69 +146,6 @@ raw validation evidence, duplicate matches, catalog contents, or sources used
 by the current model. An **approved** result means that the automated Leg 1
 approval boundary passed; it does not mean that the source is already in the
 catalog or model.
-
-#### Auto Research
-
-How it works:
-
-1. The miner securely provides an OpenRouter API key and management key.
-2. The miner enters a research direction.
-3. The miner pays the loop-start fee in TAO to cover benchmark costs.
-4. The TEE gateway runs the auto-research loop.
-5. Candidate improvements are scored.
-6. Miners are provided with their respective rewards.
-
-Research Lab rewards result from provided compute or model improvements:
-
-- Compute reimbursement covers a portion of verified compute spend from research loops based on the amount of participation.
-- Verified model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
-
-At a high level, rewards are calculated per reward epoch:
-
-```text
-lab_allocation = subnet_emissions * research_lab_allocation_rate
-compute_credit = verified_openrouter_spend * participation_multiplier
-improvement_credit = max(0, candidate_score - benchmark_score - improvement_threshold)
-```
-
-If there are no winning improvements, the Research Lab allocation is split across participating miners by compute credit:
-
-```text
-miner_reward = lab_allocation * miner_compute_credit / total_compute_credit
-```
-
-If there are winning improvements, verified compute reimbursement is paid first, capped by the miner's remaining verified spend. If reimbursement demand is larger than available reimbursement capacity, reimbursements are prorated by compute credit. If reimbursement demand is smaller than available capacity, the unused amount flows to winning improvements.
-
-```text
-reimbursement_reward = min(remaining_verified_spend, reimbursement_capacity * miner_compute_credit / total_compute_credit)
-winner_reward = remaining_lab_allocation * winner_improvement_credit / total_winner_improvement_credit
-```
-
-The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. The validator and verifier code contain the replayable reward and weight checks.
-
-### Existing Research Runtime
-
-Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
-
-For each candidate, the gateway extracts the runtime app from `/app` and gives the research model limited access to inspect that extracted source. The model can read the code it needs in order to suggest an improvement, but it does not get general repository access, shell access, credentials, deployment access, or access to files outside the runtime scope.
-
-After the model proposes a patch, the system checks that the patch only touches files the model actually read during that loop and only within the allowed edit paths. If the patch passes those checks, it is applied to the extracted runtime source, rebuilt into a candidate image, and evaluated through the normal scoring and benchmarking pipeline.
-
-The research model itself is not public to prevent miners from overfitting to the model's suggestions, prompts, hidden assumptions, or internal scoring preferences. Miners compete on the measured quality of their submitted candidates, not on reverse-engineering the improvement model.
-
-The TEE runs the non-public improvement model in an isolated environment while recording the runtime image, inspected files, proposed patch, scope checks, rebuilt candidate, and evaluation result.
-
-Candidate patches are limited to the extracted runtime code paths inside the runtime image:
-
-- `gateway/`
-- `qualification/`
-- `sourcing_model/`
-- `validator_models/`
-- `research_lab_adapter.py`
-
-`requirements.txt` may be used as a build/runtime dependency when present in the image, but it is not an editable candidate target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
-
-These are runtime image paths, so some entries may not exist as top-level folders in this repository.
 
 ### Fulfillment
 

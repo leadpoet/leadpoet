@@ -196,6 +196,7 @@ def build_service_from_environment(mode: str):
     defaults = RoundDefaults(
         runner_hotkeys=runners,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
+        baseline_image_reference=_required("LAB_ARENA_BASELINE_IMAGE"),
         max_challengers=_max_challengers_from_environment(),
         daily_cutoff_hour_utc=_daily_cutoff_hour_from_environment(),
         scorer_image_digest=scorer.image_digest,

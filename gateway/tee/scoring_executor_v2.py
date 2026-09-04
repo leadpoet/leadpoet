@@ -48,6 +48,12 @@ SCORE_PURPOSES_V2 = frozenset(
     }
 )
 
+# These names remain importable while old durable records are read during the
+# transition. They are deliberately absent from ``SCORING_OPERATIONS_V2``, so
+# the retired closed-model sandbox operation cannot execute.
+OP_RUN_MODEL_SANDBOX_V2 = "run_model_sandbox_v2"
+MODEL_COMPATIBILITY_PURPOSE_V2 = "research_lab.model_compatibility.v2"
+
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
 PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v3"

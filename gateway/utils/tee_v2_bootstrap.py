@@ -36,6 +36,32 @@ class TEEV2BootstrapError(RuntimeError):
     """The complete enclave release cannot be configured or mutually attested."""
 
 
+def configured_scoring_worker_count(config_dir: Path) -> int:
+    """Return the contiguous locally sealed scoring-proxy capacity."""
+
+    pattern = re.compile(r"^scoring_proxy_([0-9]{2})\.json$")
+    indexes = []
+    for path in Path(config_dir).glob("scoring_proxy_*.json"):
+        if path.is_symlink() or not path.is_file():
+            raise TEEV2BootstrapError(
+                "scoring proxy profile path is not a regular file"
+            )
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise TEEV2BootstrapError(
+                "scoring proxy profile filename is invalid"
+            )
+        indexes.append(int(match.group(1)))
+    indexes.sort()
+    if not indexes or indexes != list(range(len(indexes))):
+        raise TEEV2BootstrapError(
+            "scoring proxy profiles must be present and contiguous"
+        )
+    if len(indexes) > 500:
+        raise TEEV2BootstrapError("scoring proxy profile count exceeds the limit")
+    return len(indexes)
+
+
 def load_release_manifest(path: Path) -> Dict[str, Any]:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -335,9 +361,6 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
     from gateway.tee.research_lab_runtime_config_v2 import (
         build_research_lab_execution_config,
     )
-    from gateway.research_lab.provider_profiles_v2 import (
-        verify_required_worker_proxy_profiles_v2,
-    )
 
     release = load_release_manifest(args.release_manifest)
     try:
@@ -372,9 +395,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
         raise TEEV2BootstrapError(
             "protected workflow manifest hash is invalid"
         )
-    profile_set = verify_required_worker_proxy_profiles_v2(
-        config_dir=args.config_dir
-    )
+    scoring_worker_count = configured_scoring_worker_count(args.config_dir)
     research_lab_execution_config = build_research_lab_execution_config()
     documents = runtime_configuration_documents(
         release_manifest=release,
@@ -392,7 +413,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
             artifact_envelopes[0]["credential_ref_hash"]
         ),
         research_lab_execution_config=research_lab_execution_config,
-        configured_worker_counts=profile_set["worker_counts"],
+        configured_worker_counts={"gateway_scoring": scoring_worker_count},
     )
     return await bootstrap_gateway_enclaves_v2(
         release_manifest=release,

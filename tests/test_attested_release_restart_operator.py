@@ -158,7 +158,8 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "build_research_lab_execution_config(" in source
     assert "environment=runtime_environment" in source
     assert "provider_reference_hashes_from_envelopes(envelopes)" in source
-    assert "verify_required_worker_proxy_profiles_v2(config_dir=config_dir)" in source
+    assert "configured_scoring_worker_count(config_dir)" in source
+    assert "verify_required_worker_proxy_profiles_v2" not in source
     assert "runtime_configuration_documents(" in source
     assert "build_runtime_configuration(" in source
     assert "client.health_check()" in source

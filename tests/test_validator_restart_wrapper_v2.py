@@ -196,7 +196,7 @@ def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
     assert "Pulling latest GitHub main" not in invalid_forward.stdout
 
 
-def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
+def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_validator_release() {")
     end = script.index("\n}\n", start) + 3
@@ -215,11 +215,14 @@ def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
     assert 'LEADPOET_USE_CAPTURED_RESTART_START=1' in follow
     assert 'VALIDATOR_RELEASE_SUPERSESSION_COUNT="$next_count"' in follow
 
-    release_loop = script[script.index("for attempt in $(seq 1 300); do") :]
-    release_loop = release_loop[: release_loop.index("done")]
-    assert release_loop.count("follow_superseding_validator_release") == 2
-    assert release_loop.index("follow_superseding_validator_release") < release_loop.index(
-        "gateway.tee.release_channel_v2"
+    release_build = script[
+        script.index(
+            'echo "Preparing exact local build inputs before production shutdown"'
+        ) : script.index('record_validator_restart_timing "local_release_ready"')
+    ]
+    assert release_build.count("follow_superseding_validator_release") == 2
+    assert release_build.index("follow_superseding_validator_release") < (
+        release_build.index("gateway/tee/build_local_release_v2.sh")
     )
     assert script.index("follow_superseding_validator_release") < script.index(
         'echo "Stopping validator processes and containers"'
@@ -434,13 +437,13 @@ def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown()
     ]
 
     release_start = script.index(
-        'echo "Acquiring the independently built V2 release channel"'
+        'echo "Building the exact local gateway and validator runtime identities"'
     )
     release_ready = script.index(
-        'record_validator_restart_timing "release_ready"', release_start
+        'record_validator_restart_timing "local_release_ready"', release_start
     )
     release = script[release_start:release_ready]
-    assert "gateway.tee.release_channel_v2" in release
+    assert "gateway/tee/build_local_release_v2.sh" in release
     assert '--gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"' in release
     assert '--validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"' in release
     assert "--lineage-output" not in release
@@ -802,7 +805,7 @@ def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation(
     ).read_text(encoding="utf-8")
 
     release_ready = script.index(
-        'if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]'
+        'record_validator_restart_timing "local_release_ready"'
     )
     pre_shutdown_alignment = script.index(
         'echo "Checking same-SHA gateway readiness before stopping the running validator"'
@@ -951,7 +954,7 @@ def test_validator_restart_records_nonblocking_commit_bound_stage_timings():
 
     assert "leadpoet.validator_restart_timing.v1" in script
     assert 'record_validator_restart_timing "invoked"' in script
-    assert 'record_validator_restart_timing "release_ready"' in script
+    assert 'record_validator_restart_timing "local_release_ready"' in script
     assert (
         'record_validator_restart_timing "pre_shutdown_checks_complete"'
         in script

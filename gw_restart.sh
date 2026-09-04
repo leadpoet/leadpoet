@@ -236,12 +236,14 @@ GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
 RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
+GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/validator-v2-release-manifest.json}"
 GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
 GATEWAY_V2_RELEASE_REQUIREMENTS="${GATEWAY_V2_RELEASE_REQUIREMENTS:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-requirements.json}"
 # Release acquisition happens while the existing gateway is still serving.
 # Keep candidate evidence restart-scoped so its fail-closed verifier remains
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
+GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-validator-release.json}"
 GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
 GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="${GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-requirements.json}"
 # The paired restart controller installs the validator's independently selected
@@ -250,8 +252,6 @@ GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="${GATEWAY_PREPARED_V2_RELEASE_REQUIREM
 GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="${GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS:-}"
 GATEWAY_COUNTERPART_RELEASE_LINEAGE="${GATEWAY_COUNTERPART_RELEASE_LINEAGE:-}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
-GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
-GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
 GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="${RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET:-$GATEWAY_V2_RELEASE_BUCKET}"
 GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
@@ -287,16 +287,16 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   LEADPOET_DOCKER_OPERATION_LOCK_FILE
   GATEWAY_V2_CONFIG_DIR
   GATEWAY_V2_RELEASE_MANIFEST
+  GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST
   GATEWAY_V2_RELEASE_LINEAGE
   GATEWAY_V2_RELEASE_REQUIREMENTS
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST
+  GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE
   GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS
   GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS
   GATEWAY_COUNTERPART_RELEASE_LINEAGE
   GATEWAY_V2_ARTIFACT_POLICY
-  GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST
-  GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT
   VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
   GATEWAY_V2_RELEASE_PREFIX
@@ -846,9 +846,11 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_RELEASE_ARCHIVE_ROOT="$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
     GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
     GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
+    GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
     GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
     GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
     GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
     GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
@@ -856,8 +858,6 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
     GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
-    GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
-    GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
     RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
     GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
     VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -1401,9 +1401,8 @@ report_gateway_v2_bootstrap_pending() {
   local missing=() path
   for path in \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     "$GATEWAY_V2_ARTIFACT_POLICY" \
-    "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
-    "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
     "${V2_CREDENTIAL_ENVELOPES[@]}"; do
     [ -e "$path" ] || missing+=("$path")
   done
@@ -1418,10 +1417,7 @@ print(json.dumps({
     "status": "bootstrap_pending",
     "production_shutdown_started": False,
     "missing_paths": sys.argv[1:],
-    "required_external_approvals": [
-        "offline_acceptance_corpus_signature",
-        "independent_gateway_and_validator_parent_build_evidence",
-    ],
+    "required_external_approvals": [],
 }, sort_keys=True, indent=2))
 PY
   echo "Gateway remains untouched. Complete the V2 bootstrap ceremony, then rerun this restart." >&2
@@ -1847,9 +1843,11 @@ ensure_activated_gateway_release_lineage() {
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - \
     "$GATEWAY_DEPLOY_SHA" \
     "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
     "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
     "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
     "$GATEWAY_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
     "$GATEWAY_V2_RELEASE_REQUIREMENTS" \
     "$GATEWAY_V2_RELEASE_LINEAGE" <<'PY'
 import json
@@ -1865,13 +1863,16 @@ from gateway.tee.active_release_requirements_v2 import (
 from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from leadpoet_canonical.attested_v2 import canonical_json
+from validator_tee.host.release_v2 import validate_validator_release_manifest
 
 (
     expected_commit,
     prepared_manifest_path,
+    prepared_validator_manifest_path,
     prepared_requirements_path,
     prepared_lineage_path,
     manifest_output_path,
+    validator_manifest_output_path,
     requirements_output_path,
     lineage_output_path,
 ) = sys.argv[1:]
@@ -1903,6 +1904,9 @@ def read_document(path_value: str, label: str) -> tuple[bytes, dict]:
 raw_manifest, manifest_value = read_document(
     prepared_manifest_path, "prepared gateway release manifest"
 )
+raw_validator_manifest, validator_manifest_value = read_document(
+    prepared_validator_manifest_path, "prepared validator release manifest"
+)
 raw_requirements, requirements_value = read_document(
     prepared_requirements_path, "prepared active release requirements"
 )
@@ -1910,6 +1914,7 @@ raw_lineage, lineage_value = read_document(
     prepared_lineage_path, "prepared compact release lineage"
 )
 manifest = validate_release_manifest(manifest_value)
+validator_manifest = validate_validator_release_manifest(validator_manifest_value)
 requirements = validate_active_release_requirements_v2(requirements_value)
 lineage = validate_compact_release_lineage_v2(
     lineage_value,
@@ -1918,6 +1923,8 @@ lineage = validate_compact_release_lineage_v2(
 )
 if manifest.get("commit_sha") != expected_commit:
     raise SystemExit("prepared gateway release manifest commit differs")
+if validator_manifest["release"].get("commit_sha") != expected_commit:
+    raise SystemExit("prepared validator release manifest commit differs")
 if requirements.get("candidate_commit_sha") != expected_commit:
     raise SystemExit("prepared active release requirements commit differs")
 if set(lineage["releases"]) != set(requirements["required_commits"]):
@@ -1929,6 +1936,12 @@ documents = (
         manifest,
         Path(manifest_output_path),
         "prepared gateway release manifest",
+    ),
+    (
+        raw_validator_manifest,
+        validator_manifest,
+        Path(validator_manifest_output_path),
+        "prepared validator release manifest",
     ),
     (
         raw_requirements,
@@ -2009,10 +2022,12 @@ enforce_deployment_environment() {
   export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
+  export GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST
   export GATEWAY_V2_RELEASE_REQUIREMENTS
   export GATEWAY_V2_ARTIFACT_POLICY
-  export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
+  export LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
+  export LEADPOET_LOCAL_VALIDATOR_RELEASE
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
   export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"
@@ -2535,9 +2550,6 @@ if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
       || [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$GATEWAY_RESTART_LOCK_FILE" ] \
       || [ "$bootstrap_script_root" != "$bootstrap_candidate_root" ] \
       || [ -e "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" ] \
-      || [ "$GATEWAY_V2_RELEASE_PREFIX" != "attested-v2/releases" ] \
-      || [ "$GATEWAY_V2_RELEASE_BUCKET" != "leadpoet-attested-v2-artifacts-493765492819" ] \
-      || [ "$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" != "leadpoet-attested-v2-artifacts-493765492819" ] \
       || [ "$LEADPOET_GATEWAY_ENV_SECRET_ID" != "leadpoet/prod/gateway/env" ] \
       || [ "${AWS_REGION:-us-east-1}" != "us-east-1" ] \
       || [ "${AWS_DEFAULT_REGION:-us-east-1}" != "us-east-1" ] \
@@ -2641,8 +2653,6 @@ restart_only_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_EXACT_COMMIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
@@ -2773,8 +2783,6 @@ skip_keys = {
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
     "GATEWAY_V2_KMS_KEY_ID",
@@ -2935,8 +2943,6 @@ skip_keys = {
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_NONCE",
     "GATEWAY_PAIRED_DESTRUCTIVE_HANDOFF_TIMEOUT_SECONDS",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST",
-    "GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT",
     "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
     "GATEWAY_V2_KMS_KEY_ID",
@@ -3225,44 +3231,48 @@ if ! start_gateway_offline_artifact_prepare; then
   exit 75
 fi
 
-echo "Acquiring the independently built V2 release channel"
-GATEWAY_DEPLOY_STAGE="v2_release_acquisition"
-export GATEWAY_DEPLOY_STAGE
-record_gateway_restart_timing "release_wait_started"
-V2_RELEASE_READY=0
-for attempt in $(seq 1 300); do
-  GATEWAY_RELEASE_ATTEMPTS_USED="$attempt"
-  if ! follow_superseding_gateway_release; then
-    echo "Approved release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
-    sleep 12
-    continue
-  fi
-  if run_prepared_gateway_module gateway.tee.release_channel_v2 \
-      --ensure \
-      --expected-commit "$PREPARED_GATEWAY_SHA" \
-      --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
-      --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
-    if follow_superseding_gateway_release; then
-      V2_RELEASE_READY=1
-      break
-    fi
-  fi
-  echo "Approved V2 release is not published yet; waiting inside the valid restart invocation (${attempt}/300)"
-  sleep 12
-done
-if [ "$V2_RELEASE_READY" != "1" ]; then
-  echo "ERROR: independently approved V2 release is not published for $PREPARED_GATEWAY_SHA" >&2
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
-record_gateway_restart_timing "release_ready"
 if ! wait_for_gateway_offline_artifact_prepare; then
   GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
   export GATEWAY_DEPLOY_STAGE
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
+
+echo "Building the exact local gateway and validator runtime identities"
+GATEWAY_DEPLOY_STAGE="local_release_build"
+export GATEWAY_DEPLOY_STAGE
+if ! follow_superseding_gateway_release; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+    GATEWAY_V2_BUILD_WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}" \
+    VALIDATOR_V2_BUILD_WORK_ROOT="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}" \
+    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh" \
+      --repository "$LEADPOET_REPO_ROOT" \
+      --revision "$PREPARED_GATEWAY_SHA" \
+      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+      --validator-output "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"; then
+  echo "ERROR: exact local runtime identity build failed" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
+export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
+export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST"
+if [ -e "$GATEWAY_V2_RELEASE_LINEAGE" ] \
+    || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
+  export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"
+else
+  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+fi
+if ! follow_superseding_gateway_release; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+record_gateway_restart_timing "local_release_ready"
 
 echo "Preparing commit-bound KMS credential envelopes"
 GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
@@ -3442,8 +3452,6 @@ echo "Validating the prepared V2 release before production shutdown"
       --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
       --config-dir "$GATEWAY_V2_CONFIG_DIR" \
       --parent-env-file "$ENV_CLONE" \
-      --acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
-      --acceptance-corpus-root "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
       --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
       "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
@@ -3566,9 +3574,7 @@ pkill -9 -f "python3 main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
-pkill -9 -f "gateway/research_lab/worker_process.py" 2>/dev/null || true
 pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
-pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
 pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
@@ -3666,9 +3672,11 @@ exec env \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
+  GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST" \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_REQUIREMENTS="$GATEWAY_V2_RELEASE_REQUIREMENTS" \
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+  GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
   GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS="$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \
   GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS="$GATEWAY_VALIDATOR_RELEASE_REQUIREMENTS" \
@@ -3708,13 +3716,16 @@ export GATEWAY_DEPLOY_STAGE
   --activated-root "$LEADPOET_REPO_ROOT"
 enforce_deployment_environment
 
-echo "Revalidating the exact approved V2 release and bounded lineage after activation"
+echo "Revalidating the exact local V2 build identity after activation"
 GATEWAY_DEPLOY_STAGE="v2_release_lineage_revalidation"
 export GATEWAY_DEPLOY_STAGE
 if ! ensure_activated_gateway_release_lineage; then
-  echo "ERROR: activated gateway V2 release lineage is unavailable or invalid" >&2
+  echo "ERROR: activated gateway V2 build identity is unavailable or invalid" >&2
   exit 1
 fi
+export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$GATEWAY_DEPLOY_SHA"
+export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_V2_RELEASE_MANIFEST"
+export LEADPOET_LOCAL_VALIDATOR_RELEASE="$GATEWAY_V2_VALIDATOR_RELEASE_MANIFEST"
 
 echo "Recording exact gateway Git build provenance"
 GATEWAY_DEPLOY_STAGE="build_provenance"
@@ -3784,9 +3795,6 @@ GATEWAY_DEPLOY_STAGE="runtime_env_and_ecr"
 export GATEWAY_DEPLOY_STAGE
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
-export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="alias/leadpoet-research-lab-artifact-signing"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 ACTUAL_AWS_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
@@ -3807,14 +3815,14 @@ sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 record_gateway_restart_timing "attested_runtime_staged"
 
-# Preflight: verify the worker import graph against the freshly staged
-# attested runtime BEFORE building the enclave or relaunching anything.
+# Preflight: verify the runtime import graph against the freshly staged
+# runtime before building the enclave or relaunching anything.
 # A gateway/ tree that imports names the staged top-level packages do not
 # export would otherwise crash-loop every worker on its next respawn
 # (2026-07-09 incident: config.py imported a constant an unstaged
 # _attested_runtime/leadpoet_verifier/economics.py did not have).
-echo "Preflight: importing host workers from the canonical Git checkout"
-GATEWAY_DEPLOY_STAGE="worker_import_preflight"
+echo "Preflight: importing gateway dependencies from the canonical Git checkout"
+GATEWAY_DEPLOY_STAGE="dependency_import_preflight"
 export GATEWAY_DEPLOY_STAGE
 if ! PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PREFLIGHT_HOST'
 import importlib
@@ -3829,9 +3837,7 @@ if str(bt.__version__) != "10.5.0":
     raise RuntimeError(f"gateway Bittensor SDK mismatch: {bt.__version__}")
 repo_root = Path(os.environ["LEADPOET_REPO_ROOT"]).resolve()
 modules = (
-    "gateway.research_lab.worker_process",
     "gateway.research_lab.config",
-    "research_lab.code_editing",
     "leadpoet_verifier.economics",
     "leadpoet_canonical",
     "qualification",
@@ -3846,7 +3852,7 @@ for module_name in modules:
 print("canonical host imports OK")
 PREFLIGHT_HOST
 then
-  echo "ERROR: host worker import preflight FAILED against canonical Git checkout." >&2
+  echo "ERROR: gateway dependency import preflight failed against canonical Git checkout." >&2
   exit 1
 fi
 
@@ -3863,10 +3869,8 @@ attested_root = (gateway_root / "_attested_runtime").resolve()
 sys.path = [str(attested_root), str(repo_root)] + [
     path for path in sys.path if path not in {str(attested_root), str(repo_root)}
 ]
-importlib.import_module("gateway.research_lab.code_loop_engine")
 importlib.import_module("gateway.research_lab.config")
 for module_name in (
-    "research_lab.code_editing",
     "leadpoet_verifier.economics",
     "leadpoet_canonical",
     "qualification",
@@ -3886,7 +3890,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
   record_gateway_restart_timing "gateway_role_eifs_built"
   echo "Cleaning temporary role Docker images/layers before gateway relaunch"
-  for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
+  for role in gateway_coordinator gateway_scoring; do
     sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
   done
   sudo docker builder prune -af 2>/dev/null || true
@@ -3963,18 +3967,18 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_DEPLOY_STAGE="v2_runtime_bootstrap"
   export GATEWAY_DEPLOY_STAGE
   test -s "$GATEWAY_V2_RELEASE_MANIFEST" || {
-    echo "ERROR: approved V2 release manifest is missing" >&2
+    echo "ERROR: local V2 build identity is missing" >&2
     exit 1
   }
   test -s "$GATEWAY_V2_RELEASE_LINEAGE" || {
-    echo "ERROR: approved V2 release lineage is missing" >&2
+    echo "ERROR: local V2 build lineage is missing" >&2
     exit 1
   }
   test -s "$GATEWAY_V2_ARTIFACT_POLICY" || {
     echo "ERROR: encrypted V2 artifact policy is missing" >&2
     exit 1
   }
-  echo "Verifying encrypted TLS proxy profiles for all V2 workers"
+  echo "Verifying the encrypted TLS proxy profile for the V2 scoring worker"
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_profiles_v2 \
     --config-dir "$GATEWAY_V2_CONFIG_DIR" \
     --require-worker-proxies
@@ -4108,9 +4112,6 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
-export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
-export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="alias/leadpoet-research-lab-artifact-signing"
 unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 import hashlib
-import io
 import os
 from pathlib import Path
 import stat
@@ -21,8 +19,6 @@ INITIAL_VERSION = "11111111-1111-4111-8111-111111111111"
 CONCURRENT_VERSION = "22222222-2222-4222-8222-222222222222"
 CANDIDATE_COMMIT = "a" * 40
 TREE_HASH = "b" * 40
-RELEASE_HASH = "sha256:" + "c" * 64
-CHANNEL_HASH = "sha256:" + "d" * 64
 BLOB_HASH = "e" * 64
 CONTROLLER_COMMIT = next(iter(maintenance.SUPPORTED_N_MINUS_ONE_CONTROLLER_COMMITS))
 REAL_REPOSITORY = Path(__file__).resolve().parents[1]
@@ -31,9 +27,6 @@ SEQUENTIAL_CANDIDATE_COMMIT = "d72e475381e127aa209be33deed763d44a8289e6"
 RECOVERY_VERSION = "33333333-3333-4333-8333-333333333333"
 PREVIOUS_VERSION = "44444444-4444-4444-8444-444444444444"
 PENDING_VERSION = "55555555-5555-4555-8555-555555555555"
-OBJECT_VERSION = "version-identity-0000000000000001"
-OBJECT_SHA = "sha256:" + "f" * 64
-RETAIN_UNTIL = "2099-01-01T00:00:00Z"
 REAL_REQUIRE_HYDRATED_ENVIRONMENT_COMMITMENT = (
     maintenance._require_hydrated_environment_commitment
 )
@@ -220,116 +213,6 @@ def test_prepare_still_rejects_explicit_static_aws_authority(
         match="authority differs from production",
     ):
         _prepare(tmp_path, monkeypatch, client)
-
-
-def _locked_release_evidence() -> dict[str, object]:
-    return {
-        "channel": {
-            "commit_sha": CANDIDATE_COMMIT,
-            "channel_hash": CHANNEL_HASH,
-            "gateway_release_manifest": {
-                "commit_sha": CANDIDATE_COMMIT,
-                "release_hash": RELEASE_HASH,
-            },
-        },
-        "object_version_id": OBJECT_VERSION,
-        "object_sha256": OBJECT_SHA,
-        "object_lock_mode": "COMPLIANCE",
-        "object_retain_until": RETAIN_UNTIL,
-    }
-
-
-class FakeLockedReleaseS3:
-    def __init__(self):
-        self.payload = json.dumps(
-            {"commit_sha": CANDIDATE_COMMIT, "marker": "locked"},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("ascii")
-        self.version_id = OBJECT_VERSION
-        self.etag = '"exact-etag"'
-        self.retain_until = datetime.now(timezone.utc) + timedelta(days=30)
-        self.versions = 1
-        self.delete_markers = 0
-        self.latest = True
-        self.get_etag = self.etag
-        self.get_retain_until = self.retain_until
-        self.unversioned_heads = 0
-        self.replace_after_get = False
-        self.calls: list[tuple[str, dict[str, object]]] = []
-        self.last_body: io.BytesIO | None = None
-
-    def _metadata(
-        self,
-        *,
-        version_id: str | None = None,
-        etag: str | None = None,
-        retain_until: datetime | None = None,
-    ):
-        return {
-            "VersionId": version_id or self.version_id,
-            "ObjectLockMode": "COMPLIANCE",
-            "ObjectLockRetainUntilDate": retain_until or self.retain_until,
-            "ETag": etag or self.etag,
-            "ContentLength": len(self.payload),
-        }
-
-    def list_object_versions(self, **kwargs):
-        self.calls.append(("list", dict(kwargs)))
-        key = maintenance.release_channel_key(
-            CANDIDATE_COMMIT,
-            prefix=maintenance.DEFAULT_RELEASE_PREFIX,
-        )
-        versions = [
-            {
-                "Key": key,
-                "VersionId": self.version_id,
-                "ETag": self.etag,
-                "Size": len(self.payload),
-                "IsLatest": self.latest,
-            }
-            for _index in range(self.versions)
-        ]
-        return {
-            "IsTruncated": False,
-            "Versions": versions
-            + [
-                {
-                    "Key": key + ".unrelated",
-                    "VersionId": "ignored",
-                    "ETag": '"ignored"',
-                    "Size": 2,
-                    "IsLatest": True,
-                }
-            ],
-            "DeleteMarkers": [
-                {
-                    "Key": key,
-                    "VersionId": f"delete-{index}",
-                    "IsLatest": False,
-                }
-                for index in range(self.delete_markers)
-            ],
-        }
-
-    def head_object(self, **kwargs):
-        self.calls.append(("head", dict(kwargs)))
-        if "VersionId" not in kwargs:
-            self.unversioned_heads += 1
-            if self.replace_after_get and self.unversioned_heads > 1:
-                return self._metadata(version_id="replacement-version")
-        return self._metadata()
-
-    def get_object(self, **kwargs):
-        self.calls.append(("get", dict(kwargs)))
-        self.last_body = io.BytesIO(self.payload)
-        return {
-            **self._metadata(
-                etag=self.get_etag,
-                retain_until=self.get_retain_until,
-            ),
-            "Body": self.last_body,
-        }
 
 
 def _installed_controller_fixture(
@@ -819,21 +702,6 @@ def _retry_reconciliation_helper() -> dict[str, object]:
     }
 
 
-def _release_evidence(
-    commit: str = CANDIDATE_COMMIT,
-    release_hash: str = RELEASE_HASH,
-) -> dict[str, object]:
-    evidence = _locked_release_evidence()
-    channel = dict(evidence["channel"])
-    gateway_release = dict(channel["gateway_release_manifest"])
-    channel["commit_sha"] = commit
-    gateway_release["commit_sha"] = commit
-    gateway_release["release_hash"] = release_hash
-    channel["gateway_release_manifest"] = gateway_release
-    evidence["channel"] = channel
-    return evidence
-
-
 def _prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -871,16 +739,6 @@ def _prepare(
         maintenance,
         "_live_gateway_restart_authority_commitment",
         lambda **_kwargs: live_process_commitment,
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _release_evidence(candidate_commit),
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "validate_release_manifest",
-        lambda value: dict(value),
     )
     monkeypatch.setattr(
         maintenance,
@@ -954,7 +812,6 @@ def _prepare(
         restart_invocation_id=invocation_id,
         recovery_journal_path=tmp_path / "private" / "transaction.json",
         secrets_client=client,
-        release_s3_client=object(),
     )
 
 
@@ -975,7 +832,7 @@ def test_prepare_changes_only_target_and_returns_redacted_invocation_proof(
     assert result["status"] == "prepared"
     assert proof["candidate_commit"] == CANDIDATE_COMMIT
     assert proof["candidate_tree_hash"] == TREE_HASH
-    assert proof["gateway_release_hash"] == RELEASE_HASH
+    assert "gateway_release_hash" not in proof
     assert proof["current_secret_version_id"] == client.current
     assert proof["current_document_commitment"].startswith("sha256:")
     assert proof["current_stage_topology_commitment"].startswith("sha256:")
@@ -1968,7 +1825,6 @@ def test_prepare_recovers_crashed_secret_transaction_and_remains_idempotent(
     ("name", "value"),
     [
         ("LEADPOET_GATEWAY_ENV_SECRET_ID", "another/secret"),
-        ("GATEWAY_V2_RELEASE_BUCKET", "another-bucket"),
         ("AWS_REGION", "us-west-2"),
         ("AWS_DEFAULT_REGION", "eu-west-1"),
     ],
@@ -2035,216 +1891,22 @@ def test_fresh_same_and_different_candidate_retries_accept_already_false_state(
     assert client.stages == after_first_stages
 
 
-def test_locked_release_fetch_pins_singleton_compliance_version_and_content(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    s3 = FakeLockedReleaseS3()
-    monkeypatch.setattr(
-        maintenance,
-        "validate_release_channel_v2",
-        lambda value, *, expected_commit: {
-            **value,
-            "commit_sha": expected_commit,
-        },
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_require_six_release_identities",
-        lambda _channel, *, expected_commit: None,
-    )
-
-    evidence = maintenance._fetch_locked_release_channel(
-        commit_sha=CANDIDATE_COMMIT,
-        s3_client=s3,
-    )
-
-    assert evidence["object_version_id"] == OBJECT_VERSION
-    assert evidence["object_sha256"] == (
-        "sha256:" + hashlib.sha256(s3.payload).hexdigest()
-    )
-    get_call = next(arguments for name, arguments in s3.calls if name == "get")
-    assert get_call["VersionId"] == OBJECT_VERSION
-    assert [name for name, _arguments in s3.calls].count("list") == 2
-    assert s3.last_body is not None and s3.last_body.closed
-
-
-def test_locked_release_fetch_closes_body_when_read_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class ExplodingBody(io.BytesIO):
-        def read(self, *_args, **_kwargs):
-            raise RuntimeError("read failed")
-
-    class ReadFailureS3(FakeLockedReleaseS3):
-        def get_object(self, **kwargs):
-            self.calls.append(("get", dict(kwargs)))
-            self.last_body = ExplodingBody(self.payload)
-            return {**self._metadata(), "Body": self.last_body}
-
-    s3 = ReadFailureS3()
-    monkeypatch.setattr(
-        maintenance,
-        "validate_release_channel_v2",
-        lambda value, *, expected_commit: value,
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_require_six_release_identities",
-        lambda _channel, *, expected_commit: None,
-    )
-
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="lock evidence is unavailable",
-    ):
-        maintenance._fetch_locked_release_channel(
-            commit_sha=CANDIDATE_COMMIT,
-            s3_client=s3,
-        )
-
-    assert s3.last_body is not None and s3.last_body.closed
-
-
-def test_locked_release_fetch_closes_body_when_get_metadata_is_invalid(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class InvalidMetadataS3(FakeLockedReleaseS3):
-        def get_object(self, **kwargs):
-            self.calls.append(("get", dict(kwargs)))
-            self.last_body = io.BytesIO(self.payload)
-            return {
-                **self._metadata(),
-                "ObjectLockMode": "GOVERNANCE",
-                "Body": self.last_body,
-            }
-
-    s3 = InvalidMetadataS3()
-    monkeypatch.setattr(
-        maintenance,
-        "validate_release_channel_v2",
-        lambda value, *, expected_commit: value,
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_require_six_release_identities",
-        lambda _channel, *, expected_commit: None,
-    )
-
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="lacks COMPLIANCE retention",
-    ):
-        maintenance._fetch_locked_release_channel(
-            commit_sha=CANDIDATE_COMMIT,
-            s3_client=s3,
-        )
-
-    assert s3.last_body is not None and s3.last_body.closed
-
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        ("replacement_history", "history is not a singleton"),
-        ("delete_marker", "history is not a singleton"),
-        ("expired_lock", "retention is not active"),
-        ("head_get_drift", "identities differ"),
-        ("retention_drift", "identities differ"),
-        ("latest_drift", "object version changed"),
-    ],
-)
-def test_locked_release_fetch_rejects_replacement_expiry_and_head_get_drift(
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-    message: str,
-):
-    s3 = FakeLockedReleaseS3()
-    if mutation == "replacement_history":
-        s3.versions = 2
-    elif mutation == "delete_marker":
-        s3.delete_markers = 1
-    elif mutation == "expired_lock":
-        s3.retain_until = datetime.now(timezone.utc) - timedelta(seconds=1)
-    elif mutation == "head_get_drift":
-        s3.get_etag = '"drifted-etag"'
-    elif mutation == "retention_drift":
-        s3.get_retain_until = s3.retain_until + timedelta(days=1)
-    elif mutation == "latest_drift":
-        s3.replace_after_get = True
-    monkeypatch.setattr(
-        maintenance,
-        "validate_release_channel_v2",
-        lambda value, *, expected_commit: value,
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_require_six_release_identities",
-        lambda _channel, *, expected_commit: None,
-    )
-
-    with pytest.raises(maintenance.GatewayMinerMaintenanceRestartError, match=message):
-        maintenance._fetch_locked_release_channel(
-            commit_sha=CANDIDATE_COMMIT,
-            s3_client=s3,
-        )
-
-
-def test_release_channel_requires_all_six_exact_commit_identities():
-    channel = {
-        "commit_sha": CANDIDATE_COMMIT,
-        "gateway_release_manifest": {
-            "commit_sha": CANDIDATE_COMMIT,
-            "roles": {
-                role: {"commit_sha": CANDIDATE_COMMIT}
-                for role in maintenance.ROLE_SPECS
-            },
-        },
-        "validator_release_manifest": {
-            "release": {"commit_sha": CANDIDATE_COMMIT},
-        },
-    }
-    maintenance._require_six_release_identities(
-        channel,
-        expected_commit=CANDIDATE_COMMIT,
-    )
-    first_role = next(iter(maintenance.ROLE_SPECS))
-    channel["gateway_release_manifest"]["roles"][first_role]["commit_sha"] = "9" * 40
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="identities differ",
-    ):
-        maintenance._require_six_release_identities(
-            channel,
-            expected_commit=CANDIDATE_COMMIT,
-        )
-
-
-def test_direct_restart_requires_durable_false_and_locked_release(
+def test_direct_restart_requires_durable_false_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
     client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
-    calls: list[str] = []
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: calls.append("locked") or _locked_release_evidence(),
-    )
 
     result = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         },
         secrets_client=client,
-        release_s3_client=object(),
     )
 
     assert result["status"] == "durable_false_verified"
     assert result["current_secret_version_id"] == INITIAL_VERSION
-    assert result["release_channel_object_version_id"] == OBJECT_VERSION
-    assert calls == ["locked"]
 
 
 def test_direct_restart_acquires_guard_for_exact_restart_invocation(
@@ -2275,22 +1937,14 @@ def test_direct_restart_acquires_guard_for_exact_restart_invocation(
 
     monkeypatch.setattr(maintenance, "_pause_source_add_for_restart", acquire)
     monkeypatch.setattr(maintenance, "_require_source_add_quiescent", quiescent)
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _locked_release_evidence(),
-    )
-
     result = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             "GATEWAY_RESTART_INVOCATION_ID": invocation_id,
         },
         secrets_client=client,
-        release_s3_client=object(),
     )
 
     assert result["status"] == "durable_false_verified"
@@ -2403,16 +2057,9 @@ def test_receiptless_second_restart_binds_actual_hydrated_cache_bytes(
         "_require_hydrated_environment_commitment",
         REAL_REQUIRE_HYDRATED_ENVIRONMENT_COMMITMENT,
     )
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _locked_release_evidence(),
-    )
-
     result = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
@@ -2420,7 +2067,6 @@ def test_receiptless_second_restart_binds_actual_hydrated_cache_bytes(
             "AWS_DEFAULT_REGION": "us-east-1",
         },
         secrets_client=client,
-        release_s3_client=object(),
         hydrated_environment_path=hydrated,
     )
 
@@ -2439,7 +2085,6 @@ def test_receiptless_second_restart_binds_actual_hydrated_cache_bytes(
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
                 "LEADPOET_AWS_INSTANCE_ROLE_ONLY": "true",
@@ -2447,7 +2092,6 @@ def test_receiptless_second_restart_binds_actual_hydrated_cache_bytes(
                 "AWS_DEFAULT_REGION": "us-east-1",
             },
             secrets_client=client,
-            release_s3_client=object(),
             hydrated_environment_path=hydrated,
         )
 
@@ -2468,21 +2112,14 @@ def test_direct_restart_never_bypasses_false_state(
     client = FakeSecretsClient(
         f"RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED={secret_value}\n"
     )
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _locked_release_evidence(),
-    )
     with pytest.raises(maintenance.GatewayMinerMaintenanceRestartError, match=message):
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": parent_value,
             },
             secrets_client=client,
-            release_s3_client=object(),
         )
 
 
@@ -2747,10 +2384,8 @@ def test_candidate_preflight_accepts_only_proof_bound_exact_n_minus_one_runtime(
     result = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment=_verification_environment(),
         secrets_client=client,
-        release_s3_client=object(),
     )
 
     assert result["status"] == "invocation_verified"
@@ -2821,14 +2456,12 @@ def test_candidate_preflight_rejects_n_minus_one_runtime_near_misses(
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment=_verification_environment(),
             secrets_client=client,
-            release_s3_client=object(),
         )
 
 
-def test_candidate_preflight_binds_sealed_proof_to_exact_secret_and_channel(
+def test_candidate_preflight_binds_sealed_proof_to_exact_secret_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2850,10 +2483,8 @@ def test_candidate_preflight_binds_sealed_proof_to_exact_secret_and_channel(
     verified = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment=_verification_environment(),
         secrets_client=client,
-        release_s3_client=object(),
     )
     assert verified["status"] == "invocation_verified"
     assert verified["proof_hash"] == proof["proof_hash"]
@@ -2866,10 +2497,8 @@ def test_candidate_preflight_binds_sealed_proof_to_exact_secret_and_channel(
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment=_verification_environment(),
             secrets_client=client,
-            release_s3_client=object(),
         )
 
 @pytest.mark.parametrize(
@@ -2877,7 +2506,6 @@ def test_candidate_preflight_binds_sealed_proof_to_exact_secret_and_channel(
     [
         ("deploy_commit", "f" * 40),
         ("candidate_tree_hash", "f" * 40),
-        ("gateway_release_hash", "sha256:" + "f" * 64),
     ],
 )
 def test_candidate_preflight_rejects_proof_candidate_mismatch(
@@ -2902,10 +2530,8 @@ def test_candidate_preflight_rejects_proof_candidate_mismatch(
     arguments = {
         "deploy_commit": CANDIDATE_COMMIT,
         "candidate_tree_hash": TREE_HASH,
-        "gateway_release_hash": RELEASE_HASH,
         "parent_environment": _verification_environment(),
         "secrets_client": client,
-        "release_s3_client": object(),
     }
     arguments[field] = value
 
@@ -2916,7 +2542,7 @@ def test_candidate_preflight_rejects_proof_candidate_mismatch(
         maintenance.verify_gateway_miner_maintenance_state(**arguments)
 
 
-def test_invocation_proof_rejects_topology_and_locked_channel_drift(
+def test_invocation_proof_rejects_durable_secret_topology_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2942,33 +2568,9 @@ def test_invocation_proof_rejects_topology_and_locked_channel_drift(
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment=_verification_environment(),
             secrets_client=client,
-            release_s3_client=object(),
         )
-
-    client.stages[client.current].remove("UNEXPECTED_LABEL")
-    drifted = _locked_release_evidence()
-    drifted["object_version_id"] = "replacement-version-identity-000001"
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: drifted,
-    )
-    with pytest.raises(
-        maintenance.GatewayMinerMaintenanceRestartError,
-        match="immutable release differs",
-    ):
-        maintenance.verify_gateway_miner_maintenance_state(
-            deploy_commit=CANDIDATE_COMMIT,
-            candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
-            parent_environment=_verification_environment(),
-            secrets_client=client,
-            release_s3_client=object(),
-        )
-
 
 def test_invocation_proof_rejects_false_document_hydration_aba(
     tmp_path: Path,
@@ -3013,13 +2615,11 @@ def test_invocation_proof_rejects_false_document_hydration_aba(
         maintenance.verify_gateway_miner_maintenance_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             parent_environment={
                 **_verification_environment(),
                 "GATEWAY_RESTART_INVOCATION_ID": "gateway-proof-hydration-aba",
             },
             secrets_client=client,
-            release_s3_client=object(),
             hydrated_environment_path=hydrated_path,
         )
 
@@ -3073,13 +2673,11 @@ def test_identical_document_alternate_version_hydration_equivalence_passes(
     result = maintenance.verify_gateway_miner_maintenance_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         parent_environment={
             **_verification_environment(),
             "GATEWAY_RESTART_INVOCATION_ID": invocation_id,
         },
         secrets_client=client,
-        release_s3_client=object(),
         hydrated_environment_path=hydrated_path,
     )
 
@@ -3093,11 +2691,6 @@ def test_runtime_state_requires_live_boolean_exact_false(
     runtime_value,
 ):
     client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _locked_release_evidence(),
-    )
     with pytest.raises(
         maintenance.GatewayMinerMaintenanceRestartError,
         match="running gateway has miner submissions enabled",
@@ -3105,7 +2698,6 @@ def test_runtime_state_requires_live_boolean_exact_false(
         maintenance.verify_gateway_miner_maintenance_runtime_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             },
@@ -3114,26 +2706,19 @@ def test_runtime_state_requires_live_boolean_exact_false(
                 **_closed_source_add_runtime_status(),
             },
             secrets_client=client,
-            release_s3_client=object(),
         )
 
 
-def test_runtime_state_rechecks_live_false_durable_state_and_channel(
+def test_runtime_state_rechecks_live_and_durable_false_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
     client = FakeSecretsClient("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED=false\n")
-    monkeypatch.setattr(
-        maintenance,
-        "_fetch_locked_release_channel",
-        lambda **_kwargs: _locked_release_evidence(),
-    )
     monkeypatch.setattr(
         maintenance, "_fetch_runtime_status", _active_source_add_runtime_status
     )
     result = maintenance.verify_gateway_miner_maintenance_runtime_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         runtime_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
         },
@@ -3142,7 +2727,6 @@ def test_runtime_state_rechecks_live_false_durable_state_and_channel(
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
-        release_s3_client=object(),
     )
     assert result["runtime_status"] == "disabled"
     assert result["status"] == "durable_false_verified"
@@ -3198,7 +2782,6 @@ def test_runtime_releases_guard_only_after_candidate_state_verifies(
     result = maintenance.verify_gateway_miner_maintenance_runtime_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         runtime_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
@@ -3208,7 +2791,6 @@ def test_runtime_releases_guard_only_after_candidate_state_verifies(
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
-        release_s3_client=object(),
     )
 
     assert calls == ["candidate_state", "release", "restored_readback"]
@@ -3251,7 +2833,6 @@ def test_runtime_restores_a_previously_paused_source_add_state(
     result = maintenance.verify_gateway_miner_maintenance_runtime_state(
         deploy_commit=CANDIDATE_COMMIT,
         candidate_tree_hash=TREE_HASH,
-        gateway_release_hash=RELEASE_HASH,
         runtime_environment={
             "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
@@ -3261,7 +2842,6 @@ def test_runtime_restores_a_previously_paused_source_add_state(
             **_closed_source_add_runtime_status(),
         },
         secrets_client=client,
-        release_s3_client=object(),
     )
 
     assert result["source_add_restart_guard_status"] == (
@@ -3302,7 +2882,6 @@ def test_runtime_restoration_failure_forces_source_add_back_to_paused(
         maintenance.verify_gateway_miner_maintenance_runtime_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
                 "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
@@ -3312,7 +2891,6 @@ def test_runtime_restoration_failure_forces_source_add_back_to_paused(
                 **_closed_source_add_runtime_status(),
             },
             secrets_client=client,
-            release_s3_client=object(),
         )
 
     assert len(forced) == 1
@@ -3356,7 +2934,6 @@ def test_runtime_secret_read_failure_after_release_forces_source_add_paused(
         maintenance.verify_gateway_miner_maintenance_runtime_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
                 "GATEWAY_RESTART_INVOCATION_ID": DEFAULT_RESTART_INVOCATION_ID,
@@ -3366,7 +2943,6 @@ def test_runtime_secret_read_failure_after_release_forces_source_add_paused(
                 **_closed_source_add_runtime_status(),
             },
             secrets_client=client,
-            release_s3_client=object(),
         )
 
     assert len(forced) == 1
@@ -3458,13 +3034,11 @@ def test_candidate_runtime_rejects_missing_source_add_intake_field(
         maintenance.verify_gateway_miner_maintenance_runtime_state(
             deploy_commit=CANDIDATE_COMMIT,
             candidate_tree_hash=TREE_HASH,
-            gateway_release_hash=RELEASE_HASH,
             runtime_environment={
                 "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": "false",
             },
             runtime_status=status,
             secrets_client=object(),
-            release_s3_client=object(),
         )
 
     assert state_verification_called is False

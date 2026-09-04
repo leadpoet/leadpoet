@@ -1138,37 +1138,48 @@ else
   VALIDATOR_USE_CAPTURED_RESTART_START=1
 fi
 
-echo "Acquiring the independently built V2 release channel"
-VALIDATOR_DEPLOY_STAGE="release_acquisition"
-VALIDATOR_V2_RELEASE_READY=0
-for attempt in $(seq 1 300); do
-  VALIDATOR_RELEASE_ATTEMPTS_USED="$attempt"
-  if ! follow_superseding_validator_release; then
-    echo "Approved validator release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
-    sleep 12
-    continue
-  fi
-  if python3 -m gateway.tee.release_channel_v2 \
-      --ensure \
-      --expected-commit "$VALIDATOR_DEPLOY_SHA" \
-      --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
-      --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
-      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
-    if follow_superseding_validator_release; then
-      VALIDATOR_V2_RELEASE_READY=1
-      break
-    fi
-  fi
-  echo "Approved V2 release is not published yet; waiting inside the valid validator restart invocation (${attempt}/300)"
-  sleep 12
-done
-if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]; then
-  echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
+echo "Preparing exact local build inputs before production shutdown"
+VALIDATOR_DEPLOY_STAGE="local_release_inputs"
+export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT
+if ! bash "$VALIDATOR_ROOT/gateway/tee/prepare_offline_artifacts_v2.sh"; then
+  echo "ERROR: exact local build inputs are unavailable" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
-record_validator_restart_timing "release_ready"
+if ! follow_superseding_validator_release; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+echo "Building the exact local gateway and validator runtime identities"
+VALIDATOR_DEPLOY_STAGE="local_release_build"
+if ! PYTHONPATH="$VALIDATOR_ROOT" \
+    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    bash "$VALIDATOR_ROOT/gateway/tee/build_local_release_v2.sh" \
+      --repository "$VALIDATOR_ROOT" \
+      --revision "$VALIDATOR_DEPLOY_SHA" \
+      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+  echo "ERROR: exact local runtime identity build failed" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$VALIDATOR_DEPLOY_SHA"
+export LEADPOET_LOCAL_GATEWAY_RELEASE="$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST"
+export LEADPOET_LOCAL_VALIDATOR_RELEASE="$VALIDATOR_V2_RELEASE_MANIFEST"
+if [ -e "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ] \
+    || [ -L "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
+  export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE"
+else
+  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+fi
+if ! follow_superseding_validator_release; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+record_validator_restart_timing "local_release_ready"
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
@@ -1189,7 +1200,6 @@ print(json.dumps({
     "production_shutdown_started": False,
     "missing_paths": sys.argv[1:],
     "required_external_approvals": [
-        "independent_gateway_and_validator_parent_build_evidence",
         "verified_validator_hotkey_envelope_and_offline_custody",
     ],
 }, sort_keys=True, indent=2))

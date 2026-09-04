@@ -194,11 +194,8 @@ def test_release_verifier_requires_all_worker_and_provider_profiles(tmp_path):
     result = verify_required_worker_proxy_profiles_v2(config_dir=tmp_path)
 
     assert result["status"] == "ready"
-    assert result["profile_count"] == 10
-    assert result["worker_counts"] == {
-        "gateway_autoresearch": 3,
-        "gateway_scoring": 7,
-    }
+    assert result["profile_count"] == 7
+    assert result["worker_counts"] == {"gateway_scoring": 7}
 
 
 def test_release_verifier_rejects_noncontiguous_worker_profiles(tmp_path):

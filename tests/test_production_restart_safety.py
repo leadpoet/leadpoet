@@ -354,7 +354,7 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
         'echo "Stopping existing gateway and Research Lab worker processes"'
     )
     gateway_release = gateway.index(
-        "run_prepared_gateway_module gateway.tee.release_channel_v2",
+        "gateway/tee/build_local_release_v2.sh",
         gateway_gate,
     )
     validator_gate = validator.index("Leadpoet.utils.restart_epoch_gate")

@@ -74,7 +74,7 @@ def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     assert "--commit conflicts with GATEWAY_DEPLOY_COMMIT" in conflict.stderr
 
 
-def test_unpinned_gateway_release_wait_follows_new_main_before_shutdown() -> None:
+def test_unpinned_gateway_local_build_follows_new_main_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_gateway_release() {")
     follow = script[start : script.index("start_gateway_ancestry_checkpoint_bootstrap() {", start)]
@@ -92,12 +92,17 @@ def test_unpinned_gateway_release_wait_follows_new_main_before_shutdown() -> Non
         'bash "$superseding_tree/gw_restart.sh"'
     )
 
-    release_start = script.index('echo "Acquiring the independently built V2 release channel"')
-    release_loop = script[script.index("for attempt in $(seq 1 300); do", release_start) :]
-    release_loop = release_loop[: release_loop.index("done")]
-    assert release_loop.count("follow_superseding_gateway_release") == 2
-    assert release_loop.index("follow_superseding_gateway_release") < release_loop.index(
-        "gateway.tee.release_channel_v2"
+    release_start = script.index(
+        'echo "Building the exact local gateway and validator runtime identities"'
+    )
+    release_build = script[
+        release_start : script.index(
+            'record_gateway_restart_timing "local_release_ready"', release_start
+        )
+    ]
+    assert release_build.count("follow_superseding_gateway_release") == 2
+    assert release_build.index("follow_superseding_gateway_release") < (
+        release_build.index("gateway/tee/build_local_release_v2.sh")
     )
     assert script.index("follow_superseding_gateway_release") < script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'
@@ -1034,8 +1039,8 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     materialize = script.index(
         'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
     )
-    release_channel = script.index(
-        'run_prepared_gateway_module gateway.tee.release_channel_v2'
+    local_release = script.index(
+        'bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh"'
     )
     restart_window = script.index(
         'echo "Capturing the official subnet restart window before release acquisition"'
@@ -1053,13 +1058,13 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         "if ! start_gateway_offline_artifact_prepare; then",
         artifact_prepare,
     )
-    release_ready = script.index(
-        'record_gateway_restart_timing "release_ready"',
-        release_channel,
-    )
     artifact_join = script.index(
         "if ! wait_for_gateway_offline_artifact_prepare; then",
-        release_ready,
+        artifact_start,
+    )
+    release_ready = script.index(
+        'record_gateway_restart_timing "local_release_ready"',
+        local_release,
     )
     preflight = script.index(
         'echo "Validating the prepared V2 release before production shutdown"'
@@ -1086,9 +1091,9 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         < checkpoint_prepare
         < artifact_prepare
         < artifact_start
-        < release_channel
-        < release_ready
         < artifact_join
+        < local_release
+        < release_ready
         < credential_envelopes
         < dependency_preflight
         < safe_frontier
@@ -1102,7 +1107,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         script.index(
             'git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"'
         )
-        < release_channel
+        < local_release
     )
     assert (
         'PYTHONPATH="$LEADPOET_REPO_ROOT" '
@@ -1126,12 +1131,8 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         < shutdown
     )
     assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
-    assert script.index(
-        '--acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST"'
-    ) < shutdown
-    assert script.index(
-        '--acceptance-corpus-root "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT"'
-    ) < shutdown
+    assert "--acceptance-corpus-manifest" not in script
+    assert "--acceptance-corpus-root" not in script
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index("bootstrap_active_ancestry_checkpoints_v2.py") < shutdown
@@ -1158,10 +1159,10 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
         in pre_shutdown
     )
     release_start = pre_shutdown.index(
-        'echo "Acquiring the independently built V2 release channel"'
+        'echo "Building the exact local gateway and validator runtime identities"'
     )
     release_end = pre_shutdown.index(
-        'record_gateway_restart_timing "release_ready"', release_start
+        'record_gateway_restart_timing "local_release_ready"', release_start
     )
     release_acquisition = pre_shutdown[release_start:release_end]
     assert (
@@ -1218,6 +1219,7 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
     assert '"$GATEWAY_V2_RELEASE_LINEAGE"' in revalidator
     assert (
         '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\\n'
+        '    "$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \\\n'
         '    "$GATEWAY_PREPARED_V2_RELEASE_REQUIREMENTS" \\\n'
         '    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
         in revalidator
@@ -1926,8 +1928,7 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
     assert 'record_gateway_restart_timing "invoked"' in script
     assert 'record_gateway_restart_timing "offline_artifact_prepare_started"' in script
     assert 'record_gateway_restart_timing "ancestry_precheckpoint_started"' in script
-    assert 'record_gateway_restart_timing "release_wait_started"' in script
-    assert 'record_gateway_restart_timing "release_ready"' in script
+    assert 'record_gateway_restart_timing "local_release_ready"' in script
     assert (
         'record_gateway_restart_timing "offline_artifact_prepare_complete" "passed"'
         in script
@@ -2395,12 +2396,12 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
     gate = "Leadpoet.utils.restart_epoch_gate"
-    release = "gateway.tee.release_channel_v2"
+    release = "gateway/tee/build_local_release_v2.sh"
     shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
     assert gate in script
     gate_offset = script.index(gate)
     assert gate_offset < script.index(release, gate_offset) < script.index(shutdown)
-    assert "waiting inside the valid restart invocation" in script
+    assert "Approved V2 release is not published yet" not in script
     assert "--maximum" not in script
 
 
@@ -2648,26 +2649,12 @@ def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
         assert f"COPY {path}/ ./{path}/" in dockerfile
 
 
-def test_gateway_restart_defaults_research_lab_to_branch_manifest() -> None:
+def test_gateway_restart_does_not_require_private_sourcing_model_identity() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    branch_pointer = (
-        "s3://leadpoet-private-model-artifacts-493765492819/"
-        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
-    )
 
-    assert script.count(
-        'export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"'
-    ) == 2
-    assert script.count(
-        f'export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="{branch_pointer}"'
-    ) == 2
-    assert script.count(
-        'export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID='
-        '"alias/leadpoet-research-lab-artifact-signing"'
-    ) == 2
-    assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="${' not in script
-    assert 'RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${' not in script
-    assert 'RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="${' not in script
+    assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in script
+    assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in script
+    assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in script
 
 
 def test_gateway_restart_wires_automatic_signed_dev_snapshot_refresh() -> None:

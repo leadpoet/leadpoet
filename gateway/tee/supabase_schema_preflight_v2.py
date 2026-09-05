@@ -462,65 +462,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/179-lab-arena-v1.sql",
-        "lab_arena_rounds",
-        (
-            "round_id",
-            "status",
-            "configuration_doc",
-            "benchmark_ref",
-            "evaluation_date",
-            "reward_basis_hash",
-            "effective_reward_epoch",
-        ),
-    ),
-    (
-        "scripts/181-lab-arena-source-submissions.sql",
-        "lab_arena_submissions",
-        (
-            "submission_id",
-            "round_id",
-            "miner_hotkey",
-            "status",
-            "is_king",
-            "source_ref",
-            "source_size_bytes",
-            "submission_doc",
-        ),
-    ),
-    (
-        "scripts/179-lab-arena-v1.sql",
-        "lab_arena_runs",
-        (
-            "run_id",
-            "assignment_id",
-            "round_id",
-            "submission_id",
-            "miner_hotkey",
-            "stage",
-            "icp_position",
-            "attempt",
-            "kind",
-            "status",
-            "lease_generation",
-            "result_doc",
-        ),
-    ),
-    (
-        "scripts/179-lab-arena-v1.sql",
-        "lab_arena_ledger",
-        (
-            "entry_id",
-            "round_id",
-            "submission_id",
-            "run_id",
-            "entry_kind",
-            "provider",
-            "amount_microusd",
-            "entry_doc",
-        ),
-    ),
-    (
         "scripts/183-lab-arena-miner-reward-basis.sql",
         "lab_arena_reward_basis_v1",
         (
@@ -538,30 +479,6 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
-    (
-        "scripts/180-lab-arena-daily-competition.sql",
-        "lab_arena_current_daily_icp_set",
-    ),
-    (
-        "scripts/181-lab-arena-source-submissions.sql",
-        "lab_arena_register_submission",
-    ),
-    (
-        "scripts/181-lab-arena-source-submissions.sql",
-        "lab_arena_update_submission",
-    ),
-    (
-        "scripts/182-lab-arena-source-execution.sql",
-        "lab_arena_claim_assignment",
-    ),
-    (
-        "scripts/183-lab-arena-miner-reward-basis.sql",
-        "lab_arena_activate_reward",
-    ),
-    (
-        "scripts/184-lab-arena-scoring-failure-isolation.sql",
-        "lab_arena_schema_version_v1",
-    ),
     (
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "persist_research_lab_chain_realized_settlement_v1",

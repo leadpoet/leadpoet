@@ -287,11 +287,27 @@ if str(build_info.get("git_commit") or "").lower() != expected_commit:
     raise SystemExit("pinned gateway build-info differs from the selected commit")
 
 release = load_json(sys.argv[4], "release evidence")
-if (
-    release.get("schema_version") != "leadpoet.auditor_release_evidence.v2"
-    or str(release.get("commit_sha") or "").lower() != expected_commit
-):
+release_schema = release.get("schema_version")
+if str(release.get("commit_sha") or "").lower() != expected_commit:
     raise SystemExit("pinned gateway release evidence differs from the selected commit")
+if release_schema == "leadpoet.auditor_local_release_evidence.v1":
+    from leadpoet_canonical.auditor_v2 import fetch_locked_release_identity_cache
+
+    try:
+        identity_cache = fetch_locked_release_identity_cache(release)
+    except Exception:
+        raise SystemExit(
+            "pinned gateway local release evidence is invalid"
+        ) from None
+    if any(
+        str(entry.get("commit_sha") or "").lower() != expected_commit
+        for entry in identity_cache.get("entries", [])
+    ):
+        raise SystemExit(
+            "pinned gateway local release evidence differs from the selected commit"
+        )
+elif release_schema != "leadpoet.auditor_release_evidence.v2":
+    raise SystemExit("pinned gateway release evidence schema is invalid")
 
 print(json.dumps({
     "status": "pinned_gateway_release_aligned",

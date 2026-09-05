@@ -67,6 +67,7 @@ DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_SOURCE_CACHE_MAX_ENTRIES = 64
 MAX_REQUIREMENTS_BYTES = 64 * 1024
 MAX_REQUIREMENTS = 128
+MAX_AGENT_ENTRYPOINT_BYTES = 1024 * 1024
 MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
@@ -85,6 +86,60 @@ class AgentDependencyError(RunnerError):
 
 class SignatureFn(Protocol):
     def __call__(self, message: str) -> str: ...
+
+
+def _stage_agent_entrypoint(source_path: Path, run_dir: Path) -> Path:
+    """Copy the trusted entrypoint without changing its deployed permissions."""
+
+    source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    destination = Path(run_dir) / "agent-entrypoint.py"
+    source_fd = destination_fd = None
+    destination_created = False
+    try:
+        source_fd = os.open(Path(source_path), source_flags)
+        source_info = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(source_info.st_mode)
+            or source_info.st_size <= 0
+            or source_info.st_size > MAX_AGENT_ENTRYPOINT_BYTES
+        ):
+            raise RunnerError("trusted agent entrypoint is not a bounded regular file")
+        with os.fdopen(source_fd, "rb") as source_file:
+            source_fd = None
+            content = source_file.read(MAX_AGENT_ENTRYPOINT_BYTES + 1)
+        if len(content) != source_info.st_size:
+            raise RunnerError("trusted agent entrypoint changed during staging")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        destination_created = True
+        with os.fdopen(destination_fd, "wb") as destination_file:
+            destination_fd = None
+            if destination_file.write(content) != len(content):
+                raise RunnerError("trusted agent entrypoint could not be staged")
+            destination_file.flush()
+            os.fchmod(destination_file.fileno(), 0o444)
+    except RunnerError:
+        if destination_created:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    except OSError as exc:
+        if destination_created:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+        raise RunnerError("trusted agent entrypoint could not be staged safely") from exc
+    finally:
+        for descriptor in (destination_fd, source_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+    return destination
 
 
 # ---------------------------------------------------------------------------
@@ -1185,6 +1240,11 @@ class AssignmentExecutor:
                 }
                 extra_environment = {}
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
+            staged_agent_entrypoint = (
+                None
+                if scoring_run
+                else _stage_agent_entrypoint(config.agent_entrypoint_path, run_dir)
+            )
             # Both assignment kinds use the service-selected trusted Python
             # image. Execute assignments add the admitted source bundle under
             # read-only mounts; no miner image metadata is accepted.
@@ -1214,7 +1274,7 @@ class AssignmentExecutor:
                     source_dir=source_dir,
                     dependency_dir=dependency_dir,
                     agent_entrypoint_path=(
-                        None if scoring_run else config.agent_entrypoint_path
+                        staged_agent_entrypoint
                     ),
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,

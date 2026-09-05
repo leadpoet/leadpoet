@@ -309,6 +309,32 @@ def test_unknown_host_wrapper_still_fails_closed(
         )
 
 
+def test_absent_optional_recovery_host_object_is_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, current, host_restart, _release, _payloads = _controller_fixture(
+        tmp_path,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_git_commit_exists",
+        lambda _repository, commit: commit
+        not in verifier.RECOVERY_HOST_CONTROLLER_COMMITS,
+    )
+
+    result = verifier.verify_installed_controller_bundle(
+        repo_root=repository,
+        controller_current=current,
+        host_restart_path=host_restart,
+        expected_commit=CANDIDATE_COMMIT,
+        expected_controller_commit=N_MINUS_ONE_COMMIT,
+    )
+
+    assert result["host_controller_commits"] == [N_MINUS_ONE_COMMIT]
+
+
 def _controller_drift_checkout(tmp_path: Path) -> tuple[Path, bytes, bytes]:
     repository = tmp_path / "checkout"
     repository.mkdir()

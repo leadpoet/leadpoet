@@ -529,7 +529,8 @@ def verify_installed_controller_bundle(
     host_controller_commits = {
         candidate
         for candidate in host_candidates
-        if host_wrapper
+        if _git_commit_exists(repository, candidate)
+        and host_wrapper
         == _git(
             repository,
             "show",

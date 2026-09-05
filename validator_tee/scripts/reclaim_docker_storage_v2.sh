@@ -497,41 +497,38 @@ inventory_empty_online_runtime() {
 }
 
 empty_runtime_metadata_is_clear() {
-  local image_count layerdb_image_count layerdb_mount_count overlay_directory_count
+  local image_count
 
-  image_count="$(
+  if ! image_count="$(
     run_bounded_daemon_inventory docker image ls -aq \
       | sed '/^$/d' | sort -u | wc -l | tr -d '[:space:]'
-  )"
-  layerdb_image_count=0
-  layerdb_mount_count=0
-  overlay_directory_count=0
-  if sudo test -d "$DOCKER_ROOT/image/overlay2/layerdb/sha256"; then
-    layerdb_image_count="$(
-      sudo find "$DOCKER_ROOT/image/overlay2/layerdb/sha256" \
-        -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]'
-    )"
-  fi
-  if sudo test -d "$DOCKER_ROOT/image/overlay2/layerdb/mounts"; then
-    layerdb_mount_count="$(
-      sudo find "$DOCKER_ROOT/image/overlay2/layerdb/mounts" \
-        -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]'
-    )"
-  fi
-  if sudo test -d "$DOCKER_ROOT/overlay2"; then
-    overlay_directory_count="$(
-      sudo find "$DOCKER_ROOT/overlay2" \
-        -mindepth 1 -maxdepth 1 -type d ! -name l \
-        | wc -l | tr -d '[:space:]'
-    )"
-  fi
-  if [ "$image_count" -ne 0 ] \
-      || [ "$layerdb_image_count" -ne 0 ] \
-      || [ "$layerdb_mount_count" -ne 0 ] \
-      || [ "$overlay_directory_count" -ne 0 ]; then
-    echo "Docker metadata remains orphaned after guarded reconciliation: images=$image_count layerdb_images=$layerdb_image_count layerdb_mounts=$layerdb_mount_count overlay_directories=$overlay_directory_count" >&2
+  )"; then
+    echo "ERROR: Docker image inventory is unreadable after reconciliation" >&2
     return 1
   fi
+  if [ "$image_count" -ne 0 ]; then
+    echo "Docker images remain after guarded reconciliation: images=$image_count" >&2
+    return 1
+  fi
+  # Missing directories are empty; access and traversal errors are not.
+  # This function runs in an if condition, so do not rely on shell errexit.
+  sudo python3 - "$DOCKER_ROOT" <<'PY'
+import os
+import sys
+
+root = sys.argv[1]
+try:
+    for relative in ("image/overlay2/layerdb/sha256", "image/overlay2/layerdb/mounts", "overlay2"):
+        try:
+            with os.scandir(os.path.join(root, relative)) as entries:
+                if any(relative != "overlay2" or entry.name != "l" for entry in entries):
+                    raise RuntimeError("Docker metadata remains after reconciliation")
+        except FileNotFoundError:
+            continue
+except (OSError, RuntimeError) as exc:
+    print("ERROR: Docker metadata is not proven empty: " + str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 online_image_ids() {

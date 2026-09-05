@@ -64,6 +64,7 @@ gateway_handoff_nonce=""
 paired_gateway_handoff_file=""
 paired_gateway_handoff_nonce=""
 active_release_restart_invocation_id=""
+active_release_authority_commit=""
 controller_verifier_b64=""
 expected_controller_commit=""
 gateway_restart_log=""
@@ -78,6 +79,9 @@ validator_initial_requirements_remote=""
 gateway_validator_requirements_remote=""
 validator_final_requirements_remote=""
 validator_final_lineage_remote=""
+validator_recovery_requirements_remote=""
+validator_recovery_lineage_remote=""
+validator_missing_runtime_recovery=0
 validator_initial_requirements_local=""
 gateway_final_requirements_local=""
 gateway_final_lineage_local=""
@@ -235,7 +239,7 @@ cleanup() {
   fi
   if [ -n "${validator_initial_requirements_remote:-}" ]; then
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'" \
+      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp' '$validator_recovery_requirements_remote' '$validator_recovery_requirements_remote.tmp' '$validator_recovery_lineage_remote' '$validator_recovery_lineage_remote.tmp'" \
       >/dev/null 2>&1 || true
   fi
   if [ -n "${gateway_validator_requirements_remote:-}" ]; then
@@ -252,7 +256,7 @@ cleanup() {
       || [ -n "$validator_final_requirements_remote" ] \
       || [ -n "$validator_final_lineage_remote" ]; then
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'" \
+      "rm -f -- '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp' '$validator_recovery_requirements_remote' '$validator_recovery_requirements_remote.tmp' '$validator_recovery_lineage_remote' '$validator_recovery_lineage_remote.tmp'" \
       >/dev/null 2>&1 || true
   fi
   if [ -n "$temporary_root" ]; then
@@ -831,6 +835,8 @@ validator_initial_requirements_remote="/tmp/leadpoet-validator-active-release-re
 gateway_validator_requirements_remote="/tmp/leadpoet-validator-active-release-requirements.$restart_transfer_id.json"
 validator_final_requirements_remote="/tmp/leadpoet-gateway-active-release-requirements.$restart_transfer_id.json"
 validator_final_lineage_remote="/tmp/leadpoet-gateway-active-release-lineage.$restart_transfer_id.json"
+validator_recovery_requirements_remote="/tmp/leadpoet-validator-recovery-requirements.$restart_transfer_id.json"
+validator_recovery_lineage_remote="/tmp/leadpoet-validator-recovery-lineage.$restart_transfer_id.json"
 gateway_counterpart_lineage_remote="/tmp/leadpoet-validator-counterpart-release-lineage.$restart_transfer_id.json"
 ssh_common=(
   -n
@@ -1299,7 +1305,8 @@ bind_component_validator_to_gateway_release_authority() {
     "$GATEWAY_HOST:$GATEWAY_ACTIVE_RELEASE_LINEAGE_PATH" \
     "$gateway_final_lineage_local"
   chmod 600 "$gateway_final_requirements_local" "$gateway_final_lineage_local"
-  active_release_restart_invocation_id="$(
+  local active_release_binding=""
+  active_release_binding="$(
     run_local_readiness_python \
       "$commit" "$branch_commit" "$historical_topology_hash" \
       "$gateway_final_requirements_local" \
@@ -1360,13 +1367,24 @@ else:
     )
 if requirements["candidate_commit_sha"] != expected_commit:
     raise SystemExit("gateway active release candidate differs")
-if requirements["authority_commit_sha"] != expected_authority:
-    raise SystemExit("gateway active release controller differs")
 if set(requirements["required_commits"]) != set(lineage["releases"]):
     raise SystemExit("gateway active release requirements differ from lineage")
+print(requirements["authority_commit_sha"])
 print(requirements["restart_invocation_id"])
 PY
   )"
+  active_release_authority_commit="${active_release_binding%%$'\n'*}"
+  active_release_restart_invocation_id="${active_release_binding##*$'\n'}"
+  if ! [[ "$active_release_authority_commit" =~ ^[0-9a-f]{40}$ ]] \
+      || ! git -C "$ROOT" cat-file -e \
+        "$active_release_authority_commit^{commit}" \
+      || ! git -C "$ROOT" merge-base --is-ancestor \
+        "$commit" "$active_release_authority_commit" \
+      || ! git -C "$ROOT" merge-base --is-ancestor \
+        "$active_release_authority_commit" "$branch_commit"; then
+    echo "ERROR: gateway active release authority is not covered by the selected controller" >&2
+    return 1
+  fi
   if ! [[ "$active_release_restart_invocation_id" =~ ^[a-z0-9][a-z0-9_.:-]{0,127}$ ]]; then
     echo "ERROR: gateway active release invocation identity is invalid" >&2
     return 1
@@ -1389,6 +1407,24 @@ install_validator_final_release_authority() {
      chmod 600 '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote.tmp'
      mv -f -- '$validator_final_requirements_remote.tmp' '$validator_final_requirements_remote'
      mv -f -- '$validator_final_lineage_remote.tmp' '$validator_final_lineage_remote'"
+}
+
+install_validator_missing_runtime_recovery_authority() {
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$gateway_final_requirements_local" \
+    "$VALIDATOR_HOST:$validator_recovery_requirements_remote.tmp"
+  scp "${scp_common[@]}" -i "$VALIDATOR_KEY" \
+    "$gateway_final_lineage_local" \
+    "$VALIDATOR_HOST:$validator_recovery_lineage_remote.tmp"
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "set -Eeuo pipefail
+     umask 077
+     test -s '$validator_recovery_requirements_remote.tmp'
+     test -s '$validator_recovery_lineage_remote.tmp'
+     chmod 600 '$validator_recovery_requirements_remote.tmp' '$validator_recovery_lineage_remote.tmp'
+     mv -f -- '$validator_recovery_requirements_remote.tmp' '$validator_recovery_requirements_remote'
+     mv -f -- '$validator_recovery_lineage_remote.tmp' '$validator_recovery_lineage_remote'"
+  echo "Installed exact gateway authority for missing validator runtime recovery"
 }
 
 report_restart_job_early_exit() {
@@ -1499,9 +1535,18 @@ gateway_active_commit() {
 
 validator_active_commit() {
   ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-    "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-      leadpoet-validator-main \
-      | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'"
+    "set -Eeuo pipefail
+     docker info >/dev/null
+     inspect_output=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+       leadpoet-validator-main 2>&1) || {
+       if [ \"\$inspect_output\" = 'Error: No such object: leadpoet-validator-main' ]; then
+         exit 44
+       fi
+       printf '%s\n' \"\$inspect_output\" >&2
+       exit 1
+     }
+     printf '%s\n' \"\$inspect_output\" \
+       | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'"
 }
 
 build_gateway_restart_command() {
@@ -1710,9 +1755,16 @@ run_validator_restart() {
   local bootstrap_command=""
   local bootstrap_command_b64=""
   local coordination_environment=""
+  local recovery_requirements_environment=""
+  local recovery_lineage_environment=""
+  local selected_active_release_authority_commit="${active_release_authority_commit:-$branch_commit}"
   local command=()
   if [ -n "$coordination_file" ]; then
     coordination_environment="$coordination_file"
+  fi
+  if [ "$validator_missing_runtime_recovery" = "1" ]; then
+    recovery_requirements_environment="$validator_recovery_requirements_remote"
+    recovery_lineage_environment="$validator_recovery_lineage_remote"
   fi
   bootstrap_command="
     set -Eeuo pipefail
@@ -1753,7 +1805,7 @@ run_validator_restart() {
       VALIDATOR_PYTHON_BIN='$VALIDATOR_PYTHON_BIN' \\
       VALIDATOR_HOST_RESTART_SCRIPT='$VALIDATOR_RESTART' \\
       VALIDATOR_ACTIVE_RELEASE_AUTHORITY_ROOT=\"\$authority_root\" \\
-      VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit' \\
+      VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$selected_active_release_authority_commit' \\
       VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID='$active_release_restart_invocation_id' \\
       VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED=1 \\
       VALIDATOR_V2_HOTKEY_CONFIG='$VALIDATOR_V2_HOTKEY_CONFIG_PATH' \\
@@ -1764,6 +1816,8 @@ run_validator_restart() {
       VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT='$validator_initial_requirements_remote' \\
       VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT='$validator_final_requirements_remote' \\
       VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT='$validator_final_lineage_remote' \\
+      VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='$recovery_requirements_environment' \\
+      VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='$recovery_lineage_environment' \\
       LEADPOET_VALIDATOR_ENV_SECRET_ID='$VALIDATOR_ENV_SECRET_ID' \\
       VALIDATOR_V2_RELEASE_PREFIX='$RELEASE_PREFIX' \\
       bash \"\$authority_root/validator_restart.sh\" --commit '$commit'"
@@ -2242,6 +2296,19 @@ case "$component" in
     fi
     verify_gateway_release "$gateway_evidence"
     bind_component_validator_to_gateway_release_authority
+    validator_runtime_probe_status=0
+    validator_active_commit >/dev/null || validator_runtime_probe_status="$?"
+    case "$validator_runtime_probe_status" in
+      0) ;;
+      44)
+        validator_missing_runtime_recovery=1
+        install_validator_missing_runtime_recovery_authority
+        ;;
+      *)
+        echo "ERROR: validator runtime state could not be established safely" >&2
+        exit 1
+        ;;
+    esac
     invalidate_deploy_readiness
     verify_local_readiness_python_binding
     run_validator_restart_against_active_gateway
@@ -2256,7 +2323,7 @@ case "$component" in
     fi
     paired_restart_deadline=$((SECONDS + VALIDATOR_COORDINATION_TIMEOUT_SECONDS))
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-      "rm -f -- '$coordination_file' '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp'"
+      "rm -f -- '$coordination_file' '$validator_initial_requirements_remote' '$validator_final_requirements_remote' '$validator_final_requirements_remote.tmp' '$validator_final_lineage_remote' '$validator_final_lineage_remote.tmp' '$validator_recovery_requirements_remote' '$validator_recovery_requirements_remote.tmp' '$validator_recovery_lineage_remote' '$validator_recovery_lineage_remote.tmp'"
     ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
       "rm -f -- '$gateway_validator_requirements_remote' '$gateway_validator_requirements_remote.tmp' '$paired_gateway_handoff_file' '$paired_gateway_handoff_file.tmp' '$gateway_handoff_file' '$gateway_handoff_file.tmp'"
 

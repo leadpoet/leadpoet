@@ -15,6 +15,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -226,7 +227,7 @@ def test_oci_spec_invariants(tmp_path):
     assert document["root"] == {"path": str(spec.rootfs_path), "readonly": True}
     process = document["process"]
     assert process["user"] == {"uid": 65534, "gid": 65534}
-    assert process["args"] == ["python3", "/agent/entrypoint.py"]
+    assert process["args"] == ["python3", "-I", "/agent/entrypoint.py"]
     assert process["cwd"] == "/agent/source"
     assert process["noNewPrivileges"] is True
     assert process["terminal"] is False
@@ -341,7 +342,7 @@ def test_sandbox_spec_defaults_follow_the_public_constants(tmp_path):
     assert spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS == 300
     assert spec.uid == 65534 and spec.gid == 65534
     assert spec.output_tmpfs_bytes == 64 * 1024 * 1024
-    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("python3", "/agent/entrypoint.py")
+    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("python3", "-I", "/agent/entrypoint.py")
     assert spec.cwd == rt.AGENT_WORKING_DIR == "/agent/source"
 
 
@@ -349,11 +350,78 @@ def test_host_process_and_environment_are_independent_of_image_metadata(tmp_path
     spec = make_spec(tmp_path, extra_environment={"TRUSTED_SCORER": "1", "TZ": "America/New_York"})
     document = rt.oci_spec(spec)
     process = document["process"]
-    assert process["args"] == ["python3", "/agent/entrypoint.py"]
+    assert process["args"] == ["python3", "-I", "/agent/entrypoint.py"]
     assert process["cwd"] == "/agent/source"
     environment = dict(item.split("=", 1) for item in process["env"])
     assert environment["PATH"] == rt.PROCESS_ENV["PATH"] and environment["TRUSTED_SCORER"] == "1"
     assert environment["TZ"] == "UTC" and environment["LAB_ARENA_OUTPUT_PATH"] == rt.SANDBOX_OUTPUT_PATH and environment["HOME"] == "/tmp"
+
+
+def test_agent_isolated_python_skips_model_sitecustomize_and_loads_bound_mounts(tmp_path):
+    model = tmp_path / "model"
+    source = tmp_path / "source"
+    dependencies = tmp_path / "deps"
+    for path in (model, source, dependencies):
+        path.mkdir()
+    marker = tmp_path / "sitecustomize-imported"
+    output = tmp_path / "output"
+    (model / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        "Path(%r).write_text('imported', encoding='utf-8')\n" % str(marker),
+        encoding="utf-8",
+    )
+    (dependencies / "bound_dependency.py").write_text(
+        "VALUE = 'dependency-loaded'\n", encoding="utf-8"
+    )
+    (source / "bound_source.py").write_text(
+        "from bound_dependency import VALUE\nRESULT = 'source-' + VALUE\n",
+        encoding="utf-8",
+    )
+    entrypoint = tmp_path / "entrypoint.py"
+    entrypoint.write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[2])\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from bound_source import RESULT\n"
+        "Path(sys.argv[3]).write_text(RESULT, encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(model)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            *rt.AGENT_ENTRY_COMMAND[1:-1],
+            str(entrypoint),
+            str(source),
+            str(dependencies),
+            str(output),
+        ],
+        env=environment,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    assert output.read_text(encoding="utf-8") == "source-dependency-loaded"
+    assert not marker.exists()
+
+
+def test_scorer_python_keeps_trusted_model_startup(tmp_path):
+    spec = make_spec(
+        tmp_path,
+        source_dir=None,
+        dependency_dir=None,
+        agent_entrypoint_path=None,
+        entry_command=rt.SCORER_ENTRY_COMMAND,
+        working_dir=rt.SCORER_WORKING_DIR,
+    )
+    document = rt.oci_spec(spec)
+    process = document["process"]
+    environment = dict(item.split("=", 1) for item in process["env"])
+    assert process["args"] == ["python3", "/model/scorer_entrypoint.py"]
+    assert environment["PYTHONPATH"] == "/model"
 
 
 # ---------------------------------------------------------------------------

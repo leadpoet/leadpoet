@@ -60,7 +60,10 @@ OUTPUT_FILE_NAME = "companies.json"
 SANDBOX_INPUT_PATH = SANDBOX_INPUT_DIR + "/" + INPUT_FILE_NAME
 SANDBOX_OUTPUT_PATH = SANDBOX_OUTPUT_DIR + "/" + OUTPUT_FILE_NAME
 SANDBOX_HOSTNAME = "leadpoet-lab-arena"
-AGENT_ENTRY_COMMAND = ("python3", SANDBOX_AGENT_ENTRYPOINT_PATH)
+# Isolated mode keeps the trusted scorer image's /model/sitecustomize.py from
+# changing submitted source execution.  The host-owned entrypoint explicitly
+# adds only the admitted source and dependency mounts after Python starts.
+AGENT_ENTRY_COMMAND = ("python3", "-I", SANDBOX_AGENT_ENTRYPOINT_PATH)
 AGENT_WORKING_DIR = SANDBOX_AGENT_SOURCE_DIR
 SCORER_ENTRY_COMMAND = ("python3", "/model/scorer_entrypoint.py")
 SCORER_WORKING_DIR = "/model"

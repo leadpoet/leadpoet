@@ -892,7 +892,7 @@
       "symbol": "_ArtifactVerificationTransportSession"
     },
     {
-      "ast_sha256": "sha256:5b8ef524ed49eee74801a83bf0d7ee7ef1b757c856f8ece9556cd309eaade16a",
+      "ast_sha256": "sha256:2ef6725ac46ede064222ce380dd04583711f1504794a2a12c6d34636b43685ac",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_LazyApprovedReleaseBootVerifier"
     },
@@ -917,7 +917,7 @@
       "symbol": "_load_frontier_bounded_allocation_graphs"
     },
     {
-      "ast_sha256": "sha256:77fe785367822bf913df0761ff07e949cd71517b44d74775c429d6e048c5bf0a",
+      "ast_sha256": "sha256:503e5cdcb44c6176c739b1daef9352258613544841a9edc16e6772528dde7fe5",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_load_release_manifest"
     },
@@ -927,12 +927,12 @@
       "symbol": "_select_active_graphs"
     },
     {
-      "ast_sha256": "sha256:f001ad4b07f7472b2f21e7ea0c260de99869aa9e5d4d9053f201788f8452525e",
+      "ast_sha256": "sha256:f0300954ba5aced8605c291fb8217b43acfbacaac3e35f9ecc7dd56b9e598197",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_verify_coordinator_capability"
     },
     {
-      "ast_sha256": "sha256:e2f189a148931d9c063223e672772543eeff8f5a3f9624aa2cdf1804ca264764",
+      "ast_sha256": "sha256:e88fcba52844eb619f590438d3cc86a7d1a146e27875e64fef11635fa94429dd",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "bootstrap_active_ancestry_checkpoints_v2"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:edc0fe60f550258f2334d172e5c849afa05ef7a7814226c487dd48b30617d284",
+  "manifest_hash": "sha256:131fb080140c464ecbb461378a69fdebb1370f06f9206ecb098dad213118bfdb",
   "protected_source_commit": "b013c9fc0f6052fe55e91b3139edb3240c125bb1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

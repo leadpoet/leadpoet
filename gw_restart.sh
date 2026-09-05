@@ -1662,21 +1662,22 @@ if (
 process_root = proc_root / pid_text
 
 
-def read_process():
-    status = (process_root / "status").read_text(encoding="utf-8")
-    stat_fields = (process_root / "stat").read_text(encoding="utf-8").split()
+def read_process(selected_process_root):
+    status = (selected_process_root / "status").read_text(encoding="utf-8")
+    stat_fields = (selected_process_root / "stat").read_text(encoding="utf-8").split()
     argv = tuple(
         value.decode("utf-8", errors="strict")
-        for value in (process_root / "cmdline").read_bytes().split(b"\0")
+        for value in (selected_process_root / "cmdline").read_bytes().split(b"\0")
         if value
     )
-    cwd = Path(os.readlink(process_root / "cwd")).resolve()
+    cwd = Path(os.readlink(selected_process_root / "cwd")).resolve()
     fields = {}
     for line in status.splitlines():
         key, separator, value = line.partition(":")
         if separator:
             fields[key] = value.strip()
     return {
+        "ppid": int(stat_fields[3]),
         "start_ticks": int(stat_fields[21]),
         "uid": int(fields["Uid"].split()[0]),
         "rss_kib": int(fields["VmRSS"].split()[0]),
@@ -1686,8 +1687,8 @@ def read_process():
 
 
 try:
-    first = read_process()
-    second = read_process()
+    first = read_process(process_root)
+    second = read_process(process_root)
 except (IndexError, KeyError, OSError, UnicodeError, ValueError) as exc:
     raise SystemExit("running gateway process identity is unavailable") from exc
 if first != second:
@@ -1706,7 +1707,44 @@ else:
 if first["cwd"] not in allowed_cwds:
     raise SystemExit("running gateway working directory differs")
 
-reclaimable_mib = first["rss_kib"] // 1024
+worker_script = (repo_root / "gateway" / "research_lab" / "worker_process.py").resolve()
+worker_rss_kib = 0
+worker_count = 0
+for child_root in proc_root.iterdir():
+    if not child_root.name.isdigit() or child_root.name == pid_text:
+        continue
+    try:
+        child_first = read_process(child_root)
+        child_second = read_process(child_root)
+    except (IndexError, KeyError, OSError, UnicodeError, ValueError):
+        continue
+    if child_first != child_second or child_first["ppid"] != int(pid_text):
+        continue
+    child_argv = child_first["argv"]
+    if (
+        child_first["uid"] != os.getuid()
+        or child_first["cwd"] != repo_root
+        or len(child_argv) != 12
+        or Path(child_argv[0]).resolve() != python_bin
+        or Path(child_argv[1]).resolve() != worker_script
+        or child_argv[2] != "--kind"
+        or child_argv[3] not in {"hosted", "scoring"}
+        or child_argv[4] != "--worker-index"
+        or not child_argv[5].isdigit()
+        or child_argv[6] != "--total-workers"
+        or not child_argv[7].isdigit()
+        or child_argv[8] != "--worker-prefix"
+        or not child_argv[9]
+        or child_argv[10] != "--log-level"
+        or child_argv[11] != "INFO"
+    ):
+        continue
+    worker_rss_kib += child_first["rss_kib"]
+    worker_count += 1
+
+reclaimable_gateway_mib = first["rss_kib"] // 1024
+reclaimable_worker_mib = worker_rss_kib // 1024
+reclaimable_mib = reclaimable_gateway_mib + reclaimable_worker_mib
 required_mib = int(report["minimum_available_memory_mib"])
 if available_mib + reclaimable_mib < required_mib + safety_margin_mib:
     raise SystemExit("gateway shutdown would not recover enough build memory")
@@ -1716,6 +1754,9 @@ print(
             "available_memory_mib": available_mib,
             "minimum_available_memory_mib": required_mib,
             "reclaimable_gateway_memory_mib": reclaimable_mib,
+            "reclaimable_gateway_parent_memory_mib": reclaimable_gateway_mib,
+            "reclaimable_gateway_worker_count": worker_count,
+            "reclaimable_gateway_worker_memory_mib": reclaimable_worker_mib,
             "safety_margin_mib": safety_margin_mib,
             "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
             "status": "ready_after_gateway_shutdown",
@@ -3799,6 +3840,7 @@ pkill -9 -f "python3 -u main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
 pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
+pkill -9 -f "/gateway/research_lab/worker_process[.]py" 2>/dev/null || true
 pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true

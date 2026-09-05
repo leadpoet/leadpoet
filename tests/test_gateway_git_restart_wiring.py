@@ -1302,6 +1302,9 @@ gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
         "available_memory_mib": 7000,
         "minimum_available_memory_mib": 16384,
         "reclaimable_gateway_memory_mib": 12288,
+        "reclaimable_gateway_parent_memory_mib": 12288,
+        "reclaimable_gateway_worker_count": 0,
+        "reclaimable_gateway_worker_memory_mib": 0,
         "safety_margin_mib": 2048,
         "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
         "status": "ready_after_gateway_shutdown",
@@ -1339,6 +1342,109 @@ def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
     assert "gateway_memory_ready_after_running_gateway_shutdown" in script[
         :shutdown
     ]
+    assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' in script[
+        shutdown:post_shutdown
+    ]
+
+
+def test_gateway_restart_counts_exact_direct_worker_children_as_reclaimable(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = _shell_function_source(
+        script,
+        "gateway_memory_ready_after_running_gateway_shutdown",
+    )
+    repo_root = tmp_path / "repo"
+    worker_script = repo_root / "gateway" / "research_lab" / "worker_process.py"
+    worker_script.parent.mkdir(parents=True)
+    worker_script.write_text("# worker\n", encoding="utf-8")
+    proc_root = tmp_path / "proc"
+
+    def write_process(pid: str, ppid: str, rss_kib: int, argv: tuple[str, ...]) -> None:
+        process_root = proc_root / pid
+        process_root.mkdir(parents=True)
+        (process_root / "status").write_text(
+            f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
+            f"VmRSS:\t{rss_kib} kB\n",
+            encoding="utf-8",
+        )
+        (process_root / "stat").write_text(
+            f"{pid} (python3) S {ppid} " + " ".join(["1"] * 29) + "\n",
+            encoding="utf-8",
+        )
+        (process_root / "cmdline").write_bytes(
+            b"\0".join(value.encode("utf-8") for value in (*argv, ""))
+        )
+        (process_root / "cwd").symlink_to(repo_root)
+
+    write_process("123", "1", 524288, (sys.executable, "-u", "-m", "gateway.main"))
+    for pid, kind, index, total, prefix in (
+        ("456", "hosted", "0", "10", "research-lab-worker"),
+        ("789", "scoring", "0", "25", "research-lab-scorer"),
+    ):
+        write_process(
+            pid,
+            "123",
+            2097152,
+            (
+                sys.executable,
+                str(worker_script),
+                "--kind",
+                kind,
+                "--worker-index",
+                index,
+                "--total-workers",
+                total,
+                "--worker-prefix",
+                prefix,
+                "--log-level",
+                "INFO",
+            ),
+        )
+
+    report_path = tmp_path / "memory.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "available_memory_mib": 14000,
+                "minimum_available_memory_mib": 16384,
+                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
+                "status": "blocked",
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness = f"""set -euo pipefail
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
+gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
+"""
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-worker-memory-test",
+            sys.executable,
+            str(repo_root),
+            str(report_path),
+            "123",
+            str(proc_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["reclaimable_gateway_parent_memory_mib"] == 512
+    assert result["reclaimable_gateway_worker_count"] == 2
+    assert result["reclaimable_gateway_worker_memory_mib"] == 4096
+    assert result["reclaimable_gateway_memory_mib"] == 4608
 
 
 def test_gateway_active_release_selection_requires_paired_validator_authority(

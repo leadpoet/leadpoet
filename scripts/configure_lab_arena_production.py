@@ -201,7 +201,7 @@ else:
         values[key] = raw_value
 
 updates = dict(request["updates"])
-if request["role"] == "gateway":
+if request["role"] in ("gateway", "miner_credentials"):
     for source, target in request["aliases"].items():
         raw_value = str(values.get(source) or "").strip()
         try:
@@ -214,6 +214,7 @@ if request["role"] == "gateway":
         if not value.strip():
             fail("required_existing_value_missing")
         updates[target] = value
+if request["role"] == "gateway":
     service_key = str(request.get("service_key") or "")
     if not service_key.startswith("sb_secret_") or any(ch.isspace() for ch in service_key):
         fail("service_key_malformed")
@@ -413,7 +414,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="check only (the default)")
     mode.add_argument("--apply", action="store_true", help="apply after an authorized check")
-    parser.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
+    scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
     parser.add_argument("--gateway-host", default=GATEWAY_HOST)
@@ -439,9 +442,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
     if not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    if not args.prepare_runner and args.service_key_fd is None:
+    narrow_scope = args.prepare_runner or args.miner_credentials_only
+    if not narrow_scope and args.service_key_fd is None:
         raise ConfigurationError("--service-key-fd is required for configuration")
-    for name in (() if args.prepare_runner else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url")):
+    for name in (() if narrow_scope else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url")):
         raw_value = getattr(args, name)
         value = str(raw_value or "")
         if not value.strip() or any(ch in value for ch in "\r\n\x00"):
@@ -455,6 +459,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         _validate_args(args)
+        if args.miner_credentials_only:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "miner_credentials", "updates": {},
+                "aliases": {
+                    "RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "LAB_ARENA_CREDENTIAL_KMS_KEY_ID"
+                },
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
         if args.prepare_runner:
             account = _check_remote_account(
                 args.validator_host, args.ssh_key, args.allowed_account

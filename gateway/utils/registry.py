@@ -25,7 +25,18 @@ _cache_epoch = None  # Track which epoch the cache is from
 _cache_epoch_timestamp = None  # Track when we last calculated the epoch
 _cache_lock = threading.Lock()  # For quick cache read/write ONLY (no await inside!)
 _warm_lock = threading.Lock()  # Serialize long background refreshes
-_fetch_in_progress = False  # Flag to prevent concurrent fetches (async-safe)
+_fetch_in_progress = False  # True while some caller is fetching a newer metagraph
+
+# Coalesces concurrent request-path fetches into one. Without this, every signed
+# request that arrives during an epoch transition starts its own 8-attempt
+# metagraph fetch, and they contend on the shared subtensor connection.
+_fetch_singleflight = None  # asyncio.Lock, created lazily on the running loop
+
+# How stale a cached metagraph may be before the request path stops serving it
+# and fetches synchronously instead. Within this window a request served during
+# a warm uses the previous epoch's metagraph -- the graceful degradation the
+# warmer task has always documented.
+MAX_STALE_METAGRAPH_SECONDS = float(os.getenv("METAGRAPH_MAX_STALE_SECONDS", "900"))
 
 # Async subtensor instance (injected at gateway startup)
 _async_subtensor = None
@@ -110,6 +121,7 @@ async def get_metagraph_async(
         Exception: If async_subtensor not injected or unable to fetch metagraph
     """
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _fetch_in_progress
+    global _fetch_singleflight
     import time
     import asyncio
     
@@ -126,14 +138,7 @@ async def get_metagraph_async(
         raise ValueError("metagraph cache epoch must be a non-negative integer")
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 1: Quick cache check (lock held only for read)
-    # ═══════════════════════════════════════════════════════════════════════════
-    with _cache_lock:
-        # Mark that we're starting a fetch
-        _fetch_in_progress = True
-    
-    # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 2: Get current epoch (OUTSIDE the lock - this is async!)
+    # STEP 1: Get current epoch (no lock held - this is async!)
     # ═══════════════════════════════════════════════════════════════════════════
     try:
         if cache_epoch_id is None:
@@ -147,12 +152,72 @@ async def get_metagraph_async(
         with _cache_lock:
             if _metagraph_cache is not None and _cache_epoch == current_epoch:
                 _cache_epoch_timestamp = time.time()
-                _fetch_in_progress = False
                 print(f"✅ Using cached metagraph for epoch {current_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - refreshed timestamp")
                 return _metagraph_cache
-        
+
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 3: Fetch new metagraph (OUTSIDE the lock - this is async!)
+        # STEP 2: The cache is behind. Prefer serving the previous epoch's
+        # metagraph over making the caller wait for a fetch: the background
+        # warmer is already working on it, and a registration set is one epoch
+        # out of date rather than absent. Bounded by MAX_STALE_METAGRAPH_SECONDS
+        # so a permanently failing warm cannot pin the gateway on an ancient
+        # metagraph forever.
+        # ═══════════════════════════════════════════════════════════════════════
+        with _cache_lock:
+            stale = _metagraph_cache
+            stale_age = (
+                time.time() - _cache_epoch_timestamp
+                if _cache_epoch_timestamp is not None
+                else None
+            )
+            warm_running = _fetch_in_progress or _warm_lock.locked()
+        if (
+            stale is not None
+            and warm_running
+            and stale_age is not None
+            and stale_age <= MAX_STALE_METAGRAPH_SECONDS
+        ):
+            print(
+                f"⏳ Metagraph for epoch {current_epoch} is still being fetched; "
+                f"serving epoch {_cache_epoch} cache ({stale_age:.0f}s old)"
+            )
+            return stale
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # STEP 3: We have to fetch. Coalesce concurrent callers so an epoch
+        # transition costs ONE fetch, not one per in-flight request.
+        # ═══════════════════════════════════════════════════════════════════════
+        if _fetch_singleflight is None:
+            _fetch_singleflight = asyncio.Lock()
+        async with _fetch_singleflight:
+            # Another caller may have filled the cache while we queued.
+            with _cache_lock:
+                if _metagraph_cache is not None and _cache_epoch == current_epoch:
+                    _cache_epoch_timestamp = time.time()
+                    print(f"✅ Using cached metagraph for epoch {current_epoch} (filled while waiting)")
+                    return _metagraph_cache
+                _fetch_in_progress = True
+            return await _fetch_metagraph_for_epoch(current_epoch)
+    except Exception as e:
+        # Always clear the fetch flag on any exception
+        with _cache_lock:
+            _fetch_in_progress = False
+        raise
+
+
+async def _fetch_metagraph_for_epoch(current_epoch: int) -> bt.Metagraph:
+    """Fetch and cache the metagraph for `current_epoch`.
+
+    Called with the single-flight lock held and `_fetch_in_progress` already set,
+    so exactly one of these runs at a time.
+    """
+    global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _fetch_in_progress
+    import time
+    import asyncio
+
+    try:
+        # ═══════════════════════════════════════════════════════════════════════
+        # Fetch new metagraph (OUTSIDE _cache_lock - this is async!)
         # ═══════════════════════════════════════════════════════════════════════
         # Strategy:
         # - Attempts 1-4: Use shared AsyncSubtensor (fast path, reuses WebSocket)

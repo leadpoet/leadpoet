@@ -938,7 +938,13 @@ if [[ " $* " == *" rev-parse "* ]]; then
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
-    "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*)
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"gateway/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_canonical/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_observability/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"validator_tee/*)
       printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
       exit 0
       ;;
@@ -1251,6 +1257,7 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_GATEWAY_COMMIT={commit}",
                 f"FAKE_VALIDATOR_COMMIT={commit}",
                 f"FAKE_OPERATOR_SELECTED_COMMIT={commit}",
+                f"FAKE_OPERATOR_CONTROLLER_COMMIT={commit}",
                 f"FAKE_GATEWAY_OBSERVATION={gateway_observation}",
                 f"FAKE_VALIDATOR_OBSERVATION={validator_observation}",
                 f"FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS={initial_requirements}",
@@ -1695,14 +1702,20 @@ def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
     tmp_path: Path,
     dependency_complete_readiness_python: Path,
 ) -> None:
-    commit = subprocess.check_output(
+    controller_commit = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
         text=True,
     ).strip()
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main^"],
+        text=True,
+    ).strip()
+    assert controller_commit != commit
     bin_dir, events = _fake_operator_commands(
         tmp_path, commit, dependency_complete_readiness_python
     )
     environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_OPERATOR_CONTROLLER_COMMIT"] = controller_commit
     environment["FAKE_VALIDATOR_RUNTIME_MISSING"] = "1"
     result = subprocess.run(
         _operator_argv(bin_dir, commit, "--component", "validator"),

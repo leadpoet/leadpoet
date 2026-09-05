@@ -1,7 +1,10 @@
 """Restart wiring for the optional Arena service and validator runner."""
 
+import json
 import os
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,8 +37,9 @@ def test_arena_service_loads_only_scoped_values(tmp_path, monkeypatch) -> None:
 
     environment = tmp_path / "gateway.env"
     environment.write_text(
+        "UNRELATED_BARE_VALUE=production value with spaces # retained cache form\n"
         "LAB_ARENA_MODE=shadow\n"
-        "LAB_ARENA_OPENROUTER_API_KEY=scoped-secret\n"
+        "LAB_ARENA_OPENROUTER_API_KEY='scoped secret'\n"
         "OPENROUTER_API_KEY=shared-secret\n"
         "SUPABASE_SERVICE_ROLE_KEY=unrelated-secret\n",
         encoding="utf-8",
@@ -48,7 +52,8 @@ def test_arena_service_loads_only_scoped_values(tmp_path, monkeypatch) -> None:
     run_lab_arena_service.load_scoped_environment(environment)
 
     assert os.environ["LAB_ARENA_MODE"] == "shadow"
-    assert os.environ["LAB_ARENA_OPENROUTER_API_KEY"] == "scoped-secret"
+    assert os.environ["LAB_ARENA_OPENROUTER_API_KEY"] == "scoped secret"
+    assert "UNRELATED_BARE_VALUE" not in os.environ
     assert "OPENROUTER_API_KEY" not in os.environ
     assert "SUPABASE_SERVICE_ROLE_KEY" not in os.environ
 
@@ -63,6 +68,48 @@ def test_arena_service_keeps_explicit_scoped_override(tmp_path, monkeypatch) -> 
     run_lab_arena_service.load_scoped_environment(environment)
 
     assert os.environ["LAB_ARENA_MODE"] == "off"
+
+
+def test_arena_service_loads_only_scoped_json_values(tmp_path, monkeypatch) -> None:
+    from scripts import run_lab_arena_service
+
+    environment = tmp_path / "gateway.json"
+    environment.write_text(
+        json.dumps({"LAB_ARENA_MODE": "shadow", "SHARED_SECRET": "ignored"}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LAB_ARENA_MODE", raising=False)
+    monkeypatch.delenv("SHARED_SECRET", raising=False)
+
+    run_lab_arena_service.load_scoped_environment(environment)
+
+    assert os.environ["LAB_ARENA_MODE"] == "shadow"
+    assert "SHARED_SECRET" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "LAB_ARENA_MODE='unterminated\n",
+        "LAB_ARENA_MODE=shadow\nLAB_ARENA_MODE=live\n",
+    ],
+)
+def test_arena_service_rejects_invalid_scoped_values_before_restore(
+    tmp_path, monkeypatch, document
+) -> None:
+    from gateway.tee.prepare_gateway_envelopes_v2 import (
+        GatewayEnvelopePreparationV2Error,
+    )
+    from scripts import run_lab_arena_service
+
+    environment = tmp_path / "gateway.env"
+    environment.write_text(document, encoding="utf-8")
+    monkeypatch.delenv("LAB_ARENA_MODE", raising=False)
+
+    with pytest.raises(GatewayEnvelopePreparationV2Error):
+        run_lab_arena_service.load_scoped_environment(environment)
+
+    assert "LAB_ARENA_MODE" not in os.environ
 
 
 def test_validator_restart_replaces_runner_after_gateway_alignment() -> None:

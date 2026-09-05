@@ -545,6 +545,7 @@ async def test_finalization_failure_keeps_durable_journal(monkeypatch):
 async def test_finalization_retry_refreshes_epoch_and_quarantines_after_rollover(
     monkeypatch,
 ):
+    critical_messages = []
     recovered_extrinsic = {
         "authorization_hash": "sha256:" + "4" * 64,
         "extrinsic_hash": "0x" + "5" * 64,
@@ -576,6 +577,11 @@ async def test_finalization_retry_refreshes_epoch_and_quarantines_after_rollover
         fail_finalize,
     )
     monkeypatch.setattr(validator_module.asyncio, "sleep", rollover_on_sleep)
+    monkeypatch.setattr(
+        validator_module.bt.logging,
+        "critical",
+        lambda message: critical_messages.append(str(message)),
+    )
 
     outcome = await validator._recover_weight_publication_journal_v2(
         gateway_url="https://gateway.example"
@@ -588,6 +594,21 @@ async def test_finalization_retry_refreshes_epoch_and_quarantines_after_rollover
         100,
         "signed_finalization_unresolved",
     )
+    assert not any(name == "clear" for name, _value in journal.calls)
+    quarantine_messages = [
+        message
+        for message in critical_messages
+        if message.startswith("weight_publication_journal_quarantined ")
+    ]
+    assert quarantine_messages == [
+        "weight_publication_journal_quarantined epoch=100 signed=true "
+        "path=journal.quarantined.100.signed_finalization_unresolved "
+        "local_finalization_recovery=unresolved "
+        "last_attempted_substage=finalize_authoritative_weight_publication_v2 "
+        "last_exception_class=RuntimeError"
+    ]
+    assert "finalized_chain_proof=false" not in quarantine_messages[0]
+    assert "temporarily unavailable" not in quarantine_messages[0]
 
 
 @pytest.mark.asyncio

@@ -4782,7 +4782,10 @@ class Validator(BaseValidatorNeuron):
             bt.logging.critical(
                 "weight_publication_journal_quarantined "
                 f"epoch={epoch_id} signed=true path={quarantined} "
-                "finalized_chain_proof=false"
+                "local_finalization_recovery=unresolved "
+                "last_attempted_substage="
+                "finalize_authoritative_weight_publication_v2 "
+                f"last_exception_class={type(last_error).__name__}"
             )
             return _WeightPublicationRecoveryOutcome(
                 epoch_id=epoch_id,

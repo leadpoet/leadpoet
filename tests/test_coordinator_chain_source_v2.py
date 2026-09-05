@@ -557,6 +557,9 @@ class HistoricalBroker:
         fail_first=False,
         fail_all=False,
         fail_status=503,
+        result_status=None,
+        result_terminal_status="authenticated_response",
+        attempt_terminal_status="authenticated_response",
         last_field=73,
     ):
         self.epoch = int(epoch)
@@ -564,6 +567,9 @@ class HistoricalBroker:
         self.fail_first = bool(fail_first)
         self.fail_all = bool(fail_all)
         self.fail_status = int(fail_status)
+        self.result_status = result_status
+        self.result_terminal_status = str(result_terminal_status)
+        self.attempt_terminal_status = str(attempt_terminal_status)
         self.last_field = int(last_field)
         self.calls = []
 
@@ -606,6 +612,9 @@ class HistoricalBroker:
                 separators=(",", ":"),
             ).encode()
             http_status = 200
+        attempt_is_authenticated = (
+            self.attempt_terminal_status == "authenticated_response"
+        )
         attempt = build_transport_attempt(
             request_id=("%032x" % len(self.calls)),
             logical_operation_id=request["logical_operation_id"],
@@ -623,21 +632,27 @@ class HistoricalBroker:
             retry_policy_hash=request["retry_policy_hash"],
             timeout_ms=request["timeout_ms"],
             started_at="2026-07-10T20:00:00Z",
-            terminal_status="authenticated_response",
-            http_status=http_status,
-            response_hash=sha256_bytes(response),
+            terminal_status=self.attempt_terminal_status,
+            http_status=http_status if attempt_is_authenticated else None,
+            response_hash=(
+                sha256_bytes(response) if attempt_is_authenticated else None
+            ),
             request_artifact_hash=sha256_json(
                 {"archive_request": len(self.calls)}
             ),
-            response_artifact_hash=sha256_bytes(response),
-            tls_peer_chain_hash=HASH,
-            tls_protocol="TLSv1.3",
-            failure_code=None,
+            response_artifact_hash=(
+                sha256_bytes(response) if attempt_is_authenticated else None
+            ),
+            tls_peer_chain_hash=HASH if attempt_is_authenticated else None,
+            tls_protocol="TLSv1.3" if attempt_is_authenticated else None,
+            failure_code=None if attempt_is_authenticated else "timeout",
             completed_at="2026-07-10T20:00:00Z",
         )
         return {
-            "terminal_status": "authenticated_response",
-            "http_status": http_status,
+            "terminal_status": self.result_terminal_status,
+            "http_status": (
+                http_status if self.result_status is None else self.result_status
+            ),
             "body_b64": base64.b64encode(response).decode(),
             "transport_attempt": attempt,
         }
@@ -778,6 +793,62 @@ def test_historical_archive_rate_limit_retries_remain_bounded():
         )
 
     assert sleeps == [60.0, 60.0]
+    assert len(context.transport_attempts) == 3
+
+
+@pytest.mark.parametrize(
+    "broker",
+    (
+        HistoricalBroker(
+            fail_all=True,
+            fail_status=429,
+            result_terminal_status="transport_failure",
+        ),
+        HistoricalBroker(
+            fail_all=True,
+            fail_status=429,
+            result_status="429",
+        ),
+        HistoricalBroker(
+            fail_all=True,
+            fail_status=429,
+            attempt_terminal_status="transport_failure",
+        ),
+    ),
+)
+def test_archive_rate_limit_backoff_requires_authenticated_integer_status(broker):
+    sleeps = []
+    source = CoordinatorChainSourceV2(
+        execute_provider=broker.execute,
+        retry_policy_hashes={
+            "bittensor_chain": "sha256:" + "1" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": _stateful_cutover().to_dict(),
+        },
+        sleep=sleeps.append,
+    )
+    context = ExecutionContextV2(
+        job_id="legacy-settlement:untrusted-rate-limit",
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        epoch_id=101,
+    )
+
+    with pytest.raises(
+        CoordinatorChainSourceV2Error,
+        match="archive request exhausted measured retries",
+    ):
+        source.read_historical_finalized_weights(
+            netuid=71,
+            epoch_id=100,
+            validator_hotkey=ss58_encode_account_id(OWNER),
+            context=context,
+        )
+
+    assert sleeps == [1.0, 3.0]
     assert len(context.transport_attempts) == 3
 
 

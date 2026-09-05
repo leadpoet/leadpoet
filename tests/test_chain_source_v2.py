@@ -6,10 +6,11 @@ import json
 
 import pytest
 
-from leadpoet_canonical.attested_v2 import sha256_bytes
+from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_METHOD,
     ChainSourceV2Error,
+    chain_source_policy_document,
     chain_source_policy_hash,
     decode_last_update_storage,
     decode_runtime_metadata_commitment,
@@ -35,6 +36,14 @@ OWNER_ACCOUNT = bytes.fromhex(
 SECOND_ACCOUNT = bytes.fromhex(
     "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383"
 )
+
+
+def test_chain_source_policy_binds_bounded_rate_limit_backoff():
+    policy = chain_source_policy_document()
+
+    assert policy["retry_backoff_seconds"] == [1.0, 3.0]
+    assert policy["rate_limit_backoff_seconds"] == [60.0, 60.0]
+    assert chain_source_policy_hash() == sha256_json(policy)
 
 
 def test_runtime_metadata_commitment_and_reviewed_reveal_default():

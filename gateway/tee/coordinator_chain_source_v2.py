@@ -1714,21 +1714,31 @@ class CoordinatorChainSourceV2:
         context.record_artifact(str(attempt["request_artifact_hash"]))
         if attempt.get("terminal_status") == "authenticated_response":
             context.record_artifact(str(attempt["response_artifact_hash"]))
+        terminal_status = str(result.get("terminal_status") or "")
+        attempt_terminal_status = str(attempt.get("terminal_status") or "")
+        raw_http_status = result.get("http_status")
+        http_status = (
+            int(raw_http_status)
+            if isinstance(raw_http_status, int)
+            and not isinstance(raw_http_status, bool)
+            else None
+        )
         if (
-            result.get("terminal_status") != "authenticated_response"
-            or not 200 <= int(result.get("http_status") or 0) < 300
+            terminal_status != "authenticated_response"
+            or http_status is None
+            or not 200 <= http_status < 300
         ):
             raise CoordinatorChainSourceV2Error(
                 "%s request failed: %s"
                 % (
                     provider_id,
                     result.get("failure_code")
-                    or "http_%s" % result.get("http_status"),
+                    or "http_%s" % raw_http_status,
                 ),
                 http_status=(
-                    int(result["http_status"])
-                    if isinstance(result.get("http_status"), int)
-                    and not isinstance(result.get("http_status"), bool)
+                    http_status
+                    if terminal_status == "authenticated_response"
+                    and attempt_terminal_status == "authenticated_response"
                     else None
                 ),
             )

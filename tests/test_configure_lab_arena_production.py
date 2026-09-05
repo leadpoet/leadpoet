@@ -138,6 +138,65 @@ def test_remote_protocol_checks_version_again_before_stage_move():
     assert 'comments=True, posix=True' in source
 
 
+@pytest.mark.parametrize("selection,expected", [("enabled", "true"), ("disabled", "false")])
+def test_testnet_proxy_configuration_changes_only_the_route(monkeypatch, tmp_path, selection, expected):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    requests_seen = []
+
+    def ssh(host, ssh_key, request):
+        requests_seen.append(request)
+        return {"ok": True, "applied": request["apply"]}
+
+    monkeypatch.setattr(MODULE, "_ssh", ssh)
+    assert MODULE.main([
+        "--testnet-proxy", selection, "--allowed-account", "493765492819",
+        "--ssh-key", str(key), "--check",
+    ]) == 0
+    assert len(requests_seen) == 1
+    assert requests_seen[0]["updates"] == {"LAB_ARENA_TESTNET_ENABLED": expected}
+    assert requests_seen[0]["aliases"] == {}
+    assert requests_seen[0]["apply"] is False
+    assert "service_key" not in requests_seen[0]
+
+
+def test_testnet_proxy_apply_keeps_the_existing_authorization_gate(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
+    monkeypatch.setattr(MODULE, "_ssh", lambda *args: pytest.fail("unauthorized remote call"))
+    assert MODULE.main([
+        "--testnet-proxy", "enabled", "--allowed-account", "493765492819",
+        "--ssh-key", str(key), "--apply",
+    ]) == 2
+
+
+def test_testnet_proxy_scope_cannot_be_mixed_with_credential_configuration():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--testnet-proxy", "enabled", "--miner-credentials-only",
+            "--allowed-account", "493765492819",
+        ])
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_testnet_proxy_remote_apply_preserves_mainnet_configuration(tmp_path, encoded):
+    values = {"LAB_ARENA_MODE": "live", "LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "keep-key",
+              "KEEP": "same", "LAB_ARENA_TESTNET_ENABLED": "false"}
+    raw = json.dumps(values) if encoded else "\n".join(k + "=" + v for k, v in values.items())
+    updated = _run_remote_with_fake_aws(tmp_path, raw, request_override={
+        "role": "testnet_proxy", "updates": {"LAB_ARENA_TESTNET_ENABLED": "true"},
+        "aliases": {},
+    })
+    if encoded:
+        assert json.loads(updated) == dict(values, LAB_ARENA_TESTNET_ENABLED="true")
+    else:
+        assert "LAB_ARENA_MODE=live" in updated
+        assert "LAB_ARENA_CREDENTIAL_KMS_KEY_ID=keep-key" in updated
+        assert "KEEP=same" in updated
+        assert "export LAB_ARENA_TESTNET_ENABLED=true" in updated
+
+
 def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monkeypatch, tmp_path):
     seen = []
 

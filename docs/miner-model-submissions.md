@@ -99,6 +99,16 @@ Organizer keys remain for the explicitly identified daily baseline only.
 With the miner vault unset, baseline operation remains available, but new
 model admission fails closed.
 
+For a hosted testnet check, the public gateway can route
+`https://gateway.subnet71.com/testnet/arena/...` to a separate native Arena
+service on loopback port 8793. It never falls back to the mainnet service.
+Use `--testnet-proxy enabled` (or `disabled`) with the same configuration
+tool, `--allowed-account`, and `--check`/authorized `--apply` workflow.
+This changes only `LAB_ARENA_TESTNET_ENABLED`; it does not start a service or
+change the baseline, schedule, rewards, or credentials. Load the setting with
+the normal gateway restart. Miner and validator clients use
+`https://gateway.subnet71.com/testnet` as their API base URL.
+
 ## Live validation and deployment boundary
 
 The isolated testnet-401 run completed real CLI admission, source loading in

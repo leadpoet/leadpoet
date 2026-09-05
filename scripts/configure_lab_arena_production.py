@@ -417,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
     scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
+    scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -443,7 +444,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
     if not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    narrow_scope = args.prepare_runner or args.miner_credentials_only
+    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None
     if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
         raise ConfigurationError("--miner-credential-kms-key-id requires --miner-credentials-only")
     if not narrow_scope and args.service_key_fd is None:
@@ -462,6 +463,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         _validate_args(args)
+        if args.testnet_proxy is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "testnet_proxy", "aliases": {},
+                "updates": {"LAB_ARENA_TESTNET_ENABLED": "true" if args.testnet_proxy == "enabled" else "false"},
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
         if args.miner_credentials_only:
             request = {
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,

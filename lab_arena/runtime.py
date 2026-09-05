@@ -63,7 +63,9 @@ SANDBOX_HOSTNAME = "leadpoet-lab-arena"
 # Isolated mode keeps the trusted scorer image's /model/sitecustomize.py from
 # changing submitted source execution.  The host-owned entrypoint explicitly
 # adds only the admitted source and dependency mounts after Python starts.
-AGENT_ENTRY_COMMAND = ("python3", "-I", SANDBOX_AGENT_ENTRYPOINT_PATH)
+# -I ignores PYTHON* environment settings, so keep log flushing and read-only
+# import behavior explicit. LAB_ARENA_RANDOM_SEED remains available to the agent.
+AGENT_ENTRY_COMMAND = ("python3", "-I", "-u", "-B", SANDBOX_AGENT_ENTRYPOINT_PATH)
 AGENT_WORKING_DIR = SANDBOX_AGENT_SOURCE_DIR
 SCORER_ENTRY_COMMAND = ("python3", "/model/scorer_entrypoint.py")
 SCORER_WORKING_DIR = "/model"

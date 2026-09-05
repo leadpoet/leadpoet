@@ -227,7 +227,7 @@ def test_oci_spec_invariants(tmp_path):
     assert document["root"] == {"path": str(spec.rootfs_path), "readonly": True}
     process = document["process"]
     assert process["user"] == {"uid": 65534, "gid": 65534}
-    assert process["args"] == ["python3", "-I", "/agent/entrypoint.py"]
+    assert process["args"] == ["python3", "-I", "-u", "-B", "/agent/entrypoint.py"]
     assert process["cwd"] == "/agent/source"
     assert process["noNewPrivileges"] is True
     assert process["terminal"] is False
@@ -342,7 +342,7 @@ def test_sandbox_spec_defaults_follow_the_public_constants(tmp_path):
     assert spec.wall_clock_seconds == contracts.ICP_WALL_CLOCK_SECONDS == 300
     assert spec.uid == 65534 and spec.gid == 65534
     assert spec.output_tmpfs_bytes == 64 * 1024 * 1024
-    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("python3", "-I", "/agent/entrypoint.py")
+    assert spec.argv == rt.AGENT_ENTRY_COMMAND == ("python3", "-I", "-u", "-B", "/agent/entrypoint.py")
     assert spec.cwd == rt.AGENT_WORKING_DIR == "/agent/source"
 
 
@@ -350,7 +350,7 @@ def test_host_process_and_environment_are_independent_of_image_metadata(tmp_path
     spec = make_spec(tmp_path, extra_environment={"TRUSTED_SCORER": "1", "TZ": "America/New_York"})
     document = rt.oci_spec(spec)
     process = document["process"]
-    assert process["args"] == ["python3", "-I", "/agent/entrypoint.py"]
+    assert process["args"] == ["python3", "-I", "-u", "-B", "/agent/entrypoint.py"]
     assert process["cwd"] == "/agent/source"
     environment = dict(item.split("=", 1) for item in process["env"])
     assert environment["PATH"] == rt.PROCESS_ENV["PATH"] and environment["TRUSTED_SCORER"] == "1"
@@ -406,6 +406,20 @@ def test_agent_isolated_python_skips_model_sitecustomize_and_loads_bound_mounts(
     assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
     assert output.read_text(encoding="utf-8") == "source-dependency-loaded"
     assert not marker.exists()
+    assert not (source / "__pycache__").exists()
+    assert not (dependencies / "__pycache__").exists()
+
+
+def test_agent_isolated_python_flushes_output_before_abrupt_exit():
+    completed = subprocess.run(
+        [sys.executable, *rt.AGENT_ENTRY_COMMAND[1:-1], "-c",
+         "import os; print('before-exit'); os._exit(1)"],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert completed.stdout == b"before-exit\n"
 
 
 def test_scorer_python_keeps_trusted_model_startup(tmp_path):

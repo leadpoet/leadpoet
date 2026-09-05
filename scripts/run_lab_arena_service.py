@@ -10,7 +10,10 @@ and epoch cutover load only when a published live round needs activation.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
+import shlex
 import sys
 import threading
 from pathlib import Path
@@ -42,11 +45,64 @@ def build_parser() -> argparse.ArgumentParser:
 def load_scoped_environment(path: Path) -> None:
     """Load only Arena-owned values without restoring gateway provider aliases."""
 
-    from gateway.tee.prepare_gateway_envelopes_v2 import load_environment_file
+    from gateway.tee.prepare_gateway_envelopes_v2 import (
+        GatewayEnvelopePreparationV2Error,
+    )
 
-    for name, value in load_environment_file(path).items():
-        if name.startswith("LAB_ARENA_"):
-            os.environ.setdefault(name, value)
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway source environment is unavailable"
+        ) from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if parsed is not None:
+        if not isinstance(parsed, dict):
+            raise GatewayEnvelopePreparationV2Error(
+                "gateway source environment JSON must be an object"
+            )
+        scoped = {
+            str(name): str(value)
+            for name, value in parsed.items()
+            if str(name).startswith("LAB_ARENA_")
+        }
+    else:
+        scoped = {}
+        for raw_line in raw.replace("\x00", "\n").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            name, separator, raw_value = line.partition("=")
+            name = name.strip()
+            if not separator or not name.startswith("LAB_ARENA_"):
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment key is malformed"
+                )
+            try:
+                parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
+            except ValueError as exc:
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment value is malformed"
+                ) from exc
+            if len(parts) != 1 or not parts[0].startswith("VALUE="):
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment value is malformed"
+                )
+            value = parts[0].split("=", 1)[1]
+            if name in scoped and scoped[name] != value:
+                raise GatewayEnvelopePreparationV2Error(
+                    "gateway Arena environment key is duplicated"
+                )
+            scoped[name] = value
+    for name, value in scoped.items():
+        os.environ.setdefault(name, value)
 
 
 def main(argv=None) -> int:

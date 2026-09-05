@@ -153,6 +153,88 @@ def test_testnet_proxy_preserves_boundaries_and_never_falls_back(monkeypatch):
     assert client.post("/testnet/arena/v1/submissions", content=b"x" * (arena_proxy._MAX_REQUEST_BYTES + 1)).status_code == 413
 
 
+def test_testnet_benchmark_is_private_and_never_reaches_sidecar(monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise AssertionError("private testnet benchmark reached the sidecar")
+
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", fail)
+    client = _app()
+
+    blocked = client.get(
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/benchmark?ignored=1"
+    )
+    assert blocked.status_code == 403
+    assert blocked.json() == {"detail": "testnet benchmark is private"}
+    assert client.get(
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/benchmark/"
+    ).status_code == 404
+    assert client.get(
+        "/testnet/arena/v1/rounds//benchmark"
+    ).status_code == 404
+    # TestClient performs an additional decode: the double-encoded spelling
+    # becomes the exact private path, while the next level exercises the
+    # residual-percent rejection used by a one-decode ASGI server.
+    assert client.get(
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/%2562enchmark"
+    ).status_code == 403
+    assert client.get(
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/%252562enchmark"
+    ).status_code == 404
+    assert client.get(
+        "/testnet/arena/v%2531/rounds/arena-2026-09-05-testnet2/benchmark"
+    ).status_code == 403
+    assert client.get(
+        "/testnet/arena/v%252531/rounds/arena-2026-09-05-testnet2/benchmark"
+    ).status_code == 404
+
+
+def test_benchmark_guard_preserves_mainnet_and_private_testnet_routes(monkeypatch):
+    observed = []
+
+    async def forward(method, path, *, query, body, headers, testnet=False):
+        observed.append((method, path, query, body, testnet))
+        return httpx.Response(200, content=b'{}')
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+
+    assert client.get(
+        "/arena/v1/rounds/arena-2026-09-05/benchmark"
+    ).status_code == 200
+    assert client.post(
+        "/testnet/arena/v1/runs/claim", content=b'{"signed":"claim"}'
+    ).status_code == 200
+    assert client.get(
+        "/testnet/arena/v1/rounds/arena-2026-09-05-testnet2/results/submission-1"
+    ).status_code == 200
+    assert observed == [
+        (
+            "GET",
+            "v1/rounds/arena-2026-09-05/benchmark",
+            "",
+            b"",
+            False,
+        ),
+        (
+            "POST",
+            "v1/runs/claim",
+            "",
+            b'{"signed":"claim"}',
+            True,
+        ),
+        (
+            "GET",
+            "v1/rounds/arena-2026-09-05-testnet2/results/submission-1",
+            "",
+            b"",
+            True,
+        ),
+    ]
+
+
 def test_sidecar_destination_is_fixed_by_network(monkeypatch):
     import asyncio
 

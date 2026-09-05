@@ -34,6 +34,16 @@ def _arena_enabled() -> bool:
     }
 
 
+def _is_public_benchmark_path(arena_path: str) -> bool:
+    parts = arena_path.split("/")
+    return (
+        len(parts) == 4
+        and parts[:2] == ["v1", "rounds"]
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "benchmark"
+    )
+
+
 async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) -> bytes:
     declared = request.headers.get("content-length")
     if declared is not None:
@@ -89,6 +99,12 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
     # requests out of the mainnet service. Never fall back if testnet is down.
     if os.environ.get("LAB_ARENA_TESTNET_ENABLED", "false").strip().lower() != "true":
         raise HTTPException(status_code=404, detail="testnet competition is disabled")
+    # ASGI has decoded the path once. A residual percent could be decoded again
+    # by an upstream client and must not bypass the exact benchmark guard.
+    if "%" in arena_path:
+        raise HTTPException(status_code=404, detail="arena path invalid")
+    if request.method == "GET" and _is_public_benchmark_path(arena_path):
+        raise HTTPException(status_code=403, detail="testnet benchmark is private")
     return await _proxy_request(arena_path, request, testnet=True)
 
 

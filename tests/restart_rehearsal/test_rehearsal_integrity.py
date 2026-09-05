@@ -3421,21 +3421,27 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     tables, rpcs = _schema_contract(repository_root)
     assert {
         "research_lab_gateway_control_current",
+        "lab_arena_reward_basis_v1",
+    } <= tables
+    # Private competition state belongs to the standalone service, not gateway
+    # startup. Keep the existing reward read boundary without coupling restarts.
+    assert {
         "lab_arena_rounds",
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",
-        "lab_arena_reward_basis_v1",
-    } <= tables
+    }.isdisjoint(tables)
     assert {
         "research_lab_source_add_claim_work",
+    } <= rpcs
+    assert {
         "lab_arena_current_daily_icp_set",
         "lab_arena_register_submission",
         "lab_arena_update_submission",
         "lab_arena_claim_assignment",
         "lab_arena_activate_reward",
         "lab_arena_schema_version_v1",
-    } <= rpcs
+    }.isdisjoint(rpcs)
     assert {
         "research_lab_candidate_evaluation_current",
         "research_lab_candidate_promotion_events",
@@ -8569,6 +8575,72 @@ def test_module_provenance_follows_prepared_archive_python_path(
     assert rehearsal_contract_adapter._module_source(
         "gateway.tee.verify_weight_submission_ready_v2"
     ) == module_path
+
+
+def test_attested_runtime_clean_source_keeps_exact_candidate_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    candidate_sha = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", candidate_sha)
+    from tests.restart_rehearsal import contract_adapter
+
+    clean_source = tmp_path / "leadpoet_gateway_enclave_source"
+    relative = Path("gateway/tee/protected_workflows.py")
+    source = clean_source / relative
+    source.parent.mkdir(parents=True)
+    source.write_bytes((root / relative).read_bytes())
+    monkeypatch.setattr(
+        contract_adapter,
+        "ATTESTED_RUNTIME_GIT_SOURCE_ROOT",
+        clean_source,
+    )
+    monkeypatch.setattr(contract_adapter, "_candidate_root", lambda: root)
+
+    identity = contract_adapter._source_identity(source)
+    assert identity["source_kind"] == "candidate_archive"
+    assert identity["source_commit"] == candidate_sha
+    assert identity["source_git_path"] == relative.as_posix()
+
+    source.write_bytes(source.read_bytes() + b"\n# tampered\n")
+    with pytest.raises(RuntimeError, match="source bytes differ"):
+        contract_adapter._source_identity(source)
+
+
+def test_attested_runtime_clean_source_rejects_untrusted_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    from tests.restart_rehearsal import contract_adapter
+
+    clean_source = tmp_path / "leadpoet_gateway_enclave_source"
+    trusted = clean_source / "gateway/tee/protected_workflows.py"
+    git_file = clean_source / ".git/config"
+    sibling = tmp_path / "leadpoet_gateway_enclave_source-copy/source.py"
+    outside = tmp_path / "outside.py"
+    for path in (trusted, git_file, sibling, outside):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    escaped = clean_source / "gateway/tee/escaped.py"
+    escaped.symlink_to(outside)
+    monkeypatch.setattr(
+        contract_adapter,
+        "ATTESTED_RUNTIME_GIT_SOURCE_ROOT",
+        clean_source,
+    )
+
+    assert contract_adapter._candidate_git_path(
+        trusted.resolve(), Path("/home/ec2-user/leadpoet_repo")
+    ) == (Path("gateway/tee/protected_workflows.py"), "candidate_archive")
+    for rejected in (clean_source, clean_source / ".git", git_file, sibling, escaped):
+        with pytest.raises(RuntimeError, match="recognized candidate archive"):
+            contract_adapter._candidate_git_path(
+                rejected.resolve(), Path("/home/ec2-user/leadpoet_repo")
+            )
 
 
 def test_module_provenance_accepts_only_candidate_miner_bootstrap_archive(

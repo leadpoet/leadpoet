@@ -70,6 +70,7 @@ def _run_recovery(
     post_reclaim_active_count_field: Optional[str] = None,
     change_audit_manifest_after_stale_reclaim: bool = False,
     fail_zero_runtime_reconciler: bool = False,
+    zero_runtime_reconcile_clears_orphan_metadata: bool = False,
     malformed_zero_runtime_reconciler: bool = False,
     zero_runtime_boolean_field: Optional[str] = None,
     change_audit_manifest_after_reconcile: bool = False,
@@ -287,6 +288,16 @@ emit_rows() {
   done
 }
 case "$command" in
+  python3)
+    if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+        && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+      exit 0
+    fi
+    [ "$FAKE_LAYERDB_IMAGES" -eq 0 ] \
+      && [ "$FAKE_LAYERDB_MOUNTS" -eq 0 ] \
+      && [ "$FAKE_OVERLAY_DIRECTORIES" -eq 0 ]
+    exit $?
+    ;;
   env)
     printf '%s %s\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
     case "$*" in
@@ -472,14 +483,26 @@ case "$command" in
     fi
     case "${2:-}" in
       */image/overlay2/layerdb/sha256)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          exit 1
+        fi
         [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
           || [ "$FAKE_LAYERDB_IMAGE_DIRECTORY_EXISTS" = "1" ]
         ;;
       */image/overlay2/layerdb/mounts)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          exit 1
+        fi
         [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
           || [ "$FAKE_LAYERDB_MOUNT_DIRECTORY_EXISTS" = "1" ]
         ;;
       */overlay2)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          exit 1
+        fi
         [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
           || [ "$FAKE_OVERLAY_DIRECTORY_EXISTS" = "1" ]
         ;;
@@ -493,9 +516,30 @@ case "$command" in
     ;;
   find)
     case "$1" in
-      */layerdb/sha256) emit_rows "$FAKE_LAYERDB_IMAGES" ;;
-      */layerdb/mounts) emit_rows "$FAKE_LAYERDB_MOUNTS" ;;
-      */overlay2) emit_rows "$FAKE_OVERLAY_DIRECTORIES" ;;
+      */layerdb/sha256)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          emit_rows 0
+        else
+          emit_rows "$FAKE_LAYERDB_IMAGES"
+        fi
+        ;;
+      */layerdb/mounts)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          emit_rows 0
+        else
+          emit_rows "$FAKE_LAYERDB_MOUNTS"
+        fi
+        ;;
+      */overlay2)
+        if [ -f "$FAKE_DAEMON_RECONCILE_MARKER" ] \
+            && [ "$FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA" = "1" ]; then
+          emit_rows 0
+        else
+          emit_rows "$FAKE_OVERLAY_DIRECTORIES"
+        fi
+        ;;
       *) exit 2 ;;
     esac
     ;;
@@ -758,6 +802,9 @@ exit 0
         ),
         "FAKE_ZERO_RUNTIME_BOOLEAN_FIELD": (
             "" if zero_runtime_boolean_field is None else zero_runtime_boolean_field
+        ),
+        "FAKE_ZERO_RUNTIME_RECONCILE_CLEARS_ORPHAN_METADATA": (
+            "1" if zero_runtime_reconcile_clears_orphan_metadata else "0"
         ),
         "FAKE_CHANGE_AUDIT_MANIFEST_AFTER_RECONCILE": (
             "1" if change_audit_manifest_after_reconcile else "0"
@@ -2591,6 +2638,81 @@ def test_validator_docker_recovery_leaves_clean_root_above_floor_untouched(
 
     assert result.returncode == 0, result.stderr
     assert "orphaned=0" in result.stdout
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_reconciles_orphans_without_deleting_volume(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        volumes=1,
+        layerdb_images=1,
+        zero_runtime_reconcile_clears_orphan_metadata=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Reconciling orphaned dockerd metadata before considering a data-root reset" in result.stdout
+    assert "Docker storage ready after orphaned metadata reconciliation: free_bytes=40000000000" in result.stdout
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
+    assert "systemctl stop docker.service docker.socket containerd.service" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [("missing", 0), ("empty", 0), ("link_index", 0), ("record", 1),
+     ("invalid_parent", 1), ("image_inventory_failure", 1), ("sudo_failure", 1)],
+)
+def test_reconciled_metadata_inventory_fails_closed(
+    tmp_path: Path, case: str, expected: int,
+) -> None:
+    source = (ROOT / "validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
+    function = source[source.index("empty_runtime_metadata_is_clear() {"):
+                      source.index("\nonline_image_ids() {")]
+    docker_root = tmp_path / "docker"
+    docker_root.mkdir()
+    if case in ("empty", "link_index", "record"):
+        (docker_root / "overlay2").mkdir()
+    if case == "link_index":
+        (docker_root / "overlay2/l").mkdir()
+    if case == "record":
+        (docker_root / "overlay2/stale-record").touch()
+    if case == "invalid_parent":
+        (docker_root / "image").touch()
+    driver = tmp_path / "inventory.sh"
+    driver.write_text(
+        "set -euo pipefail\n"
+        "run_bounded_daemon_inventory() { return "
+        + ("7" if case == "image_inventory_failure" else "0") + "; }\n"
+        + ('sudo() { return 1; }\n' if case == "sudo_failure"
+           else 'sudo() { "$@"; }\n')
+        + function
+        + "\nif empty_runtime_metadata_is_clear; then exit 0; else exit 1; fi\n"
+    )
+    result = subprocess.run(
+        ["bash", str(driver)], capture_output=True, text=True, timeout=10,
+        env={**os.environ, "DOCKER_ROOT": str(docker_root)},
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
+
+
+def test_validator_docker_recovery_keeps_a_volume_when_metadata_persists(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        volumes=1,
+        layerdb_images=1,
+    )
+
+    assert result.returncode == 1
+    assert "Docker metadata is not proven empty after guarded reconciliation" in result.stderr
+    assert "refusing Docker data-root reset while 1 volume(s) remain" in result.stderr
+    assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
 

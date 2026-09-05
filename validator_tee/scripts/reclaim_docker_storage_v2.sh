@@ -496,6 +496,46 @@ inventory_empty_online_runtime() {
   fi
 }
 
+empty_runtime_metadata_is_clear() {
+  local image_count
+
+  if ! image_count="$(
+    run_bounded_daemon_inventory docker image ls -aq \
+      | sed '/^$/d' | sort -u | wc -l | tr -d '[:space:]'
+  )"; then
+    echo "ERROR: Docker image inventory is unreadable after reconciliation" >&2
+    return 1
+  fi
+  if [ "$image_count" -ne 0 ]; then
+    echo "Docker images remain after guarded reconciliation: images=$image_count" >&2
+    return 1
+  fi
+  # Missing directories are empty; access and traversal errors are not.
+  # This function runs in an if condition, so do not rely on shell errexit.
+  if ! sudo python3 - "$DOCKER_ROOT" <<'PY'
+import os
+import sys
+
+root = sys.argv[1]
+try:
+    for relative in ("image/overlay2/layerdb/sha256", "image/overlay2/layerdb/mounts", "overlay2"):
+        try:
+            with os.scandir(os.path.join(root, relative)) as entries:
+                if any(relative != "overlay2" or entry.name != "l" for entry in entries):
+                    raise RuntimeError("Docker metadata remains after reconciliation")
+        except FileNotFoundError:
+            continue
+except (OSError, RuntimeError) as exc:
+    print("ERROR: Docker metadata is not proven empty: " + str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    echo "ERROR: Docker metadata is not proven empty after guarded reconciliation" >&2
+    return 1
+  fi
+  return 0
+}
+
 online_image_ids() {
   local raw_image_ids
 
@@ -1281,6 +1321,42 @@ if [ "$CONTAINER_COUNT" -ne 0 ]; then
   echo "ERROR: live validator runtime has only $AVAILABLE free bytes; $REQUIRED_FREE_BYTES are required for an independent recovery build" >&2
   echo "ERROR: refusing to stop containers or reset Docker storage from the release builder" >&2
   exit 1
+fi
+
+# A named volume is independent state.  When the runtime is otherwise empty
+# and capacity is already sufficient, first refresh only dockerd metadata.  A
+# successful refresh avoids a destructive data-root reset. Verify the refreshed
+# state in this process, under the same exclusive lock. A persistent orphan
+# still follows the existing fail-closed reset checks.
+if [ "$AVAILABLE" -ge "$REQUIRED_FREE_BYTES" ] \
+    && [ "$ORPHANED_DOCKER_STATE" -eq 1 ] \
+    && [ "$VOLUME_COUNT" -ne 0 ] \
+    && [ "$IMAGE_COUNT" -eq 0 ] \
+    && [ "$CONTAINERD_CONTAINER_COUNT" -eq 0 ] \
+    && [ "$CONTAINERD_TASK_COUNT" -eq 0 ] \
+    && [ "$CONTAINERD_RUNNING_TASK_COUNT" -eq 0 ] \
+    && [ "$MOBY_SHIM_COUNT" -eq 0 ] \
+    && [ "$NON_MOBY_NAMESPACE_COUNT" -eq 0 ]; then
+  inventory_empty_online_runtime "pre-orphan-metadata-reconcile"
+  require_exact_host_gateway_absent "pre-orphan-metadata-reconcile"
+  PYTHONPATH="$REPO_ROOT" python3 \
+    -m validator_tee.host.docker_operation_guard_v2 \
+    --wait \
+    --timeout-seconds 1800 \
+    --interval-seconds 3 \
+    --proc-root "$PROC_ROOT"
+  require_exact_host_gateway_absent "pre-orphan-metadata-reconcile-apply"
+  echo "Reconciling orphaned dockerd metadata before considering a data-root reset"
+  reconcile_empty_docker_runtime
+  inventory_empty_online_runtime "post-orphan-metadata-reconcile"
+  require_exact_host_gateway_absent "post-orphan-metadata-reconcile"
+  if empty_runtime_metadata_is_clear; then
+    AVAILABLE="$(available_bytes)"
+    if [ "$AVAILABLE" -ge "$REQUIRED_FREE_BYTES" ]; then
+      echo "Docker storage ready after orphaned metadata reconciliation: free_bytes=$AVAILABLE required_free_bytes=$REQUIRED_FREE_BYTES runtime_mode=empty"
+      exit 0
+    fi
+  fi
 fi
 
 if [ "$ALLOW_DATA_ROOT_RESET" != "1" ]; then

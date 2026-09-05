@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from tests.restart_rehearsal.artifact_identity import (
     VALIDATOR_ROLE,
     eif_bytes,
+    normalized_config,
     normalized_image_id,
     pcr0,
 )
@@ -221,12 +223,14 @@ def test_pcr0_cache_adapter_preserves_checked_out_n_minus_one_identity(
 
     state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
     record = state["images"][normalized_tag]
+    normalized_layer, _ = normalized_config(parent, VALIDATOR_ROLE)
     assert record == {
         "build_root": str(build_root),
         "commit": parent,
         "id": normalized_image_id(parent, VALIDATOR_ROLE),
         "provenance": adapter.PCR0_CACHE_PROVENANCE,
         "role": VALIDATOR_ROLE,
+        "rootfs_layers": ["sha256:" + hashlib.sha256(normalized_layer).hexdigest()],
         "source_tag": tag,
     }
 

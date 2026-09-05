@@ -25,6 +25,9 @@ DEFAULT_SSH_KEY = Path.home() / ".ssh" / "leadpoet-2026-07-28.pem"
 AUTH_ENV = "LEADPOET_LAB_ARENA_PRODUCTION_APPLY"
 KNOWN_ACCOUNTS = frozenset({"187445349696", "493765492819"})
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DIGEST_REFERENCE_RE = re.compile(
+    r"(?=.{1,512}\Z)(?=[^\s\x00-\x1f\x7f]+\Z)[^/@\s]+/[^@\s]+@sha256:[0-9a-f]{64}\Z"
+)
 
 
 class ConfigurationError(RuntimeError):
@@ -71,6 +74,17 @@ def _required_alias(values: Mapping[str, str], name: str) -> str:
     if not value:
         raise ConfigurationError("required existing value is missing: %s" % name)
     return value
+
+
+def _validate_scorer_image(image: str) -> str:
+    """Validate a registry-qualified image pinned to a sha256 digest.
+
+    Keep this bounded syntax check dependency-free. The service performs the
+    authoritative registry resolution and image validation on startup.
+    """
+    if not isinstance(image, str) or not _DIGEST_REFERENCE_RE.fullmatch(image):
+        raise ConfigurationError("scorer image must be a valid sha256 digest reference")
+    return image
 
 
 def gateway_updates(values: Mapping[str, str], args: argparse.Namespace, service_key: str) -> dict[str, str]:
@@ -201,6 +215,9 @@ else:
         values[key] = raw_value
 
 updates = dict(request["updates"])
+if request["role"] == "scorer_image_only":
+    if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
+        fail("scorer_image_scope_invalid")
 if request["role"] in ("gateway", "miner_credentials"):
     for source, target in request["aliases"].items():
         raw_value = str(values.get(source) or "").strip()
@@ -418,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
     scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
+    scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -444,9 +462,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError("--daily-cutoff-utc must be between 0 and 23")
     if not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
-    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None
+    narrow_scope = args.prepare_runner or args.miner_credentials_only or args.testnet_proxy is not None or args.scorer_image_only
     if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
         raise ConfigurationError("--miner-credential-kms-key-id requires --miner-credentials-only")
+    if args.scorer_image_only:
+        _validate_scorer_image(str(args.scorer_image or ""))
     if not narrow_scope and args.service_key_fd is None:
         raise ConfigurationError("--service-key-fd is required for configuration")
     for name in (() if narrow_scope else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url")):
@@ -468,6 +488,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                 "apply": args.apply, "role": "testnet_proxy", "aliases": {},
                 "updates": {"LAB_ARENA_TESTNET_ENABLED": "true" if args.testnet_proxy == "enabled" else "false"},
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.scorer_image_only:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "scorer_image_only", "aliases": {},
+                "updates": {"LAB_ARENA_SCORER_IMAGE": args.scorer_image},
             }
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))

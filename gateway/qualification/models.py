@@ -229,7 +229,7 @@ _PROMPT_REGISTRABLE_DOMAIN_RE = re.compile(
     re.ASCII,
 )
 _PROMPT_LINKEDIN_COMPANY_SLUG_RE = re.compile(
-    r"[a-z0-9](?:[a-z0-9_-]{0,98}[a-z0-9])?",
+    r"[a-z0-9][a-z0-9_-]{0,99}",
     re.ASCII,
 )
 

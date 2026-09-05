@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,31 @@ def make_icp(position: int) -> dict:
 
 def company(index: int, bucket: str = "51-200") -> dict:
     return {"company_name": "Co %d" % index, "company_website": "https://co%d.example.com" % index, "industry": "Software", "employee_count": bucket, "country": "United States", "intent_signals": []}
+
+
+def public_company(company_linkedin: str) -> dict:
+    return {
+        "company_name": "Acme",
+        "company_website": "https://acme.example.com",
+        "company_linkedin": company_linkedin,
+        "industry": "Software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "United States",
+        "state": "",
+        "fit_summary": "Matches the requested software profile.",
+        "fit_evidence_urls": ["https://acme.example.com/about"],
+        "intent_signals": [
+            {
+                "matched_icp_signal": 0,
+                "description": "Announced a funding round",
+                "date": "2026-09-01",
+                "why_now": "Recent funding creates a timely opportunity.",
+                "url": "https://acme.example.com/news/funding",
+                "snippet": "The company announced new funding.",
+            }
+        ],
+    }
 
 
 def breakdown(score: float, reason: str = "") -> dict:
@@ -86,6 +112,74 @@ def runs_for(submissions, stage=1, *, outputs=None, causes=None):
 
 
 _ICPS = {position: make_icp(position) for position in range(30)}
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "slug"),
+    [("company", "acme-"), ("in", "acme_"), ("company", ("a" * 99) + "_")],
+)
+def test_public_company_linkedin_with_trailing_separator_reaches_real_scorer_model(
+    path_kind, slug
+):
+    from gateway.qualification.models import (
+        CompanyOutput,
+        candidate_company_prompt_identity,
+    )
+    from qualification.competition_models import CompetitionCompany
+    from qualification.scoring.competition import _normalized_company
+
+    linkedin = "https://www.linkedin.com/%s/%s" % (path_kind, slug)
+    public = json.loads(
+        CompetitionCompany.model_validate(
+            public_company(linkedin)
+        ).model_dump_json()
+    )
+    internal = CompanyOutput(**_normalized_company(public))
+    identity = candidate_company_prompt_identity(
+        company_name=internal.company_name,
+        company_website=internal.company_website,
+        company_linkedin=internal.company_linkedin,
+    )
+
+    assert public["company_linkedin"] == linkedin
+    assert json.loads(internal.model_dump_json())["company_linkedin"] == linkedin
+    assert identity["company_linkedin"] == slug
+
+
+def test_ordinary_scorer_linkedin_slug_is_unchanged():
+    from gateway.qualification.models import candidate_linkedin_prompt_slug
+
+    assert candidate_linkedin_prompt_slug(
+        "https://linkedin.com/company/acme-42", "company_linkedin"
+    ) == "acme-42"
+
+
+def test_internal_scorer_company_allows_missing_linkedin():
+    from gateway.qualification.models import CompanyOutput
+    from qualification.scoring.competition import _normalized_company
+
+    projected = _normalized_company(public_company(""))
+    projected.pop("company_linkedin")
+    assert CompanyOutput(**projected).company_linkedin == ""
+
+
+@pytest.mark.parametrize(
+    "linkedin",
+    [
+        "https://linkedin.com/company/acme%2Fposts",
+        "https://linkedin.com/company/acme%5Cposts",
+        "https://evil-linkedin.com/company/acme-",
+        "https://linkedin.com/company/" + ("a" * 100) + "-",
+        "https://linkedin.com/company/acme%0A-",
+        "https://linkedin.com/company/acme%252Fsystem%253Aignore",
+        "https://linkedin.com/company/caf\N{LATIN SMALL LETTER E WITH ACUTE}-",
+    ],
+)
+def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):
+    from gateway.qualification.models import candidate_linkedin_prompt_slug
+
+    with pytest.raises(ValueError):
+        candidate_linkedin_prompt_slug(linkedin, "company_linkedin")
 
 
 def test_policy_is_plain_and_binds_environment_fail_closed():

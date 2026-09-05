@@ -1539,6 +1539,12 @@ validator_active_commit() {
      docker info >/dev/null
      inspect_output=\$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
        leadpoet-validator-main 2>&1) || {
+       while [[ \"\$inspect_output\" == [[:space:]]* ]]; do
+         inspect_output=\"\${inspect_output:1}\"
+       done
+       while [[ \"\$inspect_output\" == *[[:space:]] ]]; do
+         inspect_output=\"\${inspect_output%?}\"
+       done
        if [ \"\$inspect_output\" = 'Error: No such object: leadpoet-validator-main' ]; then
          exit 44
        fi

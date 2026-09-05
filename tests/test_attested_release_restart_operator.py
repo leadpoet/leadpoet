@@ -1755,6 +1755,63 @@ def test_validator_only_operator_rejects_unknown_runtime_probe_failure(
     assert "validator_start" not in observed
 
 
+@pytest.mark.parametrize(
+    ("inspect_message", "expected_status"),
+    (
+        ("Error: No such object: leadpoet-validator-main", 44),
+        ("permission denied", 1),
+        ("Cannot connect to the Docker daemon", 1),
+        ("Error: No such object: leadpoet-validator-main\nextra", 1),
+    ),
+)
+def test_validator_active_commit_classifies_only_whitespace_wrapped_absence(
+    tmp_path: Path,
+    inspect_message: str,
+    expected_status: int,
+) -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("validator_active_commit() {")
+    function = source[start : source.index("\n}\n", start) + 2]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        "if [ \"$1\" = info ]; then exit 0; fi\n"
+        "printf '\\n'\n"
+        "printf '%s\\n' \"$VALIDATOR_INSPECT_MESSAGE\" >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    ssh = bin_dir / "ssh"
+    ssh.write_text(
+        '#!/bin/bash\ncommand="${!#}"\nexec bash -c "$command"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    ssh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "ssh_common=(); VALIDATOR_KEY=unused; VALIDATOR_HOST=unused\n"
+            + function
+            + "\nvalidator_active_commit",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_INSPECT_MESSAGE": inspect_message,
+        },
+    )
+    assert result.returncode == expected_status
+    if expected_status != 44:
+        assert inspect_message in result.stderr
+
+
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     tmp_path: Path,
     dependency_complete_readiness_python: Path,

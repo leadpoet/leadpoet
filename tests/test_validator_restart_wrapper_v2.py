@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+
 
 def test_restart_preserves_all_tracked_diffs_before_pull():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
@@ -651,6 +653,41 @@ def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown()
     assert "Validator remains running; production shutdown has not started." in script[
         marker:destructive
     ]
+
+
+@pytest.mark.parametrize(
+    ("inspect_message", "expected_status"),
+    (
+        ("\nError: No such object: leadpoet-validator-main\n", 0),
+        ("\npermission denied\n", 1),
+        ("\nCannot connect to the Docker daemon\n", 1),
+        ("\nError: No such object: leadpoet-validator-main\nextra", 1),
+    ),
+)
+def test_validator_restart_trims_only_outer_inspect_whitespace(
+    inspect_message: str,
+    expected_status: int,
+) -> None:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index(
+        'VALIDATOR_RUNNING_INSPECT_ERROR="$VALIDATOR_RUNNING_INSPECT_OUTPUT"'
+    )
+    end = script.index(
+        '  if [ "$VALIDATOR_RUNNING_INSPECT_ERROR" != ', start
+    )
+    normalization = script[start:end]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            normalization
+            + "\n[ \"$VALIDATOR_RUNNING_INSPECT_ERROR\" = "
+            + "\"Error: No such object: leadpoet-validator-main\" ]",
+        ],
+        check=False,
+        env={**os.environ, "VALIDATOR_RUNNING_INSPECT_OUTPUT": inspect_message},
+    )
+    assert result.returncode == expected_status
 
 
 def test_standalone_active_release_sidecars_use_bounded_nofollow_reads() -> None:

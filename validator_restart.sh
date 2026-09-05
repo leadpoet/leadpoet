@@ -1450,7 +1450,14 @@ if VALIDATOR_RUNNING_INSPECT_OUTPUT="$(
     --running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA"
   )
 else
-  if [ "$VALIDATOR_RUNNING_INSPECT_OUTPUT" != "Error: No such object: leadpoet-validator-main" ]; then
+  VALIDATOR_RUNNING_INSPECT_ERROR="$VALIDATOR_RUNNING_INSPECT_OUTPUT"
+  while [[ "$VALIDATOR_RUNNING_INSPECT_ERROR" == [[:space:]]* ]]; do
+    VALIDATOR_RUNNING_INSPECT_ERROR="${VALIDATOR_RUNNING_INSPECT_ERROR:1}"
+  done
+  while [[ "$VALIDATOR_RUNNING_INSPECT_ERROR" == *[[:space:]] ]]; do
+    VALIDATOR_RUNNING_INSPECT_ERROR="${VALIDATOR_RUNNING_INSPECT_ERROR%?}"
+  done
+  if [ "$VALIDATOR_RUNNING_INSPECT_ERROR" != "Error: No such object: leadpoet-validator-main" ]; then
     printf '%s\n' "$VALIDATOR_RUNNING_INSPECT_OUTPUT" >&2
     echo "ERROR: validator runtime state could not be established safely" >&2
     exit 1

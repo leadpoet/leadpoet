@@ -102,6 +102,7 @@ MINER_EXACT = {
 }
 MINER_PREFIXES = (
     "/arena/v1/submissions/",
+    "/testnet/arena/v1/submissions/",
     "/fulfillment/excluded-now/",
 )
 

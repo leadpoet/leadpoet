@@ -73,6 +73,82 @@ def test_daily_cutoff_accepts_hour_six_and_rejects_out_of_range(tmp_path):
         MODULE._validate_args(parsed)
 
 
+def test_scorer_image_only_requires_a_digest_pinned_registry_reference(tmp_path):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    valid = "registry.example/team/scorer:v2@sha256:" + "a" * 64
+    parsed = MODULE.build_parser().parse_args([
+        "--scorer-image-only", "--scorer-image", valid,
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ])
+    MODULE._validate_args(parsed)
+    for image in (
+        "registry.example/team/scorer:v2",
+        "registry.example/team/scorer@sha256:short",
+        "scorer@sha256:" + "a" * 64,
+        "registry.example/@sha256:" + "a" * 64,
+    ):
+        parsed.scorer_image = image
+        with pytest.raises(MODULE.ConfigurationError, match="scorer image"):
+            MODULE._validate_args(parsed)
+
+
+def test_scorer_image_only_scope_is_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--scorer-image-only", "--testnet-proxy", "enabled",
+            "--allowed-account", "493765492819",
+        ])
+
+
+def test_scorer_image_only_check_updates_only_the_scorer_image(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    image = "registry.example/team/scorer@sha256:" + "b" * 64
+    calls = []
+    monkeypatch.setattr(MODULE, "_read_fd", lambda fd: pytest.fail("must not read service key"))
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    assert MODULE.main([
+        "--scorer-image-only", "--scorer-image", image, "--check",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == MODULE.GATEWAY_HOST
+    assert calls[0][1]["role"] == "scorer_image_only"
+    assert calls[0][1]["updates"] == {"LAB_ARENA_SCORER_IMAGE": image}
+    assert calls[0][1]["aliases"] == {}
+    assert calls[0][1]["apply"] is False
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_scorer_image_only_apply_keeps_authorization_gate_and_scope(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    image = "registry.example/team/scorer@sha256:" + "c" * 64
+    monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
+    monkeypatch.setattr(MODULE, "_ssh", lambda *args: pytest.fail("unauthorized remote call"))
+    assert MODULE.main([
+        "--scorer-image-only", "--scorer-image", image, "--apply",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 2
+
+
+def test_scorer_image_only_apply_sends_exactly_one_target(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    image = "registry.example/team/scorer@sha256:" + "d" * 64
+    calls = []
+    monkeypatch.setenv(MODULE.AUTH_ENV, "1")
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True, "applied": True})
+    assert MODULE.main([
+        "--scorer-image-only", "--scorer-image", image, "--apply",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 0
+    assert len(calls) == 1
+    assert calls[0][1]["apply"] is True
+    assert set(calls[0][1]["updates"]) == {"LAB_ARENA_SCORER_IMAGE"}
+
+
 def test_validator_uses_dedicated_host_only_runner_wallet():
     updates = MODULE.validator_updates(args())
     assert updates["LAB_ARENA_WALLET_NAME"] == "arena_runner"
@@ -304,6 +380,32 @@ def test_remote_fake_aws_noops_when_current_document_already_matches(tmp_path):
     result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True)
     assert result["unchanged"] is True
     assert state == {"current": "initial", "versions": {"initial": raw}}
+
+
+def test_remote_scorer_image_scope_updates_only_the_scorer_key(tmp_path):
+    source = {"KEEP": "same", "LAB_ARENA_MODE": "live", "LAB_ARENA_SCORER_IMAGE": "old"}
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(source), request_override={
+            "role": "scorer_image_only", "updates": {
+                "LAB_ARENA_SCORER_IMAGE": "registry.example/team/scorer@sha256:" + "e" * 64,
+            }, "aliases": {}, "service_key": "",
+        }
+    ))
+    assert updated["LAB_ARENA_SCORER_IMAGE"].endswith("e" * 64)
+    assert updated["KEEP"] == "same"
+    assert updated["LAB_ARENA_MODE"] == "live"
+
+
+def test_remote_scorer_image_scope_rejects_unrelated_targets(tmp_path):
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override={
+            "role": "scorer_image_only", "updates": {
+                "LAB_ARENA_SCORER_IMAGE": "new", "KEEP": "must-not-change",
+            }, "aliases": {}, "service_key": "",
+        }
+    )
+    assert result == {"ok": False, "code": "scorer_image_scope_invalid"}
 
 
 def test_prepare_runner_is_standalone_and_does_not_read_or_write_config(monkeypatch, tmp_path, capsys):

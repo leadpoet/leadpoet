@@ -27,6 +27,28 @@ if [ -z "$REPOSITORY" ] || [ -z "$REVISION" ] \
   exit 2
 fi
 test "$(git -C "$REPOSITORY" rev-parse "$REVISION^{commit}")" = "$REVISION"
+
+if [ "${LEADPOET_LOCAL_RELEASE_FROZEN_REVISION:-}" != "$REVISION" ]; then
+  FROZEN_SOURCE_ROOT="$(mktemp -d /tmp/leadpoet-local-release-source.XXXXXX)"
+  cleanup_frozen_source() {
+    chmod -R u+w "$FROZEN_SOURCE_ROOT" 2>/dev/null || true
+    rm -rf -- "$FROZEN_SOURCE_ROOT"
+  }
+  trap cleanup_frozen_source EXIT
+  chmod 700 "$FROZEN_SOURCE_ROOT"
+  git -C "$REPOSITORY" archive "$REVISION" | tar -xf - -C "$FROZEN_SOURCE_ROOT"
+  test "$(git -C "$REPOSITORY" hash-object --no-filters \
+    "$FROZEN_SOURCE_ROOT/gateway/tee/build_local_release_v2.sh")" \
+    = "$(git -C "$REPOSITORY" rev-parse \
+      "$REVISION:gateway/tee/build_local_release_v2.sh")"
+  LEADPOET_LOCAL_RELEASE_FROZEN_REVISION="$REVISION" \
+    /bin/bash "$FROZEN_SOURCE_ROOT/gateway/tee/build_local_release_v2.sh" \
+      --repository "$REPOSITORY" \
+      --revision "$REVISION" \
+      --gateway-output "$GATEWAY_OUTPUT" \
+      --validator-output "$VALIDATOR_OUTPUT"
+  exit
+fi
 cd "$CANDIDATE_ROOT"
 
 WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"

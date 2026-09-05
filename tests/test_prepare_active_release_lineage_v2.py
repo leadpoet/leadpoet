@@ -905,7 +905,13 @@ def test_validator_final_rejects_new_uncovered_journal_release(
         )
 
 
-def test_validator_final_rejects_handed_lineage_byte_drift(
+def _rehash_lineage(lineage):
+    body = {key: lineage[key] for key in lineage if key != "lineage_hash"}
+    lineage["lineage_hash"] = sha256_json(body)
+    return lineage
+
+
+def test_validator_final_accepts_prior_wrapper_drift_and_installs_handed_lineage(
     monkeypatch, tmp_path
 ) -> None:
     initial = _requirements(transitions=(RUNNING_VALIDATOR,))
@@ -915,17 +921,180 @@ def test_validator_final_rejects_handed_lineage_byte_drift(
     handed = _lineage(final["required_commits"])
     independent = json.loads(json.dumps(handed))
     independent["releases"][RUNNING_GATEWAY]["channel_hash"] = _hash("9")
-    body = {key: independent[key] for key in independent if key != "lineage_hash"}
-    independent["lineage_hash"] = sha256_json(body)
+    independent["releases"][RUNNING_GATEWAY]["gateway_release_hash"] = _hash("8")
+    _rehash_lineage(independent)
     monkeypatch.setattr(
         prepare,
         "_fetch_exact_release_lineage_v2",
         lambda **_kwargs: independent,
     )
+    from gateway.tee import release_lineage_v2
+
+    verified_lineages = []
+    original_compact_boot_verifier = prepare._compact_boot_verifier
+
+    def compact_boot_verifier_spy(lineage):
+        verified_lineages.append(lineage)
+        return original_compact_boot_verifier(lineage)
+
+    monkeypatch.setattr(
+        prepare,
+        "_compact_boot_verifier",
+        compact_boot_verifier_spy,
+    )
+    nitro_calls = []
+
+    def verify_nitro(identity, *, expected_pcr0, certificate_validity_at_attestation_time):
+        assert expected_pcr0 == identity["pcr0"]
+        assert certificate_validity_at_attestation_time is True
+        nitro_calls.append((identity, expected_pcr0))
+        return identity
+
+    monkeypatch.setattr(release_lineage_v2, "verify_boot_identity_nitro", verify_nitro)
+
+    result = prepare.prepare_validator_final_active_lineage_v2(
+        candidate_commit_sha=CANDIDATE,
+        authority_commit_sha=AUTHORITY,
+        restart_invocation_id=RESTART_INVOCATION_ID,
+        initial_requirements=initial,
+        final_requirements=final,
+        handed_lineage=handed,
+        journal_loader=lambda: None,
+        expected_validator_hotkey=VALIDATOR_HOTKEY,
+        chain_signing_profile=CHAIN_PROFILE,
+        repository=tmp_path,
+        expected_lineage_id=LINEAGE_ID,
+    )
+
+    assert result["lineage"] == handed
+    assert result["journal_hash"] is None
+    assert verified_lineages == [handed]
+    installed = tmp_path / "gateway-v2-release-lineage.json"
+    prepare._atomic_json_documents(((installed, result["lineage"]),))
+    installed_lineage = prepare._validate_selected_lineage(
+        json.loads(installed.read_text(encoding="utf-8")),
+        historical_topology_hash=None,
+        expected_current_commit=CANDIDATE,
+    )
+    assert installed_lineage == handed
+
+    role = sorted(handed["releases"][RUNNING_GATEWAY]["roles"])[0]
+    prior_identity = {
+        "role": role,
+        "physical_role": role,
+        **handed["releases"][RUNNING_GATEWAY]["roles"][role],
+    }
+    installed_boot_verifier = (
+        release_lineage_v2.build_compact_release_lineage_boot_verifier_v2(
+            installed_lineage
+        )
+    )
+    assert installed_boot_verifier(prior_identity) == prior_identity
+    assert nitro_calls == [(prior_identity, prior_identity["pcr0"])]
+
+    altered_prior_identity = {**prior_identity, "pcr0": "9" * 96}
+    with pytest.raises(
+        release_lineage_v2.ReleaseLineageV2Error,
+        match="boot pcr0 differs from compact release lineage",
+    ):
+        installed_boot_verifier(altered_prior_identity)
+    assert nitro_calls == [(prior_identity, prior_identity["pcr0"])]
+
+
+def test_validator_final_rejects_current_wrapper_drift(monkeypatch, tmp_path) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    independent["releases"][CANDIDATE]["channel_hash"] = _hash("9")
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
 
     with pytest.raises(
         prepare.PrepareActiveReleaseLineageV2Error,
-        match="independent readback",
+        match="current release differs",
+    ):
+        prepare.prepare_validator_final_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            initial_requirements=initial,
+            final_requirements=final,
+            handed_lineage=handed,
+            journal_loader=lambda: None,
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("commit_sha", NEW_JOURNAL_COMMIT),
+        ("pcr0", "9" * 96),
+        ("build_manifest_hash", _hash("9")),
+        ("dependency_lock_hash", _hash("9")),
+    ],
+)
+def test_validator_final_rejects_prior_role_identity_drift(
+    monkeypatch, tmp_path, field, value
+) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    role = sorted(independent["releases"][RUNNING_GATEWAY]["roles"])[0]
+    independent["releases"][RUNNING_GATEWAY]["roles"][role][field] = value
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="prior release roles differ",
+    ):
+        prepare.prepare_validator_final_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            initial_requirements=initial,
+            final_requirements=final,
+            handed_lineage=handed,
+            journal_loader=lambda: None,
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+
+
+def test_validator_final_rejects_independent_membership_drift(
+    monkeypatch, tmp_path
+) -> None:
+    initial = _requirements(transitions=(RUNNING_VALIDATOR,))
+    final = _requirements(
+        transitions=tuple(sorted({*initial["required_commits"], RUNNING_GATEWAY}))
+    )
+    handed = _lineage(final["required_commits"])
+    independent = json.loads(json.dumps(handed))
+    independent["releases"].pop(RUNNING_GATEWAY)
+    _rehash_lineage(independent)
+    monkeypatch.setattr(
+        prepare, "_fetch_exact_release_lineage_v2", lambda **_kwargs: independent
+    )
+
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="membership differs",
     ):
         prepare.prepare_validator_final_active_lineage_v2(
             candidate_commit_sha=CANDIDATE,

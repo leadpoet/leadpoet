@@ -1071,11 +1071,27 @@ def prepare_validator_final_active_lineage_v2(
         s3_client=s3_client,
     )
     _require(
-        canonical_json(handed) == canonical_json(independent),
-        "handed release lineage differs from independent readback",
+        set(handed["releases"]) == set(independent["releases"]),
+        "handed release lineage membership differs from independent readback",
     )
+    for commit, handed_release in handed["releases"].items():
+        independent_release = independent["releases"][commit]
+        if commit == candidate:
+            _require(
+                canonical_json(handed_release)
+                == canonical_json(independent_release),
+                "handed current release differs from independent readback",
+            )
+        else:
+            # Prior local and attested builds can have different wrapper hashes
+            # for the same measured roles. Keep every role identity exact.
+            _require(
+                canonical_json(handed_release["roles"])
+                == canonical_json(independent_release["roles"]),
+                "handed prior release roles differ from independent readback",
+            )
     verifier = _selected_compact_boot_verifier(
-        independent,
+        handed,
         historical_topology_hash=historical_topology_hash,
     )
     first_journal = _journal_requirements(
@@ -1108,7 +1124,7 @@ def prepare_validator_final_active_lineage_v2(
     )
     return {
         "requirements": final,
-        "lineage": independent,
+        "lineage": handed,
         "journal_hash": second_journal["journal_hash"],
     }
 

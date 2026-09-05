@@ -46,9 +46,11 @@ def test_s3_guard_requires_one_unique_testnet_component():
 
 def test_gateway_secret_parser_reports_names_without_values():
     secret = SCRIPT._parse_environment_document(
-        '{"LAB_ARENA_OPENROUTER_API_KEY":"private-value","SUPABASE_URL":"https://x.supabase.co"}'
+        '{"LAB_ARENA_OPENROUTER_API_KEY":" private-value ","SUPABASE_URL":"https://x.supabase.co","unrelated.lowercase-key":"ignored"}'
     )
-    assert set(secret) == {"LAB_ARENA_OPENROUTER_API_KEY", "SUPABASE_URL"}
+    assert secret["LAB_ARENA_OPENROUTER_API_KEY"] == " private-value "
+    assert secret["SUPABASE_URL"] == "https://x.supabase.co"
+    assert secret["unrelated.lowercase-key"] == "ignored"
     with pytest.raises(SCRIPT.ConfigurationError) as error:
         SCRIPT._require_secret_names(secret, SCRIPT.REQUIRED_ORGANIZER_KEYS)
     assert "private-value" not in str(error.value)
@@ -76,4 +78,3 @@ def test_parser_fixes_shadow_limits_and_requires_explicit_resources():
     assert args.scoring_cap_usd == 10_000_000
     assert args.runner_hotkey == SCRIPT.DEFAULT_RUNNER
     assert args.miner_hotkey == SCRIPT.DEFAULT_MINER
-

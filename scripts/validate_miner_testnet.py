@@ -60,7 +60,6 @@ REQUIRED_ORGANIZER_KEYS = (
 REQUIRED_SEED_KEYS = ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
 _ROUND_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]{1,16}$")
 _PREFIX_RE = re.compile(r"^miner-testnet-[a-z0-9][a-z0-9_-]{5,63}$")
-_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _DIGEST_REFERENCE_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 
 
@@ -102,8 +101,8 @@ def _parse_environment_document(raw: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw_key, raw_value in rows:
         key = str(raw_key or "").strip()
-        if not _ENV_KEY_RE.fullmatch(key):
-            raise ConfigurationError("gateway secret contains an invalid key")
+        if not key:
+            continue
         if isinstance(raw_value, (dict, list)):
             value = json.dumps(raw_value, sort_keys=True, separators=(",", ":"))
         else:
@@ -385,7 +384,7 @@ def _cutoff_and_round(args: argparse.Namespace) -> tuple[datetime, str]:
     except ValueError:
         raise ConfigurationError("cutoff must use YYYY-MM-DDTHH:MM:SSZ") from None
     now = datetime.now(timezone.utc)
-    if cutoff.date() != now.date():
+    if not args.resume_round and cutoff.date() != now.date():
         raise ConfigurationError("cutoff must stay on the current UTC ICP date")
     if not args.resume_round and not 60 <= (cutoff - now).total_seconds() <= 3600:
         raise ConfigurationError("cutoff must be 1 to 60 minutes in the future")
@@ -417,7 +416,7 @@ def _serve(args: argparse.Namespace) -> int:
         raise ConfigurationError("bucket does not match the approved artifact bucket")
     if not _DIGEST_REFERENCE_RE.fullmatch(args.scorer_image):
         raise ConfigurationError("scorer image must be an explicit sha256 digest reference")
-    if args.runner_hotkey in (args.miner_hotkey, args.baseline_hotkey):
+    if len({args.runner_hotkey, args.miner_hotkey, args.baseline_hotkey}) != 3:
         raise ConfigurationError("runner, miner, and baseline hotkeys must be distinct")
     _validate_chain_endpoint(args.chain_endpoint)
     if args.resume_round and not args.round_id:
@@ -626,8 +625,10 @@ def _usd_cap(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-database", default=DEFAULT_DATABASE)
-    parser.add_argument("--expected-db-port", type=int, default=DEFAULT_DATABASE_PORT)
+    parser.set_defaults(
+        expected_database=DEFAULT_DATABASE,
+        expected_db_port=DEFAULT_DATABASE_PORT,
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("setup-db", help="apply the isolated schema shim and migrations 179 through 185")
 

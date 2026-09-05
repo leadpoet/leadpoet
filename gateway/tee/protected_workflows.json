@@ -4587,7 +4587,7 @@
       "symbol": "_UNSAFE_GIT_ENV_NAMES"
     },
     {
-      "ast_sha256": "sha256:68a220c61febb21ca7d05d45525fa25fc775feda1b5d67adcc7eea43484742e2",
+      "ast_sha256": "sha256:44f75bc4a4455250352f1c0c0bd4ec719cc3f28fd499a1b2ab3042d8439d704c",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "__module__"
     },
@@ -4657,7 +4657,7 @@
       "symbol": "verify_candidate_bound_controller_lineage"
     },
     {
-      "ast_sha256": "sha256:72fda4ca0bdd26c845c9f46e4353e7dcd21533579cc7b7c7aff7621444ca0554",
+      "ast_sha256": "sha256:43ccb14488e904f1de32b13374d5a09ea3ab513c6221b140fd640e28b7ff4dff",
       "path": "scripts/verify_installed_gateway_controller_v1.py",
       "symbol": "verify_installed_controller_bundle"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:32a84e48b0d32144c36eb8fcd78959c1250b6c7de767cc38e8cfd2387bec8a5b",
-  "protected_source_commit": "33cd6ad428c809be97482a4c5ef4758253b1f8d1",
+  "manifest_hash": "sha256:b6a9c61dbd73c57be6504874780971997cb863f62ab1132f7ad0e2b25722f590",
+  "protected_source_commit": "06b59e1a3a5f1066c955cacfcfc3d91f22f29f08",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

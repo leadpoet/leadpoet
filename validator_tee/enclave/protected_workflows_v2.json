@@ -312,7 +312,7 @@
       "symbol": "chain_source_boundary_for_profile_v2"
     },
     {
-      "ast_sha256": "sha256:4940d18e744cd7958b872fb9b2e2e90bdaa0b4ae59f796bc5615be7ac00c231f",
+      "ast_sha256": "sha256:eaf3e6634d306ad080e8de0fee1676e3c6e97352c6291dc441b2e59a283029d7",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "chain_source_policy_document"
     },
@@ -1092,7 +1092,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:44f2ef6e950e72d3f5285ad806e7a99a55713dcbfc3d8bfe54c2dfcb66bf094e",
-  "protected_source_commit": "e68a3f3023cbef878f2d365c35d373fb2fc60dc0",
+  "manifest_hash": "sha256:874686cfb29458259321735f0fb52ded7696aa700180bb2edbd0ecba0584cdd5",
+  "protected_source_commit": "ea832686bfe97845e69a44d0aed879f9fb1b9749",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

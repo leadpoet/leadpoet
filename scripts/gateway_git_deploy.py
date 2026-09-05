@@ -754,19 +754,42 @@ def _find_pcr0(value: Any) -> str | None:
     return None
 
 
-def collect_role_pcr0s(eif_root: Path) -> dict[str, str]:
+def _installed_release_role_pcr0s(eif_root: Path, target_sha: str) -> dict[str, str]:
+    from gateway.tee.release_manifest_v2 import validate_prior_release_manifest
+
+    path = eif_root / "gateway-v2-release-manifest.json"
+    if not path.is_file() or path.is_symlink():
+        raise GatewayGitDeployError("installed gateway release manifest is unavailable")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GatewayGitDeployError(
+            "installed gateway release manifest is unreadable"
+        ) from exc
+    release = validate_prior_release_manifest(document)
+    if release["commit_sha"] != target_sha:
+        raise GatewayGitDeployError("installed gateway release commit differs")
+    return {role: str(summary["pcr0"]) for role, summary in release["roles"].items()}
+
+
+def collect_role_pcr0s(
+    eif_root: Path, expected: Mapping[str, str]
+) -> dict[str, str]:
     role_pcr0s: dict[str, str] = {}
-    if not eif_root.is_dir():
-        return role_pcr0s
-    for path in sorted(eif_root.glob("enclave-build-*.json")):
+    for role, expected_pcr0 in sorted(expected.items()):
+        path = eif_root / ("enclave-build-%s.json" % role)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            continue
+            raise GatewayGitDeployError(
+                "gateway role measurement is unavailable: %s" % role
+            ) from None
         pcr0 = _find_pcr0(payload)
-        if pcr0:
-            role = path.stem.removeprefix("enclave-build-")
-            role_pcr0s[role] = pcr0
+        if pcr0 != expected_pcr0:
+            raise GatewayGitDeployError(
+                "gateway role measurement differs from release: %s" % role
+            )
+        role_pcr0s[role] = pcr0
     return role_pcr0s
 
 
@@ -780,12 +803,19 @@ def finalize_deployment(
     if status not in {"succeeded", "failed"}:
         raise GatewayGitDeployError("deployment final status is invalid")
     document = _read_json(plan_file)
+    expected_role_pcr0s = (
+        _installed_release_role_pcr0s(eif_root, str(document.get("target_sha") or ""))
+        if status == "succeeded"
+        else {}
+    )
     document.update(
         {
             "status": status,
             "stage": str(stage or "unknown"),
             "completed_at": _utc_now(),
-            "role_pcr0s": collect_role_pcr0s(eif_root) if status == "succeeded" else {},
+            "role_pcr0s": collect_role_pcr0s(eif_root, expected_role_pcr0s)
+            if status == "succeeded"
+            else {},
         }
     )
     _atomic_write_json(plan_file, document)
@@ -793,6 +823,48 @@ def finalize_deployment(
     if status == "succeeded":
         _atomic_write_json(Path(str(document["last_good_file"])), document)
     return document
+
+
+def repair_last_good_role_pcr0s(
+    *, last_good_file: Path, archive_root: Path
+) -> dict[str, Any]:
+    from gateway.tee.release_archive_v2 import (
+        DEFAULT_RETAIN_RELEASES,
+        ReleaseArchiveV2Error,
+        _archived_role_pcr0s,
+        load_last_good_release,
+        verify_archive_index,
+    )
+
+    document = _read_json(last_good_file)
+    try:
+        validated = load_last_good_release(last_good_file)
+        target = validated["commit_sha"]
+        existing = validated["role_pcr0s"]
+        index = verify_archive_index(
+            archive_root=archive_root,
+            minimum_releases=1,
+            maximum_releases=DEFAULT_RETAIN_RELEASES,
+        )
+        matches = [
+            item for item in index["releases"] if item["commit_sha"] == target
+        ]
+        if len(matches) != 1:
+            raise GatewayGitDeployError("last-good archive is not unique")
+        archived = _archived_role_pcr0s(archive_root, matches[0])
+    except ReleaseArchiveV2Error as exc:
+        raise GatewayGitDeployError(str(exc)) from exc
+    if archived == existing:
+        return document
+    if set(existing) - set(archived) != {"gateway_autoresearch"} or any(
+        existing.get(role) != pcr0 for role, pcr0 in archived.items()
+    ):
+        raise GatewayGitDeployError("last-good retained role PCR0s differ from archive")
+    repaired = {**document, "role_pcr0s": archived}
+    if _read_json(last_good_file) != document:
+        raise GatewayGitDeployError("last-good deployment changed during repair")
+    _atomic_write_json(last_good_file, repaired)
+    return repaired
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -848,6 +920,9 @@ def _parser() -> argparse.ArgumentParser:
     finalize.add_argument("--status", required=True, choices=("succeeded", "failed"))
     finalize.add_argument("--stage", required=True)
     finalize.add_argument("--eif-root", type=Path, default=Path("/home/ec2-user/tee"))
+    repair = subparsers.add_parser("repair-last-good-role-pcr0s")
+    repair.add_argument("--last-good-file", required=True, type=Path)
+    repair.add_argument("--archive-root", required=True, type=Path)
     return parser
 
 
@@ -874,6 +949,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "activate":
             document = activate_deployment(plan_file=args.plan_file)
             print(document["target_sha"])
+            return 0
+        if args.command == "repair-last-good-role-pcr0s":
+            before = _read_json(args.last_good_file)
+            document = repair_last_good_role_pcr0s(
+                last_good_file=args.last_good_file,
+                archive_root=args.archive_root,
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "verified"
+                        if before == document
+                        else "repaired",
+                        "target_sha": document["target_sha"],
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.command == "verify-tree":
             evidence = record_tree_verification(

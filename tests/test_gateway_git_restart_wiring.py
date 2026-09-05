@@ -2145,6 +2145,17 @@ def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -
     assert "strict_extras=True" in preflight_source
 
 
+def test_gateway_restart_repairs_retired_last_good_roles_before_local_build() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    repair = script.index("repair-last-good-role-pcr0s")
+    local_build = script.index('echo "Building the exact local gateway and validator runtime identities"')
+
+    assert repair < local_build
+    assert '--last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"' in script
+    assert '--archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT"' in script
+
+
 def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     dependency_preflight = script.index(

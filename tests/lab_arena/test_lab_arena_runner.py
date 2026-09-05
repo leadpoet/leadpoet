@@ -875,6 +875,21 @@ class FlakyCompletionApi(FakeApi):
         return super().complete(envelope)
 
 
+class CompletionDocumentApi(FakeApi):
+    """Return fixed completion documents and retain only envelope identities."""
+
+    def __init__(self, leases, responses):
+        super().__init__(leases)
+        self.responses = list(responses)
+        self.completion_attempts = []
+
+    def complete(self, envelope):
+        self.completion_attempts.append(envelope)
+        if not self.responses:
+            raise AssertionError("unexpected completion attempt")
+        return self.responses.pop(0)
+
+
 @pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
 def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
     """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
@@ -886,6 +901,103 @@ def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(t
     assert runner_.abandoned == expect_abandoned
     assert api.attempts == min(failures + 1, 3)
     assert len(api.completions) == (0 if expect_abandoned else 1)
+    if expect_abandoned:
+        assert runner_.completed[0]["error"] == "RunnerError"
+
+
+def test_accounting_open_retries_the_original_completion_until_accepted(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [
+            {"status": "accounting_open", "open_calls": 1},
+            {"status": "accepted"},
+        ],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert (
+        sum(config.accounting_open_retry_seconds)
+        < contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+    )
+    assert sum(config.accounting_open_retry_seconds) < contracts.LEASE_TTL_SECONDS
+    config.accounting_open_retry_seconds = (0.0,)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert runner_.completed == [
+        {"run_id": "r1", "result": {"status": "accepted"}}
+    ]
+    assert len(api.completion_attempts) == 2
+    assert api.completion_attempts[0] is api.completion_attempts[1]
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+        "Lab Arena completion status: accepted",
+    ]
+    assert captured.err == ""
+
+
+def test_accounting_open_retry_exhaustion_abandons_without_logging_the_envelope(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "accounting_open", "open_calls": 1}] * 3,
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 1
+    assert len(api.completion_attempts) == 3
+    assert all(
+        envelope is api.completion_attempts[0]
+        for envelope in api.completion_attempts
+    )
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+    ] * 3
+    assert captured.err == "Lab Arena run abandoned: RunnerError\n"
+    assert "tok-r1" not in captured.out + captured.err
+    assert "signature" not in captured.out + captured.err
+
+
+def test_completion_rejection_is_logged_but_not_retried(tmp_path, capsys):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "rejected", "detail": "must-not-log"}],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert len(api.completion_attempts) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "Lab Arena completion status: rejected\n"
+    assert captured.err == ""
+    assert "must-not-log" not in captured.out
 
 
 

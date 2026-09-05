@@ -25,6 +25,7 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_SUBTENSOR_MAX_TEMPO,
     CHAIN_ENDPOINT_HOST,
     CHAIN_RPC_METHOD,
+    CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
@@ -75,6 +76,10 @@ logger = logging.getLogger(__name__)
 
 class CoordinatorChainSourceV2Error(RuntimeError):
     """An authenticated chain or price source could not be validated."""
+
+    def __init__(self, message: str, *, http_status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
 
 
 def _utc_now_iso(clock: Callable[[], datetime]) -> str:
@@ -1661,7 +1666,12 @@ class CoordinatorChainSourceV2:
             except (CoordinatorChainSourceV2Error, ChainSourceV2Error) as exc:
                 last_error = exc
                 if attempt_number < len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
-                    self._sleep(CHAIN_RPC_RETRY_BACKOFF_SECONDS[attempt_number])
+                    backoff_seconds = (
+                        CHAIN_RPC_RATE_LIMIT_BACKOFF_SECONDS[attempt_number]
+                        if getattr(exc, "http_status", None) == 429
+                        else CHAIN_RPC_RETRY_BACKOFF_SECONDS[attempt_number]
+                    )
+                    self._sleep(backoff_seconds)
         raise CoordinatorChainSourceV2Error(
             "authenticated archive request exhausted measured retries"
         ) from last_error
@@ -1714,7 +1724,13 @@ class CoordinatorChainSourceV2:
                     provider_id,
                     result.get("failure_code")
                     or "http_%s" % result.get("http_status"),
-                )
+                ),
+                http_status=(
+                    int(result["http_status"])
+                    if isinstance(result.get("http_status"), int)
+                    and not isinstance(result.get("http_status"), bool)
+                    else None
+                ),
             )
         try:
             response_body = base64.b64decode(

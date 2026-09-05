@@ -550,10 +550,20 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
 
 
 class HistoricalBroker:
-    def __init__(self, *, epoch=100, fail_first=False, last_field=73):
+    def __init__(
+        self,
+        *,
+        epoch=100,
+        fail_first=False,
+        fail_all=False,
+        fail_status=503,
+        last_field=73,
+    ):
         self.epoch = int(epoch)
         self.target = (self.epoch + 1) * 360 - 1
         self.fail_first = bool(fail_first)
+        self.fail_all = bool(fail_all)
+        self.fail_status = int(fail_status)
         self.last_field = int(last_field)
         self.calls = []
 
@@ -561,9 +571,9 @@ class HistoricalBroker:
         self.calls.append(dict(request))
         body = base64.b64decode(request["body_b64"])
         rpc = json.loads(body)
-        if self.fail_first and len(self.calls) == 1:
+        if self.fail_all or (self.fail_first and len(self.calls) == 1):
             response = b'{"error":"busy"}'
-            http_status = 503
+            http_status = self.fail_status
         else:
             if rpc["method"] == "chain_getFinalizedHead":
                 value = "0x" + "a" * 64
@@ -698,6 +708,77 @@ def test_historical_archive_retries_are_recorded_and_bounded():
     assert result["epoch_id"] == 100
     assert sleeps == [1.0]
     assert len(context.transport_attempts) == 7
+
+
+def test_historical_archive_rate_limit_uses_bounded_quota_backoff():
+    broker = HistoricalBroker(fail_first=True, fail_status=429)
+    sleeps = []
+    source = CoordinatorChainSourceV2(
+        execute_provider=broker.execute,
+        retry_policy_hashes={
+            "bittensor_chain": "sha256:" + "1" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": _stateful_cutover().to_dict(),
+        },
+        sleep=sleeps.append,
+    )
+    context = ExecutionContextV2(
+        job_id="legacy-settlement:rate-limit",
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        epoch_id=101,
+    )
+
+    result = source.read_historical_finalized_weights(
+        netuid=71,
+        epoch_id=100,
+        validator_hotkey=ss58_encode_account_id(OWNER),
+        context=context,
+    )
+
+    assert result["epoch_id"] == 100
+    assert sleeps == [60.0]
+    assert len(context.transport_attempts) == 7
+
+
+def test_historical_archive_rate_limit_retries_remain_bounded():
+    broker = HistoricalBroker(fail_all=True, fail_status=429)
+    sleeps = []
+    source = CoordinatorChainSourceV2(
+        execute_provider=broker.execute,
+        retry_policy_hashes={
+            "bittensor_chain": "sha256:" + "1" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": _stateful_cutover().to_dict(),
+        },
+        sleep=sleeps.append,
+    )
+    context = ExecutionContextV2(
+        job_id="legacy-settlement:rate-limit-exhausted",
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        epoch_id=101,
+    )
+
+    with pytest.raises(
+        CoordinatorChainSourceV2Error,
+        match="archive request exhausted measured retries",
+    ):
+        source.read_historical_finalized_weights(
+            netuid=71,
+            epoch_id=100,
+            validator_hotkey=ss58_encode_account_id(OWNER),
+            context=context,
+        )
+
+    assert sleeps == [60.0, 60.0]
+    assert len(context.transport_attempts) == 3
 
 
 REVEAL_EVENT_FIXTURE_PATH = (

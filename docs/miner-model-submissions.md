@@ -49,6 +49,17 @@ The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
 
+Use the returned IDs to read the result after the round publishes:
+
+```bash
+curl "$GATEWAY_URL/arena/v1/rounds/ROUND_ID/results/SUBMISSION_ID"
+```
+
+The result includes companies, per-ICP scores, and the aggregate score.
+Before publication, this endpoint returns HTTP 403 with `results_not_public`.
+That response does not mean the submission failed. Check the round status at
+`/arena/v1/rounds/ROUND_ID`; do not submit again just to check progress.
+
 ## Operator setup
 
 Use this deployment order. Do not apply migration 185 while a service that

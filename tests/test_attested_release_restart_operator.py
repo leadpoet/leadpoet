@@ -182,7 +182,16 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         in source
     )
     assert "GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit'" in source
-    assert "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit'" in source
+    assert (
+        "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="
+        "'$selected_active_release_authority_commit'"
+    ) in source
+    assert (
+        'local selected_active_release_authority_commit="'
+        '${active_release_authority_commit:-$branch_commit}"'
+    ) in source
+    assert '"$commit" "$active_release_authority_commit"' in source
+    assert '"$active_release_authority_commit" "$branch_commit"' in source
     assert (
         'VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
         'leadpoet/stateful-epoch-cutover.json"'
@@ -929,7 +938,13 @@ if [[ " $* " == *" rev-parse "* ]]; then
     "$FAKE_OPERATOR_SELECTED_COMMIT:"leadpoet_observability/*|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/restart_attested_release_local.sh|\
     "$FAKE_OPERATOR_SELECTED_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
-    "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*)
+    "$FAKE_OPERATOR_SELECTED_COMMIT:"validator_tee/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"gateway/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_canonical/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"leadpoet_observability/*|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/restart_attested_release_local.sh|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"scripts/verify_installed_gateway_controller_v1.py|\
+    "$FAKE_OPERATOR_CONTROLLER_COMMIT:"validator_tee/*)
       printf '%s\\n' "$FAKE_OPERATOR_SOURCE_BLOB"
       exit 0
       ;;
@@ -995,6 +1010,10 @@ case "$command" in
     if [[ "$decoded" == *validator_restart.sh* ]]; then
     record validator_command_syntax
     record validator_start
+    if [[ "$decoded" == *"VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='/tmp/leadpoet-validator-recovery-requirements."* ]] \
+        && [[ "$decoded" == *"VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='/tmp/leadpoet-validator-recovery-lineage."* ]]; then
+      record validator_missing_runtime_recovery_enabled
+    fi
     trap 'record validator_cancelled; record validator_cleanup; exit 143' HUP INT TERM
     record validator_exact_commit_handoff
     record validator_prepare_started
@@ -1077,7 +1096,7 @@ case "$command" in
     fi
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     ;;
-  *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*)
+  *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*|*leadpoet-validator-recovery-*)
     record active_release_authority_installed
     ;;
   *"mv -f --"*)
@@ -1111,6 +1130,14 @@ case "$command" in
     cat "$FAKE_VALIDATOR_OBSERVATION"
     ;;
   *"docker inspect"*VALIDATOR_V2_DEPLOY_COMMIT*)
+    if [ "${FAKE_VALIDATOR_RUNTIME_PROBE_FAIL:-0}" = "1" ]; then
+      printf '%s\\n' "permission denied" >&2
+      exit 43
+    fi
+    if [ "${FAKE_VALIDATOR_RUNTIME_MISSING:-0}" = "1" ]; then
+      printf '%s\\n' "Error: No such object: leadpoet-validator-main" >&2
+      exit 44
+    fi
     printf '%s\\n' "$FAKE_VALIDATOR_COMMIT"
     record validator_active_probe
     ;;
@@ -1230,6 +1257,7 @@ exec "$FAKE_OPERATOR_REAL_PYTHON" "$@"
                 f"FAKE_GATEWAY_COMMIT={commit}",
                 f"FAKE_VALIDATOR_COMMIT={commit}",
                 f"FAKE_OPERATOR_SELECTED_COMMIT={commit}",
+                f"FAKE_OPERATOR_CONTROLLER_COMMIT={commit}",
                 f"FAKE_GATEWAY_OBSERVATION={gateway_observation}",
                 f"FAKE_VALIDATOR_OBSERVATION={validator_observation}",
                 f"FAKE_VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS={initial_requirements}",
@@ -1668,6 +1696,133 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     ) < observed.index(
         "readiness_finalized"
     )
+
+
+def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    controller_commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main^"],
+        text=True,
+    ).strip()
+    assert controller_commit != commit
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_OPERATOR_CONTROLLER_COMMIT"] = controller_commit
+    environment["FAKE_VALIDATOR_RUNTIME_MISSING"] = "1"
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    required = [
+        "gateway_verified",
+        "active_release_authority_installed",
+        "readiness_invalidated",
+        "validator_missing_runtime_recovery_enabled",
+        "validator_complete",
+        "validator_verified",
+        "readiness_finalized",
+    ]
+    positions = [observed.index(event) for event in required]
+    assert positions == sorted(positions)
+
+
+def test_validator_only_operator_rejects_unknown_runtime_probe_failure(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_VALIDATOR_RUNTIME_PROBE_FAIL"] = "1"
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert result.returncode == 1
+    assert "runtime state could not be established safely" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" not in observed
+    assert "validator_start" not in observed
+
+
+@pytest.mark.parametrize(
+    ("inspect_message", "expected_status"),
+    (
+        ("Error: No such object: leadpoet-validator-main", 44),
+        ("permission denied", 1),
+        ("Cannot connect to the Docker daemon", 1),
+        ("Error: No such object: leadpoet-validator-main\nextra", 1),
+    ),
+)
+def test_validator_active_commit_classifies_only_whitespace_wrapped_absence(
+    tmp_path: Path,
+    inspect_message: str,
+    expected_status: int,
+) -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("validator_active_commit() {")
+    function = source[start : source.index("\n}\n", start) + 2]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/bin/bash\n"
+        "if [ \"$1\" = info ]; then exit 0; fi\n"
+        "printf '\\n'\n"
+        "printf '%s\\n' \"$VALIDATOR_INSPECT_MESSAGE\" >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    ssh = bin_dir / "ssh"
+    ssh.write_text(
+        '#!/bin/bash\ncommand="${!#}"\nexec bash -c "$command"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    ssh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "ssh_common=(); VALIDATOR_KEY=unused; VALIDATOR_HOST=unused\n"
+            + function
+            + "\nvalidator_active_commit",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_INSPECT_MESSAGE": inspect_message,
+        },
+    )
+    assert result.returncode == expected_status
+    if expected_status != 44:
+        assert inspect_message in result.stderr
 
 
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(

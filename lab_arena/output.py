@@ -59,7 +59,10 @@ def output_document_from_bytes(data: bytes) -> Dict[str, Any]:
     if isinstance(parsed, list):
         companies = parsed
     elif isinstance(parsed, Mapping):
-        contracts.require_only_keys(parsed, ("schema_version", "companies"))
+        try:
+            contracts.require_only_keys(parsed, ("schema_version", "companies"))
+        except ArenaContractError as exc:
+            raise OutputInvalid("output contains unsupported fields") from exc
         if "schema_version" in parsed and parsed["schema_version"] != contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION:
             raise OutputInvalid("unsupported output schema version")
         companies = parsed.get("companies")
@@ -74,7 +77,10 @@ def validate_output_document(document: Any) -> Dict[str, Any]:
 
     if not isinstance(document, Mapping):
         raise OutputInvalid("output document must be an object")
-    contracts.require_only_keys(document, ("schema_version", "companies"))
+    try:
+        contracts.require_only_keys(document, ("schema_version", "companies"))
+    except ArenaContractError as exc:
+        raise OutputInvalid("output contains unsupported fields") from exc
     if document.get("schema_version") != contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION:
         raise OutputInvalid("unsupported output schema version")
     try:

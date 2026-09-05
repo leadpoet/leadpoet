@@ -38,6 +38,6 @@ def test_hosted_owner_transfers_and_idempotent_upgrade():
                         assert cursor.fetchone() == (False, False)
                 cursor.execute("RESET ROLE; SET ROLE lab_arena_service")
                 cursor.execute("SELECT public.lab_arena_schema_version_v1()")
-                assert cursor.fetchone()[0]["version"] == 184
+                assert cursor.fetchone()[0]["version"] == 185
     finally:
         database.close()

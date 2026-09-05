@@ -10,7 +10,7 @@ import stat
 import tarfile
 import zlib
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 SOURCE_CONTENT_TYPE = "application/gzip"
 MAX_SOURCE_ARCHIVE_BYTES = 10 * 1024 * 1024
@@ -19,6 +19,9 @@ MAX_SOURCE_FILES = 1_000
 MAX_SOURCE_PATH_BYTES = 255
 MAX_HARNESS_BYTES = 1 * 1024 * 1024
 IGNORED_DIRECTORY_NAMES = frozenset({".git", ".pytest_cache", ".venv", "__pycache__", "node_modules"})
+ALLOWED_ENV_TEMPLATE_NAMES = frozenset(
+    {".env.example", ".env.sample", ".env.template"}
+)
 
 
 class SourceBundleError(ValueError):
@@ -66,6 +69,14 @@ def validate_source_directory(source_dir: str | Path) -> Path:
     return source
 
 
+def _environment_file_forbidden(name: str) -> bool:
+    basename = PurePosixPath(name).name
+    return basename == ".env" or (
+        basename.startswith(".env.")
+        and basename not in ALLOWED_ENV_TEMPLATE_NAMES
+    )
+
+
 def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
     files: List[Tuple[Path, str, os.stat_result]] = []
     total = 0
@@ -88,6 +99,8 @@ def _source_files(source: Path) -> List[Tuple[Path, str, os.stat_result]]:
             raise SourceBundleError("source_path_invalid") from exc
         if not name or len(encoded_name) > MAX_SOURCE_PATH_BYTES:
             raise SourceBundleError("source_path_invalid")
+        if _environment_file_forbidden(name):
+            raise SourceBundleError("source_contains_credentials")
         total += int(details.st_size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")
@@ -133,19 +146,55 @@ def write_source_archive(source_dir: str | Path, target: str | Path) -> Dict[str
     return {"source_size_bytes": size}
 
 
-def _read_harness(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
-    if member.size > MAX_HARNESS_BYTES:
-        raise SourceBundleError("harness_too_large")
+def _forbidden_secret_bytes(values: Iterable[str | bytes]) -> Tuple[bytes, ...]:
+    secrets = []
+    for value in values:
+        if isinstance(value, str):
+            encoded = value.encode("utf-8")
+        elif isinstance(value, bytes):
+            encoded = value
+        else:
+            raise SourceBundleError("source_credentials_invalid")
+        if encoded:
+            secrets.append(encoded)
+    return tuple(secrets)
+
+
+def _read_member_for_validation(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    *,
+    collect: bool,
+    forbidden_values: Tuple[bytes, ...],
+) -> bytes:
     handle = archive.extractfile(member)
     if handle is None:
-        raise SourceBundleError("harness_invalid")
-    value = handle.read(MAX_HARNESS_BYTES + 1)
-    if len(value) > MAX_HARNESS_BYTES:
-        raise SourceBundleError("harness_too_large")
-    return value
+        raise SourceBundleError("source_archive_invalid")
+    contents = bytearray()
+    overlap = b""
+    overlap_size = max((len(value) for value in forbidden_values), default=1) - 1
+    remaining = int(member.size)
+    while remaining:
+        chunk = handle.read(min(64 * 1024, remaining))
+        if not chunk:
+            raise SourceBundleError("source_archive_invalid")
+        remaining -= len(chunk)
+        if collect:
+            contents.extend(chunk)
+        if forbidden_values:
+            window = overlap + chunk
+            if any(value in window for value in forbidden_values):
+                raise SourceBundleError("source_contains_credentials")
+            overlap = window[-overlap_size:] if overlap_size else b""
+    if handle.read(1):
+        raise SourceBundleError("source_archive_invalid")
+    return bytes(contents)
 
 
-def _safe_members(archive: tarfile.TarFile) -> Tuple[bytes, str]:
+def _safe_members(
+    archive: tarfile.TarFile,
+    forbidden_values: Tuple[bytes, ...] = (),
+) -> Tuple[bytes, str]:
     names = set()
     file_names = set()
     harnesses: Dict[str, bytes] = {}
@@ -169,12 +218,25 @@ def _safe_members(archive: tarfile.TarFile) -> Tuple[bytes, str]:
             continue
         if not member.isfile():
             raise SourceBundleError("source_entry_type_invalid")
+        if _environment_file_forbidden(member.name):
+            raise SourceBundleError("source_contains_credentials")
         total += int(member.size)
         if total > MAX_SOURCE_UNPACKED_BYTES:
             raise SourceBundleError("source_unpacked_too_large")
         file_names.add(member.name)
-        if path.name == "harness.py" and len(path.parts) <= 2:
-            harnesses[member.name] = _read_harness(archive, member)
+        is_harness = path.name == "harness.py" and len(path.parts) <= 2
+        if is_harness and member.size > MAX_HARNESS_BYTES:
+            raise SourceBundleError("harness_too_large")
+        if not is_harness and not forbidden_values:
+            continue
+        contents = _read_member_for_validation(
+            archive,
+            member,
+            collect=is_harness,
+            forbidden_values=forbidden_values,
+        )
+        if is_harness:
+            harnesses[member.name] = contents
     if "harness.py" in file_names:
         return harnesses["harness.py"], "harness.py"
     roots = {PurePosixPath(name).parts[0] for name in file_names}
@@ -185,17 +247,22 @@ def _safe_members(archive: tarfile.TarFile) -> Tuple[bytes, str]:
     raise SourceBundleError("harness_file_missing")
 
 
-def validate_source_archive(data: bytes) -> Dict[str, Any]:
+def validate_source_archive(
+    data: bytes,
+    *,
+    forbidden_values: Iterable[str | bytes] = (),
+) -> Dict[str, Any]:
     """Validate bounded archive structure and the final callable without extraction."""
 
     payload = bytes(data)
+    forbidden = _forbidden_secret_bytes(forbidden_values)
     if not 1 <= len(payload) <= MAX_SOURCE_ARCHIVE_BYTES:
         raise SourceBundleError("source_archive_too_large")
     try:
         # Stream members so a small compressed archive cannot force an
         # unbounded expanded member list into memory.
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r|gz") as archive:
-            harness, harness_name = _safe_members(archive)
+            harness, harness_name = _safe_members(archive, forbidden)
     except SourceBundleError:
         raise
     except (OSError, EOFError, tarfile.TarError, zlib.error) as exc:

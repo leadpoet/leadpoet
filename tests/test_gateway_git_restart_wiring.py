@@ -2145,6 +2145,17 @@ def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -
     assert "strict_extras=True" in preflight_source
 
 
+def test_gateway_restart_repairs_retired_last_good_roles_before_local_build() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    repair = script.index("repair-last-good-role-pcr0s")
+    local_build = script.index('echo "Building the exact local gateway and validator runtime identities"')
+
+    assert repair < local_build
+    assert '--last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"' in script
+    assert '--archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT"' in script
+
+
 def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     dependency_preflight = script.index(
@@ -2291,6 +2302,18 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         # remove stale values before the active controller reasserts them.
         assert script.count(f'    "{key}",') == 3
 
+    # A prior gateway process must not redirect either half of the candidate
+    # local release pair to an older restart's retained manifest.
+    for key in (
+        "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
+        "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST",
+    ):
+        assert script.count(f'    "{key}",') == 3
+
+    cleanup = _shell_function_source(script, "on_gateway_restart_exit")
+    assert '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\' in cleanup
+    assert '"$GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" \\' in cleanup
+
     merge_end = script.index(
         'if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then', merge
     )
@@ -2346,6 +2369,37 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state(
         active_arweave_keyfile,
         active_git_ssh_command,
     ]
+
+
+def test_gateway_live_env_clone_removes_both_prepared_release_paths(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    marker = 'python3 - "$PID" "$ENV_CLONE" <<\'PY\'\n'
+    start = script.index(marker) + len(marker)
+    clone_source = script[start : script.index("\nPY\n", start)]
+    clone = tmp_path / "gateway-env-clone.sh"
+    inherited = tmp_path / "inherited-environ"
+    inherited.write_bytes(
+        b"SAFE_RUNTIME_VALUE=retained\0"
+        b"GATEWAY_PREPARED_V2_RELEASE_MANIFEST=/stale/f5-gateway.json\0"
+        b"GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST=/stale/f5-validator.json\0"
+    )
+    clone_source = clone_source.replace(
+        'f"/proc/{pid}/environ"', repr(str(inherited))
+    )
+    subprocess.run(
+        [sys.executable, "-", "unused-pid", str(clone)],
+        input=clone_source,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+
+    cloned = clone.read_text(encoding="utf-8")
+    assert "SAFE_RUNTIME_VALUE=retained" in cloned
+    assert "GATEWAY_PREPARED_V2_RELEASE_MANIFEST" not in cloned
+    assert "GATEWAY_PREPARED_V2_VALIDATOR_RELEASE_MANIFEST" not in cloned
 
 
 def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:

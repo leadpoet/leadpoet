@@ -12,11 +12,11 @@ MINER = runpy.run_path(
 )
 
 
-def test_submit_source_needs_only_source_and_wallet_inputs():
+def test_submit_model_uses_source_wallet_and_environment_credentials():
     parser = MINER["build_parser"]()
     args = parser.parse_args(
         [
-            "submit-source",
+            "submit-model",
             "--source",
             "./agent",
             "--wallet-name",
@@ -30,6 +30,16 @@ def test_submit_source_needs_only_source_and_wallet_inputs():
     assert args.source == "./agent"
     assert args.wallet_path == "/var/lib/miner-wallets"
     assert not hasattr(args, "image")
+    assert not hasattr(args, "openrouter_api_key")
+    assert not hasattr(args, "openrouter_management_key")
+    assert not hasattr(args, "deepline_api_key")
+
+
+def test_submit_source_remains_a_compatibility_alias():
+    args = MINER["build_parser"]().parse_args(
+        ["submit-source", "--source", "./agent"]
+    )
+    assert args.command == "submit-source"
 
 
 def test_retired_image_and_manual_envelope_commands_are_absent():

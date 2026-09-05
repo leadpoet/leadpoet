@@ -452,11 +452,16 @@ DEEPLINE_TOOLS = (
     "exa_contents",
     "exa_people_search",
     "exa_search",
+    "firecrawl_scrape",
     "free_simple_company_search",
+    "generic_http_request",
+    "harvestapi_get_job",
+    "harvestapi_get_post",
     "hunter_discover",
     "predictleads_company_financing_events",
     "predictleads_company_job_openings",
     "predictleads_company_news_events",
+    "twitterapi_tweets_by_ids",
 )
 # Deepline's execute body names the upstream provider of each tool; pinned
 # from the official client (deepline_core 0.3.20) and the tool contracts.
@@ -466,11 +471,16 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "exa_contents": "exa",
     "exa_people_search": "exa",
     "exa_search": "exa",
+    "firecrawl_scrape": "firecrawl",
     "free_simple_company_search": "deepline_native",
+    "generic_http_request": "generic_http",
+    "harvestapi_get_job": "harvestapi",
+    "harvestapi_get_post": "harvestapi",
     "hunter_discover": "hunter",
     "predictleads_company_financing_events": "predictleads",
     "predictleads_company_job_openings": "predictleads",
     "predictleads_company_news_events": "predictleads",
+    "twitterapi_tweets_by_ids": "twitterapi",
 })
 # Asks Deepline for the provider's raw response under result.data instead of a
 # normalized view; captured from the official client and verified live.

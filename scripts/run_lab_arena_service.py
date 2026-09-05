@@ -120,11 +120,12 @@ def main(argv=None) -> int:
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
         return 0
-    initial = drive_once(service)
-    if "failed" in initial:
-        print("initial driver tick", initial, file=sys.stderr)
-    elif initial != "idle":
-        print("initial driver tick", initial)
+    if not args.no_driver:
+        initial = drive_once(service)
+        if "failed" in initial:
+            print("initial driver tick", initial, file=sys.stderr)
+        elif initial != "idle":
+            print("initial driver tick", initial)
 
     stop = threading.Event()
 

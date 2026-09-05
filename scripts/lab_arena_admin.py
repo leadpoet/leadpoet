@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--dry-run", action="store_true")
     create = commands.add_parser("create", help="create the round whose submission cutoff is the given UTC instant")
     create.add_argument("--cutoff", required=True, help="ISO 8601 UTC instant, e.g. 2026-09-05T00:00:00Z")
+    create.add_argument(
+        "--round-id",
+        help="explicit date-matched suffixed round id for an isolated manual round",
+    )
     create.add_argument("--dry-run", action="store_true")
     cancel = commands.add_parser("cancel", help="cancel a round with a supported reason")
     cancel.add_argument("--round", required=True)
@@ -53,6 +57,7 @@ def run(args, service) -> int:
     if args.command == "create":
         from datetime import datetime, timezone
 
+        from lab_arena import contracts
         from lab_arena.service import round_id_for_cutoff
 
         try:
@@ -60,18 +65,29 @@ def run(args, service) -> int:
         except ValueError:
             print("cutoff must look like 2026-09-05T00:00:00Z", file=sys.stderr)
             return 2
+        default_round_id = round_id_for_cutoff(cutoff)
+        round_id = args.round_id or default_round_id
+        if args.round_id is not None and (
+            contracts.ROUND_ID_RE.fullmatch(round_id) is None
+            or not round_id.startswith(default_round_id + "-")
+        ):
+            print(
+                "explicit round id must match the cutoff date and include a suffix",
+                file=sys.stderr,
+            )
+            return 2
         open_round = service.open_round()
         if open_round is not None:
             # Rounds overlap: a running round never blocks the next one; only an open submission window does.
             print("a round is already open for submissions: %s (%s)" % (open_round["round_id"], open_round["status"]), file=sys.stderr)
             return 3
-        if service.store.get_round(round_id_for_cutoff(cutoff)) is not None:
-            print("round %s already exists" % round_id_for_cutoff(cutoff), file=sys.stderr)
+        if service.store.get_round(round_id) is not None:
+            print("round %s already exists" % round_id, file=sys.stderr)
             return 3
         if args.dry_run:
-            print(json.dumps({"dry_run": True, "would_create": round_id_for_cutoff(cutoff), "cutoff": args.cutoff}, indent=2, sort_keys=True))
+            print(json.dumps({"dry_run": True, "would_create": round_id, "cutoff": args.cutoff}, indent=2, sort_keys=True))
             return 0
-        created = service.create_round(cutoff)
+        created = service.create_round(cutoff, round_id=round_id)
         print(json.dumps({"created": created["round_id"], "schedule": created.get("schedule")}, indent=2, sort_keys=True, default=str))
         return 0
     if args.command == "status":

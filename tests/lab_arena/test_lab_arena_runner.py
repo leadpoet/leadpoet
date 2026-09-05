@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -147,9 +148,22 @@ class BridgingRuntime:
         self.exit_code = exit_code
         self.calls = calls
         self.specs: List[runtime.SandboxSpec] = []
+        self.entrypoint_snapshots: List[Dict[str, Any]] = []
 
     def run_icp(self, spec, **_):
         self.specs.append(spec)
+        if spec.agent_entrypoint_path is not None:
+            details = os.lstat(spec.agent_entrypoint_path)
+            self.entrypoint_snapshots.append(
+                {
+                    "bytes": spec.agent_entrypoint_path.read_bytes(),
+                    "gid": details.st_gid,
+                    "mode": stat.S_IMODE(details.st_mode),
+                    "path": spec.agent_entrypoint_path,
+                    "regular": stat.S_ISREG(details.st_mode),
+                    "uid": details.st_uid,
+                }
+            )
         os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
         try:
             for _ in range(self.calls):
@@ -198,9 +212,112 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert spec.entry_command == runtime.AGENT_ENTRY_COMMAND and spec.working_dir == runtime.AGENT_WORKING_DIR
     assert spec.source_dir is not None and (spec.source_dir / "harness.py").is_file()
     assert spec.dependency_dir is not None
-    assert spec.agent_entrypoint_path == rn.AGENT_ENTRYPOINT_PATH
+    assert spec.agent_entrypoint_path != rn.AGENT_ENTRYPOINT_PATH
+    assert sandbox.entrypoint_snapshots[0]["bytes"] == rn.AGENT_ENTRYPOINT_PATH.read_bytes()
+    assert sandbox.entrypoint_snapshots[0]["mode"] == 0o444
+    assert sandbox.entrypoint_snapshots[0]["regular"] is True
+    assert not spec.agent_entrypoint_path.exists()
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
+
+
+def test_execute_stages_restrictive_trusted_entrypoint_without_mutating_source(tmp_path):
+    deployed_parent = tmp_path / "deployed" / "lab_arena"
+    deployed_parent.mkdir(parents=True)
+    deployed_parent.chmod(0o700)
+    deployed_entrypoint = deployed_parent / "agent_entrypoint.py"
+    entrypoint_bytes = b"trusted_entrypoint = True\n"
+    deployed_entrypoint.write_bytes(entrypoint_bytes)
+    deployed_entrypoint.chmod(0o600)
+    source_before = deployed_entrypoint.stat()
+    parent_before = deployed_parent.stat()
+
+    api = FakeApi([lease()])
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0)
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, sandbox)
+    config.agent_entrypoint_path = deployed_entrypoint
+
+    assert rn.Runner(config).run_once() == 1
+
+    snapshot = sandbox.entrypoint_snapshots[0]
+    assert snapshot["bytes"] == entrypoint_bytes
+    assert snapshot["mode"] == 0o444
+    assert snapshot["regular"] is True
+    assert snapshot["uid"] == os.geteuid()
+    assert snapshot["gid"] == os.getegid()
+    assert snapshot["mode"] & stat.S_IROTH
+    assert not snapshot["path"].exists()
+    source_after = deployed_entrypoint.stat()
+    parent_after = deployed_parent.stat()
+    assert deployed_entrypoint.read_bytes() == entrypoint_bytes
+    assert (
+        source_after.st_dev,
+        source_after.st_ino,
+        source_after.st_uid,
+        source_after.st_gid,
+        stat.S_IMODE(source_after.st_mode),
+        source_after.st_size,
+        source_after.st_mtime_ns,
+    ) == (
+        source_before.st_dev,
+        source_before.st_ino,
+        source_before.st_uid,
+        source_before.st_gid,
+        stat.S_IMODE(source_before.st_mode),
+        source_before.st_size,
+        source_before.st_mtime_ns,
+    )
+    assert stat.S_IMODE(parent_after.st_mode) == stat.S_IMODE(parent_before.st_mode) == 0o700
+
+
+def test_trusted_entrypoint_staging_rejects_symlink_source(tmp_path):
+    source = tmp_path / "agent_entrypoint.py"
+    source.write_text("trusted_entrypoint = True\n", encoding="utf-8")
+    link = tmp_path / "entrypoint-link.py"
+    link.symlink_to(source)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(rn.RunnerError, match="could not be staged safely"):
+        rn._stage_agent_entrypoint(link, run_dir)
+
+    assert not (run_dir / "agent-entrypoint.py").exists()
+
+
+def test_trusted_entrypoint_staging_preserves_existing_destination(tmp_path):
+    source = tmp_path / "agent_entrypoint.py"
+    source.write_text("trusted_entrypoint = True\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    destination = run_dir / "agent-entrypoint.py"
+    destination.write_bytes(b"pre-existing-data")
+
+    with pytest.raises(rn.RunnerError, match="could not be staged safely"):
+        rn._stage_agent_entrypoint(source, run_dir)
+
+    assert destination.read_bytes() == b"pre-existing-data"
+
+
+def test_trusted_entrypoint_staging_rejects_fifo_without_blocking(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "agent-entrypoint.py"
+    os.mkfifo(source)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    real_open = os.open
+
+    def require_nonblocking_source(path, flags, *args, **kwargs):
+        if Path(path) == source:
+            assert flags & os.O_NONBLOCK
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", require_nonblocking_source)
+    with pytest.raises(rn.RunnerError, match="not a bounded regular file"):
+        rn._stage_agent_entrypoint(source, run_dir)
+
+    assert not (run_dir / "agent-entrypoint.py").exists()
 
 
 @pytest.mark.parametrize("kind,expected", [
@@ -840,6 +957,26 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
     assert api.provider_frames[0]["operation_id"] == "openrouter.chat"
 
 
+@pytest.mark.parametrize("scoring_run", [False, True])
+def test_miner_key_failure_does_not_become_an_infrastructure_failure(tmp_path, scoring_run):
+    from lab_arena import scoring
+
+    class MinerKeyApi(RefusingApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            document["call"].update(funding_source="miner_key", provider_status=401)
+            return document
+
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="provider error")
+    api = MinerKeyApi([scoring_lease() if scoring_run else lease()], code="miner_credentials_unavailable")
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(tmp_path, api, RefusedJudgeRuntime(output=failure)))
+    assert runner_.run_once() == 1 and runner_.abandoned == 0
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "credential_error"
+    assert api.completions[0]["body"].get("output") in (None, {})
+
+
 class FlakyCompletionApi(FakeApi):
     """The completion call fails a given number of times before the Arena accepts it."""
 
@@ -855,6 +992,21 @@ class FlakyCompletionApi(FakeApi):
         return super().complete(envelope)
 
 
+class CompletionDocumentApi(FakeApi):
+    """Return fixed completion documents and retain only envelope identities."""
+
+    def __init__(self, leases, responses):
+        super().__init__(leases)
+        self.responses = list(responses)
+        self.completion_attempts = []
+
+    def complete(self, envelope):
+        self.completion_attempts.append(envelope)
+        if not self.responses:
+            raise AssertionError("unexpected completion attempt")
+        return self.responses.pop(0)
+
+
 @pytest.mark.parametrize("failures, expect_abandoned", [(1, 0), (2, 0), (3, 1)])
 def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(tmp_path, failures, expect_abandoned):
     """Two retries cover a lost response or a transient Arena failure; a third failure fails closed."""
@@ -866,6 +1018,103 @@ def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(t
     assert runner_.abandoned == expect_abandoned
     assert api.attempts == min(failures + 1, 3)
     assert len(api.completions) == (0 if expect_abandoned else 1)
+    if expect_abandoned:
+        assert runner_.completed[0]["error"] == "RunnerError"
+
+
+def test_accounting_open_retries_the_original_completion_until_accepted(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [
+            {"status": "accounting_open", "open_calls": 1},
+            {"status": "accepted"},
+        ],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    assert sum(config.accounting_open_retry_seconds) >= rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert (
+        sum(config.accounting_open_retry_seconds)
+        < contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+    )
+    assert sum(config.accounting_open_retry_seconds) < contracts.LEASE_TTL_SECONDS
+    config.accounting_open_retry_seconds = (0.0,)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert runner_.completed == [
+        {"run_id": "r1", "result": {"status": "accepted"}}
+    ]
+    assert len(api.completion_attempts) == 2
+    assert api.completion_attempts[0] is api.completion_attempts[1]
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+        "Lab Arena completion status: accepted",
+    ]
+    assert captured.err == ""
+
+
+def test_accounting_open_retry_exhaustion_abandons_without_logging_the_envelope(
+    tmp_path, capsys
+):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "accounting_open", "open_calls": 1}] * 3,
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 1
+    assert len(api.completion_attempts) == 3
+    assert all(
+        envelope is api.completion_attempts[0]
+        for envelope in api.completion_attempts
+    )
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Lab Arena completion status: accounting_open",
+    ] * 3
+    assert captured.err == "Lab Arena run abandoned: RunnerError\n"
+    assert "tok-r1" not in captured.out + captured.err
+    assert "signature" not in captured.out + captured.err
+
+
+def test_completion_rejection_is_logged_but_not_retried(tmp_path, capsys):
+    api = CompletionDocumentApi(
+        [lease()],
+        [{"status": "rejected", "detail": "must-not-log"}],
+    )
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    config.accounting_open_retry_seconds = (0.0, 0.0)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert len(api.completion_attempts) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "Lab Arena completion status: rejected\n"
+    assert captured.err == ""
+    assert "must-not-log" not in captured.out
 
 
 

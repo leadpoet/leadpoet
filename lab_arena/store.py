@@ -48,6 +48,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
+    "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
+    "lab_arena_get_submission_credential": (("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_provider", "text")),
     "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]")),
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
@@ -511,6 +513,42 @@ class ArenaStore:
             ),
             "update_submission",
         )
+
+    def accept_submission_with_credentials(
+        self,
+        round_id: str,
+        submission_id: str,
+        miner_hotkey: str,
+        encrypted_credentials: Mapping[str, str],
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_accept_submission_with_credentials",
+                {
+                    "p_round_id": round_id,
+                    "p_submission_id": submission_id,
+                    "p_miner_hotkey": miner_hotkey,
+                    "p_credentials": dict(encrypted_credentials),
+                },
+            ),
+            "accept_submission_with_credentials",
+        )
+
+    def get_submission_credential(
+        self, submission_id: str, miner_hotkey: str, provider: str
+    ) -> Optional[Dict[str, Any]]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_get_submission_credential",
+                {
+                    "p_submission_id": submission_id,
+                    "p_miner_hotkey": miner_hotkey,
+                    "p_provider": provider,
+                },
+            ),
+            "get_submission_credential",
+        )
+        return result if result.get("status") == "available" else None
 
     def get_submission(self, submission_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_submissions", filters={"submission_id": submission_id}, limit=1)

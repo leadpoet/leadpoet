@@ -750,12 +750,14 @@ def prepare_validator_initial_active_lineage_v2(
     candidate_commit_sha: str,
     authority_commit_sha: str,
     restart_invocation_id: str,
-    running_validator_commit_sha: str,
     expected_validator_hotkey: str,
     chain_signing_profile: Mapping[str, Any],
     journal_loader: Callable[[], Optional[Mapping[str, Any]]],
     repository: Path,
     expected_lineage_id: str,
+    running_validator_commit_sha: str | None = None,
+    recovery_requirements: Mapping[str, Any] | None = None,
+    recovery_lineage: Mapping[str, Any] | None = None,
     bucket: str = DEFAULT_BUCKET,
     prefix: str = DEFAULT_PREFIX,
     historical_topology_hash: str | None = None,
@@ -766,7 +768,6 @@ def prepare_validator_initial_active_lineage_v2(
     candidate = _commit(candidate_commit_sha, "candidate commit")
     authority = _commit(authority_commit_sha, "release authority commit")
     invocation_id = _invocation_id(restart_invocation_id)
-    running = _commit(running_validator_commit_sha, "running validator commit")
     lineage_id = _lineage_id(expected_lineage_id)
     validator_hotkey = str(expected_validator_hotkey or "")
     profile = validate_chain_signing_profile(chain_signing_profile)
@@ -776,6 +777,46 @@ def prepare_validator_initial_active_lineage_v2(
         "expected validator hotkey is invalid",
     )
     _require(callable(journal_loader), "publication journal loader is unavailable")
+    has_running = running_validator_commit_sha is not None
+    has_recovery = recovery_requirements is not None or recovery_lineage is not None
+    _require(
+        has_running != has_recovery,
+        "exactly one running validator or recovery authority is required",
+    )
+    if has_running:
+        transition_authority = [
+            _commit(running_validator_commit_sha, "running validator commit")
+        ]
+    else:
+        _require(
+            recovery_requirements is not None and recovery_lineage is not None,
+            "validator recovery authority pair is incomplete",
+        )
+        recovery = validate_active_release_requirements_v2(recovery_requirements)
+        for field, expected, label in (
+            ("candidate_commit_sha", candidate, "candidate"),
+            ("authority_commit_sha", authority, "release authority"),
+            ("restart_invocation_id", invocation_id, "restart invocation"),
+            ("ancestry_lineage_id", lineage_id, "ancestry lineage"),
+        ):
+            _require(
+                recovery[field] == expected,
+                "validator recovery %s differs" % label,
+            )
+        handed = _validate_selected_lineage(
+            recovery_lineage,
+            historical_topology_hash=historical_topology_hash,
+            expected_current_commit=candidate,
+        )
+        _require(
+            sorted(handed["releases"]) == recovery["required_commits"],
+            "validator recovery requirements differ from lineage",
+        )
+        transition_authority = list(recovery["transition_commit_shas"])
+        _require(
+            bool(transition_authority),
+            "validator recovery transition authority is empty",
+        )
 
     first = _journal_requirements(
         journal_loader(),
@@ -783,7 +824,7 @@ def prepare_validator_initial_active_lineage_v2(
         expected_validator_hotkey=validator_hotkey,
         chain_signing_profile=profile,
     )
-    transitions = sorted({running, *first["required_commits"]})
+    transitions = sorted({*transition_authority, *first["required_commits"]})
     provisional = build_active_release_requirements_v2(
         candidate_commit_sha=candidate,
         authority_commit_sha=authority,
@@ -822,7 +863,9 @@ def prepare_validator_initial_active_lineage_v2(
         candidate_commit_sha=candidate,
         authority_commit_sha=authority,
         restart_invocation_id=invocation_id,
-        transition_commit_shas=sorted({running, *second["required_commits"]}),
+        transition_commit_shas=sorted(
+            {*transition_authority, *second["required_commits"]}
+        ),
         active_graphs={},
         expected_lineage_id=lineage_id,
         boot_verifier=verifier,
@@ -1071,11 +1114,27 @@ def prepare_validator_final_active_lineage_v2(
         s3_client=s3_client,
     )
     _require(
-        canonical_json(handed) == canonical_json(independent),
-        "handed release lineage differs from independent readback",
+        set(handed["releases"]) == set(independent["releases"]),
+        "handed release lineage membership differs from independent readback",
     )
+    for commit, handed_release in handed["releases"].items():
+        independent_release = independent["releases"][commit]
+        if commit == candidate:
+            _require(
+                canonical_json(handed_release)
+                == canonical_json(independent_release),
+                "handed current release differs from independent readback",
+            )
+        else:
+            # Prior local and attested builds can have different wrapper hashes
+            # for the same measured roles. Keep every role identity exact.
+            _require(
+                canonical_json(handed_release["roles"])
+                == canonical_json(independent_release["roles"]),
+                "handed prior release roles differ from independent readback",
+            )
     verifier = _selected_compact_boot_verifier(
-        independent,
+        handed,
         historical_topology_hash=historical_topology_hash,
     )
     first_journal = _journal_requirements(
@@ -1108,7 +1167,7 @@ def prepare_validator_final_active_lineage_v2(
     )
     return {
         "requirements": final,
-        "lineage": independent,
+        "lineage": handed,
         "journal_hash": second_journal["journal_hash"],
     }
 
@@ -1166,6 +1225,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--historical-topology-hash")
     parser.add_argument("--running-validator-commit")
+    parser.add_argument("--recovery-requirements", type=Path)
+    parser.add_argument("--recovery-lineage", type=Path)
     parser.add_argument("--running-gateway-manifest", type=Path)
     gateway_authority = parser.add_mutually_exclusive_group()
     gateway_authority.add_argument("--validator-requirements", type=Path)
@@ -1220,8 +1281,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         expected_validator_hotkey = None
         chain_signing_profile = None
     if args.phase == "validator-initial":
+        has_running = args.running_validator_commit is not None
+        has_recovery = (
+            args.recovery_requirements is not None
+            or args.recovery_lineage is not None
+        )
         _require(
-            args.running_validator_commit is not None
+            has_running != has_recovery
+            and (
+                not has_recovery
+                or (
+                    args.recovery_requirements is not None
+                    and args.recovery_lineage is not None
+                )
+            )
             and args.journal is not None
             and args.requirements_output is not None,
             "validator-initial arguments are incomplete",
@@ -1231,6 +1304,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             authority_commit_sha=args.authority_commit,
             restart_invocation_id=args.restart_invocation_id,
             running_validator_commit_sha=args.running_validator_commit,
+            recovery_requirements=(
+                _load_json(
+                    args.recovery_requirements,
+                    "validator recovery requirements",
+                )
+                if args.recovery_requirements is not None
+                else None
+            ),
+            recovery_lineage=(
+                _load_json(
+                    args.recovery_lineage,
+                    "validator recovery lineage",
+                )
+                if args.recovery_lineage is not None
+                else None
+            ),
             expected_validator_hotkey=str(expected_validator_hotkey),
             chain_signing_profile=dict(chain_signing_profile or {}),
             journal_loader=lambda: _load_optional_journal(args.journal),

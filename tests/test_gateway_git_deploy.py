@@ -197,6 +197,7 @@ def _prepare(
 def test_noop_deployment_records_exact_commit_and_last_good(
     git_fixture: GitFixture,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan, manifest, last_good = _paths(tmp_path)
     prepared = _prepare(git_fixture, tmp_path)
@@ -212,8 +213,17 @@ def test_noop_deployment_records_exact_commit_and_last_good(
     eif_root = tmp_path / "tee"
     eif_root.mkdir()
     pcr0 = "a" * 96
+    monkeypatch.setattr(
+        gateway_git_deploy,
+        "_installed_release_role_pcr0s",
+        lambda _root, _target: {"gateway_scoring": pcr0},
+    )
     (eif_root / "enclave-build-gateway_scoring.json").write_text(
         json.dumps({"Measurements": {"PCR0": pcr0}}),
+        encoding="utf-8",
+    )
+    (eif_root / "enclave-build-gateway_autoresearch.json").write_text(
+        json.dumps({"Measurements": {"PCR0": "b" * 96}}),
         encoding="utf-8",
     )
     completed = gateway_git_deploy.finalize_deployment(
@@ -225,6 +235,240 @@ def test_noop_deployment_records_exact_commit_and_last_good(
     assert completed["role_pcr0s"] == {"gateway_scoring": pcr0}
     assert json.loads(manifest.read_text(encoding="utf-8"))["status"] == "succeeded"
     assert json.loads(last_good.read_text(encoding="utf-8"))["target_sha"] == git_fixture.initial_sha
+
+
+def _use_fixture_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gateway.tee import verify_release_artifacts_v2 as verifier
+
+    def read_fixture_measurement(path: Path) -> str:
+        measurement = path.with_name(
+            path.name.replace("tee-enclave-", "enclave-build-").replace(
+                ".eif", ".json"
+            )
+        )
+        return verifier._pcr0_from_build_output(measurement)
+
+    monkeypatch.setattr(verifier, "_pcr0_from_eif", read_fixture_measurement)
+
+
+def test_repair_last_good_removes_only_retired_archived_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.tee.release_archive_v2 import archive_verified_release
+    from tests.test_gateway_release_archive_v2 import _release_fixture, _role_pcr0s
+
+    _use_fixture_measurements(monkeypatch)
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    last_good = tmp_path / "gateway-last-good.json"
+    original = {
+        "schema_version": gateway_git_deploy.SCHEMA_VERSION,
+        "status": "succeeded",
+        "target_sha": release["commit_sha"],
+        "stage": "completed",
+        "sentinel": "preserved",
+        "role_pcr0s": {
+            **_role_pcr0s(release),
+            "gateway_autoresearch": "f" * 96,
+        },
+    }
+    last_good.write_text(json.dumps(original), encoding="utf-8")
+
+    repaired = gateway_git_deploy.repair_last_good_role_pcr0s(
+        last_good_file=last_good,
+        archive_root=archive_root,
+    )
+
+    assert repaired == {**original, "role_pcr0s": _role_pcr0s(release)}
+    assert json.loads(last_good.read_text(encoding="utf-8")) == repaired
+    assert gateway_git_deploy.repair_last_good_role_pcr0s(
+        last_good_file=last_good,
+        archive_root=archive_root,
+    ) == repaired
+
+    next_gateway, next_eifs, next_release_path, next_release = _release_fixture(
+        tmp_path / "next-build", "b"
+    )
+    archive_verified_release(
+        release_manifest_path=next_release_path,
+        gateway_root=next_gateway,
+        eif_root=next_eifs,
+        archive_root=archive_root,
+        last_good_manifest_path=last_good,
+    )
+    for role, pcr0 in _role_pcr0s(next_release).items():
+        (next_eifs / ("enclave-build-%s.json" % role)).write_text(
+            json.dumps({"Measurements": {"PCR0": pcr0}}),
+            encoding="utf-8",
+        )
+    next_plan = tmp_path / "next-plan.json"
+    next_plan.write_text(
+        json.dumps(
+            {
+                "schema_version": gateway_git_deploy.SCHEMA_VERSION,
+                "target_sha": next_release["commit_sha"],
+                "manifest_file": str(tmp_path / "gateway-current.json"),
+                "last_good_file": str(last_good),
+            }
+        ),
+        encoding="utf-8",
+    )
+    completed = gateway_git_deploy.finalize_deployment(
+        plan_file=next_plan,
+        status="succeeded",
+        stage="completed",
+        eif_root=next_eifs,
+    )
+    assert completed["role_pcr0s"] == _role_pcr0s(next_release)
+
+
+def test_finalize_uses_exact_release_roles_and_ignores_retired_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_gateway_release_archive_v2 import _release_fixture, _role_pcr0s
+
+    _use_fixture_measurements(monkeypatch)
+    _gateway_root, eif_root, _release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    for role, pcr0 in _role_pcr0s(release).items():
+        (eif_root / ("enclave-build-%s.json" % role)).write_text(
+            json.dumps({"Measurements": {"PCR0": pcr0}}),
+            encoding="utf-8",
+        )
+    (eif_root / "enclave-build-gateway_autoresearch.json").write_text(
+        json.dumps({"Measurements": {"PCR0": "f" * 96}}),
+        encoding="utf-8",
+    )
+    plan = tmp_path / "plan.json"
+    manifest = tmp_path / "gateway-current.json"
+    last_good = tmp_path / "gateway-last-good.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "schema_version": gateway_git_deploy.SCHEMA_VERSION,
+                "target_sha": release["commit_sha"],
+                "manifest_file": str(manifest),
+                "last_good_file": str(last_good),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = gateway_git_deploy.finalize_deployment(
+        plan_file=plan,
+        status="succeeded",
+        stage="completed",
+        eif_root=eif_root,
+    )
+
+    assert completed["role_pcr0s"] == _role_pcr0s(release)
+    assert "gateway_autoresearch" not in completed["role_pcr0s"]
+
+
+def test_repair_last_good_rejects_retained_pcr0_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.tee.release_archive_v2 import archive_verified_release
+    from tests.test_gateway_release_archive_v2 import _release_fixture, _role_pcr0s
+
+    _use_fixture_measurements(monkeypatch)
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    role_pcr0s = _role_pcr0s(release)
+    role_pcr0s["gateway_scoring"] = "e" * 96
+    last_good = tmp_path / "gateway-last-good.json"
+    original = json.dumps(
+        {
+            "schema_version": gateway_git_deploy.SCHEMA_VERSION,
+            "status": "succeeded",
+            "target_sha": release["commit_sha"],
+            "role_pcr0s": {
+                **role_pcr0s,
+                "gateway_autoresearch": "f" * 96,
+            },
+        }
+    )
+    last_good.write_text(original, encoding="utf-8")
+
+    with pytest.raises(
+        gateway_git_deploy.GatewayGitDeployError,
+        match="retained role PCR0s differ",
+    ):
+        gateway_git_deploy.repair_last_good_role_pcr0s(
+            last_good_file=last_good,
+            archive_root=archive_root,
+        )
+
+    assert last_good.read_text(encoding="utf-8") == original
+
+
+def test_repair_last_good_rejects_unknown_extra_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.tee.release_archive_v2 import archive_verified_release
+    from tests.test_gateway_release_archive_v2 import _release_fixture, _role_pcr0s
+
+    _use_fixture_measurements(monkeypatch)
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    last_good = tmp_path / "gateway-last-good.json"
+    original = json.dumps(
+        {
+            "schema_version": gateway_git_deploy.SCHEMA_VERSION,
+            "status": "succeeded",
+            "target_sha": release["commit_sha"],
+            "role_pcr0s": {**_role_pcr0s(release), "unknown_role": "f" * 96},
+        }
+    )
+    last_good.write_text(original, encoding="utf-8")
+
+    with pytest.raises(gateway_git_deploy.GatewayGitDeployError):
+        gateway_git_deploy.repair_last_good_role_pcr0s(
+            last_good_file=last_good,
+            archive_root=archive_root,
+        )
+    assert last_good.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("mode", ["missing", "mismatch"])
+def test_collect_role_pcr0s_rejects_missing_or_mismatched_measurement(
+    tmp_path: Path, mode: str
+) -> None:
+    expected = {"gateway_scoring": "a" * 96}
+    if mode == "mismatch":
+        (tmp_path / "enclave-build-gateway_scoring.json").write_text(
+            json.dumps({"Measurements": {"PCR0": "b" * 96}}),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(gateway_git_deploy.GatewayGitDeployError):
+        gateway_git_deploy.collect_role_pcr0s(tmp_path, expected)
 
 
 def test_fast_forward_is_fetched_before_checkout_activation(

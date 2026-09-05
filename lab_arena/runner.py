@@ -67,6 +67,7 @@ DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_SOURCE_CACHE_MAX_ENTRIES = 64
 MAX_REQUIREMENTS_BYTES = 64 * 1024
 MAX_REQUIREMENTS = 128
+MAX_AGENT_ENTRYPOINT_BYTES = 1024 * 1024
 MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
@@ -85,6 +86,60 @@ class AgentDependencyError(RunnerError):
 
 class SignatureFn(Protocol):
     def __call__(self, message: str) -> str: ...
+
+
+def _stage_agent_entrypoint(source_path: Path, run_dir: Path) -> Path:
+    """Copy the trusted entrypoint without changing its deployed permissions."""
+
+    source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    destination = Path(run_dir) / "agent-entrypoint.py"
+    source_fd = destination_fd = None
+    destination_created = False
+    try:
+        source_fd = os.open(Path(source_path), source_flags)
+        source_info = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(source_info.st_mode)
+            or source_info.st_size <= 0
+            or source_info.st_size > MAX_AGENT_ENTRYPOINT_BYTES
+        ):
+            raise RunnerError("trusted agent entrypoint is not a bounded regular file")
+        with os.fdopen(source_fd, "rb") as source_file:
+            source_fd = None
+            content = source_file.read(MAX_AGENT_ENTRYPOINT_BYTES + 1)
+        if len(content) != source_info.st_size:
+            raise RunnerError("trusted agent entrypoint changed during staging")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        destination_created = True
+        with os.fdopen(destination_fd, "wb") as destination_file:
+            destination_fd = None
+            if destination_file.write(content) != len(content):
+                raise RunnerError("trusted agent entrypoint could not be staged")
+            destination_file.flush()
+            os.fchmod(destination_file.fileno(), 0o444)
+    except RunnerError:
+        if destination_created:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    except OSError as exc:
+        if destination_created:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+        raise RunnerError("trusted agent entrypoint could not be staged safely") from exc
+    finally:
+        for descriptor in (destination_fd, source_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+    return destination
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +958,7 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
-            if call.get("error_code") in ("budget_refused", "budget_exhausted") or call.get("outcome") == "refused":
+            if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
         return None, document
 
@@ -1087,6 +1142,18 @@ class RunnerConfig:
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    # A sandbox can end while its last provider request is still settling. The
+    # 142-second bound covers MAX_PROVIDER_API_TIMEOUT_SECONDS without holding
+    # the lease until its 20-minute expiry.
+    accounting_open_retry_seconds: Tuple[float, ...] = (
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        30.0,
+        45.0,
+        30.0,
+    )
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
@@ -1173,6 +1240,11 @@ class AssignmentExecutor:
                 }
                 extra_environment = {}
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
+            staged_agent_entrypoint = (
+                None
+                if scoring_run
+                else _stage_agent_entrypoint(config.agent_entrypoint_path, run_dir)
+            )
             # Both assignment kinds use the service-selected trusted Python
             # image. Execute assignments add the admitted source bundle under
             # read-only mounts; no miner image metadata is accepted.
@@ -1202,7 +1274,7 @@ class AssignmentExecutor:
                     source_dir=source_dir,
                     dependency_dir=dependency_dir,
                     agent_entrypoint_path=(
-                        None if scoring_run else config.agent_entrypoint_path
+                        staged_agent_entrypoint
                     ),
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,
@@ -1239,7 +1311,22 @@ class AssignmentExecutor:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
-            provider_infrastructure_failed = any(operations.provider_status_is_infrastructure(call.get("provider_status")) for call in state.calls)
+            miner_credentials_failed = any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") == "miner_credentials_unavailable"
+                for call in state.calls
+            )
+            provider_infrastructure_failed = any(
+                call.get("error_code") in ("broker_unavailable", "provider_unavailable")
+                or (
+                    operations.provider_status_is_infrastructure(call.get("provider_status"))
+                    and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
+                )
+                for call in state.calls
+            )
+            if miner_credentials_failed and terminal != "accepted":
+                terminal = "credential_error"
+                output_document = None
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
@@ -1369,6 +1456,11 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
+            print(
+                "Lab Arena run abandoned: %s" % type(exc).__name__,
+                file=sys.stderr,
+                flush=True,
+            )
             self.completed.append(
                 {
                     "run_id": lease.get("run_id"),
@@ -1383,19 +1475,42 @@ class Runner:
         """Deliver the signed completion; a transport or server failure is retried briefly.
 
         The envelope is idempotent, so a lost response or a transient object
-        store failure on the Arena costs a retry, not the whole sandbox run.
-        A rejection the Arena returns as a document is never retried.
+        store failure on the Arena costs a retry, not the whole sandbox run. An
+        ``accounting_open`` document is retried separately while an in-flight
+        provider call settles. Other response documents are never retried.
         """
 
-        delays = tuple(self._config.completion_retry_seconds)
-        for attempt in range(len(delays) + 1):
+        failure_delays = iter(tuple(self._config.completion_retry_seconds))
+        accounting_delays = iter(
+            tuple(self._config.accounting_open_retry_seconds)
+        )
+        while True:
             try:
-                return self._config.api.complete(envelope)
-            except Exception:
-                if attempt >= len(delays):
-                    raise
-                time.sleep(max(0.0, float(delays[attempt])))
-        raise RunnerError("completion retries exhausted")  # pragma: no cover - the loop returns or raises
+                result = self._config.api.complete(envelope)
+            except Exception as exc:
+                try:
+                    delay = next(failure_delays)
+                except StopIteration:
+                    raise exc from None
+            else:
+                status = result.get("status")
+                safe_status = (
+                    status
+                    if status
+                    in ("accepted", "failed", "stale", "accounting_open", "rejected")
+                    else "other"
+                )
+                print(
+                    "Lab Arena completion status: %s" % safe_status,
+                    flush=True,
+                )
+                if status != "accounting_open":
+                    return result
+                try:
+                    delay = next(accounting_delays)
+                except StopIteration:
+                    raise RunnerError("completion remained accounting_open")
+            time.sleep(max(0.0, float(delay)))
 
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""

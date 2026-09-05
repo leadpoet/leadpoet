@@ -229,6 +229,11 @@ def test_source_submission_contract_has_two_small_signed_steps():
         "submission_id": "sub-abc123",
         "source_ref": "arena/arena-2026-09-02/sources/sub-abc123.tar.gz",
         "source_size_bytes": 123,
+        "credentials": {
+            "openrouter_api_key": "sk-or-v1-" + "a" * 32,
+            "openrouter_management_key": "sk-or-v1-" + "b" * 32,
+            "deepline_api_key": "deepline-" + "c" * 32,
+        },
     }
     assert c.validate_submission_finalize_body(finalize) == finalize
     for bad in (
@@ -248,6 +253,12 @@ def test_source_submission_contract_has_two_small_signed_steps():
         c.validate_submission_finalize_body(
             dict(finalize, source_cache_key="src-" + "a" * 32)
         )
+    with pytest.raises(c.ArenaContractError):
+        c.validate_submission_finalize_body(
+            dict(finalize, credentials={"openrouter_api_key": "x" * 16})
+        )
+
+
 def test_run_result_reward_basis_and_scoring_plan_contracts():
     keypair = Keypair.create_from_uri("//Runner")
     run_result = {

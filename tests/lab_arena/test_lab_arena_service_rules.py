@@ -21,6 +21,25 @@ def _schedule():
     }
 
 
+def test_run_context_keeps_the_durable_round_identity():
+    run = {
+        "round_id": "arena-2026-09-04",
+        "assignment_id": "assignment-1",
+        "attempt": 2,
+        "icp_position": 3,
+        "miner_hotkey": "5" * 48,
+        "submission_id": "submission-1",
+        "stage": 2,
+        "kind": "score",
+    }
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(get_run=lambda _run_id: run)
+    returned, context = service._run_context("run-1", "lease-token")
+    assert returned is run
+    assert context.round_id == "arena-2026-09-04"
+    assert context.lease_token_hash == hash_lease_token("lease-token")
+
+
 @pytest.mark.parametrize("moment", ["2026-09-01T23:59:59+00:00", "2026-09-02T01:00:00+00:00"])
 def test_submission_requires_the_full_half_open_time_window(moment):
     service = object.__new__(ArenaService)
@@ -552,6 +571,85 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
     ]
 
 
+@pytest.mark.parametrize("submission_id", ["sub-unknown", "sub-current-open-round"])
+def test_public_results_refuse_ids_outside_the_published_round(submission_id):
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "publication_doc": {
+            "participants": [
+                {
+                    "submission_id": "sub-published",
+                    "miner_hotkey": "5" + "A" * 47,
+                    "is_baseline": False,
+                }
+            ],
+            "stage1_ranking": [],
+            "final_ranking": [],
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(*_args, **_kwargs):
+            pytest.fail("a nonparticipant must be rejected before run lookup")
+
+        @staticmethod
+        def get_submission(_submission_id):
+            # This simulates a known submission in the current open round. The
+            # global submission row must not make it part of this publication.
+            return {
+                "round_id": "arena-2026-09-03",
+                "submission_id": "sub-current-open-round",
+                "miner_hotkey": "5" + "B" * 47,
+                "is_king": False,
+            }
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: published
+
+    with pytest.raises(ServiceError) as caught:
+        service.public_results(published["round_id"], submission_id)
+    assert caught.value.status == 404 and caught.value.code == "submission_missing"
+
+
+def test_public_results_take_valid_identity_from_the_round_publication():
+    hotkey = "5" + "C" * 47
+    published = {
+        "round_id": "arena-2026-09-02",
+        "status": "published",
+        "publication_doc": {
+            "participants": [
+                {
+                    "submission_id": "sub-published",
+                    "miner_hotkey": hotkey,
+                    "is_baseline": True,
+                }
+            ],
+            "stage1_ranking": [],
+            "final_ranking": [],
+        },
+    }
+
+    class Store:
+        @staticmethod
+        def list_runs(_round_id, **filters):
+            assert filters == {"submission_id": "sub-published", "kind": "execute"}
+            return []
+
+        @staticmethod
+        def get_submission(_submission_id):
+            pytest.fail("public identity must not come from the global submission row")
+
+    service = object.__new__(ArenaService)
+    service._store = Store()
+    service._round = lambda _round_id: published
+
+    result = service.public_results(published["round_id"], "sub-published")
+    assert result["submission"] == {"miner_hotkey": hotkey, "is_baseline": True}
+
+
 def test_source_download_requires_the_active_execute_lease():
     token = "a" * 64
     payload = b"private source bytes"
@@ -752,6 +850,90 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
 
 
+def _runner_claim_service(*, network_name, hotkeys, validator_permit, active=None):
+    runner = "5" * 48
+    snapshot_values = {"hotkeys": hotkeys}
+    if validator_permit is not None:
+        snapshot_values["validator_permit"] = validator_permit
+    if active is not None:
+        snapshot_values["active"] = active
+    snapshot = SimpleNamespace(**snapshot_values)
+    chain = SimpleNamespace(
+        metagraph=lambda: snapshot,
+        hotkeys_owned_by_same_coldkey=lambda _hotkey: [],
+    )
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(
+        claim_assignment=lambda **_kwargs: {"status": "empty"}
+    )
+    service._config = SimpleNamespace(network_name=network_name, chain=chain)
+    service._request_round = lambda *_args, **_kwargs: (
+        {
+            "hotkey": runner,
+            "body": {"declared_parallelism": 1},
+            "request_id": "0" * 32,
+            "signature": "sig",
+        },
+        {
+            "round_id": "arena-2026-09-05-testnet",
+            "status": "stage1",
+            "configuration_doc": {
+                "runner_hotkeys": [runner],
+                "runner_slot_ceiling": 8,
+                "lease_ttl_seconds": 420,
+            },
+        },
+    )
+    service._lease_token = lambda _validated: "token"
+    return service
+
+
+@pytest.mark.parametrize(
+    ("hotkeys", "validator_permit", "expected_code"),
+    [
+        (["5" + "A" * 47], [True], "runner_hotkey_unregistered"),
+        (["5" * 48], [False], "runner_validator_permit_required"),
+        (["5" * 48], None, "runner_validator_permit_unavailable"),
+        (["5" * 48], [], "runner_validator_permit_unavailable"),
+        (["5" * 48], ["false"], "runner_validator_permit_unavailable"),
+    ],
+)
+def test_test_network_claim_requires_registered_validator_permit(
+    hotkeys, validator_permit, expected_code
+):
+    service = _runner_claim_service(
+        network_name="test",
+        hotkeys=hotkeys,
+        validator_permit=validator_permit,
+    )
+
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim({})
+
+    assert rejected.value.code == expected_code
+
+
+def test_test_network_claim_accepts_permitted_inactive_validator():
+    service = _runner_claim_service(
+        network_name="test",
+        hotkeys=["5" * 48],
+        validator_permit=[True],
+        active=[False],
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
+def test_finney_claim_does_not_add_the_testnet_validator_permit_gate():
+    service = _runner_claim_service(
+        network_name="finney",
+        hotkeys=["5" * 48],
+        validator_permit=[False],
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
 def test_execute_lease_uses_private_source_and_the_common_trusted_python_image():
     runner = "5" * 48
     digest = "sha256:" + "a" * 64
@@ -838,6 +1020,11 @@ def test_finalize_rejects_an_invalid_source_archive():
                 "submission_id": row["submission_id"],
                 "source_ref": row["source_ref"],
                 "source_size_bytes": row["source_size_bytes"],
+                "credentials": {
+                    "openrouter_api_key": "sk-or-v1-" + "a" * 32,
+                    "openrouter_management_key": "sk-or-v1-" + "b" * 32,
+                    "deepline_api_key": "deepline-" + "c" * 32,
+                },
             },
         },
         {

@@ -138,6 +138,65 @@ def test_remote_protocol_checks_version_again_before_stage_move():
     assert 'comments=True, posix=True' in source
 
 
+@pytest.mark.parametrize("selection,expected", [("enabled", "true"), ("disabled", "false")])
+def test_testnet_proxy_configuration_changes_only_the_route(monkeypatch, tmp_path, selection, expected):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    requests_seen = []
+
+    def ssh(host, ssh_key, request):
+        requests_seen.append(request)
+        return {"ok": True, "applied": request["apply"]}
+
+    monkeypatch.setattr(MODULE, "_ssh", ssh)
+    assert MODULE.main([
+        "--testnet-proxy", selection, "--allowed-account", "493765492819",
+        "--ssh-key", str(key), "--check",
+    ]) == 0
+    assert len(requests_seen) == 1
+    assert requests_seen[0]["updates"] == {"LAB_ARENA_TESTNET_ENABLED": expected}
+    assert requests_seen[0]["aliases"] == {}
+    assert requests_seen[0]["apply"] is False
+    assert "service_key" not in requests_seen[0]
+
+
+def test_testnet_proxy_apply_keeps_the_existing_authorization_gate(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("fixture")
+    monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
+    monkeypatch.setattr(MODULE, "_ssh", lambda *args: pytest.fail("unauthorized remote call"))
+    assert MODULE.main([
+        "--testnet-proxy", "enabled", "--allowed-account", "493765492819",
+        "--ssh-key", str(key), "--apply",
+    ]) == 2
+
+
+def test_testnet_proxy_scope_cannot_be_mixed_with_credential_configuration():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--testnet-proxy", "enabled", "--miner-credentials-only",
+            "--allowed-account", "493765492819",
+        ])
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_testnet_proxy_remote_apply_preserves_mainnet_configuration(tmp_path, encoded):
+    values = {"LAB_ARENA_MODE": "live", "LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "keep-key",
+              "KEEP": "same", "LAB_ARENA_TESTNET_ENABLED": "false"}
+    raw = json.dumps(values) if encoded else "\n".join(k + "=" + v for k, v in values.items())
+    updated = _run_remote_with_fake_aws(tmp_path, raw, request_override={
+        "role": "testnet_proxy", "updates": {"LAB_ARENA_TESTNET_ENABLED": "true"},
+        "aliases": {},
+    })
+    if encoded:
+        assert json.loads(updated) == dict(values, LAB_ARENA_TESTNET_ENABLED="true")
+    else:
+        assert "LAB_ARENA_MODE=live" in updated
+        assert "LAB_ARENA_CREDENTIAL_KMS_KEY_ID=keep-key" in updated
+        assert "KEEP=same" in updated
+        assert "export LAB_ARENA_TESTNET_ENABLED=true" in updated
+
+
 def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monkeypatch, tmp_path):
     seen = []
 
@@ -156,7 +215,7 @@ def test_runner_wallet_dry_run_does_not_generate_and_apply_is_shell_quoted(monke
     assert "redirect_stdout(sink)" in MODULE._RUNNER_WALLET_REMOTE
 
 
-def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True, return_state=False):
+def _run_remote_with_fake_aws(tmp_path, raw, *, expect_success=True, return_state=False, request_override=None):
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"current": "initial", "versions": {"initial": raw}}))
     aws = tmp_path / "aws"
@@ -196,6 +255,8 @@ else:
             "SUPABASE_ANON_KEY": "LAB_ARENA_SUPABASE_ANON_KEY",
         },
     }
+    if request_override:
+        request.update(request_override)
     env = dict(os.environ, TEST_AWS_STATE=str(state), PATH=str(tmp_path) + os.pathsep + os.environ["PATH"])
     result = subprocess.run([sys.executable, "-c", MODULE._REMOTE], input=json.dumps(request), text=True, capture_output=True, env=env)
     if not expect_success:
@@ -267,3 +328,38 @@ def test_service_uses_configured_registry_client_for_scorer():
     scorer_block = source[source.index("# The trusted scorer"):source.index("defaults = RoundDefaults")]
     assert "registry = registry_client_from_environment()" in scorer_block
     assert "registry = images.RegistryClient()" not in scorer_block
+
+
+def test_miner_credentials_scope_changes_only_kms_alias(tmp_path):
+    source = {"RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "alias/existing-key",
+              "LAB_ARENA_MODE": "live", "LAB_ARENA_DAILY_CUTOFF_UTC": "6",
+              "LAB_ARENA_SERVICE_KEY": "sb_secret_unchanged"}
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(source), request_override={
+            "role": "miner_credentials", "updates": {}, "service_key": "",
+            "aliases": {"RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "LAB_ARENA_CREDENTIAL_KMS_KEY_ID"},
+        }))
+    assert updated == dict(source, LAB_ARENA_CREDENTIAL_KMS_KEY_ID="alias/existing-key")
+
+
+def test_miner_credentials_scope_does_not_require_service_key_or_touch_validator(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "ssh.pem"
+    key.write_text("test")
+    calls = []
+    monkeypatch.setattr(MODULE, "_read_fd", lambda fd: pytest.fail("must not read service key"))
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, key, request: calls.append((host, request)) or {"ok": True})
+    assert MODULE.main(["--miner-credentials-only", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
+    assert len(calls) == 1 and calls[0][0] == MODULE.GATEWAY_HOST
+    assert calls[0][1]["updates"] == {} and calls[0][1]["apply"] is False
+    assert list(calls[0][1]["aliases"].values()) == ["LAB_ARENA_CREDENTIAL_KMS_KEY_ID"]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_miner_credentials_can_be_disabled_without_changing_other_configuration(monkeypatch, tmp_path):
+    key = tmp_path / "ssh.pem"
+    key.write_text("test")
+    calls = []
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, key, request: calls.append(request) or {"ok": True})
+    assert MODULE.main(["--miner-credentials-only", "--miner-credential-kms-key-id", "", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
+    assert calls[0]["updates"] == {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": ""}
+    assert calls[0]["aliases"] == {}

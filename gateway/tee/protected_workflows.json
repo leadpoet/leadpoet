@@ -1092,7 +1092,7 @@
       "symbol": "CoordinatorChainRealizedSettlementV1"
     },
     {
-      "ast_sha256": "sha256:122d9f3edeb42245a7940beb53681d32468f683168311e3ea6b390ebe7f56d3a",
+      "ast_sha256": "sha256:7c2687560e8cc6b7a44fde2cfedc2efe43055011de9eeed81a4a0e0c34e04026",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
@@ -3857,7 +3857,7 @@
       "symbol": "chain_source_boundary_for_profile_v2"
     },
     {
-      "ast_sha256": "sha256:4940d18e744cd7958b872fb9b2e2e90bdaa0b4ae59f796bc5615be7ac00c231f",
+      "ast_sha256": "sha256:eaf3e6634d306ad080e8de0fee1676e3c6e97352c6291dc441b2e59a283029d7",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "chain_source_policy_document"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:b6a9c61dbd73c57be6504874780971997cb863f62ab1132f7ad0e2b25722f590",
-  "protected_source_commit": "06b59e1a3a5f1066c955cacfcfc3d91f22f29f08",
+  "manifest_hash": "sha256:63d0a1ac2c0a1f9c9c84cc374e223a470635d7d4eb028b6d2c73a2a2077e4a33",
+  "protected_source_commit": "8a37e34f9c96752f9a24fcb630c137334855268f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

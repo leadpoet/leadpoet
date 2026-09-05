@@ -2984,7 +2984,11 @@ def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
     del status["source_add"]["intake_enabled"]
     monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
 
-    maintenance._require_pre_activation_runtime_source_add_closed()
+    result = maintenance._require_pre_activation_runtime_source_add_closed(
+        live_process_commitment="sha256:" + "1" * 64,
+    )
+
+    assert result == "runtime_closed"
 
     bootstrap_names = (
         maintenance.bootstrap_gateway_miner_maintenance_restart.__code__.co_names
@@ -2992,6 +2996,39 @@ def test_bootstrap_accepts_legacy_intake_projection_only_before_activation(
     assert "_require_pre_activation_runtime_source_add_closed" in bootstrap_names
     assert "_require_runtime_source_add_closed" not in bootstrap_names
     assert "_controller_exec_environment" in bootstrap_names
+
+
+def test_bootstrap_pre_activation_accepts_only_proved_absent_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def unexpected_runtime_status():
+        pytest.fail("proved-absent gateway has no loopback status")
+
+    monkeypatch.setattr(
+        maintenance, "_fetch_runtime_status", unexpected_runtime_status
+    )
+
+    result = maintenance._require_pre_activation_runtime_source_add_closed(
+        live_process_commitment=maintenance.sha256_json({"status": "absent"}),
+    )
+
+    assert result == "gateway_absent"
+
+
+def test_bootstrap_pre_activation_present_gateway_still_fails_on_open_source_add(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    status = _closed_source_add_runtime_status()
+    status["source_add"]["intake_enabled"] = True
+    monkeypatch.setattr(maintenance, "_fetch_runtime_status", lambda: status)
+
+    with pytest.raises(
+        maintenance.GatewayMinerMaintenanceRestartError,
+        match="SOURCE_ADD intake is not durably paused",
+    ):
+        maintenance._require_pre_activation_runtime_source_add_closed(
+            live_process_commitment="sha256:" + "1" * 64,
+        )
 
 
 def test_bootstrap_handoff_accepts_the_canonical_paired_coordination_window():

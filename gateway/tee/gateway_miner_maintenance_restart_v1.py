@@ -1590,12 +1590,13 @@ def _require_runtime_source_add_restored(
         )
 
 
-def _require_pre_activation_runtime_source_add_closed() -> None:
-    """Verify the still-running N-1 gateway before candidate activation."""
+def _require_pre_activation_runtime_source_add_closed(
+    *, live_process_commitment: str
+) -> str:
+    """Verify the unchanged N-1 gateway, or its proved absence, before activation."""
 
-    _require_runtime_source_add_closed(
-        _fetch_runtime_status(),
-        allow_legacy_missing_intake=True,
+    return _require_pre_hydration_runtime_source_add_closed(
+        live_process_commitment=live_process_commitment,
     )
 
 
@@ -4081,6 +4082,9 @@ def bootstrap_gateway_miner_maintenance_restart(
         )
         _verify_protected_source()
         secrets_client = _resolve_bootstrap_secrets_client(secrets_client)
+        final_live_process_commitment = _pre_hydration_live_process_commitment(
+            final_tree
+        )
         _verify_proof_against_state(
             proof=_proof_from_fd(PROOF_FD_NUMBER),
             deploy_commit=expected_commit,
@@ -4088,11 +4092,11 @@ def bootstrap_gateway_miner_maintenance_restart(
             client=secrets_client,
             tree_evidence=final_tree,
             restart_invocation_id=restart_invocation_id,
-            live_process_commitment=(
-                _pre_hydration_live_process_commitment(final_tree)
-            ),
+            live_process_commitment=final_live_process_commitment,
         )
-        _require_pre_activation_runtime_source_add_closed()
+        _require_pre_activation_runtime_source_add_closed(
+            live_process_commitment=final_live_process_commitment,
+        )
         _install_controller_bundle_memfds(final_tree["controller_bundle"])
         controller_fds_open = True
         for descriptor in (

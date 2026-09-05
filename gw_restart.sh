@@ -3456,6 +3456,15 @@ if ! follow_superseding_gateway_release; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
+if [ -f "$GATEWAY_LAST_GOOD_MANIFEST" ] \
+    && [ -f "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT/index.json" ]; then
+  echo "Verifying and repairing retired last-good gateway role measurements"
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/gateway_git_deploy.py" \
+    repair-last-good-role-pcr0s \
+    --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST" \
+    --archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT"
+fi
 GATEWAY_LOCAL_RELEASE_SCRIPT="$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh"
 GATEWAY_LOCAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/local_release_v2.py"
 GATEWAY_HISTORICAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_channel_v2.py"

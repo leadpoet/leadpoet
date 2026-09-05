@@ -2472,7 +2472,7 @@
       "symbol": "_FALLBACK_CONTEXTS"
     },
     {
-      "ast_sha256": "sha256:6e7dd0c86099da26faa8bb2161de75e8c6f441cf321eca8a1480b84a2dc5a146",
+      "ast_sha256": "sha256:0bb5014003c21d0c96eb2039f92a001341452a5f4a73de720ca81f3507f4f5f3",
       "path": "gateway/tee/prepare_active_release_lineage_v2.py",
       "symbol": "__module__"
     },
@@ -2492,7 +2492,7 @@
       "symbol": "_load_active_source_add_graphs_v2"
     },
     {
-      "ast_sha256": "sha256:6ec56c60cb18fc979a879dce83281e6ff24deff0c54008059fd4318299850c22",
+      "ast_sha256": "sha256:4a8854e00f879f836300e946b6445542a8b65cc08737d90ac489999af88a8f8b",
       "path": "gateway/tee/prepare_active_release_lineage_v2.py",
       "symbol": "main"
     },
@@ -4682,7 +4682,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:f97a68ca0ea59526ec447c220204779e8b69bfaf7fa9f014a057fa3577ba26da",
-  "protected_source_commit": "611a510420ad8240f43bc1f29d4426e57392242b",
+  "manifest_hash": "sha256:fbae91f56b14135b96e4fc164a60003d87645e0ec317811a50e373917698a681",
+  "protected_source_commit": "b2949c3c206e89add4db0b96cde696d40ee9fd9a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

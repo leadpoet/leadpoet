@@ -1015,7 +1015,8 @@ publish_coordination_value() {
 
 validate_validator_initial_release_requirements() {
   run_local_readiness_python \
-    "$commit" "$branch_commit" "$active_release_restart_invocation_id" \
+    "$commit" "${active_release_authority_commit:-$branch_commit}" \
+    "$active_release_restart_invocation_id" \
     "$validator_initial_requirements_local" <<'PY'
 import json
 import os
@@ -1071,7 +1072,8 @@ PY
 
 validate_gateway_final_release_authority() {
   run_local_readiness_python \
-    "$commit" "$branch_commit" "$active_release_restart_invocation_id" \
+    "$commit" "${active_release_authority_commit:-$branch_commit}" \
+    "$active_release_restart_invocation_id" \
     "$historical_topology_hash" \
     "$validator_initial_requirements_local" \
     "$gateway_final_requirements_local" \

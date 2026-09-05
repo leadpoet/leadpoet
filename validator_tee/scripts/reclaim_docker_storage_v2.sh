@@ -512,7 +512,7 @@ empty_runtime_metadata_is_clear() {
   fi
   # Missing directories are empty; access and traversal errors are not.
   # This function runs in an if condition, so do not rely on shell errexit.
-  sudo python3 - "$DOCKER_ROOT" <<'PY'
+  if ! sudo python3 - "$DOCKER_ROOT" <<'PY'
 import os
 import sys
 
@@ -529,6 +529,11 @@ except (OSError, RuntimeError) as exc:
     print("ERROR: Docker metadata is not proven empty: " + str(exc), file=sys.stderr)
     sys.exit(1)
 PY
+  then
+    echo "ERROR: Docker metadata is not proven empty after guarded reconciliation" >&2
+    return 1
+  fi
+  return 0
 }
 
 online_image_ids() {

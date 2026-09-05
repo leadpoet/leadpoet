@@ -253,7 +253,13 @@ def test_real_sequential_prefetch_accepts_d649_when_d72_object_is_absent(
 
     assert result["controller_commit"] == SEQUENTIAL_N_MINUS_ONE_COMMIT
     assert result["host_controller_commits"] == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
-    assert observed_object_checks == [SEQUENTIAL_N_MINUS_ONE_COMMIT]
+    assert observed_object_checks[0] == SEQUENTIAL_N_MINUS_ONE_COMMIT
+    assert set(observed_object_checks[1:]) == (
+        set(verifier.SUPPORTED_CONTROLLER_COMMITS)
+        | set(verifier.RECOVERY_HOST_CONTROLLER_COMMITS)
+        | {SEQUENTIAL_N_MINUS_ONE_COMMIT}
+    )
+    assert SEQUENTIAL_CANDIDATE_COMMIT not in observed_object_checks
 
 
 def test_real_bundle_accepts_exact_production_recovery_host_wrapper(

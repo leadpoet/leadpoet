@@ -3316,18 +3316,19 @@ def test_normalization_deadline_is_not_swallowed(
     assert raised.value is deadline
 
 
-def test_instruction_files_define_deterministic_default_and_match() -> None:
+def test_instruction_files_match_and_verification_runbook_defines_default() -> None:
     agents = (ROOT / "AGENTS.md").read_bytes()
     claude = (ROOT / "CLAUDE.md").read_bytes()
 
     assert agents == claude
-    text = agents.decode("utf-8")
-    assert "## Default verification: deterministic 2-minute gate" in text
-    assert "120-second outer deadline" in text
-    assert "the legacy `prepush` profile asynchronously" in text
-    assert "Record the map before the first source" in text
-    assert "At T+90" in text
-    assert "Preserve the last valid published baseline" in text
-    assert "`un-accelerated` or `unaccelerated`" in text
-    assert '"production-equivalent"' in text
-    assert "--profile unaccelerated" in text
+    runbook = (ROOT / "docs/v2_deployment_verification_checklist.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Default Gate" in runbook
+    assert "120-second outer deadline" in runbook
+    assert "legacy\n`prepush` profile asynchronously after push" in runbook
+    assert "### 4. Asynchronous Accelerated Production Rehearsal" in runbook
+    assert "Preserve one receipt ancestry" in runbook
+    assert "`un-accelerated` or\n`unaccelerated`" in runbook
+    assert '"production-equivalent"' in runbook
+    assert "--profile unaccelerated" in runbook

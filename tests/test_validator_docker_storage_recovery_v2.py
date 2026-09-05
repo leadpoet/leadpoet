@@ -2710,7 +2710,7 @@ def test_validator_docker_recovery_keeps_a_volume_when_metadata_persists(
     )
 
     assert result.returncode == 1
-    assert "Docker metadata remains orphaned after guarded reconciliation" in result.stderr
+    assert "Docker metadata is not proven empty after guarded reconciliation" in result.stderr
     assert "refusing Docker data-root reset while 1 volume(s) remain" in result.stderr
     assert "docker_zero_runtime_reconciler_v2.py" in sudo_log
     assert "systemctl stop" not in sudo_log

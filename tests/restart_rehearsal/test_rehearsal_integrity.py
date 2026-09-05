@@ -3421,21 +3421,27 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     tables, rpcs = _schema_contract(repository_root)
     assert {
         "research_lab_gateway_control_current",
+        "lab_arena_reward_basis_v1",
+    } <= tables
+    # Private competition state belongs to the standalone service, not gateway
+    # startup. Keep the existing reward read boundary without coupling restarts.
+    assert {
         "lab_arena_rounds",
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",
-        "lab_arena_reward_basis_v1",
-    } <= tables
+    }.isdisjoint(tables)
     assert {
         "research_lab_source_add_claim_work",
+    } <= rpcs
+    assert {
         "lab_arena_current_daily_icp_set",
         "lab_arena_register_submission",
         "lab_arena_update_submission",
         "lab_arena_claim_assignment",
         "lab_arena_activate_reward",
         "lab_arena_schema_version_v1",
-    } <= rpcs
+    }.isdisjoint(rpcs)
     assert {
         "research_lab_candidate_evaluation_current",
         "research_lab_candidate_promotion_events",

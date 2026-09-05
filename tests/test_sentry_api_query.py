@@ -503,17 +503,20 @@ def test_sentry_user_token_shape_is_redacted_by_shared_scrubber():
     assert FAKE_TOKEN not in str(scrub_text("token=" + FAKE_TOKEN))
 
 
-def test_repository_agent_guidance_keeps_one_safe_access_workflow():
+def test_repository_guides_match_and_sentry_runbook_keeps_safe_access_workflow():
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
     assert agents == claude
-    assert "## Sentry API access for Codex" in agents
-    assert "query_sentry_api.py auth-check --secret-source gateway" in agents
-    assert "query_sentry_api.py issues --secret-source gateway" in agents
-    assert "query_sentry_api.py events --secret-source gateway" in agents
-    assert "must never be printed" in agents
-    assert "Do not add a raw-token output mode" in agents
+    runbook = (REPO_ROOT / "docs/sentry_error_monitoring.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Read-only Codex API access" in runbook
+    assert "query_sentry_api.py auth-check --secret-source gateway" in runbook
+    assert "query_sentry_api.py issues --secret-source gateway" in runbook
+    assert "query_sentry_api.py events --secret-source gateway" in runbook
+    assert "never prints or persists the token" in runbook
+    assert "does not support raw event bodies or a raw-token output mode" in runbook
 
 
 @pytest.mark.parametrize(

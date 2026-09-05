@@ -417,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
     scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
+    parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
     parser.add_argument("--gateway-host", default=GATEWAY_HOST)
@@ -443,6 +444,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     if not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = args.prepare_runner or args.miner_credentials_only
+    if args.miner_credential_kms_key_id is not None and not args.miner_credentials_only:
+        raise ConfigurationError("--miner-credential-kms-key-id requires --miner-credentials-only")
     if not narrow_scope and args.service_key_fd is None:
         raise ConfigurationError("--service-key-fd is required for configuration")
     for name in (() if narrow_scope else ("bucket", "scorer_image", "runner_hotkey", "baseline_hotkey", "chain_endpoint", "api_base_url")):
@@ -467,6 +470,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "LAB_ARENA_CREDENTIAL_KMS_KEY_ID"
                 },
             }
+            if args.miner_credential_kms_key_id is not None:
+                request["aliases"] = {}
+                request["updates"] = {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": args.miner_credential_kms_key_id}
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

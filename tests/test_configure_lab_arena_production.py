@@ -294,3 +294,13 @@ def test_miner_credentials_scope_does_not_require_service_key_or_touch_validator
     assert calls[0][1]["updates"] == {} and calls[0][1]["apply"] is False
     assert list(calls[0][1]["aliases"].values()) == ["LAB_ARENA_CREDENTIAL_KMS_KEY_ID"]
     assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_miner_credentials_can_be_disabled_without_changing_other_configuration(monkeypatch, tmp_path):
+    key = tmp_path / "ssh.pem"
+    key.write_text("test")
+    calls = []
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, key, request: calls.append(request) or {"ok": True})
+    assert MODULE.main(["--miner-credentials-only", "--miner-credential-kms-key-id", "", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
+    assert calls[0]["updates"] == {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": ""}
+    assert calls[0]["aliases"] == {}

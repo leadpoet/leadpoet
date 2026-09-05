@@ -210,7 +210,18 @@ def registry_client_from_environment(*, push: bool) -> images.RegistryClient:
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
-    transport = PostgrestTransport(_required("LAB_ARENA_SUPABASE_URL"), anon_key=_required("LAB_ARENA_SUPABASE_ANON_KEY"), service_jwt=_required("LAB_ARENA_SERVICE_JWT"))
+    supabase_url = _required("LAB_ARENA_SUPABASE_URL")
+    supabase_anon_key = _required("LAB_ARENA_SUPABASE_ANON_KEY")
+    service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
+    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
+    if not service_key and not service_jwt:
+        raise ServiceError("environment LAB_ARENA_SERVICE_KEY is required", 500)
+    transport = PostgrestTransport(
+        supabase_url,
+        anon_key=supabase_anon_key,
+        service_key=service_key,
+        service_jwt="" if service_key else service_jwt,
+    )
     store = ArenaStore(transport)
     objects = S3ObjectStore(_required("LAB_ARENA_BUCKET"), region_name=os.environ.get("AWS_REGION"))
     chain_config = chain_module.ArenaChainConfig(endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT"), netuid=int(os.environ.get("LAB_ARENA_NETUID", "71")), network_name=os.environ.get("LAB_ARENA_NETWORK", "finney"), request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")))

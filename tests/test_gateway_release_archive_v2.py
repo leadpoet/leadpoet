@@ -654,7 +654,7 @@ def test_gateway_role_builder_cold_builds_only_on_exact_archive_miss():
     restore = script.index("--restore")
     miss = script.index('[ "$restore_status" -ne 3 ]', restore)
     cold_gate = script.index('[ "$RESTORED_EXACT_RELEASE" != "1" ]', miss)
-    cold_build = script.index("sudo docker build", cold_gate)
+    cold_build = script.index("docker build", cold_gate)
     assert restore < miss < cold_gate < cold_build
     assert "exit \"$restore_status\"" in script[miss:cold_gate]
 

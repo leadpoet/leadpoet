@@ -119,8 +119,13 @@ if [ "$RESTORED_EXACT_RELEASE" != "1" ]; then
     output="$BUILD_EIF_ROOT/tee-enclave-${role}.eif"
     measurements="$BUILD_EIF_ROOT/enclave-build-${role}.json"
     rm -f "$output" "$measurements"
-    sudo docker build \
+    sudo env \
+      DOCKER_BUILDKIT=1 \
+      BUILDX_NO_DEFAULT_ATTESTATIONS=1 \
+      docker build \
+      --pull \
       --no-cache \
+      --build-arg "SOURCE_DATE_EPOCH=0" \
       --build-arg "LEADPOET_ENCLAVE_ROLE=${role}" \
       -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" \
       -t "$raw_image" \

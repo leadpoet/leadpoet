@@ -980,10 +980,12 @@ def _external_build_role(argv: list[str], tag: str) -> str:
         role = match.group(1)
         if role not in GATEWAY_ROLES:
             raise ValueError("gateway enclave build used an unknown role")
-        build_arg = _arg_value(argv, "--build-arg")
+        build_args = _arg_values(argv, "--build-arg")
         dockerfile = _arg_value(argv, "-f")
         if (
-            build_arg != f"LEADPOET_ENCLAVE_ROLE={role}"
+            "--pull" not in argv
+            or build_args
+            != ("SOURCE_DATE_EPOCH=0", f"LEADPOET_ENCLAVE_ROLE={role}")
             or not dockerfile.endswith("/gateway/tee/Dockerfile.enclave")
         ):
             raise ValueError("gateway enclave build contract is invalid")

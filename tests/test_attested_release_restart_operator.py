@@ -182,7 +182,16 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
         in source
     )
     assert "GATEWAY_RESTART_AUTHORITY_COMMIT='$branch_commit'" in source
-    assert "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT='$branch_commit'" in source
+    assert (
+        "VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT="
+        "'$selected_active_release_authority_commit'"
+    ) in source
+    assert (
+        'local selected_active_release_authority_commit="'
+        '${active_release_authority_commit:-$branch_commit}"'
+    ) in source
+    assert '"$commit" "$active_release_authority_commit"' in source
+    assert '"$active_release_authority_commit" "$branch_commit"' in source
     assert (
         'VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
         'leadpoet/stateful-epoch-cutover.json"'
@@ -995,6 +1004,10 @@ case "$command" in
     if [[ "$decoded" == *validator_restart.sh* ]]; then
     record validator_command_syntax
     record validator_start
+    if [[ "$decoded" == *"VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS='/tmp/leadpoet-validator-recovery-requirements."* ]] \
+        && [[ "$decoded" == *"VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE='/tmp/leadpoet-validator-recovery-lineage."* ]]; then
+      record validator_missing_runtime_recovery_enabled
+    fi
     trap 'record validator_cancelled; record validator_cleanup; exit 143' HUP INT TERM
     record validator_exact_commit_handoff
     record validator_prepare_started
@@ -1077,7 +1090,7 @@ case "$command" in
     fi
     touch "$FAKE_OPERATOR_GATEWAY_HANDOFF"
     ;;
-  *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*)
+  *leadpoet-validator-active-release-requirements*|*leadpoet-gateway-active-release*|*leadpoet-validator-counterpart-release-lineage*|*leadpoet-validator-recovery-*)
     record active_release_authority_installed
     ;;
   *"mv -f --"*)
@@ -1111,6 +1124,14 @@ case "$command" in
     cat "$FAKE_VALIDATOR_OBSERVATION"
     ;;
   *"docker inspect"*VALIDATOR_V2_DEPLOY_COMMIT*)
+    if [ "${FAKE_VALIDATOR_RUNTIME_PROBE_FAIL:-0}" = "1" ]; then
+      printf '%s\\n' "permission denied" >&2
+      exit 43
+    fi
+    if [ "${FAKE_VALIDATOR_RUNTIME_MISSING:-0}" = "1" ]; then
+      printf '%s\\n' "Error: No such object: leadpoet-validator-main" >&2
+      exit 44
+    fi
     printf '%s\\n' "$FAKE_VALIDATOR_COMMIT"
     record validator_active_probe
     ;;
@@ -1668,6 +1689,70 @@ def test_validator_only_operator_requires_healthy_matching_gateway(
     ) < observed.index(
         "readiness_finalized"
     )
+
+
+def test_validator_only_operator_recovers_missing_runtime_from_gateway_pair(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_VALIDATOR_RUNTIME_MISSING"] = "1"
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    required = [
+        "gateway_verified",
+        "active_release_authority_installed",
+        "readiness_invalidated",
+        "validator_missing_runtime_recovery_enabled",
+        "validator_complete",
+        "validator_verified",
+        "readiness_finalized",
+    ]
+    positions = [observed.index(event) for event in required]
+    assert positions == sorted(positions)
+
+
+def test_validator_only_operator_rejects_unknown_runtime_probe_failure(
+    tmp_path: Path,
+    dependency_complete_readiness_python: Path,
+) -> None:
+    commit = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+        text=True,
+    ).strip()
+    bin_dir, events = _fake_operator_commands(
+        tmp_path, commit, dependency_complete_readiness_python
+    )
+    environment = _operator_env(tmp_path, bin_dir, commit)
+    environment["FAKE_VALIDATOR_RUNTIME_PROBE_FAIL"] = "1"
+    result = subprocess.run(
+        _operator_argv(bin_dir, commit, "--component", "validator"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert result.returncode == 1
+    assert "runtime state could not be established safely" in result.stderr
+    observed = events.read_text(encoding="utf-8").splitlines()
+    assert "readiness_invalidated" not in observed
+    assert "validator_start" not in observed
 
 
 def test_validator_only_operator_rejects_unhealthy_matching_gateway(

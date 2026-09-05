@@ -60,6 +60,8 @@ VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases
 VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="${VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT:-}"
 VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="${VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT:-}"
 VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="${VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT:-}"
+VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS="${VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS:-}"
+VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE="${VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE:-}"
 VALIDATOR_ACTIVE_PUBLICATION_JOURNAL="$VALIDATOR_ROOT/validator_weights/authoritative_weight_publication_v2.json"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 VALIDATOR_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
@@ -168,6 +170,7 @@ start_lab_arena_runner() {
   cd "$VALIDATOR_ROOT"
   setsid sudo env \
     PYTHONPATH="$VALIDATOR_ROOT" \
+    PYTHONDONTWRITEBYTECODE=1 \
     LAB_ARENA_API_BASE_URL="$api_base" \
     LAB_ARENA_WALLET_NAME="${LAB_ARENA_WALLET_NAME:-$VALIDATOR_WALLET_NAME}" \
     LAB_ARENA_HOTKEY_NAME="${LAB_ARENA_HOTKEY_NAME:-$VALIDATOR_WALLET_HOTKEY}" \
@@ -323,6 +326,31 @@ done
 if [ "$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" = "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" ]; then
   echo "ERROR: validator active release requirements and lineage paths must differ" >&2
   exit 2
+fi
+
+missing_runtime_recovery_count=0
+for recovery_value in \
+  "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" \
+  "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE"; do
+  [ -n "$recovery_value" ] \
+    && missing_runtime_recovery_count=$((missing_runtime_recovery_count + 1))
+done
+if [ "$missing_runtime_recovery_count" -ne 0 ] \
+    && [ "$missing_runtime_recovery_count" -ne 2 ]; then
+  echo "ERROR: validator missing-runtime recovery authority is incomplete" >&2
+  exit 2
+fi
+if [ "$missing_runtime_recovery_count" -eq 2 ]; then
+  validate_validator_active_release_handoff_path \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS \
+    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" || exit 2
+  validate_validator_active_release_handoff_path \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE \
+    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" || exit 2
+  if [ "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" = "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" ]; then
+    echo "ERROR: validator missing-runtime recovery authority paths must differ" >&2
+    exit 2
+  fi
 fi
 
 verify_pinned_gateway_release() {
@@ -570,7 +598,9 @@ cleanup_validator_restart_preparation() {
   for handoff_path in \
     "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
     "$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
-    "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT"; do
+    "$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" \
+    "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE"; do
     if [[ "$handoff_path" =~ ^/tmp/leadpoet-[A-Za-z0-9._-]+\.json$ ]]; then
       rm -f -- "$handoff_path" || true
     fi
@@ -729,6 +759,8 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
     VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
     VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS="$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE="$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" \
     VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
     bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
@@ -931,6 +963,8 @@ follow_superseding_validator_release() {
     VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT="$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" \
     VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT="$VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" \
     VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT="$VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS="$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" \
+    VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE="$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" \
     VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS="$VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" \
     VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY="$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" \
     LEADPOET_USE_CAPTURED_RESTART_START=1 \
@@ -976,6 +1010,8 @@ cache_excluded_keys = {
     "VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
+    "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
+    "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS",
     "VALIDATOR_RESTART_INVOCATION_ID",
     "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS",
 }
@@ -1033,6 +1069,8 @@ skip_keys = {
     "VALIDATOR_EXACT_RELEASE_PINNED",
     "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
     "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
+    "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
+    "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS",
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE",
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS",
     "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
@@ -1391,17 +1429,42 @@ if ! [[ "$VALIDATOR_ANCESTRY_LINEAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 1
 fi
 
-if ! VALIDATOR_RUNNING_DEPLOY_SHA="$(
+VALIDATOR_INITIAL_TRANSITION_ARGS=()
+if VALIDATOR_RUNNING_INSPECT_OUTPUT="$(
     docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
-      leadpoet-validator-main \
+      leadpoet-validator-main 2>&1
+)"; then
+  if [ "$missing_runtime_recovery_count" -ne 0 ]; then
+    echo "ERROR: validator missing-runtime recovery was supplied while the validator container exists" >&2
+    exit 1
+  fi
+  VALIDATOR_RUNNING_DEPLOY_SHA="$(
+    printf '%s\n' "$VALIDATOR_RUNNING_INSPECT_OUTPUT" \
       | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'
-  )"; then
-  echo "ERROR: running validator release identity is unavailable" >&2
-  exit 1
-fi
-if ! [[ "$VALIDATOR_RUNNING_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "ERROR: running validator release identity is invalid or duplicated" >&2
-  exit 1
+  )"
+  if ! [[ "$VALIDATOR_RUNNING_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: running validator release identity is invalid or duplicated" >&2
+    exit 1
+  fi
+  VALIDATOR_INITIAL_TRANSITION_ARGS=(
+    --running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA"
+  )
+else
+  if [ "$VALIDATOR_RUNNING_INSPECT_OUTPUT" != "Error: No such object: leadpoet-validator-main" ]; then
+    printf '%s\n' "$VALIDATOR_RUNNING_INSPECT_OUTPUT" >&2
+    echo "ERROR: validator runtime state could not be established safely" >&2
+    exit 1
+  fi
+  if [ "$missing_runtime_recovery_count" -ne 2 ]; then
+    echo "ERROR: running validator release identity is unavailable" >&2
+    exit 1
+  fi
+  echo "Recovering missing validator runtime from exact gateway release authority"
+  VALIDATOR_INITIAL_TRANSITION_ARGS=(
+    --recovery-requirements \
+      "$VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS"
+    --recovery-lineage "$VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE"
+  )
 fi
 if [ -e "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ] \
     || [ -L "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" ]; then
@@ -1438,7 +1501,7 @@ run_validator_active_release_phase \
   --candidate-commit "$VALIDATOR_DEPLOY_SHA" \
   --authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT" \
   --restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
-  --running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA" \
+  "${VALIDATOR_INITIAL_TRANSITION_ARGS[@]}" \
   --journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL" \
   --validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
   --chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE" \

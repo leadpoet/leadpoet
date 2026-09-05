@@ -202,6 +202,48 @@ def test_restart_uses_the_arena_runner_capacity_default():
     assert 'LAB_ARENA_MAX_PARALLEL_RUNS="${LAB_ARENA_MAX_PARALLEL_RUNS:-8}"' in script
 
 
+def test_validator_restart_passes_bytecode_suppression_to_arena_runner():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("start_lab_arena_runner() {")
+    end = script.index("\n}\n", start) + 3
+    runner = script[start:end]
+    privileged_launch_start = runner.index("setsid sudo env \\")
+    privileged_launch = runner[privileged_launch_start:]
+    entrypoint = '"$VALIDATOR_PYTHON_BIN" -u scripts/run_lab_arena_runner.py'
+
+    assert "PYTHONDONTWRITEBYTECODE=1" in privileged_launch
+    assert privileged_launch.index("PYTHONDONTWRITEBYTECODE=1") < privileged_launch.index(
+        entrypoint
+    )
+
+
+def test_python_bytecode_suppression_prevents_import_cache(tmp_path: Path):
+    module = tmp_path / "isolated_runner_module.py"
+    module.write_text("VALUE = 7\n", encoding="utf-8")
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import isolated_runner_module; print(isolated_runner_module.VALUE)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "7"
+    assert not list(tmp_path.glob("__pycache__/*.pyc"))
+
+
 def test_unpinned_validator_local_build_follows_new_main_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     start = script.index("follow_superseding_validator_release() {")
@@ -296,6 +338,8 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
                 "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT=/tmp/leadpoet-stale-initial.json",
                 "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT=/tmp/leadpoet-stale-final-requirements.json",
                 "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT=/tmp/leadpoet-stale-final-lineage.json",
+                "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS=/tmp/leadpoet-stale-recovery-requirements.json",
+                "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE=/tmp/leadpoet-stale-recovery-lineage.json",
                 "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS=/tmp/leadpoet-stale-stable.json",
                 "VALIDATOR_NETUID=71",
             )
@@ -321,6 +365,8 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
     assert "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" not in exports
     assert "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" not in exports
     assert "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" not in exports
+    assert "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" not in exports
+    assert "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" not in exports
     assert "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" not in exports
     cached = cache.read_text(encoding="utf-8")
     assert "VALIDATOR_RESTART_INVOCATION_ID" not in cached
@@ -328,6 +374,8 @@ def test_secret_hydration_cannot_replace_restart_controller_state(
     assert "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT" not in cached
     assert "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT" not in cached
     assert "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT" not in cached
+    assert "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS" not in cached
+    assert "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE" not in cached
     assert "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS" not in cached
 
     preserved = subprocess.run(
@@ -397,6 +445,12 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     tmp_path: Path,
 ) -> None:
     names = set(_handoff_environment("fixture"))
+    names.update(
+        {
+            "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS",
+            "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
+        }
+    )
     clean_env = {key: value for key, value in os.environ.items() if key not in names}
     clean_env["VALIDATOR_PAIRED_ACTIVE_RELEASE_REQUIRED"] = "1"
     missing = subprocess.run(
@@ -426,6 +480,24 @@ def test_validator_restart_requires_safe_paired_handoff_paths_before_fetch(
     assert unsafe.returncode == 2
     assert "one exact controller-owned /tmp/leadpoet-*.json path" in unsafe.stderr
     assert "Pulling latest GitHub main" not in unsafe.stdout
+
+    partial_recovery_env = {
+        **_handoff_environment("fixture"),
+        "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS": (
+            "/tmp/leadpoet-recovery-requirements.json"
+        ),
+    }
+    partial = subprocess.run(
+        ["bash", "validator_restart.sh"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**clean_env, **partial_recovery_env},
+    )
+    assert partial.returncode == 2
+    assert "missing-runtime recovery authority is incomplete" in partial.stderr
+    assert "Pulling latest GitHub main" not in partial.stdout
 
 
 def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown():
@@ -529,10 +601,10 @@ def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown()
 
     initial_call = script[initial:marker]
     for argument in (
-        '--candidate-commit "$VALIDATOR_DEPLOY_SHA"',
-        '--authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT"',
-        '--restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID"',
-        '--running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA"',
+            '--candidate-commit "$VALIDATOR_DEPLOY_SHA"',
+            '--authority-commit "$VALIDATOR_ACTIVE_RELEASE_AUTHORITY_COMMIT"',
+            '--restart-invocation-id "$VALIDATOR_ACTIVE_RELEASE_RESTART_INVOCATION_ID"',
+            '"${VALIDATOR_INITIAL_TRANSITION_ARGS[@]}"',
         '--journal "$VALIDATOR_ACTIVE_PUBLICATION_JOURNAL"',
         '--validator-hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"',
         '--chain-signing-profile "$VALIDATOR_CHAIN_SIGNING_PROFILE"',
@@ -543,6 +615,16 @@ def test_validator_restart_uses_bounded_active_release_handoff_before_shutdown()
         '--requirements-output "$VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT"',
     ):
         assert argument in initial_call
+    live_transition = script[running:initial]
+    assert (
+        '--running-validator-commit "$VALIDATOR_RUNNING_DEPLOY_SHA"'
+        in live_transition
+    )
+    assert "validator missing-runtime recovery was supplied while the validator container exists" in live_transition
+    assert "Error: No such object: leadpoet-validator-main" in live_transition
+    assert "validator runtime state could not be established safely" in live_transition
+    assert "--recovery-requirements" in live_transition
+    assert "--recovery-lineage" in live_transition
     assert 'sudo chown -- "$(id -u):$(id -g)"' in initial_call
 
     final_call = script[final:preflight]
@@ -593,6 +675,8 @@ def test_validator_active_release_handoff_survives_reexec_and_cleans_exact_files
         "VALIDATOR_ACTIVE_RELEASE_REQUIREMENTS_OUTPUT",
         "VALIDATOR_FINAL_RELEASE_REQUIREMENTS_INPUT",
         "VALIDATOR_FINAL_RELEASE_LINEAGE_INPUT",
+        "VALIDATOR_MISSING_RUNTIME_RECOVERY_REQUIREMENTS",
+        "VALIDATOR_MISSING_RUNTIME_RECOVERY_LINEAGE",
         "VALIDATOR_V2_GATEWAY_RELEASE_REQUIREMENTS",
     )
 

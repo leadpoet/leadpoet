@@ -346,6 +346,145 @@ def test_validator_initial_freezes_exact_journal_commits_and_verifies_again(
     assert result["journal_hash"] == _hash("6")
 
 
+def test_validator_initial_recovers_exact_transition_pair_and_verifies_journal(
+    monkeypatch, tmp_path
+) -> None:
+    fetched = _patch_lineage_boundaries(monkeypatch)
+    recovery = _requirements(transitions=(RUNNING_VALIDATOR, CANDIDATE))
+    from validator_tee.host import publication_journal_v2
+
+    monkeypatch.setattr(
+        publication_journal_v2,
+        "publication_journal_release_requirements_v2",
+        lambda _journal, **_kwargs: {
+            "journal_hash": _hash("6"),
+            "required_commits": [JOURNAL_COMMIT],
+        },
+    )
+    result = prepare.prepare_validator_initial_active_lineage_v2(
+        candidate_commit_sha=CANDIDATE,
+        authority_commit_sha=AUTHORITY,
+        restart_invocation_id=RESTART_INVOCATION_ID,
+        recovery_requirements=recovery,
+        recovery_lineage=_lineage(recovery["required_commits"]),
+        expected_validator_hotkey=VALIDATOR_HOTKEY,
+        chain_signing_profile=CHAIN_PROFILE,
+        journal_loader=lambda: {"snapshot": "stable"},
+        repository=tmp_path,
+        expected_lineage_id=LINEAGE_ID,
+    )
+    expected = sorted({CANDIDATE, RUNNING_VALIDATOR, JOURNAL_COMMIT})
+    assert fetched == [expected]
+    assert result["requirements"]["required_commits"] == expected
+    assert result["requirements"]["transition_commit_shas"] == expected
+
+
+@pytest.mark.parametrize(
+    ("recovery", "lineage", "message"),
+    (
+        (
+            build_active_release_requirements_v2(
+                candidate_commit_sha="0" * 40,
+                authority_commit_sha=AUTHORITY,
+                restart_invocation_id=RESTART_INVOCATION_ID,
+                transition_commit_shas=(RUNNING_VALIDATOR,),
+                active_graphs={},
+                expected_lineage_id=LINEAGE_ID,
+                boot_verifier=lambda identity: identity,
+            ),
+            _lineage(("0" * 40, RUNNING_VALIDATOR), current_commit="0" * 40),
+            "recovery candidate differs",
+        ),
+        (
+            _requirements(transitions=(RUNNING_VALIDATOR,), authority="1" * 40),
+            None,
+            "recovery release authority differs",
+        ),
+        (
+            _requirements(
+                transitions=(RUNNING_VALIDATOR,), invocation_id="wrong-invocation"
+            ),
+            None,
+            "recovery restart invocation differs",
+        ),
+        (
+            build_active_release_requirements_v2(
+                candidate_commit_sha=CANDIDATE,
+                authority_commit_sha=AUTHORITY,
+                restart_invocation_id=RESTART_INVOCATION_ID,
+                transition_commit_shas=(RUNNING_VALIDATOR,),
+                active_graphs={},
+                expected_lineage_id=_hash("9"),
+                boot_verifier=lambda identity: identity,
+            ),
+            None,
+            "recovery ancestry lineage differs",
+        ),
+    ),
+)
+def test_validator_initial_recovery_rejects_mismatched_authority(
+    monkeypatch, tmp_path, recovery, lineage, message
+) -> None:
+    remote_reads = _patch_lineage_boundaries(monkeypatch)
+    with pytest.raises(prepare.PrepareActiveReleaseLineageV2Error, match=message):
+        prepare.prepare_validator_initial_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            recovery_requirements=recovery,
+            recovery_lineage=(lineage or _lineage(recovery["required_commits"])),
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            journal_loader=lambda: None,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+    assert remote_reads == []
+
+
+def test_validator_initial_recovery_rejects_lineage_membership_mismatch(
+    monkeypatch, tmp_path
+) -> None:
+    remote_reads = _patch_lineage_boundaries(monkeypatch)
+    recovery = _requirements(transitions=(RUNNING_VALIDATOR,))
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="recovery requirements differ from lineage",
+    ):
+        prepare.prepare_validator_initial_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            recovery_requirements=recovery,
+            recovery_lineage=_lineage((CANDIDATE,)),
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            journal_loader=lambda: None,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+    assert remote_reads == []
+
+
+def test_validator_initial_requires_complete_exclusive_recovery_pair(tmp_path) -> None:
+    recovery = _requirements(transitions=(RUNNING_VALIDATOR,))
+    with pytest.raises(
+        prepare.PrepareActiveReleaseLineageV2Error,
+        match="pair is incomplete",
+    ):
+        prepare.prepare_validator_initial_active_lineage_v2(
+            candidate_commit_sha=CANDIDATE,
+            authority_commit_sha=AUTHORITY,
+            restart_invocation_id=RESTART_INVOCATION_ID,
+            recovery_requirements=recovery,
+            expected_validator_hotkey=VALIDATOR_HOTKEY,
+            chain_signing_profile=CHAIN_PROFILE,
+            journal_loader=lambda: None,
+            repository=tmp_path,
+            expected_lineage_id=LINEAGE_ID,
+        )
+
+
 def test_validator_initial_rejects_journal_release_set_drift(
     monkeypatch, tmp_path
 ) -> None:

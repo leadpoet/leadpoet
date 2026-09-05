@@ -46,25 +46,20 @@ ATTESTED_COMMIT_SHA="$(
 if [ "${ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE:-0}" = "1" ]; then
   SOURCE_ROOT="$DEPLOY_SOURCE_ROOT"
 else
-  DEPLOY_SOURCE_COMMIT="$(git -C "$DEPLOY_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
-  DEPLOY_SOURCE_DIRTY="$(git -C "$DEPLOY_SOURCE_ROOT" status --porcelain 2>/dev/null || true)"
-  if [ "$DEPLOY_SOURCE_COMMIT" = "$ATTESTED_COMMIT_SHA" ] \
-      && [ -z "$DEPLOY_SOURCE_DIRTY" ] \
-      && [ -d "$DEPLOY_SOURCE_ROOT/gateway" ]; then
-    SOURCE_ROOT="$DEPLOY_SOURCE_ROOT"
-  else
-    rm -rf "$CLEAN_SOURCE_ROOT"
-    git init -q "$CLEAN_SOURCE_ROOT"
-    git -C "$CLEAN_SOURCE_ROOT" remote add origin "$SOURCE_REPO_URL"
-    git -C "$CLEAN_SOURCE_ROOT" fetch -q --depth=1 origin "$ATTESTED_COMMIT_SHA"
-    git -C "$CLEAN_SOURCE_ROOT" checkout -q --detach FETCH_HEAD
-    RESOLVED_SOURCE_COMMIT="$(git -C "$CLEAN_SOURCE_ROOT" rev-parse HEAD)"
-    if [ "$RESOLVED_SOURCE_COMMIT" != "$ATTESTED_COMMIT_SHA" ]; then
-      echo "ERROR: clean attested source commit mismatch" >&2
-      exit 1
-    fi
-    SOURCE_ROOT="$CLEAN_SOURCE_ROOT"
+  # A clean Git status does not account for ignored runtime artifacts. Always
+  # materialize the exact commit so production and independent builders stage
+  # the same complete source tree.
+  rm -rf "$CLEAN_SOURCE_ROOT"
+  git init -q "$CLEAN_SOURCE_ROOT"
+  git -C "$CLEAN_SOURCE_ROOT" remote add origin "$SOURCE_REPO_URL"
+  git -C "$CLEAN_SOURCE_ROOT" fetch -q --depth=1 origin "$ATTESTED_COMMIT_SHA"
+  git -C "$CLEAN_SOURCE_ROOT" checkout -q --detach FETCH_HEAD
+  RESOLVED_SOURCE_COMMIT="$(git -C "$CLEAN_SOURCE_ROOT" rev-parse HEAD)"
+  if [ "$RESOLVED_SOURCE_COMMIT" != "$ATTESTED_COMMIT_SHA" ]; then
+    echo "ERROR: clean attested source commit mismatch" >&2
+    exit 1
   fi
+  SOURCE_ROOT="$CLEAN_SOURCE_ROOT"
 fi
 
 SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"

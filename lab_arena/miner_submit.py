@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import getpass
+import hashlib
 import ipaddress
 import os
 import tempfile
@@ -236,15 +238,22 @@ def submit_agent_source(
     try:
         try:
             descriptor = source_bundle.write_source_archive(source, archive_path)
+            archive_bytes = archive_path.read_bytes()
             source_bundle.validate_source_archive(
-                archive_path.read_bytes(),
+                archive_bytes,
                 forbidden_values=submission_credentials.values(),
             )
         except source_bundle.SourceBundleError as exc:
             raise MinerSubmissionError(exc.code) from exc
         except OSError as exc:
             raise MinerSubmissionError("source_archive_failed") from exc
-        presign_body = {**descriptor, "consent": {"public_rerun": True}}
+        presign_body = {
+            **descriptor,
+            "source_content_md5": base64.b64encode(
+                hashlib.md5(archive_bytes, usedforsecurity=False).digest()
+            ).decode("ascii"),
+            "consent": {"public_rerun": True},
+        }
         contracts.validate_submission_presign_body(presign_body)
         presign = _signed_request(
             scope=contracts.SCOPE_SUBMISSION_PRESIGN,

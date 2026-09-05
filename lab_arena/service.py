@@ -60,7 +60,7 @@ class ObjectStore(Protocol):
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes: ...
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]: ...
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]: ...
 
 
 class LocalObjectStore:
@@ -94,7 +94,7 @@ class LocalObjectStore:
             raise ArenaContractError("object exceeds source size limit")
         return data
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
         raise ServiceError("source_upload_not_configured", 503)
 
 
@@ -112,8 +112,9 @@ class S3ObjectStore:
         self._key_prefix = self._validate_key_prefix(prefix)
         if client is None:
             import boto3  # noqa: WPS433
+            from botocore.config import Config
 
-            client = boto3.client("s3", region_name=region_name)
+            client = boto3.client("s3", region_name=region_name, config=Config(signature_version="s3v4"))
         self._client = client
         self._bucket = bucket
 
@@ -196,22 +197,27 @@ class S3ObjectStore:
             raise ArenaContractError("object exceeds source size limit")
         return data
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
         key = self._key(ref)
         headers = {
             "content-type": str(content_type),
             "content-length": str(int(size_bytes)),
             "if-none-match": "*",
         }
+        params = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "ContentType": str(content_type),
+            "ContentLength": int(size_bytes),
+            "IfNoneMatch": "*",
+        }
+        if source_content_md5 is not None:
+            checksum = contracts.validate_source_content_md5(source_content_md5)
+            params["ContentMD5"] = checksum
+            headers["content-md5"] = checksum
         url = self._client.generate_presigned_url(
             "put_object",
-            Params={
-                "Bucket": self._bucket,
-                "Key": key,
-                "ContentType": str(content_type),
-                "ContentLength": int(size_bytes),
-                "IfNoneMatch": "*",
-            },
+            Params=params,
             ExpiresIn=int(expires_seconds),
             HttpMethod="PUT",
         )
@@ -711,12 +717,14 @@ class ArenaService:
         submission_id = str(registration.get("submission_id") or submission_id)
         source_ref = str(registration.get("source_ref") or source_ref)
         try:
-            upload = self._objects.presign_put(
-                source_ref,
-                size_bytes=int(body["source_size_bytes"]),
-                content_type=source_bundle.SOURCE_CONTENT_TYPE,
-                expires_seconds=SOURCE_UPLOAD_EXPIRES_SECONDS,
-            )
+            upload_arguments = {
+                "size_bytes": int(body["source_size_bytes"]),
+                "content_type": source_bundle.SOURCE_CONTENT_TYPE,
+                "expires_seconds": SOURCE_UPLOAD_EXPIRES_SECONDS,
+            }
+            if body.get("source_content_md5") is not None:
+                upload_arguments["source_content_md5"] = body["source_content_md5"]
+            upload = self._objects.presign_put(source_ref, **upload_arguments)
         except Exception as exc:
             raise ServiceError("source_upload_unavailable", 503) from exc
         return {

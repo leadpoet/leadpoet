@@ -475,7 +475,7 @@ def _serve(args: argparse.Namespace) -> int:
 
         objects = S3ObjectStore(
             args.bucket,
-            client=boto3.client("s3", region_name=args.aws_region),
+            region_name=args.aws_region,
             prefix=prefix,
         )
         chain_reads = ChainReadsAdapter(arena_chain)

@@ -1,5 +1,7 @@
 import ast
+import base64
 import getpass
+import hashlib
 from pathlib import Path
 import warnings
 
@@ -73,6 +75,7 @@ class _Session:
                     "upload_headers": {
                         "content-type": source_bundle.SOURCE_CONTENT_TYPE,
                         "content-length": str(json["body"]["source_size_bytes"]),
+                        "content-md5": json["body"]["source_content_md5"],
                     },
                     "expires_in_seconds": 900,
                 },
@@ -160,10 +163,15 @@ def test_source_submission_archives_uploads_and_finalizes_signed_bytes(tmp_path)
     assert int(headers["content-length"]) == len(archive)
     facts = source_bundle.validate_source_archive(archive)
     assert facts["source_size_bytes"] == len(archive)
+    checksum = base64.b64encode(
+        hashlib.md5(archive, usedforsecurity=False).digest()
+    ).decode("ascii")
     assert presign["body"] == {
         "source_size_bytes": len(archive),
+        "source_content_md5": checksum,
         "consent": {"public_rerun": True},
     }
+    assert headers["content-md5"] == checksum
     finalize = _valid_signature(
         session.posts[1][1], contracts.SCOPE_SUBMISSION_FINALIZE
     )

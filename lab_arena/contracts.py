@@ -6,6 +6,7 @@ no I/O and has no dependency on validator attestation code.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -748,6 +749,7 @@ SUBMISSION_CONSENT_FIELDS = (
 )
 SUBMISSION_PRESIGN_BODY_FIELDS = (
     F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
+    F("source_content_md5", "str", required=False, minimum=24, maximum=24),
     F("consent", "object", fields=SUBMISSION_CONSENT_FIELDS),
 )
 SUBMISSION_FINALIZE_BODY_FIELDS = (
@@ -762,10 +764,27 @@ SUBMISSION_FINALIZE_BODY_FIELDS = (
 )
 
 
+def validate_source_content_md5(value: Any) -> str:
+    """Return one canonical base64-encoded 128-bit transport checksum."""
+
+    if not isinstance(value, str):
+        raise ArenaContractError("source_content_md5 must be base64 MD5")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        raise ArenaContractError("source_content_md5 must be base64 MD5") from None
+    if len(decoded) != 16 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ArenaContractError("source_content_md5 must be base64 MD5")
+    return value
+
+
 def validate_submission_presign_body(body: Any) -> Dict[str, Any]:
     """Validate transport facts before the Arena permits one source upload."""
 
     document = validate_document(body, SUBMISSION_PRESIGN_BODY_FIELDS)
+    checksum = document.get("source_content_md5")
+    if checksum is not None:
+        validate_source_content_md5(checksum)
     consent = document["consent"]
     if consent.get("public_rerun") is not True:
         raise ArenaContractError("public_rerun consent must be true")

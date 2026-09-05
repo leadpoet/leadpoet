@@ -79,6 +79,7 @@ def test_empty_s3_key_prefix_preserves_logical_keys_for_every_operation():
     assert all(request["Key"] == logical_ref for request in client.gets)
     assert client.heads == [{"Bucket": "arena", "Key": logical_ref}]
     assert client.presigns[0][1]["Params"]["Key"] == logical_ref
+    assert "ContentMD5" not in client.presigns[0][1]["Params"]
 
 
 def test_s3_key_prefix_is_applied_without_changing_the_logical_ref():
@@ -97,6 +98,7 @@ def test_s3_key_prefix_is_applied_without_changing_the_logical_ref():
         size_bytes=6,
         content_type="application/gzip",
         expires_seconds=900,
+        source_content_md5="ycS5J9O2S8sMKVgsf+qGQw==",
     )
 
     assert client.objects == {physical_key: b"source"}
@@ -104,7 +106,22 @@ def test_s3_key_prefix_is_applied_without_changing_the_logical_ref():
     assert all(request["Key"] == physical_key for request in client.gets)
     assert client.heads == [{"Bucket": "arena", "Key": physical_key}]
     assert client.presigns[0][1]["Params"]["Key"] == physical_key
+    assert client.presigns[0][1]["Params"]["ContentMD5"] == "ycS5J9O2S8sMKVgsf+qGQw=="
+    assert upload["upload_headers"]["content-md5"] == "ycS5J9O2S8sMKVgsf+qGQw=="
     assert upload["upload_url"] == "https://uploads.example/object"
+
+
+@pytest.mark.parametrize("checksum", ("not-base64", "c2hvcnQ=", "A" * 24))
+def test_s3_presign_rejects_a_non_md5_transport_checksum(checksum):
+    store = S3ObjectStore("arena", client=_ConditionalS3())
+    with pytest.raises(ArenaContractError, match="source_content_md5"):
+        store.presign_put(
+            "arena/round-1/source.tar.gz",
+            size_bytes=6,
+            content_type="application/gzip",
+            expires_seconds=900,
+            source_content_md5=checksum,
+        )
 
 
 @pytest.mark.parametrize(

@@ -467,6 +467,35 @@ def test_required_release_lineage_direct_gets_only_explicit_commits():
     ]
 
 
+def test_required_release_lineage_uses_local_current_release_without_approved_fetch(
+    monkeypatch, tmp_path
+):
+    gateway_path = tmp_path / "gateway-release.json"
+    validator_path = tmp_path / "validator-release.json"
+    gateway_path.write_text(json.dumps(_gateway_manifest()), encoding="utf-8")
+    validator_path.write_text(json.dumps(_validator_manifest()), encoding="utf-8")
+    monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", COMMIT)
+    monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
+    monkeypatch.setenv("LEADPOET_LOCAL_VALIDATOR_RELEASE", str(validator_path))
+    s3 = _S3()
+
+    lineage = fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(COMMIT,),
+        required_commits=(COMMIT,),
+    )
+
+    expected = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    assert lineage == build_release_lineage_v2([expected], current_commit=COMMIT)
+    assert s3.gets == []
+    assert s3.lists == []
+
+
 def test_required_release_lineage_rejects_more_than_bound_before_io():
     required = (COMMIT,) + tuple(
         f"{index:040x}" for index in range(MAX_LINEAGE_RELEASES)

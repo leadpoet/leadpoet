@@ -237,6 +237,7 @@ start_lab_arena_service() {
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     setsid "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+      --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
       > "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
       9>&- 190>&- 191>&- 192>&- 193>&- 194>&- &

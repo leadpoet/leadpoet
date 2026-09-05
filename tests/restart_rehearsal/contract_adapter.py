@@ -67,6 +67,9 @@ RUNSC_LOCK_PATH = Path("/opt/leadpoet/runsc-runtime.lock.json")
 EXTERNAL_ARTIFACT_ROOT = Path("/opt/leadpoet/external-artifacts")
 GITHUB_GIT_FIXTURE_REMOTE = Path("/srv/origin.git")
 LOCAL_GIT_FIXTURE_SOURCE = Path("/source")
+ATTESTED_RUNTIME_GIT_SOURCE_ROOT = Path(
+    "/tmp/leadpoet_gateway_enclave_source"
+)
 GIT_FETCH_REPOSITORY_ROOTS = (
     Path("/home/ec2-user/leadpoet_repo"),
     Path("/home/ec2-user/leadpoet/leadpoet"),
@@ -221,6 +224,16 @@ def _candidate_root() -> Path:
 def _candidate_git_path(resolved: Path, root: Path) -> tuple[Path, str]:
     if resolved == root or root in resolved.parents:
         return resolved.relative_to(root), "candidate_checkout"
+
+    try:
+        attested_relative = resolved.relative_to(
+            ATTESTED_RUNTIME_GIT_SOURCE_ROOT.resolve()
+        )
+    except ValueError:
+        pass
+    else:
+        if attested_relative.parts and attested_relative.parts[0] != ".git":
+            return attested_relative, "candidate_archive"
 
     archive_parent = Path("/tmp").resolve()
     for parent in resolved.parents:

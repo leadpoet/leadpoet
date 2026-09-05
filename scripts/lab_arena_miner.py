@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Submit one local Arena agent source directory.
+"""Submit one local Arena model source directory and its run credentials.
 
-    python3 scripts/lab_arena_miner.py submit-source --source ./my-agent \
+    OPENROUTER_API_KEY=... OPENROUTER_MANAGEMENT_KEY=... DEEPLINE_API_KEY=... \
+    python3 scripts/lab_arena_miner.py submit-model --source ./my-agent \
         --wallet-name W --hotkey-name H
 
 The helper makes one bounded source archive, uploads it to the Arena's private
-target, and finalizes it with the miner hotkey. No Dockerfile or public image
-registry is required. ``--hotkey-uri`` is for development only.
+target, and finalizes it with the miner hotkey. Credentials are read only from
+masked prompts or environment variables, and are never command arguments or
+source archive content. ``--hotkey-uri`` is for development only.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ if str(ROOT) not in sys.path:
 from lab_arena.miner_submit import (  # noqa: E402
     MinerSubmissionError,
     run_interactive_submission,
+    submission_credentials_from_environment,
     submit_agent_source,
 )
 
@@ -46,7 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Leadpoet Lab Arena miner helper")
     commands = parser.add_subparsers(dest="command", required=True)
     source = commands.add_parser(
-        "submit-source", help="archive, upload, and submit a local agent fork"
+        "submit-model",
+        aliases=["submit-source"],
+        help="archive, upload, and submit a local model",
     )
     source.add_argument("--source", required=True, help="directory with harness.py")
     _common_arguments(source)
@@ -75,10 +80,12 @@ def _keypair(args):
 
 def submit_source(args) -> int:
     try:
+        credentials = submission_credentials_from_environment()
         result = submit_agent_source(
             source_dir=args.source,
             api_base_url=args.api_base_url,
             keypair=_keypair(args),
+            credentials=credentials,
         )
     except MinerSubmissionError as exc:
         print("submission failed: %s" % exc.code, file=sys.stderr)
@@ -93,7 +100,7 @@ def interactive(args) -> int:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "submit-source":
+    if args.command in {"submit-model", "submit-source"}:
         return submit_source(args)
     if args.command == "interactive":
         return interactive(args)

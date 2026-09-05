@@ -903,7 +903,7 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
-            if call.get("error_code") in ("budget_refused", "budget_exhausted") or call.get("outcome") == "refused":
+            if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
         return None, document
 
@@ -1087,6 +1087,18 @@ class RunnerConfig:
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
     completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    # A sandbox can end while its last provider request is still settling. The
+    # 142-second bound covers MAX_PROVIDER_API_TIMEOUT_SECONDS without holding
+    # the lease until its 20-minute expiry.
+    accounting_open_retry_seconds: Tuple[float, ...] = (
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        30.0,
+        45.0,
+        30.0,
+    )
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
@@ -1239,7 +1251,22 @@ class AssignmentExecutor:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
-            provider_infrastructure_failed = any(operations.provider_status_is_infrastructure(call.get("provider_status")) for call in state.calls)
+            miner_credentials_failed = any(
+                call.get("funding_source") == "miner_key"
+                and call.get("error_code") == "miner_credentials_unavailable"
+                for call in state.calls
+            )
+            provider_infrastructure_failed = any(
+                call.get("error_code") in ("broker_unavailable", "provider_unavailable")
+                or (
+                    operations.provider_status_is_infrastructure(call.get("provider_status"))
+                    and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
+                )
+                for call in state.calls
+            )
+            if miner_credentials_failed and terminal != "accepted":
+                terminal = "credential_error"
+                output_document = None
             if provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
@@ -1369,6 +1396,11 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
+            print(
+                "Lab Arena run abandoned: %s" % type(exc).__name__,
+                file=sys.stderr,
+                flush=True,
+            )
             self.completed.append(
                 {
                     "run_id": lease.get("run_id"),
@@ -1383,19 +1415,42 @@ class Runner:
         """Deliver the signed completion; a transport or server failure is retried briefly.
 
         The envelope is idempotent, so a lost response or a transient object
-        store failure on the Arena costs a retry, not the whole sandbox run.
-        A rejection the Arena returns as a document is never retried.
+        store failure on the Arena costs a retry, not the whole sandbox run. An
+        ``accounting_open`` document is retried separately while an in-flight
+        provider call settles. Other response documents are never retried.
         """
 
-        delays = tuple(self._config.completion_retry_seconds)
-        for attempt in range(len(delays) + 1):
+        failure_delays = iter(tuple(self._config.completion_retry_seconds))
+        accounting_delays = iter(
+            tuple(self._config.accounting_open_retry_seconds)
+        )
+        while True:
             try:
-                return self._config.api.complete(envelope)
-            except Exception:
-                if attempt >= len(delays):
-                    raise
-                time.sleep(max(0.0, float(delays[attempt])))
-        raise RunnerError("completion retries exhausted")  # pragma: no cover - the loop returns or raises
+                result = self._config.api.complete(envelope)
+            except Exception as exc:
+                try:
+                    delay = next(failure_delays)
+                except StopIteration:
+                    raise exc from None
+            else:
+                status = result.get("status")
+                safe_status = (
+                    status
+                    if status
+                    in ("accepted", "failed", "stale", "accounting_open", "rejected")
+                    else "other"
+                )
+                print(
+                    "Lab Arena completion status: %s" % safe_status,
+                    flush=True,
+                )
+                if status != "accounting_open":
+                    return result
+                try:
+                    delay = next(accounting_delays)
+                except StopIteration:
+                    raise RunnerError("completion remained accounting_open")
+            time.sleep(max(0.0, float(delay)))
 
     def run_once(self, *, max_claims: int = 1000) -> int:
         """Claim while a local slot is free; return the number of leases taken."""

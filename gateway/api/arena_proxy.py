@@ -15,12 +15,14 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 
 router = APIRouter(prefix="/arena", tags=["agent-competition"])
+testnet_router = APIRouter(prefix="/testnet/arena", tags=["agent-competition-testnet"])
 
 _MAX_REQUEST_BYTES = 1_100_000
 # A completion can contain the judge's accepted 2 MiB scoring output plus the
 # small signed-request wrapper. The sidecar performs the exact schema checks.
 _MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
 _SIDECAR_URL = "http://127.0.0.1:8792"
+_TESTNET_SIDECAR_URL = "http://127.0.0.1:8793"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
 _FORWARDED_RESPONSE_HEADERS = ("content-type", "cache-control")
 
@@ -57,6 +59,7 @@ async def _request_sidecar(
     query: str,
     body: bytes,
     headers: Mapping[str, str],
+    testnet: bool = False,
 ) -> httpx.Response:
     timeout = httpx.Timeout(connect=3.0, read=150.0, write=30.0, pool=3.0)
     async with httpx.AsyncClient(
@@ -66,7 +69,7 @@ async def _request_sidecar(
     ) as client:
         return await client.request(
             method,
-            "%s/arena/%s" % (_SIDECAR_URL, path),
+            "%s/arena/%s" % (_TESTNET_SIDECAR_URL if testnet else _SIDECAR_URL, path),
             params=query,
             content=body,
             headers=dict(headers),
@@ -77,6 +80,19 @@ async def _request_sidecar(
 async def proxy_arena_request(arena_path: str, request: Request) -> Response:
     if not _arena_enabled():
         raise HTTPException(status_code=404, detail="agent competition is disabled")
+    return await _proxy_request(arena_path, request)
+
+
+@testnet_router.api_route("/{arena_path:path}", methods=("GET", "POST"))
+async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
+    # An explicit operator switch and a fixed loopback destination keep testnet
+    # requests out of the mainnet service. Never fall back if testnet is down.
+    if os.environ.get("LAB_ARENA_TESTNET_ENABLED", "false").strip().lower() != "true":
+        raise HTTPException(status_code=404, detail="testnet competition is disabled")
+    return await _proxy_request(arena_path, request, testnet=True)
+
+
+async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = False) -> Response:
     if not arena_path or any(part in {"", ".", ".."} for part in arena_path.split("/")):
         raise HTTPException(status_code=404, detail="arena path invalid")
 
@@ -102,6 +118,7 @@ async def proxy_arena_request(arena_path: str, request: Request) -> Response:
             query=request.url.query,
             body=body,
             headers=request_headers,
+            **({"testnet": True} if testnet else {}),
         )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail="agent competition is unavailable") from exc

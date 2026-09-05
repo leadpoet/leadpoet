@@ -9,6 +9,17 @@ import pytest
 from lab_arena import source_bundle
 
 
+def _archive_members(members):
+    raw = io.BytesIO()
+    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for name, data in members:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    return raw.getvalue()
+
+
 def test_source_archive_is_deterministic_and_needs_no_dockerfile(tmp_path):
     source = tmp_path / "agent"
     source.mkdir()
@@ -115,3 +126,91 @@ def test_archive_member_count_is_bounded_while_streaming():
         source_bundle.SourceBundleError, match="source_file_count_exceeded"
     ):
         source_bundle.validate_source_archive(raw.getvalue())
+
+
+@pytest.mark.parametrize(
+    "name",
+    (".env", ".env.local", ".env.production", "nested/.env.private"),
+)
+def test_local_archive_rejects_real_environment_files(tmp_path, name):
+    source = tmp_path / "agent"
+    source.mkdir()
+    (source / "harness.py").write_text("def run_icp(icp): return []\n")
+    environment = source / name
+    environment.parent.mkdir(parents=True, exist_ok=True)
+    environment.write_text("KEY=actual-value\n")
+
+    with pytest.raises(
+        source_bundle.SourceBundleError,
+        match="source_contains_credentials",
+    ):
+        source_bundle.write_source_archive(source, tmp_path / "source.tar.gz")
+
+
+@pytest.mark.parametrize(
+    "name",
+    (".env.example", ".env.sample", ".env.template"),
+)
+def test_environment_templates_are_allowed_without_submitted_values(tmp_path, name):
+    source = tmp_path / "agent"
+    source.mkdir()
+    (source / "harness.py").write_text("def run_icp(icp): return []\n")
+    (source / name).write_text("OPENROUTER_API_KEY=replace-me\n")
+    target = tmp_path / "source.tar.gz"
+
+    source_bundle.write_source_archive(source, target)
+    source_bundle.validate_source_archive(
+        target.read_bytes(),
+        forbidden_values=("actual-submitted-secret",),
+    )
+
+
+def test_gateway_archive_validation_rejects_real_environment_files():
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            ("nested/.env.local", b"KEY=actual-value\n"),
+        )
+    )
+    with pytest.raises(
+        source_bundle.SourceBundleError,
+        match="source_contains_credentials",
+    ):
+        source_bundle.validate_source_archive(payload)
+
+
+def test_archive_scan_finds_exact_submitted_value_across_stream_chunks():
+    secret = b"exact-submitted-secret-value"
+    prefix = b"x" * (64 * 1024 - 7)
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            ("binary.dat", prefix + secret + b"tail"),
+        )
+    )
+    with pytest.raises(
+        source_bundle.SourceBundleError,
+        match="source_contains_credentials",
+    ):
+        source_bundle.validate_source_archive(
+            payload,
+            forbidden_values=(secret,),
+        )
+
+
+def test_archive_scan_checks_allowed_environment_templates_for_exact_values():
+    secret = "exact-submitted-secret-value"
+    payload = _archive_members(
+        (
+            ("harness.py", b"def run_icp(icp): return []\n"),
+            (".env.example", ("KEY=" + secret + "\n").encode()),
+        )
+    )
+    with pytest.raises(
+        source_bundle.SourceBundleError,
+        match="source_contains_credentials",
+    ):
+        source_bundle.validate_source_archive(
+            payload,
+            forbidden_values=(secret,),
+        )

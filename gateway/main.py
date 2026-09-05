@@ -86,6 +86,7 @@ from gateway.db.client import create_http1_sync_client
 from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
 from gateway.api import role_translate
 from gateway.api.arena_proxy import router as arena_proxy_router
+from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
 from gateway.api import metrics as metrics_api
 
 # Research Lab is an authoritative V2 service. Import failures must abort
@@ -729,6 +730,7 @@ app.include_router(metrics_api.router)
 
 app.include_router(research_lab_router)
 app.include_router(arena_proxy_router)
+app.include_router(arena_testnet_proxy_router)
 
 if _FULFILLMENT_ROUTER_AVAILABLE:
     app.include_router(fulfillment_router)

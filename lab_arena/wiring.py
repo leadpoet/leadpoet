@@ -20,9 +20,18 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, signing
 from lab_arena.api import create_app
-from lab_arena.service import ArenaService, RoundDefaults, S3ObjectStore, ServiceConfig, ServiceError
+from lab_arena.credentials import CredentialManager
+from lab_arena.service import (
+    DEFAULT_STAGE_MINUTES,
+    ArenaService,
+    RoundDefaults,
+    S3ObjectStore,
+    ServiceConfig,
+    ServiceError,
+)
 from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
+from lab_arena.submission_runtime import SubmissionProviderKeys
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -113,6 +122,8 @@ def _daily_cutoff_hour_from_environment() -> Optional[int]:
     """LAB_ARENA_DAILY_CUTOFF_UTC: each daily cutoff hour (0..23), default 00:00 UTC."""
 
     raw = os.environ.get("LAB_ARENA_DAILY_CUTOFF_UTC", "0").strip() or "0"
+    if raw.lower() == "disabled":
+        return None
     try:
         value = int(raw)
     except ValueError:
@@ -120,6 +131,51 @@ def _daily_cutoff_hour_from_environment() -> Optional[int]:
     if value < 0 or value > 23:
         raise ServiceError("LAB_ARENA_DAILY_CUTOFF_UTC must be between 0 and 23", 500)
     return value
+
+
+def _stage_minutes_from_environment(
+    *, mode: str, network_name: str, netuid: int, rewards_enabled: bool
+) -> Mapping[str, int]:
+    """Read a complete, testnet-only stage schedule override."""
+
+    raw = os.environ.get("LAB_ARENA_STAGE_MINUTES", "").strip()
+    defaults = dict(DEFAULT_STAGE_MINUTES)
+    if not raw:
+        return defaults
+    if (
+        mode != "shadow"
+        or network_name != "test"
+        or int(netuid) != 401
+        or rewards_enabled
+    ):
+        raise ServiceError(
+            "LAB_ARENA_STAGE_MINUTES is allowed only for reward-disabled shadow testnet 401",
+            500,
+        )
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError):
+        raise ServiceError("LAB_ARENA_STAGE_MINUTES must be valid JSON", 500) from None
+    if not isinstance(document, dict) or set(document) != set(defaults):
+        raise ServiceError(
+            "LAB_ARENA_STAGE_MINUTES must contain every stage and no extra stages",
+            500,
+        )
+    schedule: dict[str, int] = {}
+    for name, maximum in defaults.items():
+        value = document[name]
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+            or value > maximum
+        ):
+            raise ServiceError(
+                "LAB_ARENA_STAGE_MINUTES values must be positive integers within native bounds",
+                500,
+            )
+        schedule[name] = value
+    return schedule
 
 
 def _pool_percent_from_environment() -> int:
@@ -242,7 +298,11 @@ def build_service_from_environment(mode: str):
         service_jwt="" if service_key else service_jwt,
     )
     store = ArenaStore(transport)
-    objects = S3ObjectStore(_required("LAB_ARENA_BUCKET"), region_name=os.environ.get("AWS_REGION"))
+    objects = S3ObjectStore(
+        _required("LAB_ARENA_BUCKET"),
+        region_name=os.environ.get("AWS_REGION"),
+        prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
+    )
     chain_config = chain_module.ArenaChainConfig(endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT"), netuid=int(os.environ.get("LAB_ARENA_NETUID", "71")), network_name=os.environ.get("LAB_ARENA_NETWORK", "finney"), request_timeout_seconds=int(os.environ.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")))
     arena_chain = chain_module.ArenaChain(chain_config, chain_module.connect_substrate(chain_config))
     atexit.register(arena_chain.close)  # the websocket threads would otherwise hold the process open at exit
@@ -252,6 +312,13 @@ def build_service_from_environment(mode: str):
         "scrapingdog": _required("LAB_ARENA_SCRAPINGDOG_API_KEY"),
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
+    credential_key_id = os.environ.get("LAB_ARENA_CREDENTIAL_KMS_KEY_ID", "").strip()
+    # A missing miner vault must not interrupt baseline rebenchmarking. New
+    # miner admission fails closed until the vault is configured.
+    credential_manager = CredentialManager(kms_key_id=credential_key_id) if credential_key_id else None
+    submission_keys = SubmissionProviderKeys(
+        store=store, credentials=credential_manager, organizer_keys=provider_keys
+    )
     runners = _runner_hotkeys_from_environment()
     # The trusted scorer remains an organizer-owned internal image. Miner and
     # baseline agents enter as source archives and need no registry account.
@@ -263,6 +330,7 @@ def build_service_from_environment(mode: str):
         raise ServiceError("scorer_image_unresolved:%s" % exc.rule_id, 500) from exc
     finally:
         registry.close()
+    rewards_enabled = _rewards_enabled_from_environment()
     defaults = RoundDefaults(
         runner_hotkeys=runners,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
@@ -271,11 +339,17 @@ def build_service_from_environment(mode: str):
             "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
         ).strip(),
         max_challengers=_max_challengers_from_environment(),
+        stage_minutes=_stage_minutes_from_environment(
+            mode=mode,
+            network_name=chain_config.network_name,
+            netuid=chain_config.netuid,
+            rewards_enabled=rewards_enabled,
+        ),
         daily_cutoff_hour_utc=_daily_cutoff_hour_from_environment(),
         scorer_image_digest=scorer.image_digest,
         scorer_image_reference=str(scorer.reference),
         pool_percent=_pool_percent_from_environment(),
-        rewards_enabled=_rewards_enabled_from_environment(),
+        rewards_enabled=rewards_enabled,
     )
 
     # The catalog is organizer-held runtime state. It is not published in a
@@ -292,7 +366,12 @@ def build_service_from_environment(mode: str):
 
     def broker_factory(service: ArenaService, round_row: Mapping[str, Any]) -> broker_module.Broker:
         judge_models = sorted({str(model) for model in (service.scorer_policy.get("judge_models") or {}).values() if model})
-        return broker_module.Broker(store=store, key_for=key_for, judge_models=judge_models, price_table=price_table, transport=broker_module.HttpxProviderTransport())
+        return broker_module.Broker(
+            store=store, key_for=key_for, judge_models=judge_models,
+            price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+            credential_for=submission_keys.credential_for,
+            funding_source_for=submission_keys.funding_source_for,
+        )
 
     def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:
         del active_at  # the database function uses its own UTC statement time
@@ -303,6 +382,8 @@ def build_service_from_environment(mode: str):
         daily_icp_source=daily_icp_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
+        credential_manager=credential_manager,
+        network_name=chain_config.network_name,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),
     )
     service = ArenaService(config)

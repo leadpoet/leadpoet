@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import broker as broker_module, contracts, rewards, scoring, signing, source_bundle, verify
+from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, rewards, scoring, signing, source_bundle, submission_rate_limit, verify
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import OutputInvalid, validate_output_document
 from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
@@ -60,7 +60,7 @@ class ObjectStore(Protocol):
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes: ...
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]: ...
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]: ...
 
 
 class LocalObjectStore:
@@ -94,28 +94,62 @@ class LocalObjectStore:
             raise ArenaContractError("object exceeds source size limit")
         return data
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
         raise ServiceError("source_upload_not_configured", 503)
 
 
 class S3ObjectStore:
     """Versioned, delete-denied Arena bucket (section 3.1); boto3 imported lazily."""
 
-    def __init__(self, bucket: str, *, client: Any = None, region_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        bucket: str,
+        *,
+        client: Any = None,
+        region_name: Optional[str] = None,
+        prefix: str = "",
+    ) -> None:
+        self._key_prefix = self._validate_key_prefix(prefix)
         if client is None:
             import boto3  # noqa: WPS433
+            from botocore.config import Config
 
-            client = boto3.client("s3", region_name=region_name)
+            client = boto3.client("s3", region_name=region_name, config=Config(signature_version="s3v4"))
         self._client = client
         self._bucket = bucket
 
+    @staticmethod
+    def _validate_key_prefix(value: str) -> str:
+        if not isinstance(value, str):
+            raise ArenaContractError("object key prefix is invalid")
+        if value == "":
+            return value
+        segments = value.split("/")
+        if (
+            value != value.strip()
+            or any(
+                segment in ("", ".", "..") or segment != segment.strip()
+                for segment in segments
+            )
+            or "\\" in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ArenaContractError("object key prefix is invalid")
+        return value
+
+    def _key(self, ref: str) -> str:
+        if not self._key_prefix:
+            return ref
+        return "%s/%s" % (self._key_prefix, ref)
+
     def put(self, ref: str, data: bytes) -> None:
         payload = bytes(data)
+        key = self._key(ref)
         for attempt in range(2):
             try:
                 self._client.put_object(
                     Bucket=self._bucket,
-                    Key=ref,
+                    Key=key,
                     Body=payload,
                     ContentType="application/json",
                     IfNoneMatch="*",
@@ -143,14 +177,15 @@ class S3ObjectStore:
         raise ArenaContractError("object ref %s could not be written safely" % ref)
 
     def get(self, ref: str) -> bytes:
-        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        response = self._client.get_object(Bucket=self._bucket, Key=self._key(ref))
         return response["Body"].read()
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes:
-        head = self._client.head_object(Bucket=self._bucket, Key=ref)
+        key = self._key(ref)
+        head = self._client.head_object(Bucket=self._bucket, Key=key)
         if int(head.get("ContentLength") or 0) > int(max_bytes):
             raise ArenaContractError("object exceeds source size limit")
-        response = self._client.get_object(Bucket=self._bucket, Key=ref)
+        response = self._client.get_object(Bucket=self._bucket, Key=key)
         body = response["Body"]
         try:
             data = body.read(int(max_bytes) + 1)
@@ -162,21 +197,27 @@ class S3ObjectStore:
             raise ArenaContractError("object exceeds source size limit")
         return data
 
-    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int) -> Mapping[str, Any]:
+    def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
+        key = self._key(ref)
         headers = {
             "content-type": str(content_type),
             "content-length": str(int(size_bytes)),
             "if-none-match": "*",
         }
+        params = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "ContentType": str(content_type),
+            "ContentLength": int(size_bytes),
+            "IfNoneMatch": "*",
+        }
+        if source_content_md5 is not None:
+            checksum = contracts.validate_source_content_md5(source_content_md5)
+            params["ContentMD5"] = checksum
+            headers["content-md5"] = checksum
         url = self._client.generate_presigned_url(
             "put_object",
-            Params={
-                "Bucket": self._bucket,
-                "Key": ref,
-                "ContentType": str(content_type),
-                "ContentLength": int(size_bytes),
-                "IfNoneMatch": "*",
-            },
+            Params=params,
             ExpiresIn=int(expires_seconds),
             HttpMethod="PUT",
         )
@@ -244,6 +285,7 @@ class ServiceConfig:
     network_name: str = "finney"
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
+    credential_manager: Optional[credentials_module.CredentialManager] = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -280,6 +322,9 @@ class ArenaService:
         self._lock = threading.RLock()
         self._hot_round_lock = threading.Lock()
         self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._submission_request_limiter = (
+            submission_rate_limit.SubmissionRequestLimiter()
+        )
         self._scorer_policy = scoring.build_scorer_policy()
         self._brokers: Dict[str, broker_module.Broker] = {}
 
@@ -343,10 +388,14 @@ class ArenaService:
             schema = self._store._transport.rpc("lab_arena_schema_version_v1", {})
         except ArenaStoreError as exc:
             raise ServiceError("function_unavailable:lab_arena_schema_version_v1", 500) from exc
-        if schema != {
-            "schema_version": "leadpoet.lab_arena.schema_version.v1",
-            "version": 184,
-        }:
+        expected_schema = "leadpoet.lab_arena.schema_version.v1"
+        schema_version = schema.get("version") if isinstance(schema, Mapping) else None
+        supported_versions = (184, 185) if self._config.credential_manager is None else (185,)
+        if (
+            not isinstance(schema, Mapping)
+            or schema.get("schema_version") != expected_schema
+            or schema_version not in supported_versions
+        ):
             raise ServiceError("arena_schema_version_invalid", 500)
         for table in ("lab_arena_rounds", "lab_arena_submissions", "lab_arena_runs", "lab_arena_ledger"):
             try:
@@ -385,7 +434,7 @@ class ArenaService:
         current = self.current_round()
         return {
             "database_identity": identity,
-            "schema_version": int(schema["version"]),
+            "schema_version": int(schema_version),
             "scoring_adapter_version": self._scorer_policy["scoring_adapter_version"],
             "current_round": current["round_id"] if current else None,
         }
@@ -615,6 +664,17 @@ class ArenaService:
         if now < _parse_iso(schedule["submission_open"]) or now >= _parse_iso(schedule["submission_cutoff"]):
             raise ServiceError("submission_window_closed", 409)
 
+    def _enforce_submission_request_limit(self, hotkey: str) -> None:
+        # Some narrow unit tests construct the service without __init__. The
+        # fallback is test-only; production always creates the limiter above.
+        limiter = getattr(self, "_submission_request_limiter", None)
+        if limiter is None:
+            limiter = submission_rate_limit.SubmissionRequestLimiter()
+            self._submission_request_limiter = limiter
+        decision = limiter.check(hotkey)
+        if not decision.allowed:
+            raise ServiceError("submission_rate_limited", 429)
+
     def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
         """Reserve one private source upload for a signed miner request."""
 
@@ -630,6 +690,7 @@ class ArenaService:
         ):
             raise ServiceError("baseline_hotkey_reserved", 403)
         body = contracts.validate_submission_presign_body(validated["body"])
+        self._enforce_submission_request_limit(validated["hotkey"])
         # The submission id is the only server-assigned source identity.
         submission_id = "sub-%s" % secrets.token_hex(16)
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
@@ -656,12 +717,14 @@ class ArenaService:
         submission_id = str(registration.get("submission_id") or submission_id)
         source_ref = str(registration.get("source_ref") or source_ref)
         try:
-            upload = self._objects.presign_put(
-                source_ref,
-                size_bytes=int(body["source_size_bytes"]),
-                content_type=source_bundle.SOURCE_CONTENT_TYPE,
-                expires_seconds=SOURCE_UPLOAD_EXPIRES_SECONDS,
-            )
+            upload_arguments = {
+                "size_bytes": int(body["source_size_bytes"]),
+                "content_type": source_bundle.SOURCE_CONTENT_TYPE,
+                "expires_seconds": SOURCE_UPLOAD_EXPIRES_SECONDS,
+            }
+            if body.get("source_content_md5") is not None:
+                upload_arguments["source_content_md5"] = body["source_content_md5"]
+            upload = self._objects.presign_put(source_ref, **upload_arguments)
         except Exception as exc:
             raise ServiceError("source_upload_unavailable", 503) from exc
         return {
@@ -673,7 +736,12 @@ class ArenaService:
             "expires_in_seconds": int(upload["expires_in_seconds"]),
         }
 
-    def _validate_uploaded_source(self, row: Mapping[str, Any]) -> None:
+    def _validate_uploaded_source(
+        self,
+        row: Mapping[str, Any],
+        *,
+        forbidden_values: Sequence[str] = (),
+    ) -> None:
         expected_size = int(row.get("source_size_bytes") or 0)
         source_ref = str(row.get("source_ref") or "")
         try:
@@ -685,7 +753,9 @@ class ArenaService:
         if len(payload) != expected_size:
             raise ServiceError("submission_rejected:source_size_mismatch", 400)
         try:
-            source_bundle.validate_source_archive(payload)
+            source_bundle.validate_source_archive(
+                payload, forbidden_values=forbidden_values
+            )
         except source_bundle.SourceBundleError as exc:
             raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
 
@@ -712,11 +782,22 @@ class ArenaService:
             if body[field] != row.get(field):
                 raise ServiceError("submission_transport_mismatch", 409)
         if row.get("status") == "accepted":
-            return {"status": "accepted", "submission_id": submission_id}
+            if all(
+                self._store.get_submission_credential(
+                    submission_id, validated["hotkey"], provider
+                )
+                is not None
+                for provider in credentials_module.RUNTIME_PROVIDERS
+            ):
+                return {"status": "accepted", "submission_id": submission_id}
+            raise ServiceError("submission_credentials_missing", 409)
         if row.get("status") != "uploading":
             raise ServiceError("submission_not_uploading", 409)
+        self._enforce_submission_request_limit(validated["hotkey"])
         try:
-            self._validate_uploaded_source(row)
+            self._validate_uploaded_source(
+                row, forbidden_values=tuple(body["credentials"].values())
+            )
         except ServiceError as exc:
             if exc.code.startswith("submission_rejected:"):
                 self._store.update_submission(
@@ -727,10 +808,35 @@ class ArenaService:
                     {"rejection_rule": exc.code.split(":", 1)[1]},
                 )
             raise
-        result = self._store.update_submission(
-            str(round_row["round_id"]), submission_id, "uploading", "accepted"
+        manager = self._config.credential_manager
+        if manager is None:
+            raise ServiceError("credential_validation_unavailable", 503)
+        try:
+            encrypted_credentials = manager.validate_and_encrypt(
+                body["credentials"],
+                submission_id=submission_id,
+                miner_hotkey=validated["hotkey"],
+            )
+        except credentials_module.CredentialError as exc:
+            if exc.retryable:
+                raise ServiceError(exc.code, 503) from exc
+            self._store.update_submission(
+                str(round_row["round_id"]),
+                submission_id,
+                "uploading",
+                "rejected",
+                {"rejection_rule": exc.code},
+            )
+            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
+        result = self._store.accept_submission_with_credentials(
+            str(round_row["round_id"]),
+            submission_id,
+            validated["hotkey"],
+            encrypted_credentials,
         )
-        if result.get("status") not in ("ok", "stale"):
+        if result.get("status") == "window_closed":
+            raise ServiceError("submission_window_closed", 409)
+        if result.get("status") not in ("ok", "existing"):
             raise ServiceError("submission_finalize_failed", 500)
         return {"status": "accepted", "submission_id": submission_id}
 
@@ -1420,6 +1526,23 @@ class ArenaService:
         configuration = round_row["configuration_doc"]
         if validated["hotkey"] not in configuration["runner_hotkeys"]:
             raise ServiceError("runner_not_allowlisted", 403)
+        if str(getattr(self._config, "network_name", "finney")).strip().lower() == "test":
+            try:
+                snapshot = self._config.chain.metagraph()
+                uid = chain_module.uid_for_hotkey(snapshot, validated["hotkey"])
+                permits = snapshot.validator_permit
+            except Exception as exc:
+                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
+            if uid is None:
+                raise ServiceError("runner_hotkey_unregistered", 403)
+            try:
+                has_validator_permit = permits[uid]
+            except (IndexError, KeyError, TypeError) as exc:
+                raise ServiceError("runner_validator_permit_unavailable", 503) from exc
+            if not isinstance(has_validator_permit, bool):
+                raise ServiceError("runner_validator_permit_unavailable", 503)
+            if not has_validator_permit:
+                raise ServiceError("runner_validator_permit_required", 403)
         excluded = list(self._config.chain.hotkeys_owned_by_same_coldkey(validated["hotkey"]))
         token = self._lease_token(validated)
         response = self._store.claim_assignment(
@@ -1469,7 +1592,7 @@ class ArenaService:
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
-        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"))
+        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""
@@ -1812,6 +1935,17 @@ class ArenaService:
         row = self._round(round_id)
         if row["status"] != "published":
             raise ServiceError("results_not_public", 403)
+        publication = row.get("publication_doc") or {}
+        participant = next(
+            (
+                item
+                for item in publication.get("participants") or []
+                if item.get("submission_id") == submission_id
+            ),
+            None,
+        )
+        if participant is None:
+            raise ServiceError("submission_missing", 404)
         runs = [run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")]
         outputs = {}
         for run in runs:
@@ -1829,14 +1963,12 @@ class ArenaService:
                 if int(run.get("stage") or 0) == 2 and run.get("per_icp_score") is not None
             ],
         }
-        publication = row.get("publication_doc") or {}
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
-        submission = self._store.get_submission(submission_id) or {}
         return {
             "round_id": round_id, "submission_id": submission_id, "submission": {
-                "miner_hotkey": submission.get("miner_hotkey"),
-                "is_baseline": bool(submission.get("is_king")),
+                "miner_hotkey": participant.get("miner_hotkey"),
+                "is_baseline": bool(participant.get("is_baseline")),
             },
             "outputs": outputs, "run_results": [run["result_doc"] for run in runs if run.get("result_doc")],
             "scores": scores,

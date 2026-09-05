@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,9 @@ class FakeService:
         self._activated = activated
         self.advanced = []
         self.ensured = 0
+
+    def startup_checks(self):
+        return {"database_identity": {"current_user": "test"}}
 
     def activate_pending_rewards(self):
         if self._reward_error is not None:
@@ -63,6 +68,79 @@ def test_scheduler_flags_split_the_driver_from_the_api(script):
     assert parser.parse_args(["--driver-only", "--tick-seconds", "5"]).driver_only is True
     with pytest.raises(SystemExit):
         parser.parse_args(["--no-driver", "--driver-only"])
+
+
+def _patch_runtime(monkeypatch, script, service):
+    wiring = types.ModuleType("lab_arena.wiring")
+    wiring.build_service_from_environment = lambda mode: (service, object())
+    monkeypatch.setitem(sys.modules, "lab_arena.wiring", wiring)
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+
+
+def test_api_only_startup_serves_without_running_a_driver_tick(script, monkeypatch):
+    service = FakeService()
+    ticks = []
+    served = []
+    _patch_runtime(monkeypatch, script, service)
+    monkeypatch.setattr(script, "drive_once", lambda service: ticks.append(service) or "idle")
+    uvicorn = types.ModuleType("uvicorn")
+    uvicorn.run = lambda app, **kwargs: served.append((app, kwargs))
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
+
+    assert script.main(["--no-driver"]) == 0
+    assert ticks == []
+    assert len(served) == 1
+
+
+def test_normal_startup_keeps_the_initial_driver_tick(script, monkeypatch):
+    service = FakeService()
+    ticks = []
+    _patch_runtime(monkeypatch, script, service)
+    monkeypatch.setattr(script, "drive_once", lambda service: ticks.append(service) or "idle")
+    uvicorn = types.ModuleType("uvicorn")
+    uvicorn.run = lambda app, **kwargs: None
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
+
+    assert script.main([]) == 0
+    assert ticks == [service]
+
+
+def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatch):
+    service = FakeService()
+    ticks = []
+    _patch_runtime(monkeypatch, script, service)
+    monkeypatch.setattr(script, "drive_once", lambda service: ticks.append(service) or "idle")
+
+    class FiniteEvent:
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, timeout):
+            self.waits += 1
+            return self.waits >= 2
+
+        def set(self):
+            pass
+
+    monkeypatch.setattr(script.threading, "Event", FiniteEvent)
+
+    assert script.main(["--driver-only", "--tick-seconds", "5"]) == 0
+    assert ticks == [service, service]
+
+
+def test_check_only_performs_startup_checks_without_writes(script, monkeypatch):
+    service = FakeService()
+    ticks = []
+    served = []
+    _patch_runtime(monkeypatch, script, service)
+    monkeypatch.setattr(script, "drive_once", lambda service: ticks.append(service) or "idle")
+    uvicorn = types.ModuleType("uvicorn")
+    uvicorn.run = lambda app, **kwargs: served.append((app, kwargs))
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
+
+    assert script.main(["--check-only"]) == 0
+    assert ticks == []
+    assert served == []
 
 
 def test_a_tick_advances_the_current_round(script):

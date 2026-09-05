@@ -43,7 +43,7 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
             try:
                 for sequence in range(3):
                     identity = contracts.provider_call_identity(attempt=1, assignment_id=response["assignment_id"], icp_position=response["icp_position"], action_sequence=sequence, operation_id="deepline.execute", request_hash=sha("%s-%d" % (run_id, sequence)))
-                    reserved = store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={})
+                    reserved = store.reserve_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="miner_key", amount_microusd=0, call_doc={})
                     assert reserved["status"] == "reserved", reserved
                     assert store.mark_dispatched(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity)["status"] == "dispatched"
                     settled = store.settle_call(run_id=run_id, lease_token_hash=lease_hash, call_identity=identity, actual_microusd=0, terminal_response={"status": 200})
@@ -79,7 +79,7 @@ def test_concurrent_call_cycles_and_claims_complete_without_unrecovered_deadlock
         if entry.get("round_id") == round_id and entry.get("call_identity"):
             heads[entry["call_identity"]] = entry["entry_kind"]
     assert len(heads) == 120 and set(heads.values()) == {"settlement"}  # three settlements per first-stage run
-    assert {entry["funding_source"] for entry in ledger if entry.get("round_id") == round_id} == {"host"}
+    assert {entry["funding_source"] for entry in ledger if entry.get("round_id") == round_id} == {"miner_key"}
     print("deadlock retries:", retries, details[:1])
     for store in stores + [setup]:
         store.close()
